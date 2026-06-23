@@ -190,6 +190,44 @@ pub fn read_memory_snapshot() -> MemorySnapshot {
     }
 }
 
+/// A REAL, point-in-time reading of the first NVIDIA GPU's VRAM via `nvidia-smi`,
+/// shaped as the same `MemorySnapshot` the host-RAM throttle consumes so the
+/// gating logic is identical against VRAM. `total_gb` = total VRAM, `available_gb`
+/// = free VRAM (`memory.free`), both in decimal GB.
+///
+/// On a GPU box the gating resource is VRAM, not host RAM: a 24 GB card with most
+/// of its VRAM already resident must NOT be handed a ~20 GB-VRAM job, exactly as a
+/// pressured Mac must not take a job that would push it into swap. Returns `None`
+/// when nvidia-smi is absent or fails — i.e. no readable NVIDIA GPU — so the caller
+/// surfaces the failure honestly (BLACKHOLE) rather than fabricating headroom.
+pub fn read_vram_snapshot() -> Option<MemorySnapshot> {
+    let out = Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=memory.free,memory.total",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let first = stdout.lines().next()?.trim(); // e.g. "11096, 24576" (MiB, nounits)
+    let (free_mib, total_mib) = first.split_once(',')?;
+    let free_mib: f64 = free_mib.trim().parse().ok()?;
+    let total_mib: f64 = total_mib.trim().parse().ok()?;
+    if total_mib <= 0.0 {
+        return None; // a zero/garbage total is not a usable reading
+    }
+    // MiB → decimal GB, matching read_memory_snapshot's units so the throttle
+    // thresholds (headroom_gb, max_memory_pct) carry over unchanged.
+    let mib_to_gb = |mib: f64| (mib * 1024.0 * 1024.0 / 1e9) as f32;
+    Some(MemorySnapshot {
+        total_gb: mib_to_gb(total_mib),
+        available_gb: mib_to_gb(free_mib),
+    })
+}
+
 /// Detect hardware class and take real measurements, producing the
 /// `WorkerCapability` advertised at registration.
 ///
