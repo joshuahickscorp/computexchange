@@ -42,11 +42,12 @@ var validTiers = map[string]bool{"batch": true, "priority": true, "trusted": tru
 // validJobTypes is the closed set of job-type tags. The three Turbo workloads
 // (batch_classification | json_extraction | rerank) join the original set; each
 // has a real result verifier (see verification.go resultsAgree). `custom` is the
-// general-compute SEAM (ACCRETION.md §7-8): an opaque BYO-container job for the
-// metered NVIDIA GPU-second lane. It is a VALID contract variant so a buyer can
-// submit one and the agent can decode it, but it has no output verifier (arbitrary
-// compute has no known answer) and the agent's runner is a stub that returns an
-// honest typed error — the sandboxed runner is the next build, never a fake result.
+// general-compute LANE (ACCRETION.md §7-8): an opaque BYO-container job for the
+// metered NVIDIA GPU-second market. It is a VALID contract variant a buyer can
+// submit; it has no output verifier (arbitrary compute has no known answer) so it is
+// metered per GPU-second + reputation-trusted, and the agent runs it on the GPU in a
+// locked-down sandbox (agent/src/sandbox.rs) — an incapable worker errors honestly,
+// never a fake result.
 var validJobTypes = map[string]bool{
 	"embed": true, "batch_infer": true, "audio_transcribe": true,
 	"image_gen": true, "eval": true, "lora_finetune": true,
@@ -92,9 +93,9 @@ type JobType struct {
 	//   Command → argv the sandbox executes inside the image (empty = the image's
 	//             own entrypoint).
 	// omitempty keeps both off the wire for every other job type. The control plane
-	// has no output verifier for custom (arbitrary compute has no known answer) and
-	// the agent's runner is an honest stub — the sandboxed BYO-container runner
-	// (gVisor/Kata + GPU cgroups + metered billing) is the next build.
+	// has no output verifier for custom (arbitrary compute has no known answer), so the
+	// lane is metered per GPU-second + reputation-trusted; the agent runs the container
+	// on the GPU in a locked-down sandbox (agent/src/sandbox.rs).
 	Image   *string  `json:"image,omitempty"`
 	Command []string `json:"command,omitempty"`
 }

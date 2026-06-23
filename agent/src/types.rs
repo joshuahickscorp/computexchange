@@ -119,16 +119,18 @@ pub enum JobType {
         #[serde(default)]
         top_k: u32,
     },
-    /// GENERAL-COMPUTE SEAM (ACCRETION.md §7-8): an opaque bring-your-own-container
-    /// compute job for the metered NVIDIA GPU-second lane (simulation / render /
+    /// GENERAL-COMPUTE LANE (ACCRETION.md §7-8): an opaque bring-your-own-container
+    /// compute job for the metered NVIDIA GPU-second market (simulation / render /
     /// HPC / training / ZK). `image` is the OCI container reference to run in (None
     /// when only `command` is given); `command` is the argv the sandbox executes
-    /// inside it (empty = the image's own entrypoint). The agent does NOT yet run
-    /// this — the sandboxed runner (gVisor/Kata + GPU cgroup limits + metered
-    /// billing) is the next build, so `CustomRunner` returns an HONEST typed error
-    /// rather than a fabricated result. Unlike the verified AI catalogue (a known
-    /// answer, honeypot/redundancy-checked), arbitrary compute has no known answer,
-    /// so this lane is metered per GPU-second with attestation, never output-checked.
+    /// inside it (empty = the image's own entrypoint). The agent runs it ON THE GPU
+    /// inside a locked-down sandbox (agent/src/sandbox.rs: no network, read-only
+    /// rootfs, all caps dropped, non-root, memory/pids capped, hard wall-clock
+    /// timeout), piping the job input to the container's stdin and capturing stdout
+    /// as the result; a worker without the sandbox returns an HONEST typed error,
+    /// never a fabricated result. Unlike the verified AI catalogue (a known answer,
+    /// honeypot/redundancy-checked), arbitrary compute has no known answer, so this
+    /// lane is metered per GPU-second, never output-checked.
     Custom {
         #[serde(default)]
         image: Option<String>,

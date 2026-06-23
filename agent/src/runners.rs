@@ -62,12 +62,14 @@ pub enum RunError {
     /// the boundary — never fake a distributed forward pass.
     #[error("cluster substrate required for `{model}`: {detail}")]
     ExternalSubstrate { model: String, detail: String },
-    /// A documented contract seam whose executor is not built yet. Today this is the
-    /// `custom` general-compute job (ACCRETION.md §7-8): the wire variant exists and
-    /// decodes, but the sandboxed BYO-container runner is the next build, so a
-    /// dispatched `custom` task fails HONESTLY here rather than returning a fake
-    /// result (BLACKHOLE: surface the boundary).
-    #[error("`{job_type}` not yet implemented: {detail}")]
+    /// This host cannot run a documented lane that a properly-equipped host could.
+    /// Today this is the `custom` general-compute job (ACCRETION.md §7-8) on a worker
+    /// without the container sandbox: the sandboxed BYO-container runner IS built
+    /// (sandbox.rs) but requires a Linux GPU host with Docker + the NVIDIA Container
+    /// Toolkit, so an incapable worker fails HONESTLY here rather than faking a result
+    /// (BLACKHOLE: surface the boundary; the scheduler routes `custom` only to workers
+    /// that advertise it).
+    #[error("`{job_type}` not supported on this host: {detail}")]
     NotImplemented {
         job_type: &'static str,
         detail: String,
@@ -1615,52 +1617,84 @@ impl JobRunner for ClusterRunner {
 // CustomRunner — general-compute SEAM (ACCRETION.md §7-8)
 // ---------------------------------------------------------------------------
 
-/// The general-compute seam: the documented entry point for the metered
-/// bring-your-own-container lane (simulation / render / HPC / training / ZK on the
-/// NVIDIA GPU-second market — ACCRETION.md §7-8). The `custom` wire variant exists
-/// and decodes (control/types.go, agent/src/types.rs, proto/manifest.schema.json),
-/// so a buyer can submit one and the control plane can carry it; what is NOT built
-/// yet is the EXECUTOR — a sandboxed container runner (gVisor/Kata isolation + GPU
-/// cgroup limits + signed-digest attestation + per-GPU-second metering). Until that
-/// lands, this runner accepts the job type and then surfaces an HONEST typed
-/// `NotImplemented` error rather than fabricating a result. Arbitrary compute has no
-/// known answer, so this lane will be metered + reputation-trusted, never
-/// honeypot/redundancy output-checked like the AI catalogue (BLACKHOLE: never fake
-/// success; surface the boundary).
+/// The general-compute lane: the metered bring-your-own-container runner (simulation
+/// / render / HPC / training / ZK on the NVIDIA GPU-second market — ACCRETION.md
+/// §7-8). The buyer supplies an OCI `image` + `command`; this runner executes it on
+/// the GPU inside a locked-down sandbox (sandbox.rs: no network, read-only rootfs,
+/// all caps dropped, non-root, memory/pids capped, hard wall-clock timeout), piping
+/// the job input to the container's stdin and capturing its stdout as the result.
+/// Arbitrary compute has no known answer, so this lane is metered per GPU-second and
+/// reputation-trusted, never honeypot/redundancy output-checked like the AI catalogue.
+/// On a host that cannot run the sandbox (no Docker / NVIDIA Container Toolkit) it
+/// returns an honest typed error — never a fabricated result (BLACKHOLE). GPU
+/// execution is validated end-to-end by scripts/prove-cuda.sh.
 pub struct CustomRunner;
 
 #[async_trait]
 impl JobRunner for CustomRunner {
     async fn can_run(&self, manifest: &JobManifest, _cap: &WorkerCapability) -> bool {
-        // Claim the `custom` job type so dispatch routes it here (to the honest
-        // boundary) instead of falling through to a `NoRunner`. The model kind and
-        // memory are irrelevant to an opaque container job, so we gate on type only;
-        // the real sandbox/GPU gating belongs to the executor that is the next build.
+        // Claim the `custom` job type so dispatch routes it here. Whether this host can
+        // actually sandbox a container is decided in run() (honest error if not);
+        // scheduler-side routing is gated by the worker's advertised `supported_jobs`,
+        // which only lists `custom` on the container-capable CUDA lane (hardware.rs).
         matches!(manifest.job_type, JobType::Custom { .. })
     }
 
     async fn run(
         &self,
         manifest: &JobManifest,
-        _input: &[u8],
+        input: &[u8],
         _pool: &ModelPool,
     ) -> Result<JobOutput, RunError> {
-        // Echo back the requested image/command in the error so an operator sees
-        // exactly what was asked for; then surface the boundary. Never a fake result.
-        let requested = match &manifest.job_type {
-            JobType::Custom { image, command } => {
-                let img = image.as_deref().unwrap_or("<none>");
-                format!("image={img}, command={command:?}")
+        let started = std::time::Instant::now();
+        let (image, command) = match &manifest.job_type {
+            JobType::Custom { image, command } => (image.clone(), command.clone()),
+            // can_run gates this to Custom, but never assume — surface, don't fake.
+            other => {
+                return Err(RunError::BadInput {
+                    job: "custom",
+                    msg: format!("non-custom job `{}` routed to CustomRunner", other.tag()),
+                })
             }
-            _ => "<non-custom job routed to CustomRunner>".to_string(),
         };
-        Err(RunError::NotImplemented {
-            job_type: "custom",
-            detail: format!(
-                "custom compute not yet implemented; the sandboxed BYO-container runner \
-                 (gVisor/Kata isolation + GPU cgroup limits + per-GPU-second metering, \
-                 ACCRETION.md §7-8) is the next build. Requested: {requested}."
-            ),
+        let image = image.ok_or(RunError::BadInput {
+            job: "custom",
+            msg: "custom job requires a container `image`".into(),
+        })?;
+        // The buyer's declared memory floor doubles as the container RAM cap (≥16 GiB,
+        // so a trivial declaration still gets headroom); the wall-clock limit is the
+        // job's max_duration_secs (default 1h).
+        let limits = crate::sandbox::SandboxLimits {
+            memory_gb: if manifest.constraints.min_memory_gb >= 1.0 {
+                manifest.constraints.min_memory_gb.ceil() as u32
+            } else {
+                16
+            },
+            timeout_secs: if manifest.constraints.max_duration_secs > 0 {
+                manifest.constraints.max_duration_secs
+            } else {
+                3600
+            },
+            ..Default::default()
+        };
+        // Docker exec is blocking I/O — run it off the async runtime so a long compute
+        // job never stalls the agent's poll/heartbeat loop.
+        let input = input.to_vec();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::sandbox::run_sandboxed(&image, &command, &input, &limits)
+        })
+        .await
+        .map_err(|e| RunError::Inference {
+            backend: "custom",
+            msg: format!("sandbox task join failed: {e}"),
+        })??;
+        Ok(JobOutput {
+            // Opaque compute output — raw bytes, not catalogue JSON; uploaded as
+            // application/octet-stream. Metered by GPU-seconds (duration), not tokens.
+            result,
+            binary: true,
+            duration_ms: started.elapsed().as_millis() as u64,
+            tokens_used: 0,
         })
     }
 
@@ -2283,16 +2317,18 @@ mod tests {
         });
     }
 
-    /// The general-compute SEAM: a `custom` job routes to CustomRunner (claimed via
-    /// `can_run`), and `run` surfaces an HONEST `NotImplemented` boundary that names
-    /// the requested image/command — never a fabricated result. Also proves dispatch
-    /// picks CustomRunner for a custom job rather than falling through to NoRunner.
+    /// The general-compute lane: a `custom` job routes to CustomRunner (claimed via
+    /// `can_run`, not the AI runners), and `run` validates input HONESTLY — an
+    /// image-less job is rejected before any container is spawned, never a fabricated
+    /// result. The sandbox hardening is unit-tested in sandbox.rs and the full Docker
+    /// execution is validated on a real GPU host by scripts/prove-cuda.sh, so this
+    /// test deliberately does not shell out.
     #[test]
-    fn custom_runner_is_seam_and_never_fakes() {
+    fn custom_runner_routes_and_validates() {
         let cap = cap_with(HardwareClass::Nvidia80g, 80.0);
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let mut m = test_manifest(JobType::Custom {
+            let m = test_manifest(JobType::Custom {
                 image: Some("docker.io/org/sim:tag".into()),
                 command: vec!["python".into(), "sim.py".into()],
             });
@@ -2301,31 +2337,22 @@ mod tests {
             assert!(!BatchInferRunner.can_run(&m, &cap).await);
             assert!(!EmbedRunner.can_run(&m, &cap).await);
 
-            // run() surfaces the typed boundary and echoes what was requested.
-            let pool = ModelPool::new();
-            match CustomRunner.run(&m, b"", &pool).await {
-                Err(RunError::NotImplemented { job_type, detail }) => {
-                    assert_eq!(job_type, "custom");
-                    assert!(detail.contains("not yet implemented"));
-                    assert!(detail.contains("BYO-container"));
-                    assert!(detail.contains("docker.io/org/sim:tag"));
-                }
-                other => panic!("expected NotImplemented boundary, got {other:?}"),
-            }
-
             // dispatch routes a custom job to CustomRunner (not NoRunner).
             let runners = default_runners();
             let picked = dispatch(&m, &cap, &runners).await.expect("custom routes");
             assert_eq!(picked.backend_name(), "custom");
 
-            // A command-only custom job (null image) still routes + reports cleanly.
-            m.job_type = JobType::Custom {
+            // A custom job with no image is rejected HONESTLY before any container is
+            // spawned — never a fabricated result (BLACKHOLE). (The Docker execution
+            // path itself is exercised on a real GPU host by scripts/prove-cuda.sh.)
+            let no_image = test_manifest(JobType::Custom {
                 image: None,
                 command: vec!["./run".into()],
-            };
-            match CustomRunner.run(&m, b"", &pool).await {
-                Err(RunError::NotImplemented { detail, .. }) => assert!(detail.contains("<none>")),
-                other => panic!("expected NotImplemented boundary, got {other:?}"),
+            });
+            let pool = ModelPool::new();
+            match CustomRunner.run(&no_image, b"", &pool).await {
+                Err(RunError::BadInput { job, .. }) => assert_eq!(job, "custom"),
+                other => panic!("expected BadInput for image-less custom job, got {other:?}"),
             }
         });
     }

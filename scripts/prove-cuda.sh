@@ -86,8 +86,28 @@ else
   bad "batched generation test FAILED:"; grep -iE "panicked|assertion|FAILED|error" /tmp/cuda-batch.log | head
 fi
 
-# TODO (after the BYO-container runner lands): smoke-test a `custom` job —
-#   docker run --gpus all --network none <image> <command>  -> result uploaded, metered.
+hr "6. BYO-container custom lane: sandbox profile on the GPU"
+if ! command -v docker >/dev/null 2>&1 || ! docker version --format '{{.Server.Version}}' >/dev/null 2>&1; then
+  echo "  (skip) Docker daemon not reachable — install Docker + the NVIDIA Container"
+  echo "         Toolkit to serve the custom lane; the agent advertises 'custom' only then."
+else
+  # Run nvidia-smi INSIDE the exact locked-down profile the agent uses (sandbox.rs
+  # sandbox_argv): --gpus all under --network none, --read-only, --cap-drop ALL,
+  # non-root, mem/pids capped. Proves the GPU is reachable UNDER the hardening — the
+  # one thing that can only be verified on a real GPU host.
+  img="nvidia/cuda:12.4.1-base-ubuntu22.04"
+  echo "  pulling $img (first run only)…"; docker pull -q "$img" >/dev/null 2>&1 || true
+  smoke="$(docker run --rm -i --gpus all --network none --read-only \
+      --tmpfs /tmp:rw,size=2g,noexec --cap-drop ALL --security-opt no-new-privileges \
+      --user 65534:65534 --pids-limit 512 --memory 4g --memory-swap 4g \
+      "$img" nvidia-smi -L 2>/tmp/cuda-smoke.log)"
+  if echo "$smoke" | grep -qi "GPU"; then
+    echo "$smoke" | head -2 | sed 's/^/  /'
+    ok "GPU reachable inside the locked-down sandbox (no-network, read-only, nobody)"
+  else
+    bad "GPU NOT visible under the sandbox profile:"; tail -5 /tmp/cuda-smoke.log
+  fi
+fi
 
 hr "result"
 echo "  passed: $pass   failed: $fail"

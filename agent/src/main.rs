@@ -14,6 +14,7 @@ mod pool;
 mod protocol;
 mod quantized_llama_batched; // vendored + patched candle quantized_llama (bsz>1 batched prefill)
 mod runners;
+mod sandbox; // sandboxed BYO-container execution for the `custom` general-compute lane
 mod status;
 mod types;
 

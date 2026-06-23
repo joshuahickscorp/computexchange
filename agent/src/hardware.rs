@@ -309,6 +309,19 @@ pub fn detect_and_benchmark(
     .map(|s| s.to_string())
     .collect();
 
+    // BYO-container general-compute (`custom`, ACCRETION.md §7-8) runs only on a
+    // container-capable GPU host. Advertise it only on an NVIDIA worker with a
+    // reachable Docker daemon, so the scheduler never routes an opaque container job
+    // to a worker that can't sandbox it; run() still errors honestly if the daemon
+    // dies between detection and dispatch. (matches! borrows hw_class — no move.)
+    let runs_custom = matches!(
+        hw_class,
+        HardwareClass::Nvidia24g
+            | HardwareClass::Nvidia48g
+            | HardwareClass::Nvidia80g
+            | HardwareClass::Nvidia180g
+    ) && container_sandbox_available();
+
     WorkerCapability {
         worker_id: Uuid::new_v4(),
         supplier_id,
@@ -318,23 +331,43 @@ pub fn detect_and_benchmark(
         // Job types this agent will accept dispatch for. `can_run` in runners.rs
         // is the real per-task guard; this is the advertised superset (every
         // runner we registered, including the new workloads).
-        supported_jobs: [
-            "embed",
-            "batch_infer",
-            "audio_transcribe",
-            "batch_classification",
-            "json_extraction",
-            "rerank",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect(),
+        supported_jobs: {
+            let mut jobs: Vec<String> = [
+                "embed",
+                "batch_infer",
+                "audio_transcribe",
+                "batch_classification",
+                "json_extraction",
+                "rerank",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+            if runs_custom {
+                jobs.push("custom".to_string());
+            }
+            jobs
+        },
         supported_models,
         benchmarks,
         agent_version: agent_version.to_string(),
         os_version: os_version(),
         min_payout_usd_hr,
     }
+}
+
+/// True when this host can run the BYO-container `custom` lane: a reachable Docker
+/// daemon. Checked once at capability build so the worker never advertises a lane it
+/// cannot execute (the NVIDIA Container Toolkit is assumed on a GPU supplier box and
+/// surfaces honestly at run() time if absent). `docker version --format {{.Server...}}`
+/// prints the SERVER version only when the daemon answers, so a missing binary or a
+/// dead daemon both yield false — never a fabricated capability.
+fn container_sandbox_available() -> bool {
+    std::process::Command::new("docker")
+        .args(["version", "--format", "{{.Server.Version}}"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
