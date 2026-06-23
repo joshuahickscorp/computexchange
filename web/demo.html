@@ -6,179 +6,162 @@
 <title>Computexchange</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600&display=swap" rel="stylesheet">
 <style>
   :root{
-    /* Surface: raw concrete, near black to mid grey */
-    --cx-void:#000000; --cx-bg:#080808; --cx-panel:#0E0E0E; --cx-raise:#161616;
-    /* Lines: structure, shown not hidden */
-    --cx-seam:#181818; --cx-border:#2A2A2A; --cx-border-hi:#3C3C3C;
-    /* Pigment: ash greys to bone whites */
-    --cx-ash:#6E6E6E; --cx-mute:#8C8C8C; --cx-bone:#C8C5BF; --cx-bone-hi:#E9E6E0; --cx-signal:#FFFFFF;
-    /* Type */
-    --cx-font-display:"Cormorant Garamond","Times New Roman",serif;
-    --cx-font-mono:"Geist Mono","Berkeley Mono","IBM Plex Mono",ui-monospace,monospace;
-    --cx-t-micro:10px; --cx-t-label:11px; --cx-t-body:13px; --cx-t-data:15px;
-    --cx-t-lead:19px; --cx-t-sub:28px; --cx-d-1:64px; --cx-d-2:104px;
-    /* Spacing: 8px base */
-    --cx-1:4px; --cx-2:8px; --cx-3:12px; --cx-4:16px; --cx-5:24px; --cx-6:32px; --cx-7:48px; --cx-8:64px; --cx-9:96px;
-    /* Form */
-    --cx-hair:1px solid var(--cx-seam); --cx-frame:1px solid var(--cx-border); --cx-radius:0;
-    /* Motion: mechanical, no overshoot */
-    --cx-dur-1:90ms; --cx-dur-2:140ms; --cx-dur-3:220ms; --cx-ease:cubic-bezier(0.2,0,0,1);
+    --bg:#0a0a0c; --card:#101013; --raise:#16161a;
+    --line:#222226; --line-soft:#1a1a1e; --line-hi:#33333a;
+    --ash:#6c6c72; --mute:#8d8d94; --bone:#cbc8c1; --bone-hi:#ebe7e0; --signal:#ffffff;
+    --serif:"Cormorant Garamond",serif;
+    --sans:-apple-system,BlinkMacSystemFont,"SF Pro Display","Inter",system-ui,sans-serif;
+    --r:14px; --r-sm:10px; --r-pill:999px;
+    --dur:.16s; --dur-slow:.26s; --ease:cubic-bezier(.2,0,0,1);
+    --pad:18px; --gap:16px;
   }
-  /* Radius is zero everywhere. The one circular form (power disc) is drawn in SVG, not CSS. */
-  *{box-sizing:border-box; border-radius:var(--cx-radius)}
+  *{box-sizing:border-box}
   html,body{margin:0;height:100%}
-  body{background:var(--cx-void);color:var(--cx-bone);-webkit-font-smoothing:antialiased;
-    font:400 var(--cx-t-body)/1.5 var(--cx-font-mono)}
-  /* Concrete grain: faint desaturated fractal noise, fixed behind content. Material, not texture. */
-  body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.05;
-    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
-  ::selection{background:var(--cx-bone-hi);color:var(--cx-bg)}
-  :focus-visible{outline:1px solid var(--cx-border-hi);outline-offset:2px}
+  body{
+    background:radial-gradient(120% 100% at 50% 0%, #101014 0%, #0a0a0c 55%, #08080a 100%);
+    background-attachment:fixed;
+    color:var(--bone); -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+    font:400 13px/1.5 var(--sans);
+  }
+  ::selection{background:var(--bone-hi);color:var(--bg)}
+  :focus-visible{outline:none;box-shadow:0 0 0 1px var(--line-hi);border-radius:var(--r-sm)}
 
-  .app{position:relative;z-index:1;display:flex;min-height:100vh;max-width:960px;margin:0 auto;background:var(--cx-bg)}
-
-  /* 5.1 Mode rail: a structural spine */
-  .rail{width:60px;border-right:var(--cx-frame);display:flex;flex-direction:column;align-items:center;gap:var(--cx-1);padding:var(--cx-4) 0}
-  .brand{width:30px;height:30px;border:var(--cx-frame);color:var(--cx-bone);display:flex;align-items:center;justify-content:center;font:500 var(--cx-t-body) var(--cx-font-mono);margin-bottom:var(--cx-3)}
-  .nav{position:relative;width:44px;height:44px;border:none;background:none;color:var(--cx-ash);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:color var(--cx-dur-1) var(--cx-ease)}
-  .nav svg{width:20px;height:20px}
-  .nav:hover{color:var(--cx-bone)}
-  .nav.on{color:var(--cx-bone-hi)}
-  .nav.on::before{content:"";position:absolute;left:0;top:11px;bottom:11px;width:2px;background:var(--cx-bone)}
+  .app{display:flex;min-height:100vh;max-width:600px;margin:0 auto}
+  /* rail */
+  .rail{width:60px;display:flex;flex-direction:column;align-items:center;gap:6px;padding:18px 0;border-right:1px solid var(--line-soft)}
+  .brand{width:30px;height:30px;border-radius:var(--r-sm);background:var(--raise);border:1px solid var(--line);color:var(--bone-hi);display:flex;align-items:center;justify-content:center;font-weight:600;font-size:14px;margin-bottom:10px}
+  .nav{width:42px;height:42px;border:none;background:none;color:var(--ash);border-radius:var(--r-sm);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:background var(--dur) var(--ease),color var(--dur) var(--ease)}
+  .nav svg{width:21px;height:21px}
+  .nav:hover{color:var(--bone);background:var(--raise)}
+  .nav.on{color:var(--bone-hi);background:var(--raise)}
   .nav.acct{margin-top:auto}
 
-  /* 5.2 Header: a section plate, not a page heading */
+  /* main + header */
   .main{flex:1;min-width:0;display:flex;flex-direction:column}
-  .top{display:flex;align-items:center;justify-content:space-between;padding:var(--cx-4) var(--cx-5);border-bottom:var(--cx-hair)}
-  .title{font:500 var(--cx-t-label) var(--cx-font-mono);text-transform:uppercase;letter-spacing:.14em;color:var(--cx-mute)}
-  .bell{position:relative;width:36px;height:36px;border:none;background:none;color:var(--cx-ash);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:color var(--cx-dur-1) var(--cx-ease)}
-  .bell:hover{color:var(--cx-bone)} .bell svg{width:18px;height:18px}
-  .badge{position:absolute;top:8px;right:9px;width:6px;height:6px;background:var(--cx-bone)}
+  .top{display:flex;align-items:center;justify-content:space-between;padding:18px 22px}
+  .eyebrow{font-size:11px;font-weight:500;letter-spacing:.18em;text-transform:uppercase;color:var(--mute)}
+  .bell{position:relative;width:34px;height:34px;border:none;background:none;color:var(--ash);border-radius:var(--r-sm);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background var(--dur) var(--ease),color var(--dur) var(--ease)}
+  .bell:hover{background:var(--raise);color:var(--bone)} .bell svg{width:18px;height:18px}
+  .badge{position:absolute;top:7px;right:8px;width:7px;height:7px;border-radius:50%;background:var(--signal)}
   .badge.hide{display:none}
-  .notif{position:absolute;top:54px;right:var(--cx-4);width:264px;background:var(--cx-panel);border:var(--cx-frame);display:none;z-index:5}
+  .notif{position:absolute;top:52px;right:18px;width:268px;background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:6px;display:none;z-index:8;box-shadow:0 1px 0 rgba(255,255,255,.03) inset,0 8px 24px rgba(0,0,0,.4)}
   .notif.open{display:block}
-  .notif-item{padding:var(--cx-3) var(--cx-4);font:400 var(--cx-t-body) var(--cx-font-mono);color:var(--cx-mute);border-bottom:var(--cx-hair)}
-  .notif-item:last-child{border-bottom:none}
-  .notif-item .t{color:var(--cx-ash);font-size:var(--cx-t-micro);margin-top:var(--cx-1);text-transform:uppercase;letter-spacing:.12em}
+  .notif-item{padding:10px 11px;font-size:13px;border-radius:var(--r-sm);color:var(--bone)} .notif-item:hover{background:var(--raise)}
+  .notif-item .t{color:var(--ash);font-size:11px;margin-top:2px}
 
-  .view{padding:var(--cx-6) var(--cx-7);display:none} .view.on{display:block}
-  .vlbl{font:500 var(--cx-t-micro) var(--cx-font-mono);text-transform:uppercase;letter-spacing:.14em;color:var(--cx-ash);margin:0 0 var(--cx-4)}
+  .view{display:none;max-width:540px;width:100%;margin:0 auto;padding:8px 22px 40px} .view.on{display:block}
+  .section-label{font-size:10px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--mute);margin:0 0 12px}
 
-  /* 5.7 Payment gate: a plate, not a floating card */
-  .banner{display:flex;align-items:center;gap:var(--cx-4);justify-content:space-between;border:var(--cx-frame);padding:var(--cx-4);margin-bottom:var(--cx-6);font:400 var(--cx-t-body) var(--cx-font-mono);color:var(--cx-bone)}
+  .card{
+    background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(0,0,0,.14));
+    border:1px solid var(--line-soft);border-radius:var(--r);
+    box-shadow:0 1px 0 rgba(255,255,255,.03) inset,0 1px 2px rgba(0,0,0,.3);
+  }
 
-  /* 5.8 Intake: registration marks, not a dashed box */
-  .intake{position:relative;padding:var(--cx-8) var(--cx-4);text-align:center;color:var(--cx-mute);cursor:pointer;background:var(--cx-bg);transition:color var(--cx-dur-2) var(--cx-ease)}
-  .intake svg{width:24px;height:24px;display:block;margin:0 auto var(--cx-3);stroke-width:1}
-  .intake .rg{position:absolute;width:14px;height:14px;border:0 solid var(--cx-border);transition:border-color var(--cx-dur-2) var(--cx-ease)}
-  .intake .rg.tl{top:0;left:0;border-top-width:1px;border-left-width:1px}
-  .intake .rg.tr{top:0;right:0;border-top-width:1px;border-right-width:1px}
-  .intake .rg.bl{bottom:0;left:0;border-bottom-width:1px;border-left-width:1px}
-  .intake .rg.br{bottom:0;right:0;border-bottom-width:1px;border-right-width:1px}
-  .intake:hover,.intake.drag{color:var(--cx-bone)}
-  .intake:hover .rg,.intake.drag .rg{border-color:var(--cx-border-hi)}
+  /* numerals */
+  .num{font-variant-numeric:tabular-nums}
 
-  /* Audit result card */
-  .card{border:var(--cx-frame);padding:var(--cx-4);margin-top:var(--cx-4);background:var(--cx-panel)}
-  .card-h{display:flex;align-items:center;gap:var(--cx-2);font:500 var(--cx-t-body) var(--cx-font-mono);color:var(--cx-bone);text-transform:uppercase;letter-spacing:.04em}
-  .card-h .right{margin-left:auto;font:400 var(--cx-t-label) var(--cx-font-mono);color:var(--cx-mute);text-transform:uppercase;letter-spacing:.12em}
-  .card-sub{margin-top:var(--cx-2);font:400 var(--cx-t-body) var(--cx-font-mono);color:var(--cx-mute)}
-  /* The buyer's one monument: what this launch costs. */
-  .quote{margin:var(--cx-4) 0;padding:var(--cx-4) 0;border-top:var(--cx-hair);border-bottom:var(--cx-hair);text-align:center}
-  .q-fig{font:600 var(--cx-d-1)/0.95 var(--cx-font-display);letter-spacing:-.015em;color:var(--cx-bone-hi);font-variant-numeric:tabular-nums}
-  .q-lbl{font:500 var(--cx-t-micro) var(--cx-font-mono);text-transform:uppercase;letter-spacing:.14em;color:var(--cx-ash);margin-top:var(--cx-2)}
-  .stages{display:flex;flex-direction:column}
-  .stage{display:flex;gap:var(--cx-3);padding:var(--cx-2) 0;position:relative}
-  .stage-n{width:20px;height:20px;border:var(--cx-frame);color:var(--cx-mute);font:400 var(--cx-t-label) var(--cx-font-mono);display:flex;align-items:center;justify-content:center;flex:none;background:var(--cx-bg);z-index:1}
-  .stage:not(:last-child)::before{content:"";position:absolute;left:10px;top:24px;bottom:-2px;width:1px;background:var(--cx-seam)}
-  .stage-op{font:500 var(--cx-t-body) var(--cx-font-mono);color:var(--cx-bone)}
-  .stage-d{font:400 var(--cx-t-body) var(--cx-font-mono);color:var(--cx-mute);margin-top:1px}
+  /* ===== EARN ===== */
+  .power-wrap{text-align:center;padding:18px 0 2px}
+  .knob{position:relative;width:240px;height:240px;margin:0 auto;cursor:pointer;outline:none}
+  .knob img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:block}
+  .knob-base{z-index:1}
+  .knob-glow{z-index:2;opacity:0;transition:opacity var(--dur-slow) var(--ease)}
+  .knob-press{z-index:3;opacity:0;transition:opacity 90ms var(--ease)}
+  .knob-shadow{position:absolute;left:50%;bottom:8%;width:60%;height:10%;transform:translateX(-50%);
+    background:radial-gradient(ellipse,rgba(0,0,0,.7),transparent 70%);filter:blur(7px);z-index:0}
+  .knob.is-on .knob-glow{opacity:1;animation:knob-breathe 3.6s ease-in-out infinite}
+  .knob:active .knob-press{opacity:1}
+  .knob:focus-visible{box-shadow:0 0 0 1px var(--line-hi);border-radius:50%}
+  @keyframes knob-breathe{0%,100%{opacity:.6} 50%{opacity:1}}
 
-  /* 5.10 Budget cap */
-  .budget{display:flex;align-items:baseline;gap:var(--cx-2);margin-top:var(--cx-5)}
-  .budget .k{font:500 var(--cx-t-micro) var(--cx-font-mono);text-transform:uppercase;letter-spacing:.14em;color:var(--cx-mute)}
-  .budget .pre{color:var(--cx-mute);font-family:var(--cx-font-mono)}
-  .budget input{width:72px;height:32px;border:var(--cx-frame);background:transparent;color:var(--cx-bone-hi);padding:0 var(--cx-2);font:400 var(--cx-t-data) var(--cx-font-mono);font-variant-numeric:tabular-nums}
-  .budget input:focus{outline:none;border-color:var(--cx-border-hi)}
-  .budget .hint{color:var(--cx-mute);font:400 var(--cx-t-body) var(--cx-font-mono)}
+  .pstate{font-size:12px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--bone-hi);margin-top:18px}
+  .pstate.off{color:var(--ash)}
+  .phint{font-size:11px;color:var(--mute);margin-top:5px}
+  .prun{font-size:11px;color:var(--ash);margin-top:8px}
 
-  /* 5.11 Launch slab: armed = filled signal, disabled = hollow */
-  .go{width:100%;height:var(--cx-8);margin-top:var(--cx-5);border:var(--cx-frame);background:var(--cx-signal);color:var(--cx-bg);font:500 var(--cx-t-data) var(--cx-font-mono);text-transform:uppercase;letter-spacing:.14em;display:flex;align-items:center;justify-content:center;gap:var(--cx-2);cursor:pointer;transition:background var(--cx-dur-1) var(--cx-ease),color var(--cx-dur-1) var(--cx-ease)}
+  .figures{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-top:30px;padding-bottom:28px;border-bottom:1px solid var(--line-soft)}
+  .fig{flex:1} .fig.mid{flex:0 0 auto;text-align:center} .fig.end{text-align:right}
+  .fig .k{font-size:10px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--mute)}
+  .fig .v{font-size:16px;font-weight:500;color:var(--bone-hi);margin-top:6px}
+  .fig .v.live{color:var(--signal)}
+  .monument{font-family:var(--serif);font-weight:600;font-size:60px;line-height:.9;letter-spacing:-.01em;color:var(--bone-hi);margin-top:2px}
+
+  .monitor{margin-top:22px;padding:14px 16px}
+  .monitor.hide{display:none}
+  .monitor-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+  .monitor-h .k{font-size:10px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--mute)}
+  .monitor-h .v{font-size:13px;font-weight:500;color:var(--bone-hi)}
+  .monitor svg{display:block;width:100%;height:46px}
+
+  .row{display:flex;align-items:center;justify-content:space-between;padding:14px 2px;border-top:1px solid var(--line-soft);font-size:13px}
+  .row:first-of-type{border-top:none}
+  .row .l{display:flex;align-items:center;gap:10px;min-width:0}
+  .row .k{font-size:10px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--mute)}
+  .r-meta{color:var(--mute)}
+  .marker{width:8px;height:8px;border-radius:50%;flex:none;background:var(--bone)}
+  .marker.hollow{background:transparent;border:1.5px solid var(--ash)}
+
+  /* ===== LAUNCH ===== */
+  .banner{display:flex;align-items:center;gap:12px;justify-content:space-between;padding:14px 16px;margin-bottom:18px;font-size:13px;color:var(--bone)}
+  .pill{height:32px;padding:0 16px;border-radius:var(--r-pill);border:1px solid var(--line);background:transparent;color:var(--bone);font:500 12px var(--sans);cursor:pointer;transition:border-color var(--dur) var(--ease),color var(--dur) var(--ease),background var(--dur) var(--ease)}
+  .pill:hover{border-color:var(--line-hi);color:var(--bone-hi)}
+  .pill.solid{background:var(--bone-hi);color:var(--bg);border-color:var(--bone-hi)}
+  .pill.solid:hover{background:var(--signal);border-color:var(--signal)}
+
+  .intake{border:1.5px dashed var(--line);border-radius:var(--r);padding:28px 16px;text-align:center;color:var(--mute);cursor:pointer;transition:border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
+  .intake svg{width:24px;height:24px;display:block;margin:0 auto 8px;stroke-width:1.5}
+  .intake:hover,.intake.drag{border-color:var(--line-hi);color:var(--bone)}
+
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+  .chip{height:32px;padding:0 14px;border-radius:var(--r-pill);border:1px solid var(--line);background:transparent;color:var(--mute);font:500 12px var(--sans);cursor:pointer;transition:border-color var(--dur) var(--ease),color var(--dur) var(--ease),background var(--dur) var(--ease)}
+  .chip:hover{border-color:var(--line-hi);color:var(--bone)}
+  .chip.sel{background:var(--bone-hi);color:var(--bg);border-color:var(--bone-hi)}
+
+  .budget{display:flex;align-items:center;gap:8px;margin-top:20px;font-size:13px;color:var(--mute)}
+  .budget input{width:72px;height:32px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--card);color:var(--bone-hi);padding:0 10px;font:500 14px var(--sans);font-variant-numeric:tabular-nums}
+  .budget input:focus{outline:none;border-color:var(--line-hi)}
+
+  .go{width:100%;height:50px;margin-top:18px;border:1px solid var(--bone-hi);border-radius:var(--r);background:var(--bone-hi);color:var(--bg);font:600 15px var(--sans);display:flex;align-items:center;justify-content:center;gap:8px;cursor:pointer;transition:background var(--dur) var(--ease),border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
   .go svg{width:15px;height:15px}
-  .go[disabled]{background:transparent;border-color:var(--cx-border);color:var(--cx-ash);cursor:default;pointer-events:none}
+  .go:hover{background:var(--signal);border-color:var(--signal)}
+  .go:active{transform:translateY(1px)}
+  .go[disabled]{background:var(--card);border-color:var(--line);color:var(--ash);cursor:default;pointer-events:none}
   .go[disabled] svg{display:none}
 
-  /* 5.12 Runs ledger */
-  .recent{margin-top:var(--cx-6)}
-  .run{border-top:var(--cx-hair)}
-  .run-main{display:flex;align-items:center;justify-content:space-between;padding:var(--cx-3) 0;font:400 var(--cx-t-body) var(--cx-font-mono);cursor:pointer;color:var(--cx-bone)}
-  .run .l{display:flex;align-items:center;gap:var(--cx-3);min-width:0}
-  .run .src{color:var(--cx-ash);font-size:var(--cx-t-body)}
-  .run-right{display:flex;align-items:center;gap:var(--cx-3)} .r-meta{color:var(--cx-mute)}
-  .run[data-status="failed"] .r-meta{color:var(--cx-ash)}
-  /* Status by form: filled square done, signal square running (live), hollow square failed. */
-  .dot{width:8px;height:8px;flex:none}
-  .dot.done{background:var(--cx-bone)}
-  .dot.run{background:var(--cx-signal)}
-  .dot.fail{border:1px solid var(--cx-border);background:transparent}
-  .icon{width:26px;height:26px;border:none;background:none;color:var(--cx-ash);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;transition:color var(--cx-dur-1) var(--cx-ease)}
-  .icon:hover{color:var(--cx-bone)} .icon svg{width:15px;height:15px;stroke-width:1.4}
-  .bar{height:2px;background:var(--cx-seam);overflow:hidden;margin:0 0 var(--cx-3)} .bar-fill{height:100%;width:0;background:var(--cx-bone-hi);transition:width var(--cx-dur-3) linear}
-  .detail{display:none;padding:0 0 var(--cx-3)} .detail.open{display:block}
-  .preview{font:400 var(--cx-t-body) var(--cx-font-mono);color:var(--cx-mute);background:var(--cx-panel);border:var(--cx-hair);padding:var(--cx-3);overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
-  .actions{display:flex;align-items:center;gap:var(--cx-2);margin-top:var(--cx-3)}
-  .mini{height:32px;padding:0 var(--cx-4);border:var(--cx-frame);background:transparent;color:var(--cx-bone);font:500 var(--cx-t-label) var(--cx-font-mono);text-transform:uppercase;letter-spacing:.1em;cursor:pointer;transition:border-color var(--cx-dur-1) var(--cx-ease),color var(--cx-dur-1) var(--cx-ease)}
-  .mini:hover{border-color:var(--cx-border-hi);color:var(--cx-bone-hi)}
-  .mini.solid{background:var(--cx-bone-hi);color:var(--cx-bg);border-color:var(--cx-bone-hi)}
-  .mini.solid:hover{background:var(--cx-bone);border-color:var(--cx-bone)}
+  .runs{margin-top:30px}
+  .run{border-top:1px solid var(--line-soft)}
+  .run-main{display:flex;align-items:center;justify-content:space-between;padding:13px 2px;font-size:13px;cursor:pointer}
+  .run .l{display:flex;align-items:center;gap:10px;min-width:0}
+  .run .src{color:var(--ash);font-size:12px}
+  .run-right{display:flex;align-items:center;gap:8px}
+  .run .st{color:var(--mute)} .run[data-status="running"] .st{color:var(--bone-hi)} .run[data-status="failed"] .st{color:var(--ash)}
+  .run .trace{width:54px;height:20px;display:none} .run[data-status="running"] .trace{display:block}
+  .icon{width:26px;height:26px;border:none;background:none;color:var(--ash);border-radius:var(--r-sm);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;transition:background var(--dur) var(--ease),color var(--dur) var(--ease)}
+  .icon:hover{background:var(--raise);color:var(--bone)} .icon svg{width:15px;height:15px;stroke-width:1.5}
+  .detail{display:none;padding:0 2px 14px} .detail.open{display:block}
+  .preview{font-size:12px;color:var(--mute);background:var(--card);border:1px solid var(--line-soft);border-radius:var(--r-sm);padding:10px 12px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+  .actions{display:flex;align-items:center;gap:8px;margin-top:10px}
+  .mini{height:32px;padding:0 14px;border:1px solid var(--line);border-radius:var(--r-sm);background:transparent;color:var(--bone);font:500 13px var(--sans);cursor:pointer;transition:border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
+  .mini:hover{border-color:var(--line-hi);color:var(--bone-hi)}
 
-  /* 5.3 Power control: the signature altar object, drawn in SVG so no CSS radius exists */
-  .power-wrap{text-align:center;padding:var(--cx-6) 0 var(--cx-2)}
-  .power{width:128px;height:128px;border:none;background:none;padding:0;cursor:pointer;display:inline-flex;align-items:center;justify-content:center}
-  .power svg{width:128px;height:128px;display:block}
-  .power .disc{fill:var(--cx-signal);stroke:var(--cx-signal);stroke-width:1}
-  .power .glyph{fill:none;stroke:var(--cx-bg);stroke-width:3}
-  .power.off .disc{fill:none;stroke:var(--cx-border)}
-  .power.off .glyph{stroke:var(--cx-ash)}
-  .power .disc,.power .glyph{transition:fill var(--cx-dur-1) var(--cx-ease),stroke var(--cx-dur-1) var(--cx-ease)}
-  .pstate{font:500 var(--cx-t-label) var(--cx-font-mono);text-transform:uppercase;letter-spacing:.14em;margin-top:var(--cx-4);color:var(--cx-bone-hi)}
-  .power.off + .pstate{color:var(--cx-ash)}
-  .phint{font:400 var(--cx-t-body) var(--cx-font-mono);color:var(--cx-mute);margin-top:var(--cx-2)}
-  .phint.run{margin-top:var(--cx-3)}
+  /* ===== SETTINGS ===== */
+  .avatar{width:42px;height:42px;border-radius:var(--r-pill);background:var(--raise);border:1px solid var(--line);color:var(--bone-hi);display:flex;align-items:center;justify-content:center;font-weight:600;font-size:14px;flex:none}
+  .switch{width:40px;height:24px;border-radius:var(--r-pill);border:1px solid var(--line);background:var(--card);cursor:pointer;position:relative;flex:none;transition:background var(--dur) var(--ease),border-color var(--dur) var(--ease)}
+  .switch::after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:var(--ash);transition:left var(--dur) var(--ease),background var(--dur) var(--ease)}
+  .switch.on{background:var(--bone-hi);border-color:var(--bone-hi)} .switch.on::after{left:18px;background:var(--bg)}
 
-  /* 5.4 Earnings: total is the screen's one monument, today + next payout flank it */
-  .earn-figure{text-align:center;margin-top:var(--cx-6);padding-top:var(--cx-5);border-top:var(--cx-hair)}
-  .monument{font:600 var(--cx-d-1)/0.95 var(--cx-font-display);letter-spacing:-.015em;color:var(--cx-bone-hi);font-variant-numeric:tabular-nums}
-  .mono-lbl{font:500 var(--cx-t-micro) var(--cx-font-mono);text-transform:uppercase;letter-spacing:.14em;color:var(--cx-ash);margin-top:var(--cx-2)}
-  .earn-flank{display:flex;margin-top:var(--cx-5);border-top:var(--cx-hair)}
-  .spec{flex:1;padding:var(--cx-4) 0;text-align:center}
-  .spec:not(:last-child){border-right:var(--cx-hair)}
-  .spec .k{display:block;font:500 var(--cx-t-micro) var(--cx-font-mono);text-transform:uppercase;letter-spacing:.14em;color:var(--cx-mute)}
-  .spec b{display:block;font:500 var(--cx-t-sub) var(--cx-font-mono);color:var(--cx-bone-hi);margin-top:var(--cx-2);font-variant-numeric:tabular-nums;letter-spacing:-.01em}
-
-  /* 5.5 Earnings instrument: a measured trace, not a decorative swoosh */
-  .spark{display:block;margin:var(--cx-5) auto var(--cx-2);width:210px;height:36px}
-
-  /* 5.6 Spec rows / ledger rows */
-  .row{display:flex;align-items:center;justify-content:space-between;padding:var(--cx-4) 0;border-top:var(--cx-hair);font:400 var(--cx-t-body) var(--cx-font-mono);color:var(--cx-bone)}
-  .row .l{display:flex;align-items:center;gap:var(--cx-3)}
-  .row .k{font:500 var(--cx-t-micro) var(--cx-font-mono);text-transform:uppercase;letter-spacing:.14em;color:var(--cx-mute)}
-  .r-meta{color:var(--cx-mute)}
-
-  /* Settings: same system */
-  .avatar{width:42px;height:42px;border:var(--cx-frame);color:var(--cx-bone);display:flex;align-items:center;justify-content:center;font:500 var(--cx-t-body) var(--cx-font-mono);flex:none}
-  .switch{width:40px;height:22px;border:var(--cx-frame);background:transparent;cursor:pointer;position:relative;flex:none;transition:border-color var(--cx-dur-1) var(--cx-ease),background var(--cx-dur-1) var(--cx-ease)}
-  .switch::after{content:"";position:absolute;top:3px;left:3px;width:14px;height:14px;background:var(--cx-ash);transition:left var(--cx-dur-1) var(--cx-ease),background var(--cx-dur-1) var(--cx-ease)}
-  .switch.on{background:var(--cx-bone-hi);border-color:var(--cx-bone-hi)} .switch.on::after{left:21px;background:var(--cx-bg)}
-
-  .toasts{position:fixed;bottom:var(--cx-5);right:var(--cx-5);display:flex;flex-direction:column;gap:var(--cx-2);z-index:20}
-  .toast{background:var(--cx-raise);border:var(--cx-frame);color:var(--cx-bone);padding:var(--cx-3) var(--cx-4);font:400 var(--cx-t-body) var(--cx-font-mono);opacity:0;transform:translateY(8px);transition:opacity var(--cx-dur-3) var(--cx-ease),transform var(--cx-dur-3) var(--cx-ease);max-width:300px}
+  .toasts{position:fixed;bottom:20px;right:20px;display:flex;flex-direction:column;gap:8px;z-index:20}
+  .toast{background:var(--raise);border:1px solid var(--line);color:var(--bone);padding:11px 15px;border-radius:var(--r-sm);font-size:13px;opacity:0;transform:translateY(8px);transition:opacity var(--dur-slow) var(--ease),transform var(--dur-slow) var(--ease);max-width:300px;box-shadow:0 8px 24px rgba(0,0,0,.4)}
   .toast.show{opacity:1;transform:none}
 
-  @media (prefers-reduced-motion:reduce){*{transition:none !important;animation:none !important}}
+  @media (prefers-reduced-motion:reduce){
+    *{transition:none !important;animation:none !important}
+    .knob.is-on .knob-glow{opacity:1}
+  }
 </style>
 </head>
 <body>
@@ -191,68 +174,73 @@
   </nav>
   <main class="main">
     <div class="top">
-      <div class="title" id="title">Launch</div>
+      <div class="eyebrow" id="title">Launch</div>
       <button class="bell" id="bell" aria-label="Notifications"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6"/><path d="M10 19a2 2 0 0 0 4 0"/></svg><span class="badge hide" id="badge"></span></button>
     </div>
     <div class="notif" id="notif"></div>
 
     <section class="view on" id="v-launch">
-      <div class="banner" id="setup"><span>Add a payment method to run your first job.</span><button class="mini solid" id="setupBtn">Add payment</button></div>
+      <div class="banner card" id="setup"><span>Add a payment method to run your first job.</span><button class="pill solid" id="setupBtn">Add payment</button></div>
       <div class="intake" id="intake">
-        <span class="rg tl"></span><span class="rg tr"></span><span class="rg bl"></span><span class="rg br"></span>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h3.5l2 2H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
-        <div id="intake-text">connect a repo or drop data</div>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h3.5l2 2H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+        <div id="intake-text">Connect a repo or drop your data</div>
       </div>
-      <div id="audit"></div>
-      <div class="budget"><span class="k">Budget cap</span><span class="pre">$</span><input id="cap" value="5.00" inputmode="decimal" aria-label="Budget cap"><span class="hint" id="capHint">won't exceed $5.00</span></div>
+      <div class="chips" id="chips">
+        <button class="chip" data-job="Embed a CSV">Embed a CSV</button>
+        <button class="chip" data-job="Transcribe audio">Transcribe audio</button>
+        <button class="chip" data-job="Classify tickets">Classify tickets</button>
+        <button class="chip" data-job="Extract JSON">Extract JSON</button>
+      </div>
+      <div class="budget"><span>Budget cap $</span><input id="cap" value="5.00" inputmode="decimal" class="num" aria-label="Budget cap"><span id="capHint">won't exceed $5.00</span></div>
       <button class="go" id="launchBtn" disabled><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg><span id="launchLabel">Launch</span></button>
-      <div class="recent"><p class="vlbl">Runs</p><div id="jobs"></div></div>
+      <div class="runs"><p class="section-label">Runs</p><div id="jobs"></div></div>
     </section>
 
     <section class="view" id="v-earn">
       <div class="power-wrap">
-        <button class="power" id="power" aria-label="Toggle online"><svg viewBox="0 0 128 128" aria-hidden="true"><circle class="disc" cx="64" cy="64" r="63.5"/><g class="glyph" stroke-linecap="round"><path d="M64 40v30"/><path d="M49 54a20 20 0 1 0 30 0"/></g></svg></button>
-        <div class="pstate" id="pstate">online · earning</div>
+        <div class="knob is-on" id="knob" tabindex="0" role="button" aria-pressed="true" aria-label="Power">
+          <div class="knob-shadow"></div>
+          <img class="knob-base" src="assets/knob-off@3x.png" alt="">
+          <img class="knob-glow" src="assets/knob-on@3x.png" alt="">
+          <img class="knob-press" src="assets/knob-pressed@3x.png" alt="">
+        </div>
+        <div class="pstate" id="pstate">Online · Earning</div>
         <div class="phint" id="phint">tap to go offline</div>
-        <div class="phint run" id="running">running · batch embed</div>
+        <div class="prun" id="running">running · batch embed</div>
       </div>
-      <div class="earn-figure">
-        <div class="monument">$1,284</div>
-        <div class="mono-lbl">total</div>
+      <div class="figures">
+        <div class="fig"><div class="k">Today</div><div class="v live num" id="earned">$3.18</div></div>
+        <div class="fig mid"><div class="k">Total</div><div class="monument num">$1,284</div></div>
+        <div class="fig end"><div class="k">Next payout</div><div class="v num">Jun 30</div></div>
       </div>
-      <div class="earn-flank">
-        <div class="spec"><span class="k">today</span><b id="earned">$3.18</b></div>
-        <div class="spec"><span class="k">next payout</span><b>Jun 30</b></div>
+      <div class="monitor card" id="monitor">
+        <div class="monitor-h"><span class="k">Throughput</span><span class="v num" id="tput">1.24k tok/s</span></div>
+        <svg id="feed" viewBox="0 0 300 46" preserveAspectRatio="none" aria-hidden="true"></svg>
       </div>
-      <svg class="spark" viewBox="0 0 210 36" aria-hidden="true">
-        <line x1="2" y1="34" x2="208" y2="34" stroke="var(--cx-seam)" stroke-width="1"/>
-        <polyline fill="none" stroke="var(--cx-mute)" stroke-width="1" stroke-linejoin="miter" stroke-linecap="butt" points="2,30 18,26 34,27 50,21 66,23 82,16 98,19 114,12 130,15 146,9 162,12 178,6 194,9 208,4"/>
-        <rect x="206" y="2" width="3" height="3" fill="var(--cx-bone-hi)"/>
-      </svg>
-      <div class="row"><span class="l"><span class="k">Machine</span><span class="dot done" id="mDot"></span>Mac Studio · M2 Max</span><span class="r-meta" id="mState">42 GB free</span></div>
-      <div class="row"><span class="l"><span class="k">Payout</span><span class="dot done"></span>Stripe</span><span class="r-meta">connected</span></div>
+      <div class="row"><span class="l"><span class="k">Machine</span><span class="marker" id="mDot"></span>Mac Studio · M2 Max</span><span class="r-meta" id="mState">42 GB free</span></div>
+      <div class="row"><span class="l"><span class="k">Payout</span><span class="marker"></span>Stripe</span><span class="r-meta">connected</span></div>
     </section>
 
     <section class="view" id="v-settings">
-      <div style="display:flex;align-items:center;gap:var(--cx-3);margin-bottom:var(--cx-5)">
+      <div style="display:flex;align-items:center;gap:12px;margin:6px 0 26px">
         <div class="avatar">AR</div>
-        <div style="flex:1;min-width:0"><div style="color:var(--cx-bone-hi)">Alex Rivera</div><div style="font-size:var(--cx-t-body);color:var(--cx-mute)">alex@acme.co</div></div>
+        <div style="flex:1;min-width:0"><div style="color:var(--bone-hi);font-weight:500">Alex Rivera</div><div style="font-size:13px;color:var(--mute)">alex@acme.co</div></div>
         <button class="mini" data-toast="Signed out">Sign out</button>
       </div>
-      <p class="vlbl">Connections</p>
-      <div class="row"><span class="l"><span class="k">GitHub</span></span><button class="mini" data-toast="Connecting to GitHub">Connect</button></div>
-      <p class="vlbl" style="margin-top:var(--cx-5)">Billing</p>
-      <div class="row"><span class="l"><span class="k">Payment</span></span><span class="r-meta">•••• 4242 · Visa</span></div>
-      <div class="row"><span class="l"><span class="k">Payout</span></span><span class="r-meta">Stripe · connected</span></div>
-      <p class="vlbl" style="margin-top:var(--cx-5)">Supplier agent</p>
+      <p class="section-label">Connections</p>
+      <div class="row"><span class="l">GitHub</span><button class="mini" data-toast="Connecting to GitHub">Connect</button></div>
+      <p class="section-label" style="margin-top:24px">Billing</p>
+      <div class="row"><span class="l">Payment method</span><span class="r-meta num">•••• 4242 · Visa</span></div>
+      <div class="row"><span class="l">Payout</span><span class="r-meta">Stripe · connected</span></div>
+      <p class="section-label" style="margin-top:24px">Supplier agent</p>
       <div class="row"><span class="l">Quiet hours · 10pm to 8am</span><button class="switch on" aria-label="Quiet hours"></button></div>
       <div class="row"><span class="l">Run on power only</span><button class="switch" aria-label="Power only"></button></div>
-      <div class="row"><span class="l">Memory headroom</span><span class="r-meta">16 GB</span></div>
-      <div class="row"><span class="l">Minimum payout</span><span class="r-meta">$0.50 / hr</span></div>
-      <p class="vlbl" style="margin-top:var(--cx-5)">API keys</p>
-      <div class="row"><span class="l" style="font-variant-numeric:tabular-nums">cx_live_••••••••••••4f2a</span><span class="r-meta">created Jun 12</span></div>
-      <div style="margin-top:var(--cx-4)"><button class="mini solid" data-toast="New API key created">Create key</button></div>
-      <p class="vlbl" style="margin-top:var(--cx-5)">Appearance</p>
+      <div class="row"><span class="l">Memory headroom</span><span class="r-meta num">16 GB</span></div>
+      <div class="row"><span class="l">Minimum payout</span><span class="r-meta num">$0.50 / hr</span></div>
+      <p class="section-label" style="margin-top:24px">API keys</p>
+      <div class="row"><span class="l num">cx_live_••••••••••••4f2a</span><span class="r-meta">created Jun 12</span></div>
+      <div style="margin-top:14px"><button class="pill solid" data-toast="New API key created">Create key</button></div>
+      <p class="section-label" style="margin-top:24px">Appearance</p>
       <div class="row"><span class="l">Theme</span><span class="r-meta">follows system</span></div>
     </section>
   </main>
@@ -276,58 +264,99 @@
   });
 
   // notifications + toasts
-  var notifs=[], badge=$('badge'), notifPanel=$('notif');
-  var toasts=$('toasts');
+  var notifs=[], badge=$('badge'), notifPanel=$('notif'), toasts=$('toasts');
   function toast(text){var t=el('<div class="toast">'+text+'</div>');toasts.appendChild(t);requestAnimationFrame(function(){t.classList.add('show');});setTimeout(function(){t.classList.remove('show');setTimeout(function(){t.remove();},250);},2800);}
-  function renderNotif(){notifPanel.innerHTML=notifs.length?notifs.map(function(n){return '<div class="notif-item">'+n.t+'<div class="t">just now</div></div>';}).join(''):'<div class="notif-item">no notifications</div>';}
+  function renderNotif(){notifPanel.innerHTML=notifs.length?notifs.map(function(n){return '<div class="notif-item">'+n.t+'<div class="t">just now</div></div>';}).join(''):'<div class="notif-item" style="color:var(--mute)">no notifications</div>';}
   function notify(title,sub){notifs.unshift({t:title+(sub?' · '+sub:'')});renderNotif();badge.classList.remove('hide');toast(title+(sub?' · '+sub:''));}
   $('bell').addEventListener('click',function(){notifPanel.classList.toggle('open');badge.classList.add('hide');});
   renderNotif();
   document.querySelectorAll('[data-toast]').forEach(function(b){b.addEventListener('click',function(){toast(b.dataset.toast);});});
 
-  // launch / runs
-  var intake=$('intake'),intakeText=$('intake-text'),audit=$('audit'),btn=$('launchBtn'),launchLabel=$('launchLabel'),jobs=$('jobs');
-  var connected=false,busy=false,curName='',curPrice=0;
-  var SHIELD='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex:none"><path d="M12 3l7 3v5c0 4.5-3 7.6-7 9-4-1.4-7-4.5-7-9V6z"/><path d="M9 12l2 2 4-4"/></svg>';
-  var RERUN='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2 5"/><path d="M20 5v6h-6"/></svg>';
-  var SRC={
-    'support-pipeline':{p:4.20,from:'acme/support-pipeline · main@a1b2c3',s:[{op:'embed',d:'2.1M text rows · tickets.csv to 384-dim vectors'},{op:'classify',d:'topic labels · labels.yaml · 12 classes'},{op:'summarize',d:'rows flagged "urgent" · batch_infer'}]}
-  };
-
-  function arm(price){
-    curPrice=price;
-    var cap=parseFloat($('cap').value)||0;
-    if(price>cap){launchLabel.textContent='Raise cap to launch';btn.disabled=true;}
-    else{launchLabel.textContent='Launch · $'+price.toFixed(2);btn.disabled=false;}
+  // live feed: ring buffer rendered as a scrolling line + soft area fill + leading point.
+  function liveFeed(svg, opts){
+    var W=opts.w, H=opts.h, N=opts.n;
+    function mk(t){return document.createElementNS('http://www.w3.org/2000/svg',t);}
+    var pts=Array.from({length:N},function(){return 0.45+(Math.random()-0.5)*0.2;});
+    var area=mk('polygon'); area.setAttribute('fill','rgba(203,200,193,0.07)'); svg.appendChild(area);
+    var line=mk('polyline'); line.setAttribute('fill','none'); line.setAttribute('stroke','#9a9aa0'); line.setAttribute('stroke-width','1.4'); line.setAttribute('stroke-linejoin','round'); svg.appendChild(line);
+    var dot=mk('circle'); dot.setAttribute('r','2.4'); dot.setAttribute('fill','#ffffff'); svg.appendChild(dot);
+    function draw(){
+      var lp='', ap='0,'+H+' ';
+      for(var i=0;i<N;i++){var x=(i/(N-1))*W, y=H-3-pts[i]*(H-8); lp+=x.toFixed(1)+','+y.toFixed(1)+' '; ap+=x.toFixed(1)+','+y.toFixed(1)+' ';}
+      ap+=W+','+H;
+      line.setAttribute('points',lp.trim()); area.setAttribute('points',ap.trim());
+      dot.setAttribute('cx',W); dot.setAttribute('cy',(H-3-pts[N-1]*(H-8)).toFixed(1));
+    }
+    draw();
+    return {tick:function(v){pts.shift();pts.push(Math.max(0.06,Math.min(0.95,v)));draw();}, el:svg};
   }
-  function showAudit(name,from,stages,price){
-    var rows=stages.map(function(st,i){return '<div class="stage"><span class="stage-n">'+(i+1)+'</span><div><div class="stage-op">'+st.op+'</div><div class="stage-d">'+st.d+'</div></div></div>';}).join('');
-    audit.innerHTML='<div class="card"><div class="card-h">'+SHIELD+'Auditor · '+name+'<span class="right">cleared</span></div>'
-      +'<div class="card-sub">'+from+' · no policy violations</div>'
-      +'<div class="quote"><div class="q-fig">$'+price.toFixed(2)+'</div><div class="q-lbl">estimated cost</div></div>'
-      +'<div class="vlbl" style="margin:var(--cx-5) 0 var(--cx-2)">Detected pipeline · '+stages.length+' stage'+(stages.length>1?'s':'')+'</div>'
-      +'<div class="stages">'+rows+'</div></div>';
-  }
-  function connect(name){var src=SRC[name];connected=true;curName=name;showAudit(name,src.from,src.s,src.p);arm(src.p);intakeText.textContent=name+' connected · click to reset';}
-  function reset(){connected=false;audit.innerHTML='';btn.disabled=true;launchLabel.textContent='Launch';intakeText.textContent='connect a repo or drop data';}
-  function startConnect(name){if(busy)return;busy=true;intakeText.textContent='Auditing '+name;audit.innerHTML='';setTimeout(function(){connect(name);busy=false;},620);}
+  var reduceMotion=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  intake.addEventListener('click',function(){if(connected){reset();}else{startConnect('support-pipeline');}});
-  // Drag-over is visual only (registration marks brighten); the click path drives connect.
+  // ===== EARN =====
+  var knob=$('knob'),pstate=$('pstate'),phint=$('phint'),running=$('running'),earned=$('earned'),mDot=$('mDot'),mState=$('mState'),monitor=$('monitor'),tput=$('tput');
+  var feed=liveFeed($('feed'),{w:300,h:46,n:48});
+  var onln=true,total=3.18,earnTimer=null,feedTimer=null;
+  function startFeed(){
+    if(reduceMotion){feed.tick(0.6);return;}
+    feedTimer=setInterval(function(){
+      var v=0.45+Math.sin(Date.now()/600)*0.16+(Math.random()-0.5)*0.18; feed.tick(v);
+      tput.textContent=(1.05+Math.random()*0.4).toFixed(2)+'k tok/s';
+    },180);
+  }
+  function stopFeed(){if(feedTimer){clearInterval(feedTimer);feedTimer=null;}}
+  function setKnob(on){
+    onln=on;
+    knob.classList.toggle('is-on',on);
+    knob.setAttribute('aria-pressed',String(on));
+    pstate.textContent=on?'Online · Earning':'Offline';
+    pstate.classList.toggle('off',!on);
+    phint.textContent=on?'tap to go offline':'tap to go online';
+    running.style.display=on?'':'none';
+    earned.classList.toggle('live',on);
+    mDot.className=on?'marker':'marker hollow';
+    mState.textContent=on?'42 GB free':'paused';
+    monitor.classList.toggle('hide',!on);
+    if(on){
+      if(!earnTimer)earnTimer=setInterval(function(){total+=0.0023;earned.textContent='$'+total.toFixed(2);},1000);
+      startFeed();
+    }else{
+      if(earnTimer){clearInterval(earnTimer);earnTimer=null;}
+      stopFeed();
+    }
+  }
+  knob.addEventListener('click',function(){setKnob(!onln);});
+  knob.addEventListener('keydown',function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();setKnob(!onln);}});
+  setKnob(true);
+
+  // ===== LAUNCH =====
+  var intake=$('intake'),intakeText=$('intake-text'),btn=$('launchBtn'),launchLabel=$('launchLabel'),jobs=$('jobs');
+  var RERUN='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2 5"/><path d="M20 5v6h-6"/></svg>';
+  var repo=null, job=null;
+  function refreshArm(){btn.disabled=!(repo||job);}
+  // chips: single-select, inverts when chosen
+  $('chips').addEventListener('click',function(e){
+    var c=e.target.closest('.chip'); if(!c)return;
+    var was=c.classList.contains('sel');
+    document.querySelectorAll('.chip').forEach(function(x){x.classList.remove('sel');});
+    if(was){job=null;}else{c.classList.add('sel');job=c.dataset.job;}
+    refreshArm();
+  });
+  function connectRepo(){repo='acme/support-pipeline';intakeText.textContent=repo+' · main@a1b2c3 · click to reset';refreshArm();}
+  function resetRepo(){repo=null;intakeText.textContent='Connect a repo or drop your data';refreshArm();}
+  intake.addEventListener('click',function(){if(repo){resetRepo();}else{connectRepo();}});
   ['dragenter','dragover'].forEach(function(ev){intake.addEventListener(ev,function(e){e.preventDefault();intake.classList.add('drag');});});
   ['dragleave','drop'].forEach(function(ev){intake.addEventListener(ev,function(e){e.preventDefault();intake.classList.remove('drag');});});
-  $('cap').addEventListener('input',function(){$('capHint').textContent="won't exceed $"+(parseFloat($('cap').value)||0).toFixed(2);if(connected)arm(curPrice);});
+  $('cap').addEventListener('input',function(){$('capHint').textContent="won't exceed $"+(parseFloat($('cap').value)||0).toFixed(2);});
 
-  function doneDetail(){return '<div class="preview">[ 0.0131, -0.0412, 0.0098, 0.0457, 0.0203, … ]  · 384-dim × 2,100,000 rows</div><div class="actions"><button class="mini" data-dl>Download</button><button class="mini" data-pr>Open PR</button></div>';}
-  function failDetail(){return '<div class="preview">failed · malformed input at line 4002 (buyer input)</div><div class="actions"><span class="r-meta">refunded $1.20</span><button class="mini" data-fix>Fix &amp; re-run</button></div>';}
+  function doneDetail(){return '<div class="preview num">[ 0.0131, -0.0412, 0.0098, 0.0457, 0.0203, … ]  · 384-dim × 2,100,000 rows</div><div class="actions"><button class="mini" data-dl>Download</button><button class="mini" data-pr>Open PR</button></div>';}
+  function failDetail(){return '<div class="preview">failed · malformed input at line 4002 (buyer input)</div><div class="actions"><span class="r-meta num">refunded $1.20</span><button class="mini" data-fix>Fix &amp; re-run</button></div>';}
 
   function runHTML(name,src,status){
-    var dot=status==='running'?'dot run':status==='failed'?'dot fail':'dot done';
-    var meta=status==='running'?'0/8 · ~8s':status;
+    var mk=status==='running'?'marker':status==='failed'?'marker hollow':'marker';
+    var st=status==='running'?'running':status;
     return '<div class="run" data-status="'+status+'" data-name="'+name+'">'
-      +'<div class="run-main"><span class="l"><span class="'+dot+'"></span>'+name+' <span class="src">'+src+'</span></span>'
-      +'<span class="run-right"><span class="r-meta">'+meta+'</span><button class="icon rerun" aria-label="Re-run" title="Re-run">'+RERUN+'</button></span></div>'
-      +(status==='running'?'<div class="bar"><div class="bar-fill"></div></div>':'')
+      +'<div class="run-main"><span class="l"><span class="'+mk+'"></span>'+name+' <span class="src num">'+src+'</span></span>'
+      +'<span class="run-right"><svg class="trace" viewBox="0 0 54 20" preserveAspectRatio="none"></svg><span class="st">'+st+'</span><button class="icon rerun" aria-label="Re-run" title="Re-run">'+RERUN+'</button></span></div>'
       +'<div class="detail">'+(status==='failed'?failDetail():status==='done'?doneDetail():'')+'</div></div>';
   }
   function attach(run){
@@ -341,18 +370,19 @@
   }
   function launch(name){
     var run=el(runHTML(name,'main@'+sha(),'running'));jobs.prepend(run);attach(run);
-    var fill=run.querySelector('.bar-fill'),meta=run.querySelector('.r-meta'),t=0;
-    var iv=setInterval(function(){
-      t++;fill.style.width=Math.round(t/8*100)+'%';meta.textContent=t+'/8 · ~'+(8-t)+'s';
-      if(t>=8){clearInterval(iv);
-        run.dataset.status='done';run.querySelector('.dot').className='dot done';meta.textContent='done';
-        var bar=run.querySelector('.bar');if(bar)bar.remove();
+    var trace=liveFeed(run.querySelector('.trace'),{w:54,h:20,n:20});
+    var st=run.querySelector('.st'),t=0,iv=null,tv=null;
+    if(!reduceMotion)tv=setInterval(function(){trace.tick(0.4+Math.random()*0.4);},170);
+    iv=setInterval(function(){
+      t++; st.textContent='running · '+t+'/8';
+      if(t>=8){clearInterval(iv);if(tv)clearInterval(tv);
+        run.dataset.status='done';run.querySelector('.marker').className='marker';st.textContent='done';
         run.querySelector('.detail').innerHTML=doneDetail();
         notify('Job complete',name);
       }
     },360);
   }
-  btn.addEventListener('click',function(){if(btn.disabled)return;var n=curName||'support-pipeline';reset();launch(n);});
+  btn.addEventListener('click',function(){if(btn.disabled)return;var n=repo?repo.split('/').pop():(job||'job');document.querySelectorAll('.chip').forEach(function(x){x.classList.remove('sel');});job=null;if(repo)resetRepo();else refreshArm();launch(n);});
   jobs.addEventListener('click',function(e){
     if(e.target.closest('[data-dl]')){e.stopPropagation();toast('Downloaded results to ~/Downloads');}
     else if(e.target.closest('[data-pr]')){e.stopPropagation();toast('Opened a pull request on the repo');}
@@ -360,19 +390,7 @@
   });
   [['support-pipeline','main@a1b2c3','done'],['nightly-embeds','main@9f0e1d','done'],['ticket-classify','main@77c2b0','failed']].forEach(function(r){var run=el(runHTML(r[0],r[1],r[2]));jobs.appendChild(run);attach(run);});
 
-  // first run
   $('setupBtn').addEventListener('click',function(){$('setup').style.display='none';toast('Payment method added');});
-
-  // earn
-  var power=$('power'),pstate=$('pstate'),phint=$('phint'),running=$('running'),earned=$('earned'),mDot=$('mDot'),mState=$('mState'),onln=false,total=3.18,timer=null;
-  function setOnline(on){
-    onln=on;
-    if(on){power.classList.remove('off');pstate.textContent='online · earning';phint.textContent='tap to go offline';running.style.display='';mDot.className='dot done';mState.textContent='42 GB free';
-      timer=setInterval(function(){total+=0.0023;earned.textContent='$'+total.toFixed(2);},1000);
-    }else{power.classList.add('off');pstate.textContent='offline';phint.textContent='tap to go online';running.style.display='none';mDot.className='dot fail';mState.textContent='paused';if(timer){clearInterval(timer);timer=null;}}
-  }
-  power.addEventListener('click',function(){setOnline(!onln);});
-  setOnline(true);
 
   // settings switches
   document.querySelectorAll('.switch').forEach(function(s){s.addEventListener('click',function(){s.classList.toggle('on');});});
