@@ -62,6 +62,16 @@ pub enum RunError {
     /// the boundary — never fake a distributed forward pass.
     #[error("cluster substrate required for `{model}`: {detail}")]
     ExternalSubstrate { model: String, detail: String },
+    /// A documented contract seam whose executor is not built yet. Today this is the
+    /// `custom` general-compute job (ACCRETION.md §7-8): the wire variant exists and
+    /// decodes, but the sandboxed BYO-container runner is the next build, so a
+    /// dispatched `custom` task fails HONESTLY here rather than returning a fake
+    /// result (BLACKHOLE: surface the boundary).
+    #[error("`{job_type}` not yet implemented: {detail}")]
+    NotImplemented {
+        job_type: &'static str,
+        detail: String,
+    },
 }
 
 /// Helper: wrap any `candle`/`anyhow` error as an `Inference` failure.
@@ -1048,10 +1058,18 @@ impl LlamaBackend {
 }
 
 /// Load the HF tokenizer.json that pairs with the GGUF model (from the base repo,
-/// not the GGUF repo, which usually lacks tokenizer.json).
+/// not the GGUF repo, which usually lacks tokenizer.json). Must mirror
+/// `models::llama_gguf_spec`'s repo choice so the tokenizer matches the weights:
+/// the big 7B model uses the Qwen2.5-7B tokenizer, the small alternate the
+/// Qwen2.5-0.5B one, and the default the Llama-3.2-1B one.
 fn load_llama_tokenizer(model_ref: &str) -> Result<Tokenizer, RunError> {
     let r = model_ref.to_ascii_lowercase();
-    let spec = if r.contains("qwen") {
+    let spec = if models::is_big_llama(&r) {
+        models::ModelSpec {
+            repo: "Qwen/Qwen2.5-7B-Instruct",
+            files: &["tokenizer.json"],
+        }
+    } else if r.contains("qwen") {
         models::ModelSpec {
             repo: "Qwen/Qwen2.5-0.5B-Instruct",
             files: &["tokenizer.json"],
@@ -1071,9 +1089,16 @@ pub struct BatchInferRunner;
 #[async_trait]
 impl JobRunner for BatchInferRunner {
     async fn can_run(&self, manifest: &JobManifest, cap: &WorkerCapability) -> bool {
+        // The bigger 7B model needs real VRAM: enforce a hard agent-side floor so a
+        // mis-constrained manifest never loads it on a worker that cannot hold it —
+        // we decline (→ NoRunner) instead of attempting a load that would OOM. The
+        // catalogue's higher min_memory_gb is the primary gate; this is the backstop.
+        let big_model_fits = !models::is_big_llama(&manifest.model.model_ref)
+            || cap.memory_gb >= models::BIG_LLAMA_MIN_MEMORY_GB;
         matches!(manifest.job_type, JobType::BatchInfer { .. })
             && manifest.model.kind == ModelKind::Gguf
             && meets_memory(manifest, cap)
+            && big_model_fits
     }
 
     async fn run(
@@ -1587,6 +1612,64 @@ impl JobRunner for ClusterRunner {
 }
 
 // ---------------------------------------------------------------------------
+// CustomRunner — general-compute SEAM (ACCRETION.md §7-8)
+// ---------------------------------------------------------------------------
+
+/// The general-compute seam: the documented entry point for the metered
+/// bring-your-own-container lane (simulation / render / HPC / training / ZK on the
+/// NVIDIA GPU-second market — ACCRETION.md §7-8). The `custom` wire variant exists
+/// and decodes (control/types.go, agent/src/types.rs, proto/manifest.schema.json),
+/// so a buyer can submit one and the control plane can carry it; what is NOT built
+/// yet is the EXECUTOR — a sandboxed container runner (gVisor/Kata isolation + GPU
+/// cgroup limits + signed-digest attestation + per-GPU-second metering). Until that
+/// lands, this runner accepts the job type and then surfaces an HONEST typed
+/// `NotImplemented` error rather than fabricating a result. Arbitrary compute has no
+/// known answer, so this lane will be metered + reputation-trusted, never
+/// honeypot/redundancy output-checked like the AI catalogue (BLACKHOLE: never fake
+/// success; surface the boundary).
+pub struct CustomRunner;
+
+#[async_trait]
+impl JobRunner for CustomRunner {
+    async fn can_run(&self, manifest: &JobManifest, _cap: &WorkerCapability) -> bool {
+        // Claim the `custom` job type so dispatch routes it here (to the honest
+        // boundary) instead of falling through to a `NoRunner`. The model kind and
+        // memory are irrelevant to an opaque container job, so we gate on type only;
+        // the real sandbox/GPU gating belongs to the executor that is the next build.
+        matches!(manifest.job_type, JobType::Custom { .. })
+    }
+
+    async fn run(
+        &self,
+        manifest: &JobManifest,
+        _input: &[u8],
+        _pool: &ModelPool,
+    ) -> Result<JobOutput, RunError> {
+        // Echo back the requested image/command in the error so an operator sees
+        // exactly what was asked for; then surface the boundary. Never a fake result.
+        let requested = match &manifest.job_type {
+            JobType::Custom { image, command } => {
+                let img = image.as_deref().unwrap_or("<none>");
+                format!("image={img}, command={command:?}")
+            }
+            _ => "<non-custom job routed to CustomRunner>".to_string(),
+        };
+        Err(RunError::NotImplemented {
+            job_type: "custom",
+            detail: format!(
+                "custom compute not yet implemented; the sandboxed BYO-container runner \
+                 (gVisor/Kata isolation + GPU cgroup limits + per-GPU-second metering, \
+                 ACCRETION.md §7-8) is the next build. Requested: {requested}."
+            ),
+        })
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "custom"
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
 
@@ -1594,7 +1677,9 @@ impl JobRunner for ClusterRunner {
 /// returns the first whose `can_run` is true. `ClusterRunner` is FIRST so a giant
 /// model on a cluster worker routes to the Plane B seam (not to BatchInferRunner,
 /// which would try to load it on one node); for every non-cluster worker its
-/// `can_run` is false, so normal dispatch is unchanged.
+/// `can_run` is false, so normal dispatch is unchanged. `CustomRunner` is the
+/// general-compute seam (ACCRETION.md §7-8): it claims the `custom` job type so such
+/// a job reaches an honest `NotImplemented` boundary instead of a generic NoRunner.
 pub fn default_runners() -> Vec<Box<dyn JobRunner>> {
     vec![
         Box::new(ClusterRunner),
@@ -1604,6 +1689,7 @@ pub fn default_runners() -> Vec<Box<dyn JobRunner>> {
         Box::new(BatchClassificationRunner),
         Box::new(JsonExtractionRunner),
         Box::new(RerankRunner),
+        Box::new(CustomRunner),
     ]
 }
 
@@ -2194,6 +2280,83 @@ mod tests {
                 }
                 other => panic!("expected ExternalSubstrate boundary, got {other:?}"),
             }
+        });
+    }
+
+    /// The general-compute SEAM: a `custom` job routes to CustomRunner (claimed via
+    /// `can_run`), and `run` surfaces an HONEST `NotImplemented` boundary that names
+    /// the requested image/command — never a fabricated result. Also proves dispatch
+    /// picks CustomRunner for a custom job rather than falling through to NoRunner.
+    #[test]
+    fn custom_runner_is_seam_and_never_fakes() {
+        let cap = cap_with(HardwareClass::Nvidia80g, 80.0);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut m = test_manifest(JobType::Custom {
+                image: Some("docker.io/org/sim:tag".into()),
+                command: vec!["python".into(), "sim.py".into()],
+            });
+            // Claims custom; the AI runners do not.
+            assert!(CustomRunner.can_run(&m, &cap).await);
+            assert!(!BatchInferRunner.can_run(&m, &cap).await);
+            assert!(!EmbedRunner.can_run(&m, &cap).await);
+
+            // run() surfaces the typed boundary and echoes what was requested.
+            let pool = ModelPool::new();
+            match CustomRunner.run(&m, b"", &pool).await {
+                Err(RunError::NotImplemented { job_type, detail }) => {
+                    assert_eq!(job_type, "custom");
+                    assert!(detail.contains("not yet implemented"));
+                    assert!(detail.contains("BYO-container"));
+                    assert!(detail.contains("docker.io/org/sim:tag"));
+                }
+                other => panic!("expected NotImplemented boundary, got {other:?}"),
+            }
+
+            // dispatch routes a custom job to CustomRunner (not NoRunner).
+            let runners = default_runners();
+            let picked = dispatch(&m, &cap, &runners).await.expect("custom routes");
+            assert_eq!(picked.backend_name(), "custom");
+
+            // A command-only custom job (null image) still routes + reports cleanly.
+            m.job_type = JobType::Custom {
+                image: None,
+                command: vec!["./run".into()],
+            };
+            match CustomRunner.run(&m, b"", &pool).await {
+                Err(RunError::NotImplemented { detail, .. }) => assert!(detail.contains("<none>")),
+                other => panic!("expected NotImplemented boundary, got {other:?}"),
+            }
+        });
+    }
+
+    /// The bigger 7B model is gated to high-VRAM workers: BatchInferRunner declines
+    /// it below `BIG_LLAMA_MIN_MEMORY_GB` (→ NoRunner, never an OOM load) and accepts
+    /// it on a big worker. The small default model still runs on a small worker.
+    #[test]
+    fn big_llama_gated_by_worker_memory() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let small_worker = cap_with(HardwareClass::AppleSiliconPro, 16.0);
+            let big_worker = cap_with(HardwareClass::Nvidia80g, 80.0);
+
+            let mut big = test_manifest(JobType::BatchInfer {
+                max_tokens: 16,
+                temperature: 0.0,
+            });
+            big.model.model_ref = "qwen2.5-7b-instruct-q4".into();
+            // Big model on a small worker → declined (the agent-side floor backstops
+            // a mis-constrained manifest); on a big worker → accepted.
+            assert!(!BatchInferRunner.can_run(&big, &small_worker).await);
+            assert!(BatchInferRunner.can_run(&big, &big_worker).await);
+
+            // The small default model runs on the small worker (gate is big-only).
+            let mut small = test_manifest(JobType::BatchInfer {
+                max_tokens: 16,
+                temperature: 0.0,
+            });
+            small.model.model_ref = "llama-3.2-1b-instruct-q4".into();
+            assert!(BatchInferRunner.can_run(&small, &small_worker).await);
         });
     }
 

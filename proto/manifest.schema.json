@@ -67,7 +67,7 @@
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["embed", "batch_infer", "audio_transcribe", "image_gen", "eval", "lora_finetune"]
+          "enum": ["embed", "batch_infer", "audio_transcribe", "image_gen", "eval", "lora_finetune", "batch_classification", "json_extraction", "rerank", "custom"]
         }
       },
       "oneOf": [
@@ -145,6 +145,54 @@
             "checkpoint_every": { "type": "integer", "minimum": 1 }
           },
           "required": ["type", "epochs", "lr", "checkpoint_every"],
+          "additionalProperties": false
+        },
+        {
+          "title": "batch_classification",
+          "description": "Assign each input text exactly one label from `labels` (warm Llama, top-1).",
+          "properties": {
+            "type": { "const": "batch_classification" },
+            "labels": { "type": "array", "items": { "type": "string" }, "description": "Closed label set the model picks from." }
+          },
+          "required": ["type", "labels"],
+          "additionalProperties": false
+        },
+        {
+          "title": "json_extraction",
+          "description": "Extract one JSON object per input text conforming to `schema` (warm Llama).",
+          "properties": {
+            "type": { "const": "json_extraction" },
+            "schema": { "type": "object", "description": "JSON schema each extracted item must conform to (free-form object)." }
+          },
+          "required": ["type", "schema"],
+          "additionalProperties": false
+        },
+        {
+          "title": "rerank",
+          "description": "Re-order each query's candidate docs by relevance (warm MiniLM, cosine).",
+          "properties": {
+            "type": { "const": "rerank" },
+            "top_k": { "type": "integer", "minimum": 0, "description": "Cut the ranking to the top-K documents; 0 = keep all." }
+          },
+          "required": ["type", "top_k"],
+          "additionalProperties": false
+        },
+        {
+          "title": "custom",
+          "description": "GENERAL-COMPUTE SEAM (ACCRETION.md §7-8): an opaque bring-your-own-container compute job for the metered NVIDIA GPU-second lane (simulation / render / HPC / training / ZK). It carries a `command` to run and/or a container `image` reference; the agent does NOT yet execute it — the sandboxed BYO-container runner (gVisor/Kata + GPU cgroup limits + metered billing) is the next build, so a dispatched `custom` task fails with an HONEST typed error rather than a fabricated result. Unlike the verified AI catalogue (honeypot/redundancy on a known answer), arbitrary compute has no known answer, so this lane is metered per GPU-second with attestation, never output-checked.",
+          "properties": {
+            "type": { "const": "custom" },
+            "image": {
+              "description": "OCI container image reference (e.g. `docker.io/org/sim:tag` or a registry digest) the job runs in, or null when only `command` is given.",
+              "oneOf": [ { "type": "null" }, { "type": "string" } ]
+            },
+            "command": {
+              "type": "array",
+              "description": "Argv the sandbox executes inside the image (e.g. [\"python\",\"sim.py\"]). Empty = the image's own entrypoint.",
+              "items": { "type": "string" }
+            }
+          },
+          "required": ["type", "image", "command"],
           "additionalProperties": false
         }
       ]
@@ -233,8 +281,8 @@
         "model_id": { "type": "string" },
         "job_type": {
           "type": "string",
-          "description": "The JobType tag string (embed | batch_infer | audio_transcribe | image_gen | eval | lora_finetune).",
-          "enum": ["embed", "batch_infer", "audio_transcribe", "image_gen", "eval", "lora_finetune"]
+          "description": "The JobType tag string (embed | batch_infer | audio_transcribe | image_gen | eval | lora_finetune | batch_classification | json_extraction | rerank | custom).",
+          "enum": ["embed", "batch_infer", "audio_transcribe", "image_gen", "eval", "lora_finetune", "batch_classification", "json_extraction", "rerank", "custom"]
         },
         "tps":        { "type": "number", "description": "Tokens per second." },
         "eps":        { "type": "number", "description": "Embeddings per second." },
@@ -257,7 +305,7 @@
         "supported_jobs": {
           "type": "array",
           "description": "JobType tag strings this worker can run.",
-          "items": { "type": "string", "enum": ["embed", "batch_infer", "audio_transcribe", "image_gen", "eval", "lora_finetune"] }
+          "items": { "type": "string", "enum": ["embed", "batch_infer", "audio_transcribe", "image_gen", "eval", "lora_finetune", "batch_classification", "json_extraction", "rerank", "custom"] }
         },
         "supported_models": { "type": "array", "items": { "type": "string" }, "description": "Model ids available locally." },
         "benchmarks":     { "type": "array", "items": { "$ref": "#/$defs/BenchResult" } },

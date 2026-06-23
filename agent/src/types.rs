@@ -119,6 +119,22 @@ pub enum JobType {
         #[serde(default)]
         top_k: u32,
     },
+    /// GENERAL-COMPUTE SEAM (ACCRETION.md §7-8): an opaque bring-your-own-container
+    /// compute job for the metered NVIDIA GPU-second lane (simulation / render /
+    /// HPC / training / ZK). `image` is the OCI container reference to run in (None
+    /// when only `command` is given); `command` is the argv the sandbox executes
+    /// inside it (empty = the image's own entrypoint). The agent does NOT yet run
+    /// this — the sandboxed runner (gVisor/Kata + GPU cgroup limits + metered
+    /// billing) is the next build, so `CustomRunner` returns an HONEST typed error
+    /// rather than a fabricated result. Unlike the verified AI catalogue (a known
+    /// answer, honeypot/redundancy-checked), arbitrary compute has no known answer,
+    /// so this lane is metered per GPU-second with attestation, never output-checked.
+    Custom {
+        #[serde(default)]
+        image: Option<String>,
+        #[serde(default)]
+        command: Vec<String>,
+    },
 }
 
 impl JobType {
@@ -135,6 +151,7 @@ impl JobType {
             JobType::BatchClassification { .. } => "batch_classification",
             JobType::JsonExtraction { .. } => "json_extraction",
             JobType::Rerank { .. } => "rerank",
+            JobType::Custom { .. } => "custom",
         }
     }
 }
@@ -439,6 +456,45 @@ mod tests {
         assert!(matches!(
             serde_json::from_str::<JobType>(r#"{"type":"rerank"}"#).unwrap(),
             JobType::Rerank { top_k: 0 }
+        ));
+    }
+
+    /// The general-compute SEAM (ACCRETION.md §7-8): a `custom` job decodes its
+    /// opaque `image` + `command` payload, round-trips the tag, and — like every
+    /// other variant — still decodes from a bare discriminant (fields default to
+    /// None / empty). This guards the contract shape shared with control/types.go
+    /// (Image *string, Command []string) and proto/manifest.schema.json.
+    #[test]
+    fn custom_jobtype_carries_image_and_command() {
+        let c: JobType = serde_json::from_str(
+            r#"{"type":"custom","image":"docker.io/org/sim:tag","command":["python","sim.py"]}"#,
+        )
+        .unwrap();
+        assert_eq!(c.tag(), "custom");
+        match c {
+            JobType::Custom { image, command } => {
+                assert_eq!(image.as_deref(), Some("docker.io/org/sim:tag"));
+                assert_eq!(command, ["python", "sim.py"]);
+            }
+            _ => panic!("wrong variant"),
+        }
+        // A null image (command-only) round-trips to None.
+        let c: JobType =
+            serde_json::from_str(r#"{"type":"custom","image":null,"command":["./run"]}"#).unwrap();
+        match c {
+            JobType::Custom { image, command } => {
+                assert!(image.is_none());
+                assert_eq!(command, ["./run"]);
+            }
+            _ => panic!("wrong variant"),
+        }
+        // Bare discriminant decodes (fields default).
+        assert!(matches!(
+            serde_json::from_str::<JobType>(r#"{"type":"custom"}"#).unwrap(),
+            JobType::Custom {
+                image: None,
+                command,
+            } if command.is_empty()
         ));
     }
 }
