@@ -266,4 +266,20 @@ high-margin tip. New roadmap (Wave 5+): a BYO-`Dockerfile` job runner on the NVI
 lane with gVisor/Kata isolation + GPU cgroup limits + metered billing; per-domain
 curated runners (Blender, a CFD solver) where verified-output beats metered.
 
+---
+
+## 8. Pipeline performance (measured on the A100; in progress)
+
+"Power per buck" = throughput per GPU-second. Findings + roadmap, grounded in real numbers:
+
+- **Batched generation — SHIPPED, +4.4×.** `batch_infer` length-buckets prompts and runs B sequences per forward pass (`runners.rs::generate_batch`). A100: **221 → 979 tok/s** on a 48-token workload, **output byte-identical to serial** (verified). Same GPU-hour, 4.4× the batch work.
+- **FP16 embeddings — SHIPPED, neutral on tiny models.** Correct GPU default (half memory) but MiniLM-L6 is launch/overhead-bound on an A100 → micro-bench flat. Pays off on larger embed models / bigger batches.
+- **Batched PREFILL — NEXT (the rest of the generation win).** candle's quantized-llama slices the last position non-contiguously for bsz>1 (its quantized matmul rejects it), so we prefill token-by-token today (gives up within-prompt parallelism → only ~1.8× on 1-token jobs). Fix: vendor a patched `quantized_llama` with a `.contiguous()` before the output projection → true batched prefill. Re-test on an A100.
+- **Wire `generate_batch` into `batch_classification`** — same method; classification batches across many short generations (easy win, scaffolded).
+- **Hardware-matched routing** — scheduler should prefer the *cheapest hardware that's compute-bound* for the job (small/embeddings → cheap/Apple; big models → A100). Power-per-buck at the marketplace level.
+- **Chunk sizing by worker class** — `adaptiveSplitSize` is tuned for Apple Silicon; high-VRAM NVIDIA workers should take far larger chunks to amortize overhead.
+- **Bigger models = the moat** — tiny models leave any GPU idle; 30–70B is where A100s (and Apple unified memory) are the bottleneck and earn their cost.
+
+**Silicon catch-up session:** the same batching applies to Metal (candle has a Metal seq_len==1 decode path), and Apple's unified memory runs 70B where consumer NVIDIA can't — the lever to match/beat CUDA on the large-model class. Re-run `cx-agent bench` + the batched test (`batched_vs_serial_throughput`) on Apple Silicon to measure parity.
+
 *Mass is conserved. Only volume collapses. Now we make it pull.*
