@@ -221,4 +221,49 @@ Ordered by leverage. Each item is concrete and traces to an audit finding.
    scoped CF API token (Zone:DNS:Edit) so Caddy can renew via DNS-01.
 4. **Then the front end** — merge skeleton + demo, wire the real endpoints.
 
+---
+
+## 7. The bigger market — general compute (A100-validated 2026-06-23)
+
+The NVIDIA lane is not an "AI also-ran" — it's the door to the **whole GPU-compute
+market**, which dwarfs batch AI inference. A Linux GPU box can sandbox arbitrary
+workloads (containers + cgroups + seccomp / gVisor / Kata) the way Metal cannot, so
+the two lanes specialize:
+
+- **Apple lane** — curated, fixed AI job types (verified, honeypot-checked). Safe by
+  construction (no arbitrary code). The high-margin verified tip.
+- **NVIDIA lane** — **bring-your-own-container general compute**, isolated per job:
+  simulation (CFD / FEA / MD / Monte Carlo), rendering (Blender / OptiX), HPC, model
+  *training* (not just inference), ZK proving, video transcode (NVENC), RAPIDS/data.
+
+**Proof it's real** — a RunPod A100-SXM4-80GB ran our probe (`scripts/gpubench.cu`)
+at spec across every class:
+
+| Class | A100 | ~% of peak | Sells to |
+|---|---|---|---|
+| FP32 GEMM | 19.0 TFLOPS | ~97% | HPC / simulation |
+| VRAM bandwidth | 1,760 GB/s | ~91% | bandwidth-bound sim |
+| TF32 tensor | 146.6 TFLOPS | ~94% | AI training |
+| FP16 tensor | 298.3 TFLOPS | ~96% | training / inference |
+| Monte Carlo | 618 Gsamples/s | — | finance / risk / sim |
+
+The agent's own `cx-agent bench` also self-classified the box as `nvidia_80g` (80 GB
+VRAM) — schedulable on the exchange today.
+
+**The catch this opens (real design work):** arbitrary compute is non-deterministic
+and has no known answer, so honeypot/redundancy verification doesn't apply. Two
+trust+pricing models, by workload:
+- **Verified-output** (the AI catalogue + deterministic kernels) — priced per output,
+  trust via honeypots/redundancy. The premium product.
+- **Metered GPU-second** (opaque BYO-container jobs) — priced per GPU-second with
+  attestation (signed container digest + resource accounting), trust via reputation +
+  sandbox integrity, not output checking. This is how Vast/RunPod sell — but we layer
+  reputation, the OpenAI-shaped SDK, and settlement on top.
+
+TAM consequence: stop competing only for "batch AI" spend; compete for the broader
+**rent-a-GPU** spend (sim, render, train, HPC) while keeping verified-AI as the
+high-margin tip. New roadmap (Wave 5+): a BYO-`Dockerfile` job runner on the NVIDIA
+lane with gVisor/Kata isolation + GPU cgroup limits + metered billing; per-domain
+curated runners (Blender, a CFD solver) where verified-output beats metered.
+
 *Mass is conserved. Only volume collapses. Now we make it pull.*
