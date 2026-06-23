@@ -164,6 +164,10 @@
   .toast{background:var(--raise);border:1px solid var(--line);color:var(--bone);padding:11px 15px;border-radius:var(--r-sm);font-size:13px;opacity:0;transform:translateY(8px);transition:opacity var(--dur-slow) var(--ease),transform var(--dur-slow) var(--ease);max-width:300px;box-shadow:0 8px 24px rgba(0,0,0,.4)}
   .toast.show{opacity:1;transform:none}
 
+  .keyin{height:32px;width:210px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--card);color:var(--bone-hi);padding:0 12px;font:400 13px var(--sans)}
+  .keyin:focus{outline:none;border-color:var(--line-hi)}
+  .live-badge{margin-left:10px;font-size:9px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--bg);background:var(--bone-hi);padding:3px 8px;border-radius:var(--r-pill)}
+
   @media (prefers-reduced-motion:reduce){
     *{transition:none !important;animation:none !important}
     .knob.is-on .knob-glow{opacity:1}
@@ -180,7 +184,7 @@
   </nav>
   <main class="main">
     <div class="top">
-      <div class="eyebrow" id="title">Launch</div>
+      <div style="display:flex;align-items:center"><div class="eyebrow" id="title">Launch</div><span class="live-badge" id="liveBadge" hidden>live</span></div>
       <button class="bell" id="bell" aria-label="Notifications"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6"/><path d="M10 19a2 2 0 0 0 4 0"/></svg><span class="badge hide" id="badge"></span></button>
     </div>
     <div class="notif" id="notif"></div>
@@ -240,6 +244,8 @@
       <p class="section-label" style="margin-top:24px">API keys</p>
       <div class="row"><span class="l num">cx_live_••••••••••••4f2a</span><span class="r-meta">created Jun 12</span></div>
       <div style="margin-top:14px"><button class="pill solid" data-toast="New API key created">Create key</button></div>
+      <div class="row"><span class="l">Live test key</span><input id="liveKey" class="keyin" type="password" placeholder="cx_live_…" aria-label="Live buyer API key"></div>
+      <div class="d-meta" style="margin-top:8px">Paste a buyer key to run real jobs against this server from Launch. Stored locally in this browser. Test harness only, never the shipped client.</div>
       <p class="section-label" style="margin-top:24px">Appearance</p>
       <div class="row"><span class="l">Theme</span><span class="r-meta">follows system</span></div>
     </section>
@@ -331,7 +337,7 @@
   // ===== LAUNCH =====
   var intake=$('intake'),intakeText=$('intake-text'),btn=$('launchBtn'),launchLabel=$('launchLabel'),jobs=$('jobs');
   var RERUN='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2 5"/><path d="M20 5v6h-6"/></svg>';
-  var project=null, curQuote=null, fileEl=$('file');
+  var project=null, curQuote=null, liveFile=null, fileEl=$('file');
   function refreshArm(){btn.disabled=!project;}
   function fmtN(n){return n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?Math.round(n/1e3)+'k':''+n;}
   function fmtBytes(b){return b>=1e9?(b/1e9).toFixed(1)+' GB':b>=1e6?Math.round(b/1e6)+' MB':Math.max(1,Math.round(b/1e3))+' KB';}
@@ -352,8 +358,9 @@
     intakeText.innerHTML='<span class="d-name">'+name+'</span><span class="d-meta">detected · '+job+' · '+shape+' · '+quoteStr(quote)+' · click to reset</span>';
     refreshArm();
   }
-  function resetIntake(){project=null;curQuote=null;intake.classList.remove('detected');intakeText.textContent='Connect a repo or drop your data';refreshArm();}
+  function resetIntake(){project=null;curQuote=null;liveFile=null;intake.classList.remove('detected');intakeText.textContent='Connect a repo or drop your data';refreshArm();}
   function detectFile(file){
+    liveFile=file;
     var ext=(file.name.split('.').pop()||'').toLowerCase(), c=classifyExt(ext);
     if(c.metered){showDetection(file.name,c.job,fmtBytes(file.size)+' · sandboxed container',null);return;}
     if(c.perMin){var mins=Math.max(1,Math.round(file.size/1e6));showDetection(file.name,c.job,'~'+mins+' min audio',+(mins*c.perMin+0.02).toFixed(2));return;}
@@ -403,15 +410,68 @@
       }
     },360);
   }
-  btn.addEventListener('click',function(){if(btn.disabled)return;var n=project.split('/').pop().replace(/\.[^.]+$/,'')||project;resetIntake();launch(n);});
+  btn.addEventListener('click',function(){
+    if(btn.disabled)return;
+    if(isLive()&&liveFile){liveLaunch();resetIntake();return;}   // real prod job
+    var n=project.split('/').pop().replace(/\.[^.]+$/,'')||project;resetIntake();launch(n);   // demo simulation
+  });
   jobs.addEventListener('click',function(e){
     if(e.target.closest('[data-dl]')){e.stopPropagation();toast('Downloaded results to ~/Downloads');}
     else if(e.target.closest('[data-pr]')){e.stopPropagation();toast('Opened a pull request on the repo');}
     else if(e.target.closest('[data-fix]')){e.stopPropagation();var r=e.target.closest('.run');notify('Re-running',r.dataset.name);launch(r.dataset.name);}
+    else if(e.target.closest('[data-results]')){e.stopPropagation();var id=e.target.closest('[data-results]').getAttribute('data-results');
+      fetch('/v1/jobs/'+id+'/results',{headers:{'Authorization':'Bearer '+liveKey}}).then(function(res){return res.ok?res.json():null;}).then(function(j){var u=j&&(j.results_url||(j.result_urls&&j.result_urls[0]));if(u){window.open(u,'_blank');toast('Opened results');}else{toast('Results not ready');}}).catch(function(){toast('Results fetch failed');});}
   });
   [['support-pipeline','main@a1b2c3','done'],['nightly-embeds','main@9f0e1d','done'],['ticket-classify','main@77c2b0','failed']].forEach(function(r){var run=el(runHTML(r[0],r[1],r[2]));jobs.appendChild(run);attach(run);});
 
   $('setupBtn').addEventListener('click',function(){$('setup').style.display='none';toast('Payment method added');});
+
+  // ---- live mode: real prod jobs via the /v1 API (same-origin when served at /demo) ----
+  // A pasted buyer key turns Launch into a real submission against THIS server. Without
+  // a key the demo runs its local simulation (everything above). Client-side key is a
+  // test harness only, never the shipped buyer client.
+  var liveBadge=$('liveBadge'), keyIn=$('liveKey'), liveKey='';
+  try{liveKey=localStorage.getItem('cx_key')||'';}catch(e){}
+  function isLive(){return !!liveKey;}
+  function syncLive(){if(liveBadge)liveBadge.hidden=!isLive();if(keyIn&&!keyIn.value&&liveKey)keyIn.value=liveKey;}
+  if(keyIn)keyIn.addEventListener('change',function(){liveKey=(keyIn.value||'').trim();try{localStorage.setItem('cx_key',liveKey);}catch(e){}syncLive();toast(isLive()?'Live mode on · Launch runs real jobs on this server':'Live mode off');});
+  syncLive();
+  // Turn the dropped file into JSONL the embed runner accepts: jsonl as-is, json array
+  // flattened, csv/txt one {"text": line} per non-empty line.
+  function toJSONL(name,text){
+    var ext=(name.split('.').pop()||'').toLowerCase();
+    if(ext==='jsonl')return text;
+    if(ext==='json'){try{var a=JSON.parse(text);if(Array.isArray(a))return a.map(function(x){return JSON.stringify(x);}).join('\n');}catch(e){}return text;}
+    return text.split(/\r?\n/).filter(function(l){return l.trim();}).map(function(l){return JSON.stringify({text:l});}).join('\n');
+  }
+  function liveLaunch(){
+    var f=liveFile;if(!f){toast('Drop a real data file to run a live job');return;}
+    var run=el(runHTML(f.name,'live','running'));jobs.prepend(run);attach(run);
+    var st=run.querySelector('.st'),trace=liveFeed(run.querySelector('.trace'),{w:54,h:20,n:20});
+    var tv=reduceMotion?null:setInterval(function(){trace.tick(0.4+Math.random()*0.4);},170);
+    function stop(){if(tv){clearInterval(tv);tv=null;}}
+    function fail(msg){stop();run.dataset.status='failed';run.querySelector('.marker').className='marker fail';st.textContent='failed';run.querySelector('.detail').innerHTML='<div class="preview">'+msg+'</div>';notify('Job failed',f.name);}
+    f.slice(0,1000000).text().then(function(text){
+      var body={job_type:{type:'embed'},model:{kind:'hf',ref:'all-minilm-l6-v2'},params:{},constraints:{min_memory_gb:0,max_duration_secs:0},verification:{redundancy_frac:0,honeypot_frac:0,payout_hold_secs:0},tier:'batch',input:toJSONL(f.name,text)};
+      return fetch('/v1/jobs',{method:'POST',headers:{'Authorization':'Bearer '+liveKey,'Content-Type':'application/json'},body:JSON.stringify(body)});
+    }).then(function(res){return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});}).then(function(r){
+      var j={};try{j=JSON.parse(r.t);}catch(e){}
+      if(!r.ok){fail('submit '+r.status+': '+String(j.error||r.t).slice(0,160));return;}
+      st.textContent='running · queued';
+      notify('Job submitted',f.name+(j.estimated_usd!=null?' · est $'+(+j.estimated_usd).toFixed(2):''));
+      pollJob(j.job_id,run,st,stop);
+    }).catch(function(e){fail('network: '+e.message);});
+  }
+  function pollJob(id,run,st,stop){
+    var iv=setInterval(function(){
+      fetch('/v1/jobs/'+id,{headers:{'Authorization':'Bearer '+liveKey}}).then(function(res){return res.ok?res.json():null;}).then(function(j){
+        if(!j)return;
+        if(j.task_count)st.textContent='running · '+(j.tasks_done||0)+'/'+j.task_count;
+        if(j.status==='complete'){clearInterval(iv);stop();var usd=(j.actual_usd!=null?j.actual_usd:j.estimated_usd)||0;run.dataset.status='done';run.querySelector('.marker').className='marker done';st.textContent='done · $'+(+usd).toFixed(2);run.querySelector('.detail').innerHTML='<div class="preview">complete · '+(j.task_count||0)+' tasks · billed $'+(+usd).toFixed(2)+'</div><div class="actions"><button class="mini" data-results="'+id+'">Download</button></div>';notify('Job complete',id);}
+        else if(j.status==='failed'||j.status==='cancelled'){clearInterval(iv);stop();run.dataset.status='failed';run.querySelector('.marker').className='marker fail';st.textContent=j.status;notify('Job '+j.status,id);}
+      }).catch(function(){});
+    },2500);
+  }
 
   // settings switches
   document.querySelectorAll('.switch').forEach(function(s){s.addEventListener('click',function(){s.classList.toggle('on');});});
