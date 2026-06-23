@@ -99,6 +99,9 @@ func seedDemo(ctx context.Context, pool *pgxpool.Pool) error {
 		{`INSERT INTO models (id, family, quant, kind, dim, job_type, price_per_1k, price_per_unit, min_memory_gb, hf_repo)
 		  VALUES ('llama-3.2-1b-instruct-q4','llama','q4_k_m','gguf',NULL,'batch_infer',0.00200000,NULL,4,'unsloth/Llama-3.2-1B-Instruct-GGUF')
 		  ON CONFLICT (id) DO NOTHING`, nil},
+		{`INSERT INTO models (id, family, quant, kind, dim, job_type, price_per_1k, price_per_unit, min_memory_gb, hf_repo)
+		  VALUES ('qwen2.5-7b-instruct-q4','qwen','q4_k_m','gguf',NULL,'batch_infer',0.00800000,NULL,40,'Qwen/Qwen2.5-7B-Instruct-GGUF')
+		  ON CONFLICT (id) DO NOTHING`, nil},
 		// A couple of honeypots with known answers so honeypot tasks have probes.
 		{`INSERT INTO honeypots (job_type, input_ref, known_answer)
 		  SELECT 'embed', $1, $2
