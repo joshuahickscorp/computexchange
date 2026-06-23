@@ -954,6 +954,116 @@ impl LlamaBackend {
             .map_err(infer_err(backend))?;
         Ok((text.trim().to_string(), generated.len()))
     }
+
+    /// Batched greedy generation — the GPU-saturation win over one-prompt-at-a-time
+    /// decode. candle's quantized-llama causal mask has no padding-awareness and its
+    /// rotary uses one position range for the whole batch, so we BUCKET prompts by
+    /// exact token length: same-length prompts batch with NO padding, which keeps the
+    /// per-sequence math identical to `generate` (attention is within-sequence; greedy
+    /// argmax is unchanged) while running B sequences per forward pass. Results are
+    /// returned in the caller's original order.
+    pub fn generate_batch(
+        &mut self,
+        prompts: &[String],
+        max_tokens: u32,
+    ) -> Result<Vec<(String, usize)>, RunError> {
+        let backend = "batch_infer";
+        // Wrap + tokenize every prompt (same chat template as `generate`).
+        let mut encoded: Vec<Vec<u32>> = Vec::with_capacity(prompts.len());
+        for p in prompts {
+            let wrapped = format!(
+                "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{p}<|eot_id|>\
+                 <|start_header_id|>assistant<|end_header_id|>\n\n"
+            );
+            let enc = self
+                .tokenizer
+                .encode(wrapped, true)
+                .map_err(infer_err(backend))?;
+            encoded.push(enc.get_ids().to_vec());
+        }
+        // Bucket prompt indices by token length so each batch needs no padding.
+        let mut buckets: std::collections::HashMap<usize, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (i, ids) in encoded.iter().enumerate() {
+            buckets.entry(ids.len()).or_default().push(i);
+        }
+        let mut out: Vec<(String, usize)> = vec![(String::new(), 0); prompts.len()];
+        for members in buckets.values() {
+            // bsz == 1: nothing to batch — the single-prompt path does a fast
+            // full-prompt prefill (candle handles seq_len > 1 fine at batch size 1).
+            if members.len() == 1 {
+                let m = members[0];
+                let (text, n) = self.generate(&prompts[m], max_tokens)?;
+                out[m] = (text, n);
+                continue;
+            }
+            // bsz > 1: feed the prompt token-by-token (seq_len == 1 on EVERY forward).
+            // candle's quantized-llama output projection slices the last position,
+            // which is non-contiguous for a multi-row batch when seq_len > 1 (its
+            // quantized matmul then rejects it) — so we never feed seq_len > 1. Each
+            // forward still batches all B sequences (the throughput win); we only give
+            // up within-prompt prefill parallelism. The math is identical to a full
+            // prefill (causal attention over the growing KV cache).
+            let bsz = members.len();
+            let plen = encoded[members[0]].len();
+            let mut gen: Vec<Vec<u32>> = vec![Vec::new(); bsz];
+            let mut last_tok: Vec<u32> = vec![0u32; bsz];
+            let mut done = vec![false; bsz];
+            let mut index_pos = 0usize;
+            let total_steps = plen - 1 + max_tokens as usize;
+            for step in 0..total_steps {
+                let mut row = vec![0u32; bsz];
+                if step < plen {
+                    for (b, &m) in members.iter().enumerate() {
+                        row[b] = encoded[m][step];
+                    }
+                } else {
+                    row.copy_from_slice(&last_tok);
+                }
+                let input =
+                    Tensor::from_vec(row, (bsz, 1), &self.device).map_err(infer_err(backend))?;
+                let logits = self
+                    .model
+                    .forward(&input, index_pos)
+                    .map_err(infer_err(backend))?; // (bsz, vocab) — last position only
+                index_pos += 1;
+                // The forward after the LAST prompt token (step == plen-1) predicts the
+                // first generated token; act on predictions from there on.
+                if step + 1 >= plen {
+                    let next: Vec<u32> = logits
+                        .argmax(1)
+                        .map_err(infer_err(backend))?
+                        .to_vec1::<u32>()
+                        .map_err(infer_err(backend))?;
+                    let mut all_done = true;
+                    for b in 0..bsz {
+                        if done[b] {
+                            continue;
+                        }
+                        let t = next[b];
+                        if t == self.eos {
+                            done[b] = true;
+                        } else {
+                            gen[b].push(t);
+                            last_tok[b] = t;
+                            all_done = false;
+                        }
+                    }
+                    if all_done {
+                        break;
+                    }
+                }
+            }
+            for (b, &m) in members.iter().enumerate() {
+                let text = self
+                    .tokenizer
+                    .decode(&gen[b], true)
+                    .map_err(infer_err(backend))?;
+                out[m] = (text.trim().to_string(), gen[b].len());
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// Load the HF tokenizer.json that pairs with the GGUF model (from the base repo,
@@ -1008,17 +1118,19 @@ impl JobRunner for BatchInferRunner {
         let (completions, total_tokens) =
             tokio::task::spawn_blocking(move || -> Result<_, RunError> {
                 let mut backend = model.blocking_lock();
-                let mut completions = Vec::with_capacity(prompts.len());
-                let mut total = 0usize;
-                for (index, prompt) in prompts.iter().enumerate() {
-                    let (text, n) = backend.generate(prompt, max_tokens)?;
-                    total += n;
-                    completions.push(Completion {
+                // Batched: prompts are bucketed by length and run B-per-forward-pass
+                // (see generate_batch) — the GPU-saturation win over serial decode.
+                let results = backend.generate_batch(&prompts, max_tokens)?;
+                let total: usize = results.iter().map(|(_, n)| *n).sum();
+                let completions: Vec<Completion> = results
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (text, tokens))| Completion {
                         index,
                         text,
-                        tokens: n,
-                    });
-                }
+                        tokens,
+                    })
+                    .collect();
                 Ok((completions, total))
             })
             .await
@@ -2336,5 +2448,53 @@ mod tests {
             "extraction OK: item={}",
             serde_json::to_string(&v["items"][0]).unwrap()
         );
+    }
+
+    #[test]
+    #[ignore = "downloads the GGUF llama (~800MB) + needs a GPU; run on the A100 to measure batching"]
+    fn batched_vs_serial_throughput() {
+        use std::time::Instant;
+        let mut be = LlamaBackend::load("llama-3.2-1b-instruct-q4").expect("load gguf");
+        // 32 same-length prompts — a realistic batch_infer/classification shape.
+        // Generation-heavy prompt (decode dominates, where batching pays off).
+        let prompts: Vec<String> = (0..32)
+            .map(|_| "Write a detailed paragraph about the ocean and its wonders:".to_string())
+            .collect();
+        let max = 48u32;
+
+        let t = Instant::now();
+        let mut serial_tok = 0usize;
+        let mut first_serial = String::new();
+        for (i, p) in prompts.iter().enumerate() {
+            let (text, n) = be.generate(p, max).unwrap();
+            serial_tok += n;
+            if i == 0 {
+                first_serial = text;
+            }
+        }
+        let serial = t.elapsed();
+
+        let t = Instant::now();
+        let res = be.generate_batch(&prompts, max).unwrap();
+        let batched = t.elapsed();
+        let batched_tok: usize = res.iter().map(|(_, n)| n).sum();
+
+        println!("\n=== batch_infer throughput (32 prompts, {max} tok max) ===");
+        println!(
+            "serial : {serial_tok} tok in {serial:?} = {:.1} tok/s",
+            serial_tok as f64 / serial.as_secs_f64()
+        );
+        println!(
+            "batched: {batched_tok} tok in {batched:?} = {:.1} tok/s",
+            batched_tok as f64 / batched.as_secs_f64()
+        );
+        println!("SPEEDUP: {:.1}x", serial.as_secs_f64() / batched.as_secs_f64());
+
+        // Correctness: identical greedy prompts must yield the identical output, and
+        // the batched result must equal the serial result token-for-token.
+        for r in &res {
+            assert_eq!(r.0, first_serial, "batched output must match serial (greedy)");
+        }
+        println!("correctness: OK — batched == serial for all 32");
     }
 }
