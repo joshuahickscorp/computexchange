@@ -179,10 +179,16 @@ fn join_err(backend: &'static str) -> impl Fn(tokio::task::JoinError) -> RunErro
     }
 }
 
-/// Canonical Llama-family id for pool keying. Qwen refs key separately so the two
-/// models never collide on one warm slot; everything else is the catalogue id.
+/// Canonical Llama-family id for pool keying. Each distinct model gets its own
+/// slot so they never collide on one warm handle (the second loader would
+/// otherwise silently reuse the first's weights — the WRONG model). The big
+/// Qwen2.5-7B is checked first via `models::is_big_llama` (the single source of
+/// truth for "the big model", a `7b` marker), so it never falls into the small
+/// 0.5B Qwen branch below; everything else is the catalogue id.
 fn canonical_llama_id(model_ref: &str) -> String {
-    if model_ref.to_ascii_lowercase().contains("qwen") {
+    if crate::models::is_big_llama(model_ref) {
+        "qwen2.5-7b-instruct-q4".to_string()
+    } else if model_ref.to_ascii_lowercase().contains("qwen") {
         "qwen2.5-0.5b-instruct-q4".to_string()
     } else {
         "llama-3.2-1b-instruct-q4".to_string()
@@ -214,6 +220,17 @@ mod tests {
             canonical_llama_id("Qwen/Qwen2.5"),
             "qwen2.5-0.5b-instruct-q4"
         );
+        // The big 7B keys to its OWN slot (a `7b` marker wins over the bare
+        // `qwen` branch), so it never collides with the small 0.5B Qwen.
+        assert_eq!(
+            canonical_llama_id("qwen2.5-7b-instruct-q4"),
+            "qwen2.5-7b-instruct-q4"
+        );
+        assert_eq!(
+            canonical_llama_id("Qwen/Qwen2.5-7B-Instruct-GGUF"),
+            "qwen2.5-7b-instruct-q4"
+        );
+        assert_eq!(canonical_llama_id("7b"), "qwen2.5-7b-instruct-q4");
         assert_eq!(canonical_whisper_id("whisper-tiny"), "whisper-tiny");
         assert_eq!(canonical_whisper_id("openai/whisper-base"), "whisper-base");
         assert_eq!(canonical_whisper_id(""), "whisper-tiny");

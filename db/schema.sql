@@ -195,6 +195,7 @@ CREATE TABLE IF NOT EXISTS models (
 INSERT INTO models (id, family, quant, kind, dim, job_type, price_per_1k, price_per_unit, min_memory_gb, hf_repo) VALUES
     ('all-minilm-l6-v2', 'minilm', NULL,   'embed',   384,  'embed',            0.00100000, NULL,        2, 'sentence-transformers/all-MiniLM-L6-v2'),
     ('llama-3.2-1b-instruct-q4', 'llama', 'q4_k_m', 'gguf', NULL, 'batch_infer', 0.00200000, NULL,        4, 'unsloth/Llama-3.2-1B-Instruct-GGUF'),
+    ('qwen2.5-7b-instruct-q4', 'qwen', 'q4_k_m', 'gguf', NULL, 'batch_infer',    0.00800000, NULL,       40, 'Qwen/Qwen2.5-7B-Instruct-GGUF'),
     ('whisper-tiny',     'whisper', NULL,  'whisper', NULL,  'audio_transcribe', NULL,       0.00400000,  1, 'openai/whisper-tiny'),
     ('whisper-base',     'whisper', NULL,  'whisper', NULL,  'audio_transcribe', NULL,       0.00500000,  2, 'openai/whisper-base')
 ON CONFLICT (id) DO NOTHING;
