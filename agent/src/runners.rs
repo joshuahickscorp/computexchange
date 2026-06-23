@@ -8,12 +8,12 @@
 
 use std::io::Cursor;
 
+use crate::quantized_llama_batched::ModelWeights as QLlama; // patched: bsz>1 batched prefill
 use async_trait::async_trait;
 use candle_core::quantized::gguf_file;
-use candle_core::{DType, Device, IndexOp, Tensor};
+use candle_core::{Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config as BertConfig, DTYPE as BERT_DTYPE};
-use candle_transformers::models::quantized_llama::ModelWeights as QLlama;
 use candle_transformers::models::whisper::{self, audio as whisper_audio, model as whisper_model};
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer;
@@ -367,7 +367,6 @@ pub struct Embedder {
     model: BertModel,
     tokenizer: Tokenizer,
     device: Device,
-    dtype: DType,
 }
 
 impl Embedder {
@@ -384,16 +383,11 @@ impl Embedder {
         tokenizer.with_padding(Some(pad));
 
         let device = models::device().clone();
-        // FP16 on a GPU (~2x throughput + half the memory via tensor cores); F32 on
-        // CPU, which has no fast F16 path. Every worker of a hardware class runs this
-        // same build, so redundancy/honeypot comparisons stay within one precision.
-        let dtype = if device.is_cuda() || device.is_metal() {
-            DType::F16
-        } else {
-            BERT_DTYPE
-        };
+        // FP32 (BERT_DTYPE): FP16 was tried and reverted — it gave no throughput gain
+        // on this tiny model (overhead-bound) and degraded embedding precision enough
+        // to flip rerank ordering. Embeddings stay full-precision.
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[weights_p], dtype, &device)
+            VarBuilder::from_mmaped_safetensors(&[weights_p], BERT_DTYPE, &device)
                 .map_err(infer_err("embed"))?
         };
         let model = BertModel::load(vb, &config).map_err(infer_err("embed"))?;
@@ -401,7 +395,6 @@ impl Embedder {
             model,
             tokenizer,
             device,
-            dtype,
         })
     }
 
@@ -425,10 +418,7 @@ impl Embedder {
         let input_ids =
             Tensor::from_vec(ids, (bsz, seq), &self.device).map_err(infer_err(backend))?;
         let token_type = input_ids.zeros_like().map_err(infer_err(backend))?;
-        let attn = Tensor::from_vec(mask, (bsz, seq), &self.device)
-            .map_err(infer_err(backend))?
-            .to_dtype(self.dtype)
-            .map_err(infer_err(backend))?; // match model precision (F16 on GPU)
+        let attn = Tensor::from_vec(mask, (bsz, seq), &self.device).map_err(infer_err(backend))?;
 
         // [bsz, seq, hidden]
         let hidden = self
@@ -457,11 +447,7 @@ impl Embedder {
             .sqrt()
             .map_err(infer_err(backend))?;
         let normed = mean.broadcast_div(&norm).map_err(infer_err(backend))?;
-        normed
-            .to_dtype(DType::F32) // back to f32 for the wire (vectors are f32)
-            .map_err(infer_err(backend))?
-            .to_vec2::<f32>()
-            .map_err(infer_err(backend))
+        normed.to_vec2::<f32>().map_err(infer_err(backend))
     }
 }
 
@@ -997,61 +983,56 @@ impl LlamaBackend {
                 out[m] = (text, n);
                 continue;
             }
-            // bsz > 1: feed the prompt token-by-token (seq_len == 1 on EVERY forward).
-            // candle's quantized-llama output projection slices the last position,
-            // which is non-contiguous for a multi-row batch when seq_len > 1 (its
-            // quantized matmul then rejects it) — so we never feed seq_len > 1. Each
-            // forward still batches all B sequences (the throughput win); we only give
-            // up within-prompt prefill parallelism. The math is identical to a full
-            // prefill (causal attention over the growing KV cache).
+            // bsz > 1: true batched prefill. step 0 feeds each full prompt as one
+            // (bsz, plen) forward; later steps feed each sequence's last token (bsz, 1)
+            // against the grown KV cache. The patched quantized_llama makes the
+            // output-projection slice contiguous so the (bsz, plen) prefill's quantized
+            // matmul succeeds. Math is identical to single-prompt (attention is
+            // within-sequence; greedy argmax unchanged) — verified batched == serial.
             let bsz = members.len();
             let plen = encoded[members[0]].len();
             let mut gen: Vec<Vec<u32>> = vec![Vec::new(); bsz];
             let mut last_tok: Vec<u32> = vec![0u32; bsz];
             let mut done = vec![false; bsz];
             let mut index_pos = 0usize;
-            let total_steps = plen - 1 + max_tokens as usize;
-            for step in 0..total_steps {
-                let mut row = vec![0u32; bsz];
-                if step < plen {
-                    for (b, &m) in members.iter().enumerate() {
-                        row[b] = encoded[m][step];
+            for step in 0..max_tokens as usize {
+                let (rows, seq_len) = if step == 0 {
+                    let mut flat = Vec::with_capacity(bsz * plen);
+                    for &m in members {
+                        flat.extend_from_slice(&encoded[m]);
                     }
+                    (flat, plen)
                 } else {
-                    row.copy_from_slice(&last_tok);
-                }
-                let input =
-                    Tensor::from_vec(row, (bsz, 1), &self.device).map_err(infer_err(backend))?;
+                    (last_tok.clone(), 1usize)
+                };
+                let input = Tensor::from_vec(rows, (bsz, seq_len), &self.device)
+                    .map_err(infer_err(backend))?;
                 let logits = self
                     .model
                     .forward(&input, index_pos)
                     .map_err(infer_err(backend))?; // (bsz, vocab) — last position only
-                index_pos += 1;
-                // The forward after the LAST prompt token (step == plen-1) predicts the
-                // first generated token; act on predictions from there on.
-                if step + 1 >= plen {
-                    let next: Vec<u32> = logits
-                        .argmax(1)
-                        .map_err(infer_err(backend))?
-                        .to_vec1::<u32>()
-                        .map_err(infer_err(backend))?;
-                    let mut all_done = true;
-                    for b in 0..bsz {
-                        if done[b] {
-                            continue;
-                        }
-                        let t = next[b];
-                        if t == self.eos {
-                            done[b] = true;
-                        } else {
-                            gen[b].push(t);
-                            last_tok[b] = t;
-                            all_done = false;
-                        }
+                index_pos += seq_len;
+                let next: Vec<u32> = logits
+                    .argmax(1)
+                    .map_err(infer_err(backend))?
+                    .to_vec1::<u32>()
+                    .map_err(infer_err(backend))?;
+                let mut all_done = true;
+                for b in 0..bsz {
+                    if done[b] {
+                        continue;
                     }
-                    if all_done {
-                        break;
+                    let t = next[b];
+                    if t == self.eos {
+                        done[b] = true;
+                    } else {
+                        gen[b].push(t);
+                        last_tok[b] = t;
+                        all_done = false;
                     }
+                }
+                if all_done {
+                    break;
                 }
             }
             for (b, &m) in members.iter().enumerate() {
@@ -1251,22 +1232,29 @@ impl JobRunner for BatchClassificationRunner {
             let labels = labels.clone();
             tokio::task::spawn_blocking(move || -> Result<_, RunError> {
                 let mut backend = model.blocking_lock();
-                let mut out = Vec::with_capacity(texts.len());
-                let mut total = 0usize;
-                for (index, text) in texts.iter().enumerate() {
-                    // Short generation: the label is one or a few tokens.
-                    let (gen, n) = backend.generate(&classification_prompt(text, &labels), 12)?;
-                    total += n;
-                    let (label, matched) = closest_label(&gen, &labels);
-                    if !matched {
-                        tracing::warn!(
-                            index,
-                            generation = %gen,
-                            "classification: no label matched generation; defaulting to first label (low confidence)"
-                        );
-                    }
-                    out.push(LabelAssignment { index, label });
-                }
+                // Batched: classify all texts B-per-forward-pass (short generations,
+                // many items — exactly where bucketed batching pays off).
+                let prompts: Vec<String> = texts
+                    .iter()
+                    .map(|t| classification_prompt(t, &labels))
+                    .collect();
+                let results = backend.generate_batch(&prompts, 12)?;
+                let total: usize = results.iter().map(|(_, n)| *n).sum();
+                let out: Vec<LabelAssignment> = results
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (gen, _))| {
+                        let (label, matched) = closest_label(&gen, &labels);
+                        if !matched {
+                            tracing::warn!(
+                                index,
+                                generation = %gen,
+                                "classification: no label matched generation; defaulting to first label (low confidence)"
+                            );
+                        }
+                        LabelAssignment { index, label }
+                    })
+                    .collect();
                 Ok((out, total))
             })
             .await
@@ -1373,27 +1361,34 @@ impl JobRunner for JsonExtractionRunner {
         let model = pool.llama(&manifest.model.model_ref).await?;
         let (extracted, total) = tokio::task::spawn_blocking(move || -> Result<_, RunError> {
             let mut backend = model.blocking_lock();
-            let mut out = Vec::with_capacity(texts.len());
-            let mut total = 0usize;
-            for (index, text) in texts.iter().enumerate() {
-                let (gen, n) = backend.generate(&extraction_prompt(text, &schema), 256)?;
-                total += n;
-                // Validate it parses to a JSON object; on failure surface an empty
-                // object with an `_error` so the row is accounted for, never faked
-                // as a clean extraction.
-                let json = match extract_json_object(&gen) {
-                    Some(v) => v,
-                    None => {
-                        tracing::warn!(
-                            index,
-                            generation = %gen,
-                            "json_extraction: generation had no parseable JSON object"
-                        );
-                        serde_json::json!({ "_error": "no_parseable_json", "_raw": gen })
-                    }
-                };
-                out.push(ExtractedItem { index, json });
-            }
+            // Batched: extract from all texts B-per-forward-pass.
+            let prompts: Vec<String> = texts
+                .iter()
+                .map(|t| extraction_prompt(t, &schema))
+                .collect();
+            let results = backend.generate_batch(&prompts, 256)?;
+            let total: usize = results.iter().map(|(_, n)| *n).sum();
+            // Validate each parses to a JSON object; on failure surface an empty
+            // object with an `_error` so the row is accounted for, never faked as a
+            // clean extraction.
+            let out: Vec<ExtractedItem> = results
+                .into_iter()
+                .enumerate()
+                .map(|(index, (gen, _))| {
+                    let json = match extract_json_object(&gen) {
+                        Some(v) => v,
+                        None => {
+                            tracing::warn!(
+                                index,
+                                generation = %gen,
+                                "json_extraction: generation had no parseable JSON object"
+                            );
+                            serde_json::json!({ "_error": "no_parseable_json", "_raw": gen })
+                        }
+                    };
+                    ExtractedItem { index, json }
+                })
+                .collect();
             Ok((out, total))
         })
         .await
@@ -2488,12 +2483,18 @@ mod tests {
             "batched: {batched_tok} tok in {batched:?} = {:.1} tok/s",
             batched_tok as f64 / batched.as_secs_f64()
         );
-        println!("SPEEDUP: {:.1}x", serial.as_secs_f64() / batched.as_secs_f64());
+        println!(
+            "SPEEDUP: {:.1}x",
+            serial.as_secs_f64() / batched.as_secs_f64()
+        );
 
         // Correctness: identical greedy prompts must yield the identical output, and
         // the batched result must equal the serial result token-for-token.
         for r in &res {
-            assert_eq!(r.0, first_serial, "batched output must match serial (greedy)");
+            assert_eq!(
+                r.0, first_serial,
+                "batched output must match serial (greedy)"
+            );
         }
         println!("correctness: OK — batched == serial for all 32");
     }

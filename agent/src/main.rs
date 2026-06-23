@@ -12,6 +12,7 @@ mod hardware;
 mod models;
 mod pool;
 mod protocol;
+mod quantized_llama_batched; // vendored + patched candle quantized_llama (bsz>1 batched prefill)
 mod runners;
 mod status;
 mod types;
