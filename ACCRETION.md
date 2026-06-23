@@ -262,9 +262,24 @@ trust+pricing models, by workload:
 
 TAM consequence: stop competing only for "batch AI" spend; compete for the broader
 **rent-a-GPU** spend (sim, render, train, HPC) while keeping verified-AI as the
-high-margin tip. New roadmap (Wave 5+): a BYO-`Dockerfile` job runner on the NVIDIA
-lane with gVisor/Kata isolation + GPU cgroup limits + metered billing; per-domain
-curated runners (Blender, a CFD solver) where verified-output beats metered.
+high-margin tip.
+
+**BYO-container runner — SHIPPED (agent side).** `agent/src/sandbox.rs` + `CustomRunner`
+execute a buyer's OCI `image`+`command` on the GPU under a locked-down profile
+(`--gpus all` with `--network none`, `--read-only`, `--cap-drop ALL`, `--security-opt
+no-new-privileges`, non-root `nobody`, `--memory`/`--pids-limit` caps, hard wall-clock
+`timeout`); job input → container stdin, stdout → result, fed via a writer thread to
+avoid a pipe deadlock. The worker advertises `custom` only on an NVIDIA host with a
+reachable Docker daemon, so the scheduler routes container jobs only to capable workers;
+an incapable host errors honestly, never a fake result. Hardening is unit-tested, and
+`scripts/prove-cuda.sh` (section 6) runs `nvidia-smi` inside the exact profile on a real
+GPU to prove the device is reachable under the sandbox. Real GPU telemetry (utilization
++ temperature via nvidia-smi) now flows in the heartbeat on the CUDA lane.
+
+**Remaining (Wave 5+):** control-side metered GPU-second billing + ledger entries for
+`custom` jobs; signed-container-digest attestation; stronger isolation (gVisor/Kata) as
+defense-in-depth; per-domain curated runners (Blender, a CFD solver) where verified
+output beats metered.
 
 ---
 

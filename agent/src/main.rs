@@ -150,6 +150,19 @@ fn throttle_snapshot() -> hardware::MemorySnapshot {
     hardware::read_memory_snapshot()
 }
 
+/// GPU utilization (%) + temperature (°C) for the heartbeat, CUDA lane only. Off the
+/// NVIDIA lane (Apple/CPU) there is no discrete GPU to query, so report an honest
+/// 0.0/None rather than a fabricated number; on CUDA a failed nvidia-smi read also
+/// degrades to 0.0/None (never faked).
+fn gpu_telemetry() -> (f32, Option<f32>) {
+    if models::device_label() == "cuda" {
+        if let Some((util, temp)) = hardware::read_gpu_telemetry() {
+            return (util, temp);
+        }
+    }
+    (0.0, None)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -589,12 +602,14 @@ async fn run_agent(cfg: AgentConfig) -> Result<()> {
                 // control plane can prefer this worker for those models. Real ids only —
                 // `loaded_model_ids` gates on a resolved OnceCell, never a load in flight.
                 let loaded_models = ctx.pool.loaded_model_ids().await;
+                // Real GPU telemetry on the CUDA lane (nvidia-smi); honest 0.0/None off it.
+                let (gpu, gpu_temp) = gpu_telemetry();
                 let hb = Heartbeat {
                     worker_id,
                     timestamp: ts,
                     cpu_pct: cpu,
-                    gpu_pct: 0.0,        // GPU telemetry: Phase 2 (no fake numbers).
-                    gpu_temp_c: None,
+                    gpu_pct: gpu,
+                    gpu_temp_c: gpu_temp,
                     current_task: None,
                     available_memory_gb: throttle.available_gb,
                     effective_memory_gb: throttle.effective_gb,

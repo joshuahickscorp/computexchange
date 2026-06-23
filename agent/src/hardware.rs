@@ -356,6 +356,30 @@ pub fn detect_and_benchmark(
     }
 }
 
+/// Sample the active GPU's utilization (%) and temperature (°C) via nvidia-smi for the
+/// heartbeat. `Some((util_pct, temp_c))` on the NVIDIA lane; `None` if nvidia-smi is
+/// absent or fails — the caller then reports an honest 0.0/None, never a fabricated
+/// load. Mirrors read_vram_snapshot's nvidia-smi parsing.
+pub fn read_gpu_telemetry() -> Option<(f32, Option<f32>)> {
+    let out = Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=utilization.gpu,temperature.gpu",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let first = stdout.lines().next()?.trim(); // e.g. "37, 58" (%, °C)
+    let (util, temp) = first.split_once(',')?;
+    let util_pct: f32 = util.trim().parse().ok()?;
+    // Temperature reads "N/A" on some virtualized GPUs — keep utilization, drop temp.
+    let temp_c: Option<f32> = temp.trim().parse().ok();
+    Some((util_pct, temp_c))
+}
+
 /// True when this host can run the BYO-container `custom` lane: a reachable Docker
 /// daemon. Checked once at capability build so the worker never advertises a lane it
 /// cannot execute (the NVIDIA Container Toolkit is assumed on a GPU supplier box and
