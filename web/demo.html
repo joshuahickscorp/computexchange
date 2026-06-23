@@ -117,12 +117,16 @@
   .banner{display:flex;align-items:center;gap:12px;justify-content:space-between;padding:14px 16px;margin-bottom:18px;font-size:13px;color:var(--bone)}
   .pill{height:32px;padding:0 16px;border-radius:var(--r-pill);border:1px solid var(--line);background:transparent;color:var(--bone);font:500 12px var(--sans);cursor:pointer;transition:border-color var(--dur) var(--ease),color var(--dur) var(--ease),background var(--dur) var(--ease)}
   .pill:hover{border-color:var(--line-hi);color:var(--bone-hi)}
-  .pill.solid{background:var(--bone-hi);color:var(--bg);border-color:var(--bone-hi)}
+  .pill.solid{background:var(--bone-hi);color:var(--bg);border-color:var(--bone-hi);box-shadow:inset 0 1px 0 rgba(255,255,255,.5)}
   .pill.solid:hover{background:var(--signal);border-color:var(--signal)}
 
   .intake{border:1.5px dashed var(--line);border-radius:var(--r);padding:28px 16px;text-align:center;color:var(--mute);cursor:pointer;transition:border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
   .intake svg{width:24px;height:24px;display:block;margin:0 auto 8px;stroke-width:1.5}
   .intake:hover,.intake.drag{border-color:var(--line-hi);color:var(--bone)}
+  .intake.detected{border-style:solid;border-color:var(--line)}
+  .intake.detected .intake-icon{display:none}
+  .d-name{display:block;color:var(--bone-hi);font-size:14px;font-weight:500}
+  .d-meta{display:block;color:var(--mute);font-size:12px;margin-top:5px}
 
   .go{width:100%;height:50px;margin-top:18px;border:1px solid var(--bone-hi);border-radius:var(--r);background:var(--bone-hi);color:var(--bg);font:600 15px var(--sans);display:flex;align-items:center;justify-content:center;gap:8px;cursor:pointer;transition:background var(--dur) var(--ease),border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
   .go svg{width:15px;height:15px}
@@ -130,6 +134,9 @@
   .go:active{transform:translateY(1px)}
   .go[disabled]{background:var(--card);border-color:var(--line);color:var(--ash);cursor:default;pointer-events:none}
   .go[disabled] svg{display:none}
+  /* armed Launch echoes the knob: a machined top edge + a gentle breathing glow (alive) */
+  .go:not([disabled]){box-shadow:inset 0 1px 0 rgba(255,255,255,.55);animation:btn-breathe 3.6s ease-in-out infinite}
+  @keyframes btn-breathe{0%,100%{box-shadow:inset 0 1px 0 rgba(255,255,255,.55),0 0 0 0 rgba(255,255,255,0)} 50%{box-shadow:inset 0 1px 0 rgba(255,255,255,.55),0 0 20px 0 rgba(255,255,255,.18)}}
 
   .runs{margin-top:30px}
   .run{border-top:1px solid var(--line-soft)}
@@ -181,7 +188,8 @@
     <section class="view on" id="v-launch">
       <div class="banner card" id="setup"><span>Add a payment method to run your first job.</span><button class="pill solid" id="setupBtn">Add payment</button></div>
       <div class="intake" id="intake">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h3.5l2 2H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+        <input type="file" id="file" hidden>
+        <svg class="intake-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h3.5l2 2H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
         <div id="intake-text">Connect a repo or drop your data</div>
       </div>
       <button class="go" id="launchBtn" disabled><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg><span id="launchLabel">Launch</span></button>
@@ -323,13 +331,43 @@
   // ===== LAUNCH =====
   var intake=$('intake'),intakeText=$('intake-text'),btn=$('launchBtn'),launchLabel=$('launchLabel'),jobs=$('jobs');
   var RERUN='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2 5"/><path d="M20 5v6h-6"/></svg>';
-  var repo=null;
-  function refreshArm(){btn.disabled=!repo;}
-  function connectRepo(){repo='acme/support-pipeline';intakeText.textContent=repo+' · main@a1b2c3 · click to reset';refreshArm();}
-  function resetRepo(){repo=null;intakeText.textContent='Connect a repo or drop your data';refreshArm();}
-  intake.addEventListener('click',function(){if(repo){resetRepo();}else{connectRepo();}});
+  var project=null, curQuote=null, fileEl=$('file');
+  function refreshArm(){btn.disabled=!project;}
+  function fmtN(n){return n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?Math.round(n/1e3)+'k':''+n;}
+  function fmtBytes(b){return b>=1e9?(b/1e9).toFixed(1)+' GB':b>=1e6?Math.round(b/1e6)+' MB':Math.max(1,Math.round(b/1e3))+' KB';}
+  function quoteStr(q){return q==null?'metered · GPU-second':'~$'+q.toFixed(2);}
+  // Identify what the data is from its type + a sampled shape. Pricing mirrors the
+  // catalogue (per 1k units, or per audio-minute); a small margin is added. The real
+  // server-side quote replaces this when the live wiring lands.
+  function classifyExt(ext){
+    if(['csv','tsv'].indexOf(ext)>=0)   return {job:'embed',    unit:'rows',    perK:0.001};
+    if(['json','jsonl'].indexOf(ext)>=0)return {job:'extract',  unit:'records', perK:0.002};
+    if(['txt','md'].indexOf(ext)>=0)    return {job:'embed',    unit:'lines',   perK:0.001};
+    if(['wav','mp3','m4a','flac','aac','ogg'].indexOf(ext)>=0) return {job:'transcribe', perMin:0.006};
+    return {job:'custom', metered:true};
+  }
+  function showDetection(name,job,shape,quote){
+    project=name; curQuote=quote;
+    intake.classList.add('detected');
+    intakeText.innerHTML='<span class="d-name">'+name+'</span><span class="d-meta">detected · '+job+' · '+shape+' · '+quoteStr(quote)+' · click to reset</span>';
+    refreshArm();
+  }
+  function resetIntake(){project=null;curQuote=null;intake.classList.remove('detected');intakeText.textContent='Connect a repo or drop your data';refreshArm();}
+  function detectFile(file){
+    var ext=(file.name.split('.').pop()||'').toLowerCase(), c=classifyExt(ext);
+    if(c.metered){showDetection(file.name,c.job,fmtBytes(file.size)+' · sandboxed container',null);return;}
+    if(c.perMin){var mins=Math.max(1,Math.round(file.size/1e6));showDetection(file.name,c.job,'~'+mins+' min audio',+(mins*c.perMin+0.02).toFixed(2));return;}
+    var fr=new FileReader();
+    fr.onload=function(){var s=String(fr.result),nl=(s.match(/\n/g)||[]).length||1,avg=s.length/nl,rows=Math.max(1,Math.round(file.size/avg));
+      showDetection(file.name,c.job,fmtN(rows)+' '+c.unit,+(rows/1000*c.perK+0.02).toFixed(2));};
+    fr.onerror=function(){showDetection(file.name,c.job,fmtBytes(file.size),null);};
+    fr.readAsText(file.slice(0,65536));
+  }
+  intake.addEventListener('click',function(){if(project){resetIntake();}else{fileEl.click();}});
+  fileEl.addEventListener('change',function(){if(fileEl.files&&fileEl.files[0])detectFile(fileEl.files[0]);});
   ['dragenter','dragover'].forEach(function(ev){intake.addEventListener(ev,function(e){e.preventDefault();intake.classList.add('drag');});});
-  ['dragleave','drop'].forEach(function(ev){intake.addEventListener(ev,function(e){e.preventDefault();intake.classList.remove('drag');});});
+  intake.addEventListener('dragleave',function(e){e.preventDefault();intake.classList.remove('drag');});
+  intake.addEventListener('drop',function(e){e.preventDefault();intake.classList.remove('drag');var f=e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files[0];if(f)detectFile(f);});
 
   function doneDetail(){return '<div class="preview num">[ 0.0131, -0.0412, 0.0098, 0.0457, 0.0203, … ]  · 384-dim × 2,100,000 rows</div><div class="actions"><button class="mini" data-dl>Download</button><button class="mini" data-pr>Open PR</button></div>';}
   function failDetail(){return '<div class="preview">failed · malformed input at line 4002 (buyer input)</div><div class="actions"><span class="r-meta num">refunded $1.20</span><button class="mini" data-fix>Fix &amp; re-run</button></div>';}
@@ -365,7 +403,7 @@
       }
     },360);
   }
-  btn.addEventListener('click',function(){if(btn.disabled)return;var n=repo.split('/').pop();resetRepo();launch(n);});
+  btn.addEventListener('click',function(){if(btn.disabled)return;var n=project.split('/').pop().replace(/\.[^.]+$/,'')||project;resetIntake();launch(n);});
   jobs.addEventListener('click',function(e){
     if(e.target.closest('[data-dl]')){e.stopPropagation();toast('Downloaded results to ~/Downloads');}
     else if(e.target.closest('[data-pr]')){e.stopPropagation();toast('Opened a pull request on the repo');}
