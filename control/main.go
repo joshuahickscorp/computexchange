@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -47,10 +48,15 @@ func main() {
 	}
 
 	// Hardening secrets: without these, OAuth tokens are stored unencrypted and OAuth
-	// state is unsigned (CSRF-open). We do NOT fatal — local dev + tests run without
-	// them by design — but we surface the insecure state loudly so production never
-	// runs unhardened by accident. Production sets both in .env.
+	// state is unsigned (CSRF-open). In production this is unacceptable, so a missing
+	// secret is FATAL — a prod deploy must never silently run unhardened. Outside
+	// production (CX_ENV unset or any other value) local dev + tests run without them
+	// by design, so we only surface the insecure state loudly. Production sets both in .env.
 	if os.Getenv("CX_TOKEN_KEY") == "" || os.Getenv("CX_STATE_SECRET") == "" {
+		cxEnv := os.Getenv("CX_ENV")
+		if strings.EqualFold(cxEnv, "production") || strings.EqualFold(cxEnv, "prod") {
+			log.Fatal("CX_TOKEN_KEY and/or CX_STATE_SECRET unset with CX_ENV=" + cxEnv + " — refusing to start in production: OAuth tokens would be stored UNENCRYPTED and OAuth state UNSIGNED; set both")
+		}
 		log.Print("WARNING: CX_TOKEN_KEY and/or CX_STATE_SECRET unset — OAuth tokens stored UNENCRYPTED and OAuth state UNSIGNED; set both before production")
 	}
 
