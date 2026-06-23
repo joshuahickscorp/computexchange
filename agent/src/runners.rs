@@ -10,7 +10,7 @@ use std::io::Cursor;
 
 use async_trait::async_trait;
 use candle_core::quantized::gguf_file;
-use candle_core::{Device, IndexOp, Tensor};
+use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config as BertConfig, DTYPE as BERT_DTYPE};
 use candle_transformers::models::quantized_llama::ModelWeights as QLlama;
@@ -367,6 +367,7 @@ pub struct Embedder {
     model: BertModel,
     tokenizer: Tokenizer,
     device: Device,
+    dtype: DType,
 }
 
 impl Embedder {
@@ -383,8 +384,16 @@ impl Embedder {
         tokenizer.with_padding(Some(pad));
 
         let device = models::device().clone();
+        // FP16 on a GPU (~2x throughput + half the memory via tensor cores); F32 on
+        // CPU, which has no fast F16 path. Every worker of a hardware class runs this
+        // same build, so redundancy/honeypot comparisons stay within one precision.
+        let dtype = if device.is_cuda() || device.is_metal() {
+            DType::F16
+        } else {
+            BERT_DTYPE
+        };
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[weights_p], BERT_DTYPE, &device)
+            VarBuilder::from_mmaped_safetensors(&[weights_p], dtype, &device)
                 .map_err(infer_err("embed"))?
         };
         let model = BertModel::load(vb, &config).map_err(infer_err("embed"))?;
@@ -392,6 +401,7 @@ impl Embedder {
             model,
             tokenizer,
             device,
+            dtype,
         })
     }
 
@@ -415,7 +425,10 @@ impl Embedder {
         let input_ids =
             Tensor::from_vec(ids, (bsz, seq), &self.device).map_err(infer_err(backend))?;
         let token_type = input_ids.zeros_like().map_err(infer_err(backend))?;
-        let attn = Tensor::from_vec(mask, (bsz, seq), &self.device).map_err(infer_err(backend))?;
+        let attn = Tensor::from_vec(mask, (bsz, seq), &self.device)
+            .map_err(infer_err(backend))?
+            .to_dtype(self.dtype)
+            .map_err(infer_err(backend))?; // match model precision (F16 on GPU)
 
         // [bsz, seq, hidden]
         let hidden = self
@@ -444,7 +457,11 @@ impl Embedder {
             .sqrt()
             .map_err(infer_err(backend))?;
         let normed = mean.broadcast_div(&norm).map_err(infer_err(backend))?;
-        normed.to_vec2::<f32>().map_err(infer_err(backend))
+        normed
+            .to_dtype(DType::F32) // back to f32 for the wire (vectors are f32)
+            .map_err(infer_err(backend))?
+            .to_vec2::<f32>()
+            .map_err(infer_err(backend))
     }
 }
 
