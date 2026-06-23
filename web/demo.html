@@ -102,8 +102,16 @@
   .row .l{display:flex;align-items:center;gap:10px;min-width:0}
   .row .k{font-size:10px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--mute)}
   .r-meta{color:var(--mute)}
-  .marker{width:8px;height:8px;border-radius:50%;flex:none;background:var(--bone)}
-  .marker.hollow{background:transparent;border:1.5px solid var(--ash)}
+  /* status markers: small rendered-metal pucks echoing the power knob (assets/dot-*.png).
+     State reads at 16px by TONE: running carries a live breathing glow halo (the knob's
+     cue), done is bright metal, failed is dimmed and inert. */
+  .marker{position:relative;width:16px;height:16px;flex:none;background-size:contain;background-repeat:no-repeat;background-position:center}
+  .marker.done{background-image:url(assets/dot-done@3x.png)}
+  .marker.fail{background-image:url(assets/dot-fail@3x.png);filter:brightness(.58)}
+  .marker.run{background-image:url(assets/dot-on@3x.png)}
+  .marker.run::after{content:"";position:absolute;inset:-6px;border-radius:50%;pointer-events:none;
+    background:radial-gradient(circle,rgba(255,255,255,.5),rgba(255,255,255,0) 66%);animation:dot-breathe 3.6s ease-in-out infinite}
+  @keyframes dot-breathe{0%,100%{opacity:.45} 50%{opacity:1}}
 
   /* ===== LAUNCH ===== */
   .banner{display:flex;align-items:center;gap:12px;justify-content:space-between;padding:14px 16px;margin-bottom:18px;font-size:13px;color:var(--bone)}
@@ -201,8 +209,8 @@
         <div class="monitor-h"><span class="k">Throughput</span><span class="v num" id="tput">1.24k tok/s</span></div>
         <svg id="feed" viewBox="0 0 300 46" preserveAspectRatio="none" aria-hidden="true"></svg>
       </div>
-      <div class="row"><span class="l"><span class="k">Machine</span><span class="marker" id="mDot"></span>Mac Studio · M2 Max</span><span class="r-meta" id="mState">42 GB free</span></div>
-      <div class="row"><span class="l"><span class="k">Payout</span><span class="marker"></span>Stripe</span><span class="r-meta">connected</span></div>
+      <div class="row"><span class="l"><span class="k">Machine</span><span class="marker done" id="mDot"></span>Mac Studio · M2 Max</span><span class="r-meta" id="mState">42 GB free</span></div>
+      <div class="row"><span class="l"><span class="k">Payout</span><span class="marker done"></span>Stripe</span><span class="r-meta">connected</span></div>
     </section>
 
     <section class="view" id="v-settings">
@@ -297,7 +305,7 @@
     phint.textContent=on?'tap to go offline':'tap to go online';
     running.style.display=on?'':'none';
     earned.classList.toggle('live',on);
-    mDot.className=on?'marker':'marker hollow';
+    mDot.className=on?'marker done':'marker fail';
     mState.textContent=on?'42 GB free':'paused';
     monitor.classList.toggle('hide',!on);
     if(on){
@@ -327,7 +335,7 @@
   function failDetail(){return '<div class="preview">failed · malformed input at line 4002 (buyer input)</div><div class="actions"><span class="r-meta num">refunded $1.20</span><button class="mini" data-fix>Fix &amp; re-run</button></div>';}
 
   function runHTML(name,src,status){
-    var mk=status==='running'?'marker':status==='failed'?'marker hollow':'marker';
+    var mk='marker '+(status==='running'?'run':status==='failed'?'fail':'done');
     var st=status==='running'?'running':status;
     return '<div class="run" data-status="'+status+'" data-name="'+name+'">'
       +'<div class="run-main"><span class="l"><span class="'+mk+'"></span>'+name+' <span class="src num">'+src+'</span></span>'
@@ -351,7 +359,7 @@
     iv=setInterval(function(){
       t++; st.textContent='running · '+t+'/8';
       if(t>=8){clearInterval(iv);if(tv)clearInterval(tv);
-        run.dataset.status='done';run.querySelector('.marker').className='marker';st.textContent='done';
+        run.dataset.status='done';run.querySelector('.marker').className='marker done';st.textContent='done';
         run.querySelector('.detail').innerHTML=doneDetail();
         notify('Job complete',name);
       }
