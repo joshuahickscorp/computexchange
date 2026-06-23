@@ -17,7 +17,7 @@ import (
 //            apple_silicon_ultra | cpu
 // tier:      batch | priority | trusted
 // job type:  embed | batch_infer | audio_transcribe | image_gen | eval | lora_finetune |
-//            batch_classification | json_extraction | rerank
+//            batch_classification | json_extraction | rerank | custom
 // task status: queued | running | complete | failed | retrying
 // job status:  queued | running | verifying | complete | failed | cancelled
 
@@ -41,11 +41,17 @@ var validTiers = map[string]bool{"batch": true, "priority": true, "trusted": tru
 
 // validJobTypes is the closed set of job-type tags. The three Turbo workloads
 // (batch_classification | json_extraction | rerank) join the original set; each
-// has a real result verifier (see verification.go resultsAgree).
+// has a real result verifier (see verification.go resultsAgree). `custom` is the
+// general-compute SEAM (ACCRETION.md §7-8): an opaque BYO-container job for the
+// metered NVIDIA GPU-second lane. It is a VALID contract variant so a buyer can
+// submit one and the agent can decode it, but it has no output verifier (arbitrary
+// compute has no known answer) and the agent's runner is a stub that returns an
+// honest typed error — the sandboxed runner is the next build, never a fake result.
 var validJobTypes = map[string]bool{
 	"embed": true, "batch_infer": true, "audio_transcribe": true,
 	"image_gen": true, "eval": true, "lora_finetune": true,
 	"batch_classification": true, "json_extraction": true, "rerank": true,
+	"custom": true,
 }
 
 // JobType is the tagged job descriptor. The wire form is the serde-tagged enum
@@ -79,6 +85,18 @@ type JobType struct {
 	Labels []string        `json:"labels,omitempty"`
 	Schema json.RawMessage `json:"schema,omitempty"`
 	TopK   uint32          `json:"top_k,omitempty"`
+	// General-compute SEAM (custom only; ACCRETION.md §7-8). An opaque
+	// bring-your-own-container job for the metered NVIDIA GPU-second lane:
+	//   Image   → OCI container image ref the job runs in (nullable: a pointer so a
+	//             null on the wire round-trips, matching the agent's Option<String>),
+	//   Command → argv the sandbox executes inside the image (empty = the image's
+	//             own entrypoint).
+	// omitempty keeps both off the wire for every other job type. The control plane
+	// has no output verifier for custom (arbitrary compute has no known answer) and
+	// the agent's runner is an honest stub — the sandboxed BYO-container runner
+	// (gVisor/Kata + GPU cgroups + metered billing) is the next build.
+	Image   *string  `json:"image,omitempty"`
+	Command []string `json:"command,omitempty"`
 }
 
 // ModelRef references a model. Wire: {"kind":"gguf"|"hf"|"mlx","ref":"..."}.

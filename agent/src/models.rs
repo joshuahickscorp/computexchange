@@ -105,12 +105,40 @@ pub fn whisper_spec(model_ref: &str) -> ModelSpec {
     }
 }
 
-/// Our batch-inference model: a small quantized (GGUF) Llama-architecture LLM.
-/// Default is Llama-3.2-1B-Instruct (Q4_K_M). Qwen2.5-0.5B-Instruct is an
-/// accepted alternate (also llama-arch GGUF, supported by candle).
+/// Minimum advertised memory (GB) below which the big 7B batch_infer model is
+/// refused. Q4_K_M 7B weights are ~4.7 GB on disk and the working set (weights +
+/// KV cache + activations for a batched prefill) needs real headroom, so this is
+/// gated to the high-VRAM workers (nvidia_48g/80g/180g and the large Apple
+/// unified-memory / cluster classes). The small Llama-3.2-1B (catalogue floor 4 GB)
+/// stays the default for everyone else. `BatchInferRunner::can_run` enforces this
+/// as a hard agent-side floor so a mis-constrained manifest can never load the big
+/// model on a worker that cannot hold it — it surfaces NoRunner, never an OOM.
+pub const BIG_LLAMA_MIN_MEMORY_GB: f32 = 40.0;
+
+/// True if `model_ref` selects the bigger (7B-class) quantized LLM. Matched
+/// case-insensitively on a `7b` marker so the catalogue id (`qwen2.5-7b-instruct-q4`),
+/// the HF repo, or a bare `7b` all resolve to it. Kept as one predicate so
+/// `llama_gguf_spec`, the tokenizer resolver, and the memory gate agree on exactly
+/// one definition of "the big model".
+pub fn is_big_llama(model_ref: &str) -> bool {
+    model_ref.to_ascii_lowercase().contains("7b")
+}
+
+/// Our batch-inference model: a quantized (GGUF) Llama-architecture LLM.
+/// Default is Llama-3.2-1B-Instruct (Q4_K_M). Qwen2.5-0.5B-Instruct is an accepted
+/// small alternate, and Qwen2.5-7B-Instruct (Q4_K_M) is the BIG model for high-VRAM
+/// workers (selected by a `7b` ref, gated by `BIG_LLAMA_MIN_MEMORY_GB`). All three
+/// are llama-arch GGUF, supported by candle's quantized-llama path.
 pub fn llama_gguf_spec(model_ref: &str) -> ModelSpec {
     let r = model_ref.to_ascii_lowercase();
-    if r.contains("qwen") {
+    if is_big_llama(&r) {
+        // Bigger model — only dispatched to high-VRAM workers (see the memory gate
+        // in BatchInferRunner::can_run + the catalogue's higher min_memory_gb).
+        ModelSpec {
+            repo: "Qwen/Qwen2.5-7B-Instruct-GGUF",
+            files: &["qwen2.5-7b-instruct-q4_k_m.gguf"],
+        }
+    } else if r.contains("qwen") {
         ModelSpec {
             repo: "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
             files: &["qwen2.5-0.5b-instruct-q4_k_m.gguf"],

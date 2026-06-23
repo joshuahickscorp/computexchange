@@ -23,6 +23,11 @@ pub fn classify(err: &RunError, low_memory: bool) -> &'static str {
         // A cluster substrate that this single host cannot provide — retry/elsewhere
         // is the control plane's call, so report it as a non-buyer system failure.
         RunError::ExternalSubstrate { .. } => "internal_error",
+        // A documented-but-unbuilt seam (today: the `custom` general-compute job).
+        // No worker can run it yet, so it is TERMINAL, not retryable — retrying
+        // elsewhere would just storm the same unimplemented runner. `unsupported_job_type`
+        // is the taxonomy's "request can't be served as specified" class.
+        RunError::NotImplemented { .. } => "unsupported_job_type",
         RunError::Inference { msg, .. } => {
             let m = msg.to_ascii_lowercase();
             if m.contains("input_url") || m.contains("output_url") || m.contains("presigned") {
@@ -125,6 +130,18 @@ mod tests {
                 false
             ),
             "internal_error"
+        );
+        // The general-compute seam: an unbuilt `custom` runner is terminal
+        // (unsupported_job_type), not a retryable internal_error.
+        assert_eq!(
+            classify(
+                &RunError::NotImplemented {
+                    job_type: "custom",
+                    detail: "custom compute not yet implemented".into(),
+                },
+                false
+            ),
+            "unsupported_job_type"
         );
     }
 
