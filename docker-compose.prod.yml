@@ -1,0 +1,120 @@
+# Computexchange — PRODUCTION stack (claimed droplet, fronted by Caddy).
+#
+# Differences from docker-compose.yml (local dev):
+#   - All credentials come from .env (strong, generated) — never the cx/cx +
+#     minioadmin defaults.
+#   - Postgres is NOT published to the host; MinIO console (9001) is NOT published.
+#   - control + MinIO S3 bind to 127.0.0.1 only — the public edge is Caddy, which
+#     reverse-proxies computexchange.net -> control and storage.computexchange.net
+#     -> MinIO (TLS terminated by Caddy).
+#   - control receives Stripe/CX secrets via env_file: .env; infra wiring is set
+#     explicitly below (and overrides any stale localhost values in .env).
+#
+#   cd /opt/computexchange
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# .env must define: POSTGRES_PASSWORD, MINIO_ROOT_USER, MINIO_ROOT_PASSWORD,
+# STRIPE_SECRET_KEY, STRIPE_PUBLISHABLE_KEY, CX_TOKEN_KEY, CX_STATE_SECRET, and
+# (once the webhook exists) STRIPE_WEBHOOK_SECRET.
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: cx
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: cx
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cx -d cx"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:9000:9000"   # S3 API, localhost-only; Caddy fronts it publicly
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # One-shot: create the jobs bucket with the rotated creds.
+  createbuckets:
+    image: minio/mc
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    entrypoint: >
+      /bin/sh -c "
+      set -e;
+      mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD;
+      mc mb -p local/cx-jobs;
+      mc anonymous set none local/cx-jobs;
+      echo 'bucket cx-jobs ready';
+      "
+    restart: "no"
+
+  # One-shot: apply the authoritative schema once Postgres is healthy.
+  migrate:
+    image: postgres:17
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./db/schema.sql:/schema.sql:ro
+    entrypoint: >
+      /bin/sh -c "
+      set -e;
+      psql -v ON_ERROR_STOP=1 -h postgres -U cx -d cx -f /schema.sql;
+      echo 'schema applied';
+      "
+    restart: "no"
+
+  control:
+    build:
+      context: .
+      dockerfile: Dockerfile.control
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      createbuckets:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://cx:${POSTGRES_PASSWORD}@postgres:5432/cx?sslmode=disable
+      LISTEN_ADDR: ":8080"
+      S3_ENDPOINT: http://minio:9000
+      S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-https://storage.computexchange.net}
+      S3_REGION: us-east-1
+      S3_BUCKET: cx-jobs
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "127.0.0.1:8080:8080"   # Caddy proxies computexchange.net -> here
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  miniodata:

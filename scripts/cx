@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# cx — manage the computexchange production stack (lives at /usr/local/bin/cx on the droplet).
+set -euo pipefail
+cd /opt/computexchange
+C=(docker compose -f docker-compose.prod.yml)
+case "${1:-help}" in
+  ps|status) "${C[@]}" ps ;;
+  up)        "${C[@]}" up -d ;;
+  rebuild)   "${C[@]}" up -d --build ;;
+  restart)   "${C[@]}" restart "${2:-}" ;;
+  reload)    "${C[@]}" up -d --force-recreate --no-deps control ;;   # reload .env into control
+  down)      "${C[@]}" down ;;
+  logs)      "${C[@]}" logs -f --tail=100 "${2:-control}" ;;
+  psql)      PW=$(grep -E '^POSTGRES_PASSWORD=' .env | cut -d= -f2-); "${C[@]}" exec -e PGPASSWORD="$PW" postgres psql -U cx -d cx ;;
+  env)       "${EDITOR:-nano}" .env && echo "now run: cx reload" ;;
+  backup)    cx-backup && echo "backup written to backups/" ;;
+  health)    curl -s -o /dev/null -w "control HTTP %{http_code} (404=up)\n" http://127.0.0.1:8080/ ;;
+  *) cat <<'EOF'
+cx — manage computexchange
+  cx ps            container status
+  cx logs [svc]    tail logs (default: control)
+  cx reload        reload .env into control (after editing secrets)
+  cx rebuild       rebuild + restart after code changes
+  cx restart [svc] restart one or all services
+  cx up | down     start / stop the stack
+  cx psql          open a psql shell on the database
+  cx env           edit .env, then reload
+  cx backup        run a DB backup now
+  cx health        quick control healthcheck
+EOF
+  ;;
+esac

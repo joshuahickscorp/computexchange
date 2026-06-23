@@ -1,0 +1,17 @@
+fn main() {
+    // Test JSON serialization of f32 vs f64
+    // f32(64.0) should round-trip cleanly to/from JSON
+    // But what about arbitrary values from memory reads?
+    
+    let memory_vals = vec![
+        (64.0f32, "64.0 GB total"),
+        (40.15625f32, "40.15625 GB (test with fraction)"),
+        (0.1f32, "0.1 GB (problematic f32)"),
+        (32.0f32, "32.0 GB effective"),
+    ];
+    
+    for (val, label) in memory_vals {
+        let as_f64 = val as f64;
+        println!("{}: f32={} -> f64={:.20}", label, val, as_f64);
+    }
+}

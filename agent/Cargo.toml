@@ -1,0 +1,54 @@
+[package]
+name = "cx-agent"
+version = "0.1.0"
+edition = "2021"
+description = "Computexchange supplier agent — detects/benchmarks Apple Silicon, registers with the control plane, polls and executes batch inference tasks."
+license = "MIT"
+
+[[bin]]
+name = "cx-agent"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "time", "signal", "sync", "fs"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+uuid = { version = "1.10", features = ["v4", "serde"] }
+clap = { version = "4.5", features = ["derive"] }
+sysinfo = "0.31"
+anyhow = "1.0"
+thiserror = "1.0"
+base64 = "0.22"
+async-trait = "0.1"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Encrypted local staging for large results (action plan §K): ephemeral
+# AES-256-GCM key, ciphertext-only on disk, wiped after upload.
+aes-gcm = "0.10"
+rand = "0.8"
+
+# Real inference (pure Rust). Metal on Apple Silicon, CPU fallback elsewhere.
+candle-core = "0.10"
+candle-nn = "0.10"
+candle-transformers = "0.10"
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+hf-hub = { version = "0.5", default-features = false, features = ["ureq", "rustls-tls"] }
+hound = "3.5"
+
+[features]
+# On by default for Apple Silicon: GPU inference via Metal. Disable
+# (`--no-default-features`) to force the CPU path (e.g. CI on Linux).
+default = ["metal"]
+metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
+# NVIDIA / RunPod lane: build with `--no-default-features --features cuda` on a
+# CUDA box (Linux + NVIDIA Container Toolkit). Mirrors `metal` exactly — the
+# runners call models::device() and are device-agnostic, so this is a device
+# branch, not a rewrite.
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

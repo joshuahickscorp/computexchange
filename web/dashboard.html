@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Computexchange — Dashboard</title>
+<!--
+  Single self-contained static dashboard. No build step, no external CDN, no
+  dependencies — inline CSS + vanilla JS only. It talks directly to the buyer
+  REST API (POST /v1/jobs, GET /v1/jobs/{id}, GET /v1/jobs/{id}/results) and the
+  /metrics endpoint. The control plane can serve this file from a static route
+  (a route will be added separately); until then, open it from disk and point it
+  at the control plane via the Base URL field (CORS permitting).
+
+  Design rule (BLACKHOLE: surface every failure): every fetch error is shown in
+  the UI. Nothing is ever faked — an unreachable metric or a failed request
+  renders an explicit error, never a placeholder zero.
+-->
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel-2: #1d212b; --border: #2a2f3a;
+    --text: #e6e9ef; --muted: #8b93a3; --accent: #5b9dff; --accent-2: #2a3548;
+    --ok: #46c08a; --warn: #e0a64a; --err: #e0594a; --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    padding: 16px 20px; border-bottom: 1px solid var(--border); background: var(--panel);
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  main { display: grid; grid-template-columns: 1fr; gap: 16px; padding: 20px; max-width: 1100px; margin: 0 auto; }
+  @media (min-width: 880px) { main { grid-template-columns: 360px 1fr; align-items: start; } }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+  .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 12px; }
+  .full { grid-column: 1 / -1; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  input, select, textarea {
+    width: 100%; background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 8px 10px; font: inherit;
+  }
+  textarea { font-family: var(--mono); font-size: 12px; min-height: 84px; resize: vertical; }
+  .row { display: flex; gap: 10px; } .row > * { flex: 1; }
+  button {
+    background: var(--accent); color: #07101f; border: 0; border-radius: 6px;
+    padding: 9px 14px; font: inherit; font-weight: 600; cursor: pointer; margin-top: 12px;
+  }
+  button.secondary { background: var(--accent-2); color: var(--text); }
+  button:disabled { opacity: .55; cursor: default; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; }
+  td.id { font-family: var(--mono); font-size: 11px; }
+  td.actions a { color: var(--accent); cursor: pointer; margin-right: 10px; }
+  .pill { padding: 1px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--border); }
+  .pill.queued, .pill.running, .pill.verifying { color: var(--warn); border-color: var(--warn); }
+  .pill.complete { color: var(--ok); border-color: var(--ok); }
+  .pill.failed, .pill.cancelled, .pill.error { color: var(--err); border-color: var(--err); }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .metric { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 12px; }
+  .metric .v { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .metric .k { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .err { color: var(--err); font-size: 12px; margin-top: 8px; white-space: pre-wrap; font-family: var(--mono); }
+  .muted { color: var(--muted); }
+  .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .toolbar .spacer { flex: 1; }
+  pre.out { background: #0b0d11; border: 1px solid var(--border); border-radius: 6px; padding: 12px; overflow: auto; max-height: 320px; font-size: 12px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--muted); }
+  .dot.ok { background: var(--ok); } .dot.err { background: var(--err); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Computexchange</h1>
+  <span class="sub">buyer dashboard · jobs &amp; metrics</span>
+  <span class="sub" id="conn"><span class="dot" id="connDot"></span> <span id="connText">not connected</span></span>
+</header>
+
+<main>
+  <!-- Connection + submit -->
+  <section class="panel">
+    <h2>Connection</h2>
+    <label>Base URL</label>
+    <input id="baseUrl" placeholder="http://localhost:8080" autocomplete="off">
+    <label>API key (Bearer)</label>
+    <input id="apiKey" type="password" placeholder="cx api key" autocomplete="off">
+    <button class="secondary" id="saveBtn">Save &amp; test connection</button>
+
+    <h2 style="margin-top:22px">Submit embed job</h2>
+    <div class="row">
+      <div>
+        <label>Model</label>
+        <input id="model" value="all-minilm-l6-v2">
+      </div>
+      <div>
+        <label>Tier</label>
+        <select id="tier"><option>batch</option><option>priority</option><option>trusted</option></select>
+      </div>
+    </div>
+    <label>Input (one JSON record per line, JSONL)</label>
+    <textarea id="input">{"text":"hello world"}
+{"text":"compute exchange"}</textarea>
+    <button id="submitBtn">Submit job</button>
+    <div class="err" id="submitErr"></div>
+  </section>
+
+  <!-- Jobs -->
+  <section class="panel">
+    <div class="toolbar">
+      <h2 style="margin:0">Jobs</h2>
+      <span class="spacer"></span>
+      <span class="muted" id="pollNote">polling every 4s</span>
+    </div>
+    <table>
+      <thead><tr><th>Job ID</th><th>Type</th><th>Status</th><th>Tasks</th><th>Est $</th><th></th></tr></thead>
+      <tbody id="jobsBody"><tr><td colspan="6" class="muted">No jobs yet — submit one, or jobs you submit here will appear.</td></tr></tbody>
+    </table>
+    <div class="err" id="jobsErr"></div>
+    <pre class="out" id="resultsOut" style="display:none"></pre>
+  </section>
+
+  <!-- Metrics -->
+  <section class="panel full">
+    <div class="toolbar">
+      <h2 style="margin:0">Control-plane metrics</h2>
+      <span class="spacer"></span>
+      <span class="muted" id="metricsNote"></span>
+    </div>
+    <div class="metrics" id="metrics">
+      <div class="metric"><div class="v muted">—</div><div class="k">connect to load /metrics</div></div>
+    </div>
+    <div class="err" id="metricsErr"></div>
+  </section>
+</main>
+
+<script>
+"use strict";
+// --- tiny helpers ---
+const $ = (id) => document.getElementById(id);
+const LS = "cx_dashboard";
+function loadCfg() {
+  try { return JSON.parse(localStorage.getItem(LS)) || {}; } catch { return {}; }
+}
+function saveCfg(c) { localStorage.setItem(LS, JSON.stringify(c)); }
+function baseUrl() { return ($("baseUrl").value || "http://localhost:8080").replace(/\/+$/, ""); }
+function apiKey() { return $("apiKey").value || ""; }
+function headers() { const h = {}; if (apiKey()) h["Authorization"] = "Bearer " + apiKey(); return h; }
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+// Jobs tracked client-side (the API has no list endpoint; we remember what we submit
+// here and re-fetch each one). Persisted so a refresh keeps the table.
+let jobIds = loadCfg().jobIds || [];
+
+// --- API calls (every non-2xx surfaces the status + body, never a fake) ---
+async function api(method, path, body) {
+  const opt = { method, headers: { ...headers() } };
+  if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
+  const resp = await fetch(baseUrl() + path, opt);
+  const text = await resp.text();
+  if (!resp.ok) throw new Error(method + " " + path + " -> " + resp.status + " " + resp.statusText + "\n" + text.trim());
+  return text ? JSON.parse(text) : {};
+}
+
+async function testConnection() {
+  $("connDot").className = "dot";
+  $("connText").textContent = "testing…";
+  try {
+    // /healthz is unauthenticated; it proves the control plane + DB are up.
+    const resp = await fetch(baseUrl() + "/healthz");
+    if (!resp.ok) throw new Error("healthz -> " + resp.status);
+    $("connDot").className = "dot ok";
+    $("connText").textContent = "connected";
+  } catch (e) {
+    $("connDot").className = "dot err";
+    $("connText").textContent = "unreachable";
+  }
+}
+
+async function submitJob() {
+  $("submitErr").textContent = "";
+  const lines = $("input").value.split("\n").map(s => s.trim()).filter(Boolean);
+  if (!lines.length) { $("submitErr").textContent = "input is empty — add at least one JSONL line"; return; }
+  const body = {
+    job_type: { type: "embed" },
+    model: { kind: "gguf", ref: $("model").value.trim() },
+    constraints: { min_memory_gb: 0 },
+    verification: { redundancy_frac: 0, honeypot_frac: 0, payout_hold_secs: 0 },
+    tier: $("tier").value,
+    input: lines.join("\n") + "\n"   // a JSON string IS the inline JSONL
+  };
+  $("submitBtn").disabled = true;
+  try {
+    const res = await api("POST", "/v1/jobs", body);
+    if (res.job_id && !jobIds.includes(res.job_id)) {
+      jobIds.unshift(res.job_id);
+      const c = loadCfg(); c.jobIds = jobIds; saveCfg(c);
+    }
+    await refreshJobs();
+  } catch (e) {
+    $("submitErr").textContent = e.message;
+  } finally {
+    $("submitBtn").disabled = false;
+  }
+}
+
+function statusPill(s) { return `<span class="pill ${esc(s)}">${esc(s)}</span>`; }
+
+async function refreshJobs() {
+  if (!jobIds.length) return;
+  $("jobsErr").textContent = "";
+  const rows = await Promise.all(jobIds.map(async (id) => {
+    try {
+      const j = await api("GET", "/v1/jobs/" + id);
+      const est = (j.actual_usd && j.actual_usd > 0) ? j.actual_usd : j.estimated_usd;
+      return `<tr>
+        <td class="id">${esc(id)}</td>
+        <td>${esc(j.job_type || "?")}</td>
+        <td>${statusPill(j.status || "?")}</td>
+        <td>${esc(j.tasks_done ?? 0)}/${esc(j.task_count ?? 0)}</td>
+        <td>$${Number(est || 0).toFixed(4)}</td>
+        <td class="actions"><a data-results="${esc(id)}">results</a><a data-forget="${esc(id)}">forget</a></td>
+      </tr>`;
+    } catch (e) {
+      return `<tr>
+        <td class="id">${esc(id)}</td><td>—</td><td>${statusPill("error")}</td>
+        <td>—</td><td>—</td>
+        <td class="actions"><a data-forget="${esc(id)}">forget</a></td>
+      </tr><tr><td colspan="6" class="err">${esc(e.message)}</td></tr>`;
+    }
+  }));
+  $("jobsBody").innerHTML = rows.join("") || `<tr><td colspan="6" class="muted">No jobs yet.</td></tr>`;
+}
+
+async function showResults(id) {
+  const out = $("resultsOut");
+  out.style.display = "block";
+  out.textContent = "loading results for " + id + " …";
+  try {
+    const r = await api("GET", "/v1/jobs/" + id + "/results");
+    const url = r.results_url || (r.result_urls && r.result_urls[0]);
+    if (!url) { out.textContent = "no results yet (status " + (r.status || "?") + ")"; return; }
+    const resp = await fetch(url); // presigned — no auth header
+    const text = await resp.text();
+    if (!resp.ok) throw new Error("download -> " + resp.status + "\n" + text.trim());
+    out.textContent = text.slice(0, 20000) + (text.length > 20000 ? "\n… (truncated)" : "");
+  } catch (e) {
+    out.textContent = "error: " + e.message;
+  }
+}
+
+// Parse Prometheus text exposition. Returns { name: number, labelledSums: {...} }.
+// We sum cx_queue_depth across its label series for a single "queue depth" figure.
+function parseMetrics(text) {
+  const flat = {};
+  let queueDepth = 0, sawQueue = false;
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line || line[0] === "#") continue;
+    const sp = line.lastIndexOf(" ");
+    if (sp < 0) continue;
+    const key = line.slice(0, sp), val = parseFloat(line.slice(sp + 1));
+    if (Number.isNaN(val)) continue;
+    if (key.startsWith("cx_queue_depth")) { queueDepth += val; sawQueue = true; }
+    else { flat[key] = val; }
+  }
+  if (sawQueue) flat["cx_queue_depth"] = queueDepth;
+  return flat;
+}
+
+const METRIC_CARDS = [
+  ["cx_jobs_submitted_total", "jobs submitted"],
+  ["cx_tasks_completed_total", "tasks completed"],
+  ["cx_queue_depth", "queue depth"],
+  ["cx_quarantines_total", "quarantines"],
+  ["cx_active_workers", "active workers"],
+  ["cx_verification_mismatch_total", "verif. mismatches"],
+];
+
+async function refreshMetrics() {
+  $("metricsErr").textContent = "";
+  try {
+    const resp = await fetch(baseUrl() + "/metrics");
+    const text = await resp.text();
+    if (!resp.ok) throw new Error("/metrics -> " + resp.status + "\n" + text.trim());
+    const m = parseMetrics(text);
+    $("metrics").innerHTML = METRIC_CARDS.map(([k, label]) => {
+      const present = Object.prototype.hasOwnProperty.call(m, k);
+      // Never fabricate a zero: a metric the control plane did not export shows
+      // "n/a", not "0".
+      const v = present ? m[k] : "n/a";
+      return `<div class="metric"><div class="v">${esc(v)}</div><div class="k">${esc(label)}</div></div>`;
+    }).join("");
+    $("metricsNote").textContent = "updated " + new Date().toLocaleTimeString();
+  } catch (e) {
+    $("metricsErr").textContent = e.message;
+    $("metricsNote").textContent = "fetch failed";
+  }
+}
+
+// --- wiring ---
+$("jobsBody").addEventListener("click", (ev) => {
+  const r = ev.target.getAttribute("data-results");
+  const f = ev.target.getAttribute("data-forget");
+  if (r) showResults(r);
+  if (f) { jobIds = jobIds.filter(x => x !== f); const c = loadCfg(); c.jobIds = jobIds; saveCfg(c); refreshJobs(); }
+});
+$("saveBtn").addEventListener("click", () => {
+  const c = loadCfg(); c.baseUrl = $("baseUrl").value; c.apiKey = $("apiKey").value; saveCfg(c);
+  testConnection(); refreshMetrics(); refreshJobs();
+});
+$("submitBtn").addEventListener("click", submitJob);
+
+(function init() {
+  const c = loadCfg();
+  $("baseUrl").value = c.baseUrl || "http://localhost:8080";
+  $("apiKey").value = c.apiKey || "";
+  testConnection();
+  refreshJobs();
+  refreshMetrics();
+  setInterval(() => { refreshJobs(); refreshMetrics(); }, 4000);
+})();
+</script>
+</body>
+</html>

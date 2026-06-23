@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Computexchange — App Skeleton</title>
+<!--
+  SKELETON ONLY. This is the closed-alpha role-based app skeleton: functional
+  structure, placeholders, and wiring to the REAL existing APIs — NOT a designed
+  product. There is intentionally no design system, no marketing page, and no
+  IDE. Final UX needs product/design input (see the Workflows tab + docs).
+
+  Three role surfaces (they have different jobs — see docs/PRODUCT_SHAPE.md):
+    • Supplier  — the real control surface is the local menu-bar app (it reads
+                  ~/.compute-exchange/status.json). This tab is a read-only
+                  skeleton describing that surface; the web cannot read a
+                  provider's local file.
+    • Buyer     — submit/track/fetch jobs against the real buyer REST API.
+    • Admin/Op  — workers / jobs / payouts / fraud over the real /admin endpoints.
+    • Workflows — deferred placeholder (no code editor in alpha).
+
+  Honesty rule (BLACKHOLE): every fetch error is shown verbatim; nothing is faked.
+  Vanilla HTML + CSS + JS, no build step, no dependencies — same pattern as
+  web/dashboard.html.
+-->
+<style>
+  :root {
+    --bg:#0f1115; --panel:#171a21; --panel-2:#1d212b; --border:#2a2f3a;
+    --text:#e6e9ef; --muted:#8b93a3; --accent:#5b9dff; --accent-2:#2a3548;
+    --ok:#46c08a; --warn:#e0a64a; --err:#e0594a; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  header { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; padding:14px 20px; border-bottom:1px solid var(--border); background:var(--panel); }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  header .sub { color:var(--muted); font-size:12px; }
+  .skel-tag { margin-left:auto; font-size:11px; color:var(--warn); border:1px solid var(--warn); border-radius:999px; padding:1px 8px; }
+  nav { display:flex; gap:4px; padding:10px 20px 0; border-bottom:1px solid var(--border); background:var(--panel); flex-wrap:wrap; }
+  nav button { background:transparent; color:var(--muted); border:0; border-bottom:2px solid transparent; padding:8px 12px; font:inherit; cursor:pointer; }
+  nav button.active { color:var(--text); border-bottom-color:var(--accent); }
+  main { padding:18px 20px; max-width:1100px; margin:0 auto; }
+  .conn { display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; margin-bottom:16px; }
+  .conn > div { flex:1; min-width:160px; }
+  label { display:block; font-size:12px; color:var(--muted); margin:0 0 4px; }
+  input,select,textarea { width:100%; background:var(--panel-2); border:1px solid var(--border); color:var(--text); border-radius:6px; padding:8px 10px; font:inherit; }
+  textarea { font-family:var(--mono); font-size:12px; min-height:72px; resize:vertical; }
+  button.go { background:var(--accent); color:#07101f; border:0; border-radius:6px; padding:9px 14px; font:inherit; font-weight:600; cursor:pointer; }
+  button.go.secondary { background:var(--accent-2); color:var(--text); }
+  .panel { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:16px; }
+  .panel h2 { font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:0 0 12px; }
+  .ph { color:var(--muted); font-size:13px; border:1px dashed var(--border); border-radius:6px; padding:12px; background:var(--panel-2); }
+  .ph b { color:var(--text); }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--border); white-space:nowrap; }
+  th { color:var(--muted); font-weight:500; font-size:11px; text-transform:uppercase; }
+  td.id { font-family:var(--mono); font-size:11px; }
+  .pill { padding:1px 8px; border-radius:999px; font-size:11px; border:1px solid var(--border); }
+  .pill.ok,.pill.active,.pill.complete { color:var(--ok); border-color:var(--ok); }
+  .pill.warn,.pill.queued,.pill.running,.pill.verifying,.pill.held,.pill.ready { color:var(--warn); border-color:var(--warn); }
+  .pill.err,.pill.failed,.pill.cancelled,.pill.suspended,.pill.throttled { color:var(--err); border-color:var(--err); }
+  .err { color:var(--err); font-size:12px; margin-top:8px; white-space:pre-wrap; font-family:var(--mono); }
+  .muted { color:var(--muted); }
+  pre.out { background:#0b0d11; border:1px solid var(--border); border-radius:6px; padding:12px; overflow:auto; max-height:320px; font-size:12px; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .hidden { display:none; }
+  .note { font-size:12px; color:var(--muted); margin-top:8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Computexchange</h1>
+  <span class="sub">closed-alpha app skeleton</span>
+  <span class="skel-tag">SKELETON — structure + wiring only</span>
+</header>
+
+<nav>
+  <button data-tab="supplier" class="active">Supplier</button>
+  <button data-tab="buyer">Buyer</button>
+  <button data-tab="admin">Admin / Operator</button>
+  <button data-tab="workflows">Workflows</button>
+</nav>
+
+<main>
+  <!-- Shared connection -->
+  <div class="conn">
+    <div><label>Control plane base URL</label><input id="baseUrl" placeholder="http://localhost:8080" autocomplete="off"></div>
+    <div><label>Buyer API key (Bearer)</label><input id="apiKey" type="password" placeholder="cx api key" autocomplete="off"></div>
+    <div><label>Admin key (Bearer)</label><input id="adminKey" type="password" placeholder="cx admin key" autocomplete="off"></div>
+    <div style="flex:0 0 auto"><button class="go secondary" id="saveBtn">Save</button></div>
+  </div>
+
+  <!-- ───────────────────────── SUPPLIER ───────────────────────── -->
+  <section id="tab-supplier">
+    <div class="panel">
+      <h2>Supplier — agent status</h2>
+      <div class="ph">
+        The supplier control surface is the <b>local menu-bar app</b> (macapp/), which
+        reads <b>~/.compute-exchange/status.json</b> written by the running agent.
+        A browser can't read a provider's local file, so this tab documents that
+        surface. Fields the agent already emits:
+      </div>
+      <table style="margin-top:12px">
+        <tbody>
+          <tr><td class="muted">Agent state</td><td>active / idle / paused / offline <span class="muted">(status.json <code>state</code>)</span></td></tr>
+          <tr><td class="muted">Current job</td><td><span class="muted">status.json <code>current_job</code> / <code>current_task_id</code></span></td></tr>
+          <tr><td class="muted">Resource limits</td><td><span class="muted">memory headroom + max memory % (agent.toml)</span></td></tr>
+          <tr><td class="muted">Effective memory</td><td><span class="muted">available − reserved headroom (status.json <code>effective_memory_gb</code>)</span></td></tr>
+          <tr><td class="muted">Throttled</td><td><span class="muted">status.json <code>throttled</code> + <code>throttle_reason</code></span></td></tr>
+          <tr><td class="muted">Earnings / payout</td><td><span class="muted">status.json <code>today_earnings_usd</code> / <code>balance_usd</code> (placeholder here)</span></td></tr>
+          <tr><td class="muted">Logs / diagnostics</td><td><span class="muted">~/.compute-exchange logs (placeholder — opened from the app)</span></td></tr>
+        </tbody>
+      </table>
+      <p class="note">This worker's live throttle/effective-memory state is also visible to operators on the Admin tab (<code>/admin/workers</code>).</p>
+    </div>
+  </section>
+
+  <!-- ───────────────────────── BUYER ───────────────────────── -->
+  <section id="tab-buyer" class="hidden">
+    <div class="panel">
+      <h2>Buyer — submit job</h2>
+      <div class="grid2">
+        <div><label>Model</label><input id="b_model" value="all-minilm-l6-v2"></div>
+        <div><label>Job type</label>
+          <select id="b_type">
+            <option>embed</option><option>batch_infer</option><option>batch_classification</option>
+            <option>json_extraction</option><option>rerank</option><option>audio_transcribe</option>
+          </select>
+        </div>
+      </div>
+      <label>Input (JSONL, one record per line)</label>
+      <textarea id="b_input">{"text":"hello world"}
+{"text":"computexchange"}</textarea>
+      <label>Webhook URL <span class="muted">(placeholder — optional)</span></label>
+      <input id="b_webhook" placeholder="https://… (completion webhook)">
+      <div style="margin-top:12px"><button class="go" id="b_submit">Submit job (POST /v1/jobs)</button></div>
+      <div class="err" id="b_submitErr"></div>
+    </div>
+    <div class="panel">
+      <h2>Buyer — jobs</h2>
+      <table>
+        <thead><tr><th>Job ID</th><th>Type</th><th>Status</th><th>Tasks</th><th>Est $</th><th></th></tr></thead>
+        <tbody id="b_jobs"><tr><td colspan="6" class="muted">Submit a job — ids you submit here are tracked client-side.</td></tr></tbody>
+      </table>
+      <div class="err" id="b_jobsErr"></div>
+      <pre class="out hidden" id="b_results"></pre>
+    </div>
+  </section>
+
+  <!-- ───────────────────────── ADMIN ───────────────────────── -->
+  <section id="tab-admin" class="hidden">
+    <div class="panel">
+      <h2>Operator — workers <span class="muted">(GET /admin/workers — throttle + effective memory)</span></h2>
+      <table>
+        <thead><tr><th>Worker</th><th>HW class</th><th>Mem GB</th><th>Eff. GB</th><th>Throttled</th><th>Supplier status</th><th>Last seen</th></tr></thead>
+        <tbody id="a_workers"><tr><td colspan="7" class="muted">Save an admin key, then Refresh.</td></tr></tbody>
+      </table>
+      <div class="err" id="a_workersErr"></div>
+    </div>
+    <div class="grid2">
+      <div class="panel">
+        <h2>Jobs <span class="muted">(/admin/jobs)</span></h2>
+        <table><thead><tr><th>Job</th><th>Type</th><th>Status</th></tr></thead>
+          <tbody id="a_jobs"><tr><td colspan="3" class="muted">—</td></tr></tbody></table>
+        <div class="err" id="a_jobsErr"></div>
+      </div>
+      <div class="panel">
+        <h2>Payouts <span class="muted">(/admin/payouts)</span></h2>
+        <table><thead><tr><th>Supplier</th><th>Status</th><th>$</th></tr></thead>
+          <tbody id="a_payouts"><tr><td colspan="3" class="muted">—</td></tr></tbody></table>
+        <div class="err" id="a_payoutsErr"></div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Fraud flags <span class="muted">(/admin/fraud-flags)</span></h2>
+      <pre class="out" id="a_fraud">—</pre>
+      <div class="err" id="a_fraudErr"></div>
+    </div>
+    <div class="panel">
+      <h2>Stuck jobs &amp; incident response</h2>
+      <div class="ph">
+        Stuck/long-running jobs surface in the Jobs view above (status <b>running</b>/<b>verifying</b>
+        past their ETA). The control plane self-heals: <b>stale-task requeue</b> and
+        <b>straggler hedging</b> run automatically. Manual runbooks (requeue, payout
+        export, backup/restore, disaster recovery) live in <b>docs/RUNBOOKS.md</b>.
+        Backups: <code>make backup</code>; restore is proven by <code>make prove-local</code>'s disaster-recovery check.
+      </div>
+      <div style="margin-top:12px"><button class="go secondary" id="a_refresh">Refresh admin views</button></div>
+    </div>
+  </section>
+
+  <!-- ───────────────────────── WORKFLOWS (deferred) ───────────────────────── -->
+  <section id="tab-workflows" class="hidden">
+    <div class="panel">
+      <h2>Workflows / Pipelines</h2>
+      <div class="ph">
+        <b>Deferred for closed alpha.</b> The final workflow / pipeline / codebase UX
+        (the "IDE" idea) needs <b>product + design input</b> before it is built. There is
+        intentionally <b>no code editor</b> and no arbitrary code execution in alpha.
+        <br><br>
+        Today, multi-step work is expressed by submitting jobs (Buyer tab / <code>cx</code> CLI /
+        SDK / OpenAI-compatible Batch API). This panel is a named placeholder so the
+        surface is visible without implying a feature that does not exist yet.
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const LS = "cx_skeleton";
+const loadCfg = () => { try { return JSON.parse(localStorage.getItem(LS)) || {}; } catch { return {}; } };
+const saveCfg = (c) => localStorage.setItem(LS, JSON.stringify(c));
+const baseUrl = () => ($("baseUrl").value || "http://localhost:8080").replace(/\/+$/, "");
+const esc = (s) => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const pill = (s) => `<span class="pill ${esc(String(s).toLowerCase())}">${esc(s)}</span>`;
+let jobIds = loadCfg().jobIds || [];
+
+// Authenticated fetch; surfaces status + body verbatim on any non-2xx (never faked).
+async function api(method, path, key, body) {
+  const opt = { method, headers: {} };
+  if (key) opt.headers["Authorization"] = "Bearer " + key;
+  if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
+  const resp = await fetch(baseUrl() + path, opt);
+  const text = await resp.text();
+  if (!resp.ok) throw new Error(method + " " + path + " -> " + resp.status + " " + resp.statusText + "\n" + text.trim());
+  return text ? JSON.parse(text) : {};
+}
+
+// --- tabs ---
+document.querySelectorAll("nav button").forEach(btn => btn.addEventListener("click", () => {
+  document.querySelectorAll("nav button").forEach(b => b.classList.toggle("active", b === btn));
+  ["supplier","buyer","admin","workflows"].forEach(t => $("tab-" + t).classList.toggle("hidden", t !== btn.dataset.tab));
+  if (btn.dataset.tab === "admin") refreshAdmin();
+  if (btn.dataset.tab === "buyer") refreshJobs();
+}));
+
+// --- buyer ---
+async function submitJob() {
+  $("b_submitErr").textContent = "";
+  const lines = $("b_input").value.split("\n").map(s => s.trim()).filter(Boolean);
+  if (!lines.length) { $("b_submitErr").textContent = "input is empty"; return; }
+  const body = {
+    job_type: { type: $("b_type").value },
+    model: { kind: "gguf", ref: $("b_model").value.trim() },
+    constraints: { min_memory_gb: 0 },
+    verification: { redundancy_frac: 0, honeypot_frac: 0, payout_hold_secs: 0 },
+    tier: "batch",
+    input: lines.join("\n") + "\n",
+  };
+  if ($("b_webhook").value.trim()) body.webhook_url = $("b_webhook").value.trim();
+  try {
+    const res = await api("POST", "/v1/jobs", $("apiKey").value, body);
+    if (res.job_id && !jobIds.includes(res.job_id)) { jobIds.unshift(res.job_id); const c = loadCfg(); c.jobIds = jobIds; saveCfg(c); }
+    refreshJobs();
+  } catch (e) { $("b_submitErr").textContent = e.message; }
+}
+async function refreshJobs() {
+  if (!jobIds.length) return;
+  $("b_jobsErr").textContent = "";
+  try {
+    const rows = await Promise.all(jobIds.map(async id => {
+      const j = await api("GET", "/v1/jobs/" + id, $("apiKey").value);
+      const est = (j.actual_usd > 0) ? j.actual_usd : j.estimated_usd;
+      return `<tr><td class="id">${esc(id)}</td><td>${esc(j.job_type||"?")}</td><td>${pill(j.status||"?")}</td>
+        <td>${esc(j.tasks_done??0)}/${esc(j.task_count??0)}</td><td>$${Number(est||0).toFixed(4)}</td>
+        <td><a class="muted" style="cursor:pointer" data-r="${esc(id)}">results</a></td></tr>`;
+    }));
+    $("b_jobs").innerHTML = rows.join("");
+  } catch (e) { $("b_jobsErr").textContent = e.message; }
+}
+async function showResults(id) {
+  const out = $("b_results"); out.classList.remove("hidden"); out.textContent = "loading " + id + " …";
+  try {
+    const r = await api("GET", "/v1/jobs/" + id + "/results", $("apiKey").value);
+    const url = r.results_url || (r.result_urls && r.result_urls[0]);
+    if (!url) { out.textContent = "no results yet (status " + (r.status||"?") + ")"; return; }
+    const resp = await fetch(url); const text = await resp.text();
+    out.textContent = resp.ok ? text.slice(0, 20000) : ("download -> " + resp.status + "\n" + text);
+  } catch (e) { out.textContent = "error: " + e.message; }
+}
+
+// --- admin ---
+async function refreshAdmin() {
+  const key = $("adminKey").value;
+  // Workers — the throttle + effective-memory surface.
+  try {
+    const ws = await api("GET", "/admin/workers", key);
+    $("a_workersErr").textContent = "";
+    $("a_workers").innerHTML = (ws||[]).map(w => `<tr>
+      <td class="id">${esc((w.id||"").slice(0,8))}…</td><td>${esc(w.hw_class||"?")}</td>
+      <td>${Number(w.memory_gb||0).toFixed(0)}</td><td>${Number(w.effective_memory_gb||0).toFixed(0)}</td>
+      <td>${w.throttled ? pill("throttled") : pill("ok")}</td><td>${pill(w.status||"?")}</td>
+      <td class="muted">${esc(w.last_seen_at||"—")}</td></tr>`).join("")
+      || `<tr><td colspan="7" class="muted">no workers</td></tr>`;
+  } catch (e) { $("a_workersErr").textContent = e.message; }
+  // Jobs
+  try {
+    const js = await api("GET", "/admin/jobs", key); $("a_jobsErr").textContent = "";
+    $("a_jobs").innerHTML = (js||[]).slice(0,50).map(j => `<tr><td class="id">${esc((j.id||"").slice(0,8))}…</td><td>${esc(j.job_type||"?")}</td><td>${pill(j.status||"?")}</td></tr>`).join("") || `<tr><td colspan="3" class="muted">none</td></tr>`;
+  } catch (e) { $("a_jobsErr").textContent = e.message; }
+  // Payouts
+  try {
+    const ps = await api("GET", "/admin/payouts", key); $("a_payoutsErr").textContent = "";
+    $("a_payouts").innerHTML = (ps||[]).map(p => `<tr><td class="id">${esc((p.supplier_id||"").slice(0,8))}…</td><td>${pill(p.payout_status||"?")}</td><td>$${Number(p.amount_usd||0).toFixed(2)}</td></tr>`).join("") || `<tr><td colspan="3" class="muted">none</td></tr>`;
+  } catch (e) { $("a_payoutsErr").textContent = e.message; }
+  // Fraud
+  try {
+    const f = await api("GET", "/admin/fraud-flags", key); $("a_fraudErr").textContent = "";
+    $("a_fraud").textContent = JSON.stringify(f, null, 2);
+  } catch (e) { $("a_fraudErr").textContent = e.message; }
+}
+
+// --- wiring ---
+$("saveBtn").addEventListener("click", () => {
+  const c = loadCfg(); c.baseUrl = $("baseUrl").value; c.apiKey = $("apiKey").value; c.adminKey = $("adminKey").value; saveCfg(c);
+});
+$("b_submit").addEventListener("click", submitJob);
+$("b_jobs").addEventListener("click", ev => { const r = ev.target.getAttribute("data-r"); if (r) showResults(r); });
+$("a_refresh").addEventListener("click", refreshAdmin);
+
+(function init() {
+  const c = loadCfg();
+  $("baseUrl").value = c.baseUrl || "http://localhost:8080";
+  $("apiKey").value = c.apiKey || ""; $("adminKey").value = c.adminKey || "";
+})();
+</script>
+</body>
+</html>

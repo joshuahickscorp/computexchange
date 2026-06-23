@@ -1,0 +1,40 @@
+# Computexchange — control plane (Go) image. Multi-stage: build a fully static
+# binary, then ship it on distroless (no shell, no libc surface). The control
+# plane is pure-Go (pgx + google/uuid; no cgo), so CGO_ENABLED=0 yields a static
+# binary that runs on `gcr.io/distroless/static`.
+#
+# Build:  docker build -f Dockerfile.control -t cx-control .
+# Run:    docker run --rm -p 8080:8080 --env-file .env cx-control
+#
+# NOTE: there is deliberately NO Dockerfile for the Rust agent. The agent uses
+# Candle + Metal for on-device inference, and Metal is unavailable inside Linux
+# containers — the agent MUST run natively on macOS. See README "Why no agent
+# image".
+
+# ── build stage ───────────────────────────────────────────────────────────────
+FROM golang:1.26 AS build
+WORKDIR /src
+
+# Module graph first, for layer-cached `go mod download`.
+COPY control/go.mod control/go.sum ./control/
+WORKDIR /src/control
+RUN go mod download
+
+# Source, then build a static binary.
+COPY control/ ./
+# CGO off → static binary; trimpath + ldflags -s -w strip debug bloat.
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /control .
+
+# ── final stage ───────────────────────────────────────────────────────────────
+FROM gcr.io/distroless/static:nonroot
+WORKDIR /
+
+# The binary and the authoritative schema (so the image can self-document /
+# bootstrap the DB; the control plane reads DATABASE_URL at runtime).
+COPY --from=build /control /control
+COPY db/schema.sql /db/schema.sql
+
+EXPOSE 8080
+# distroless/static:nonroot already runs as uid 65532; be explicit.
+USER nonroot:nonroot
+ENTRYPOINT ["/control"]

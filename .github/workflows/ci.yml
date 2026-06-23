@@ -1,0 +1,169 @@
+# Computexchange — CI. Three independent jobs, each a real gate that fails
+# loudly (no `|| true`, no soft-skip): the Go control plane (build + vet + gofmt
+# + tests against live Postgres & MinIO), the Rust agent (fmt + clippy + build +
+# the non-ignored test set, on macOS for Candle/Metal), and a schema apply that
+# asserts db/schema.sql loads cleanly into Postgres 17.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Control plane (Go) ───────────────────────────────────────────────────────
+  control:
+    name: control (go)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: cx
+          POSTGRES_PASSWORD: cx
+          POSTGRES_DB: cx
+        ports:
+          - 5432:5432
+        # Gate the job on the DB actually accepting connections.
+        options: >-
+          --health-cmd "pg_isready -U cx -d cx"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      minio:
+        # bitnami/minio starts the server on launch (no custom command needed,
+        # which a services: entry can't reliably set) and creates the bucket from
+        # MINIO_DEFAULT_BUCKETS — so the control plane finds cx-jobs at startup.
+        image: bitnami/minio:latest
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+          MINIO_DEFAULT_BUCKETS: cx-jobs
+        ports:
+          - 9000:9000
+          - 9001:9001
+        options: >-
+          --health-cmd "curl -fsS http://localhost:9000/minio/health/live || exit 1"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://cx:cx@localhost:5432/cx?sslmode=disable
+      S3_ENDPOINT: http://localhost:9000
+      S3_PUBLIC_ENDPOINT: http://localhost:9000
+      S3_BUCKET: cx-jobs
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: control/go.sum
+      - name: install psql client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: apply schema (base tables for the integration suite)
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/schema.sql
+      - name: build
+        run: cd control && go build ./...
+      - name: vet
+        run: cd control && go vet ./...
+      - name: gofmt (must be clean)
+        run: |
+          cd control
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt found unformatted files:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: test (unit, no infra)
+        run: cd control && go test ./...
+      - name: test (integration matrix — live Postgres + MinIO)
+        run: cd control && go test -tags integration -count=1 ./...
+
+  # ── Supplier agent (Rust) ────────────────────────────────────────────────────
+  # macOS so Candle's default `metal` feature compiles (Metal is unavailable on
+  # Linux runners). cargo test runs the non-ignored set; the three model-download
+  # integration tests are #[ignore]d and not exercised here.
+  agent:
+    name: agent (rust)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent
+      - name: fmt (check)
+        run: cd agent && cargo fmt --check
+      - name: clippy (deny warnings)
+        run: cd agent && cargo clippy -- -D warnings
+      - name: build
+        run: cd agent && cargo build
+      - name: test (non-ignored)
+        run: cd agent && cargo test
+
+  # ── Supplier agent — CUDA lane (Linux) ───────────────────────────────────────
+  # Compile-gate the NVIDIA/CUDA build so the lane can't silently rot. Installs the
+  # CUDA toolkit (no GPU needed to COMPILE + link Candle's CUDA kernels) and builds
+  # with --features cuda, mirroring the RunPod build (docs/RUNPOD_SPIKE.md). It does
+  # NOT run — CI has no NVIDIA GPU; runtime is verified on a real GPU host (prove-cuda).
+  # The CUDA toolkit version may need bumping as Candle/cudarc move.
+  agent-cuda:
+    name: agent (cuda build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install CUDA toolkit (nvcc, no GPU required to build)
+        uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: "12.4.0"
+          method: network
+          sub-packages: '["nvcc", "cudart"]'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent
+      - name: build (cuda feature)
+        run: cd agent && cargo build --no-default-features --features cuda
+
+  # ── Schema apply ─────────────────────────────────────────────────────────────
+  # Assert the single authoritative schema loads into Postgres 17 with no error.
+  # ON_ERROR_STOP=1 turns any SQL error into a non-zero psql exit, failing the job.
+  schema:
+    name: schema (psql apply)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: cx
+          POSTGRES_PASSWORD: cx
+          POSTGRES_DB: cx
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cx -d cx"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: install psql client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: apply schema (idempotent — apply twice to prove re-runnability)
+        env:
+          PGPASSWORD: cx
+        run: |
+          psql -h localhost -U cx -d cx -v ON_ERROR_STOP=1 -f db/schema.sql
+          psql -h localhost -U cx -d cx -v ON_ERROR_STOP=1 -f db/schema.sql

@@ -1,0 +1,51 @@
+# ── Build artifacts ──────────────────────────────────────────────────────────
+# Rust (agent/)
+agent/target/
+**/*.rs.bk
+# Go (control/) — compiled binaries and test/coverage output
+control/control
+control/**/*.test
+cli/cli
+*.out
+coverage.out
+# Swift (macapp/) build products
+macapp/.build/
+# Python (sdk/) caches
+**/__pycache__/
+*.pyc
+
+# ── Local run artifacts ──────────────────────────────────────────────────────
+# scripts/prove-local.sh writes its throwaway Postgres/MinIO data, logs, and the
+# proof ledger under .artifacts/. Logs and pidfiles from any ad-hoc local runs.
+# Never commit these.
+.artifacts/
+scripts/*.log
+*.log
+*.pid
+
+# ── Secrets / local config ───────────────────────────────────────────────────
+.env
+.env.local
+# The agent's runtime config holds a worker token — commit agent.example.toml,
+# never the real one.
+agent/agent.toml
+
+# ── Editor / OS cruft ────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# ── PROTECTED ASSETS (SACRED — see BLACKHOLE.md) ─────────────────────────────
+# Models, weights, datasets, and caches are expensive or impossible to
+# regenerate. They are gitignored so they are NEVER committed, but they must
+# NEVER be deleted or moved either: a user who pulled a model yesterday still
+# has it working today. The collapse restructures the code that loads them, not
+# the artifacts. Do not `git clean` these away.
+models/
+data/
+*.gguf
+*.safetensors
+*.mlx
+*.bin
