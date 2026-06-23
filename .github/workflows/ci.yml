@@ -116,20 +116,23 @@ jobs:
   agent-cuda:
     name: agent (cuda build)
     runs-on: ubuntu-latest
+    # Run IN the CUDA devel image — it ships nvcc + the dev libs Candle needs to
+    # COMPILE the NVIDIA lane (no GPU required to build, no flaky toolkit-install
+    # action). Mirrors Dockerfile.agent's build stage. Runtime is proven on real
+    # NVIDIA hardware (docs/RUNPOD_SPIKE.md + the A100 trial), not here.
+    container: nvidia/cuda:12.4.1-devel-ubuntu22.04
     steps:
       - uses: actions/checkout@v4
-      - name: install CUDA toolkit (nvcc, no GPU required to build)
-        uses: Jimver/cuda-toolkit@v0.2.19
-        with:
-          cuda: "12.4.0"
-          method: network
-          sub-packages: '["nvcc", "cudart"]'
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: agent
+      - name: install build deps + rust
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y -qq curl build-essential pkg-config libssl-dev ca-certificates
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
       - name: build (cuda feature)
-        run: cd agent && cargo build --no-default-features --features cuda
+        run: |
+          . "$HOME/.cargo/env"
+          cd agent && cargo build --no-default-features --features cuda
 
   # ── Schema apply ─────────────────────────────────────────────────────────────
   # Assert the single authoritative schema loads into Postgres 17 with no error.
