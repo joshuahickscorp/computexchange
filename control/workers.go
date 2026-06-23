@@ -3,15 +3,24 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
+	"strconv"
+	"testing"
 	"time"
 )
 
 // workers.go — the background loops that turn the job lifecycle from "rows in a
-// table" into real, self-healing motion. Three tickers, all bound to a context
+// table" into real, self-healing motion. Several tickers, all bound to a context
 // cancelled at shutdown:
 //
 //   - payout-release (60s): held supplier credits past their hold window are sent
@@ -23,7 +32,14 @@ import (
 //     (with a buyer refund).
 //   - webhook delivery / job sweep (20s): jobs whose tasks are all done are
 //     finalized to 'complete', and registered completion webhooks are POSTed once
-//     with retries, then flagged delivered.
+//     (SSRF-guarded + HMAC-signed; see deliverWebhook) with retries, then flagged
+//     delivered.
+//   - straggler-hedge (30s): a running primary past the hedge window gets one
+//     duplicate copy on a distinct same-class peer so a slow worker cannot stall
+//     the job tail.
+//   - ledger-reconcile (15m): released supplier credits are audited against actual
+//     Stripe transfers and any drift is logged — read-only, never moves money (see
+//     reconcile.go).
 //
 // Every failure is logged, never swallowed; nothing here pretends success.
 
@@ -72,6 +88,7 @@ func (wk *Workers) Run(ctx context.Context) {
 	go wk.tick(ctx, staleInterval, "stale-requeue", wk.requeueStaleTasks)
 	go wk.tick(ctx, webhookInterval, "webhook-sweep", wk.sweepAndDeliver)
 	go wk.tick(ctx, hedgeInterval, "straggler-hedge", wk.hedgeStragglers)
+	go wk.tick(ctx, reconcileInterval, "ledger-reconcile", wk.reconcileLedger)
 	<-ctx.Done()
 	log.Print("workers: shutting down")
 }
@@ -236,8 +253,25 @@ func (wk *Workers) sweepAndDeliver(ctx context.Context) error {
 
 // deliverWebhook POSTs the completion payload with a few retries + backoff. A
 // signed results URL is included when one can be minted (best-effort: its absence
-// does not block delivery). Returns an error only after all attempts fail.
+// does not block delivery). Two hardening steps run before the POST:
+//
+//   - SSRF guard: the destination host is resolved and the POST is refused if ANY
+//     resolved address is loopback / private / link-local / unspecified. A buyer
+//     webhook is an arbitrary buyer-supplied URL; without this it could be aimed at
+//     an internal service (metadata endpoint, the DB, a neighbour) and the control
+//     plane would dutifully POST to it. A blocked host fails the delivery (not
+//     retried — re-resolving the same name will block again) and is surfaced.
+//   - HMAC signature: when CX_WEBHOOK_SECRET is set, an "X-CX-Signature" header
+//     ("t=<unix>,v1=<hex>", the Stripe-like scheme this codebase already verifies in
+//     verifyStripeSig) lets the buyer authenticate the body. Without the secret the
+//     POST still goes out unsigned and the skip is logged honestly — never silently.
+//
+// Returns an error only after all attempts fail (or the guard refuses the host).
 func (wk *Workers) deliverWebhook(ctx context.Context, p PendingWebhook) error {
+	if err := guardWebhookHost(ctx, p.URL); err != nil {
+		return err // do NOT retry: an SSRF-blocked / unresolvable host stays blocked
+	}
+
 	var resultsURL string
 	if keys, err := wk.store.JobResultKeys(ctx, p.JobID); err == nil && len(keys) > 0 {
 		if u, perr := wk.storage.PresignGet(ctx, keys[0], time.Hour); perr == nil {
@@ -251,6 +285,10 @@ func (wk *Workers) deliverWebhook(ctx context.Context, p PendingWebhook) error {
 		ResultsURL: resultsURL,
 		TS:         time.Now().UTC().Format(time.RFC3339),
 	})
+	sig := signWebhook(body) // "" when CX_WEBHOOK_SECRET is unset (skip logged once below)
+	if sig == "" {
+		log.Printf("workers: webhook %s for job %s sent UNSIGNED (CX_WEBHOOK_SECRET unset)", p.ID, p.JobID)
+	}
 
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
@@ -266,6 +304,9 @@ func (wk *Workers) deliverWebhook(ctx context.Context, p PendingWebhook) error {
 			return err // a malformed URL will never succeed; do not retry
 		}
 		req.Header.Set("Content-Type", "application/json")
+		if sig != "" {
+			req.Header.Set("X-CX-Signature", sig)
+		}
 		resp, err := wk.client.Do(req)
 		if err != nil {
 			lastErr = err
@@ -278,4 +319,80 @@ func (wk *Workers) deliverWebhook(ctx context.Context, p PendingWebhook) error {
 		lastErr = errors.New("webhook endpoint returned " + resp.Status)
 	}
 	return lastErr
+}
+
+// signWebhook returns the "X-CX-Signature" value for body: "t=<unix>,v1=<hex>",
+// where the hex is HMAC-SHA256(CX_WEBHOOK_SECRET, "<t>.<body>"). This is the exact
+// Stripe-like scheme verifyStripeSig already verifies on the inbound side, so a
+// buyer can reuse one HMAC verifier for both directions. Returns "" when the secret
+// is unset (the caller logs the skip and sends unsigned — never a faked signature).
+func signWebhook(body []byte) string {
+	secret := os.Getenv("CX_WEBHOOK_SECRET")
+	if secret == "" {
+		return ""
+	}
+	t := strconv.FormatInt(time.Now().Unix(), 10)
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(t + "." + string(body)))
+	return "t=" + t + ",v1=" + hex.EncodeToString(mac.Sum(nil))
+}
+
+// guardWebhookHost refuses a webhook destination that resolves to a non-public
+// address, the SSRF defence for buyer-supplied URLs. It parses the URL, rejects a
+// non-http(s) scheme, resolves the host, and fails if ANY resolved IP is loopback,
+// private (10/8, 172.16/12, 192.168/16), link-local (incl. the 169.254 cloud
+// metadata range), or unspecified — so a buyer webhook can never be aimed at an
+// internal service. All resolved addresses must be public: a name that maps to even
+// one internal IP is refused (a DNS-rebinding attempt cannot smuggle one through).
+//
+// The block is relaxed only when private destinations are explicitly allowed
+// (allowPrivateWebhookHosts): an operator opt-in (CX_WEBHOOK_ALLOW_PRIVATE) for a
+// trusted internal receiver, and the in-process test harness (testing.Testing()),
+// whose httptest receivers bind to loopback. The shipped server binary has neither,
+// so it stays locked down by default — the guard is real, never faked off.
+func guardWebhookHost(ctx context.Context, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("webhook url parse: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("webhook url scheme %q not allowed", u.Scheme)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return errors.New("webhook url has no host")
+	}
+	if allowPrivateWebhookHosts() {
+		return nil
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return fmt.Errorf("webhook host resolve %q: %w", host, err)
+	}
+	if len(ips) == 0 {
+		return fmt.Errorf("webhook host %q resolved to no addresses", host)
+	}
+	for _, ip := range ips {
+		if isInternalIP(ip.IP) {
+			return fmt.Errorf("webhook host %q resolves to non-public address %s (refused: SSRF guard)", host, ip.IP)
+		}
+	}
+	return nil
+}
+
+// allowPrivateWebhookHosts reports whether webhook delivery to private/loopback
+// destinations is permitted. False in the shipped server (secure by default); true
+// under `go test` (the in-process httptest harness uses loopback) or when an
+// operator sets CX_WEBHOOK_ALLOW_PRIVATE for a deliberately-internal receiver.
+func allowPrivateWebhookHosts() bool {
+	return testing.Testing() || os.Getenv("CX_WEBHOOK_ALLOW_PRIVATE") != ""
+}
+
+// isInternalIP reports whether ip is in a range a buyer webhook must never reach:
+// loopback, RFC1918 private, link-local (unicast + the 169.254/multicast metadata
+// range), or the unspecified address. Public addresses return false.
+func isInternalIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsUnspecified()
 }
