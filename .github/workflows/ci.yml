@@ -134,6 +134,13 @@ jobs:
           apt-get install -y -qq curl build-essential pkg-config libssl-dev ca-certificates
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
       - name: build (cuda feature)
+        env:
+          # candle-kernels probes nvidia-smi for the GPU compute capability at BUILD
+          # time, but no GPU is present during a container build (only at docker run
+          # --gpus all). Pin it so the kernels compile headless (sm_80 = A100, the
+          # trial target); other archs JIT from PTX at runtime. Without this the build
+          # fails at ComputeCapDetectionFailed before our code is ever compiled.
+          CUDA_COMPUTE_CAP: "80"
         run: |
           . "$HOME/.cargo/env"
           cd agent && cargo build --no-default-features --features cuda
