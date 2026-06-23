@@ -41,8 +41,8 @@ func NewVerifier(s *Store) *Verifier { return &Verifier{store: s} }
 // tiebreak vote (gather all committed results for a chunk and compare them).
 func (v *Verifier) WithStorage(st *Storage) *Verifier { v.storage = st; return v }
 
-// verifyTaskResult runs the layered V1 verification for a freshly committed
-// task and applies reputation/payout side effects. It mirrors the action plan:
+// verifyTaskResult runs the layered verification for a freshly committed task
+// and applies reputation/payout side effects. It mirrors the action plan:
 //
 //	Step 1  honeypot check     — compare to known answer; dock + requeue on fail
 //	Step 2  redundancy compare — same hw_class; mismatch → majority vote + dock
@@ -50,14 +50,51 @@ func (v *Verifier) WithStorage(st *Storage) *Verifier { v.storage = st; return v
 //	                             one documented next step; the compare is real)
 //	Step 3  schedule payout    — ledger entries with the hold window
 //
+// Verification V2 (reputation-weighted): the per-probe verification COST is made
+// adaptive to the committing supplier's reputation. A high-reputation supplier
+// (above the trusted floor, verifyTrustFloor) has its honeypot comparison and its
+// costly third-worker tiebreak re-dispatch SAMPLED — performed only a fraction of
+// the time (effectiveCheckProb), shrinking toward verifyCheckProbFloor but NEVER to
+// zero, so even the most trusted worker is still audited regularly. A supplier at or
+// below the floor is checked at the full rate (probability 1.0), so a fresh/low-rep
+// worker is checked the most. Sampling only ever skips SPENDING a check; it never
+// suppresses a failure a check actually found, and a skipped check is never reported
+// as a pass (BLACKHOLE: never fabricate a pass). The within-hardware-class
+// comparison rule is unchanged. Reputation is read with the same live matching view
+// the peer selector uses (committingReputation); when it cannot be determined the
+// safe default is full checking.
+//
 // commitBytes is the worker's committed result, fetched from object storage by
 // the caller (api.go) using the canonical result key. redundancyBytes is a
 // committed peer's result when one exists for the same input chunk, else nil.
 func (v *Verifier) verifyTaskResult(ctx context.Context, info *CommitTaskInfo, commit TaskCommit, commitBytes, redundancyBytes []byte) (VerifyOutcome, error) {
+	// Reputation-weighted check budget for this committing supplier (V2). checkProb
+	// is the probability we SPEND a sampled probe (honeypot comparison / tiebreak
+	// re-dispatch) on this task; checkSampled draws a deterministic per-task decision
+	// from it. The reputation read behind it is LAZY (memoized) so a plain non-probe
+	// primary — the common commit — never pays for the lookup; it is fetched at most
+	// once, only when a sampled branch is actually reached. A supplier at or below
+	// verifyTrustFloor (or whose reputation we cannot read) gets 1.0 — always checked.
+	var checkProbCached float64
+	var checkProbDone bool
+	checkProb := func() float64 {
+		if !checkProbDone {
+			checkProbCached = v.effectiveCheckProb(ctx, info)
+			checkProbDone = true
+		}
+		return checkProbCached
+	}
+
 	// Step 1: honeypot. The known answer is keyed by (job_type, input_ref) — the
 	// honeypot task's input chunk, NOT its result key — and we compare it against
-	// the worker's committed result bytes (commitBytes).
-	if info.IsHoneypot {
+	// the worker's committed result bytes (commitBytes). The comparison is sampled
+	// by reputation (V2): a trusted supplier's honeypot is verified only a fraction
+	// of the time. When sampled OUT we do not look at the known answer at all — the
+	// task falls through to the ordinary success path, exactly as a non-probe task
+	// would. This is reduced audit FREQUENCY, never a fabricated honeypot pass: we
+	// only skip checks for suppliers already above the trusted floor, and even they
+	// keep a verifyCheckProbFloor chance of being checked every task.
+	if info.IsHoneypot && v.checkSampled(info.TaskID, checkProb()) {
 		known, err := v.store.GetHoneypotAnswer(ctx, jobTypeOf(info), info.InputRef)
 		if err != nil && !errors.Is(err, errNotFound) {
 			return OutcomeFail, err
@@ -119,13 +156,19 @@ func (v *Verifier) verifyTaskResult(ctx context.Context, info *CommitTaskInfo, c
 			// are fine — they are tiny deltas applied once per commit.
 			return v.resolveTiebreak(ctx, info, all)
 		case len(all) == 2 && !resultsAgree(info.jobType, all[0].bytes, all[1].bytes):
-			// Two same-class results disagree. Dispatch a third, distinct same-class
-			// worker (excluding both that already ran the chunk) to break the tie,
-			// unless one is already pending. The committing worker is NOT docked yet
-			// — the vote decides. With no third worker available we cannot get a
-			// majority, so we provisionally trust the primary (no credit either way).
-			if err := v.dispatchTiebreak(ctx, info, all); err != nil {
-				return OutcomePassWithPenalty, err
+			// Two same-class results disagree — a real, DETECTED mismatch
+			// (pass_with_penalty regardless of what follows; the caller bumps the
+			// mismatch metric). Breaking the tie costs a third worker re-running the
+			// chunk, so that re-dispatch is the expensive part we sample by reputation
+			// (V2): for a trusted supplier a lone disagreement is more likely benign
+			// jitter, so we skip the third opinion a fraction of the time and trust the
+			// primary provisionally — no credit either way. A supplier at or below the
+			// trusted floor always gets the tiebreak. Detection is never suppressed:
+			// the outcome stays pass_with_penalty whether or not we re-dispatch.
+			if v.checkSampled(info.TaskID, checkProb()) {
+				if err := v.dispatchTiebreak(ctx, info, all); err != nil {
+					return OutcomePassWithPenalty, err
+				}
 			}
 			return OutcomePassWithPenalty, nil
 		default:
@@ -135,6 +178,20 @@ func (v *Verifier) verifyTaskResult(ctx context.Context, info *CommitTaskInfo, c
 				return OutcomePass, err
 			}
 		}
+	} else if info.IsRedundancy {
+		// Redundancy-coverage gap, made EXPLICIT (V2): this task was injected
+		// specifically to give its chunk a redundant peer to compare against, yet no
+		// committed peer result was found (the primary has not landed, or its object
+		// could not be read). We must NOT silently emit a clean pass for a chunk that
+		// was supposed to be cross-checked and was not. The work itself is provisionally
+		// accepted and the worker — blameless for a missing sibling — is still credited
+		// task success below, but the outcome is surfaced as pass_with_penalty so the
+		// missing coverage is visible (the caller bumps the verification-mismatch metric)
+		// rather than being lost (BLACKHOLE: surface every gap, never fabricate a pass).
+		if err := v.store.DockReputation(ctx, info.SupplierID, EventTaskSuccess); err != nil {
+			return OutcomePassWithPenalty, err
+		}
+		return OutcomePassWithPenalty, nil
 	}
 
 	// Step 3: success path — credit reputation. Payout scheduling (ledger
@@ -144,6 +201,92 @@ func (v *Verifier) verifyTaskResult(ctx context.Context, info *CommitTaskInfo, c
 		return OutcomePass, err
 	}
 	return OutcomePass, nil
+}
+
+// Reputation-weighted verification tuning (V2).
+//
+//   - verifyTrustFloor: at or below this reputation, every probe is checked at the
+//     full rate (probability 1.0). It is the action plan's trusted-tier reputation
+//     gate (reputationTier tier-3 threshold): only suppliers ABOVE it have earned
+//     the reduced-audit margin. Anchoring the band here keeps a 0.90-reputation
+//     supplier fully checked.
+//   - verifyCheckProbFloor: the LOWEST a sampled-probe probability ever drops to,
+//     for a maxed-out 1.0-reputation supplier. It is strictly > 0 so checks are
+//     never disabled — even the most trusted worker is audited ~1 task in 4.
+const (
+	verifyTrustFloor     = 0.90
+	verifyCheckProbFloor = 0.25
+)
+
+// effectiveCheckProb is the probability that a sampled probe (honeypot comparison
+// or tiebreak re-dispatch) is SPENT on this committing supplier's task, derived
+// from its reputation. At or below verifyTrustFloor → 1.0 (always check, so low-rep
+// suppliers are checked the most). Above the floor it ramps linearly down to
+// verifyCheckProbFloor at reputation 1.0, so the more trusted a supplier the less
+// often (but never zero) we pay to re-verify it. When reputation cannot be read
+// (the worker is not in the live matching view) the safe default is 1.0 — unknown
+// trust is treated as untrusted, never as a license to skip checks.
+func (v *Verifier) effectiveCheckProb(ctx context.Context, info *CommitTaskInfo) float64 {
+	rep, ok := v.committingReputation(ctx, info)
+	if !ok || rep <= verifyTrustFloor {
+		return 1.0
+	}
+	if rep > 1.0 {
+		rep = 1.0
+	}
+	// Linear interpolation from 1.0 at verifyTrustFloor to verifyCheckProbFloor at 1.0.
+	frac := float64(rep-verifyTrustFloor) / float64(1.0-verifyTrustFloor)
+	prob := 1.0 - frac*(1.0-verifyCheckProbFloor)
+	if prob < verifyCheckProbFloor {
+		prob = verifyCheckProbFloor
+	}
+	return prob
+}
+
+// committingReputation reads the committing worker's supplier reputation from the
+// SAME live matching view SelectRedundancyPeerExcluding uses (CandidateWorkers,
+// keyed by the task's job type / model / memory). The worker just committed, so it
+// is live and present in that set; we find its row by worker id. ok is false when
+// the worker is not in the candidate set (e.g. it went stale, or the store read
+// failed) — the caller then defaults to full checking. This uses only existing
+// store reads; it adds no query of its own.
+func (v *Verifier) committingReputation(ctx context.Context, info *CommitTaskInfo) (float32, bool) {
+	if info.WorkerID == uuid.Nil {
+		return 0, false
+	}
+	cands, err := v.store.CandidateWorkers(ctx, info.jobType, info.ModelRef, info.MinMemoryGB)
+	if err != nil {
+		return 0, false // a read failure must not silently lower the check rate
+	}
+	for _, c := range cands {
+		if c.ID == info.WorkerID {
+			return c.Reputation, true
+		}
+	}
+	return 0, false
+}
+
+// checkSampled draws a DETERMINISTIC per-task decision for whether to spend a
+// sampled probe, true meaning "run the check this time". prob >= 1.0 is always
+// true (full checking), and a non-positive prob also returns true (defensive: the
+// floor keeps prob > 0, but a degenerate value must never disable checks). Otherwise
+// it compares a stable [0,1) value derived from the task id's own bytes against
+// prob, so the decision is identical across commit retries (idempotent) and
+// uniformly spread across tasks without any RNG state or new dependency.
+func (v *Verifier) checkSampled(taskID uuid.UUID, prob float64) bool {
+	if prob >= 1.0 || prob <= 0 {
+		return true
+	}
+	return taskSample(taskID) < prob
+}
+
+// taskSample maps a task id to a stable, uniformly distributed value in [0,1) by
+// reading the first 8 bytes of its 16-byte UUID as a big-endian unsigned integer
+// and dividing by 2^64. Deterministic and dependency-free (encoding/binary is
+// already imported for the binary embed artifact).
+func taskSample(taskID uuid.UUID) float64 {
+	hi := binary.BigEndian.Uint64(taskID[:8])
+	return float64(hi) / float64(1<<64)
 }
 
 // chunkVote is one committed result for a chunk plus the bytes the vote compares.
