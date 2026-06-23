@@ -272,10 +272,9 @@ curated runners (Blender, a CFD solver) where verified-output beats metered.
 
 "Power per buck" = throughput per GPU-second. Findings + roadmap, grounded in real numbers:
 
-- **Batched generation — SHIPPED, +4.4×.** `batch_infer` length-buckets prompts and runs B sequences per forward pass (`runners.rs::generate_batch`). A100: **221 → 979 tok/s** on a 48-token workload, **output byte-identical to serial** (verified). Same GPU-hour, 4.4× the batch work.
-- **FP16 embeddings — SHIPPED, neutral on tiny models.** Correct GPU default (half memory) but MiniLM-L6 is launch/overhead-bound on an A100 → micro-bench flat. Pays off on larger embed models / bigger batches.
-- **Batched PREFILL — NEXT (the rest of the generation win).** candle's quantized-llama slices the last position non-contiguously for bsz>1 (its quantized matmul rejects it), so we prefill token-by-token today (gives up within-prompt parallelism → only ~1.8× on 1-token jobs). Fix: vendor a patched `quantized_llama` with a `.contiguous()` before the output projection → true batched prefill. Re-test on an A100.
-- **Wire `generate_batch` into `batch_classification`** — same method; classification batches across many short generations (easy win, scaffolded).
+- **Batched generation — SHIPPED, 6.5× on A100, all three LLM job types.** `batch_infer`, `batch_classification`, and `json_extraction` length-bucket prompts and run B sequences per forward pass (`runners.rs::generate_batch`). A100: **222 → ~1350 tok/s**, **output byte-identical to serial** — verified across all three. Same GPU-hour, 6.5× the batch work.
+- **Batched PREFILL — SHIPPED** via a vendored, one-line-patched candle `quantized_llama` (`quantized_llama_batched.rs`: `.contiguous()` on the output-projection slice so the bsz>1 quantized matmul succeeds). This took it from 4.4× (token-by-token prefill) to 6.5×.
+- **FP16 embeddings — TRIED & REVERTED.** Zero throughput gain (MiniLM is overhead-bound on an A100) and it degraded precision enough to flip rerank ordering + fail the embed test. Embeddings stay FP32. *Lesson: optimize the compute-bound path, not the overhead-bound one.*
 - **Hardware-matched routing** — scheduler should prefer the *cheapest hardware that's compute-bound* for the job (small/embeddings → cheap/Apple; big models → A100). Power-per-buck at the marketplace level.
 - **Chunk sizing by worker class** — `adaptiveSplitSize` is tuned for Apple Silicon; high-VRAM NVIDIA workers should take far larger chunks to amortize overhead.
 - **Bigger models = the moat** — tiny models leave any GPU idle; 30–70B is where A100s (and Apple unified memory) are the bottleneck and earn their cost.
