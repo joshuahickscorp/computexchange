@@ -121,6 +121,67 @@ func containsStr(xs []string, x string) bool {
 	return false
 }
 
+// hwClassCostRank maps a hardware class to a COST/CAPACITY rank: cheaper, smaller
+// classes rank LOWER, expensive high-VRAM classes rank HIGHER. The ranking is the
+// rough $/hr (and scarcity) ordering of the supply: a CPU box is the cheapest place
+// to run a tiny job; the big accelerators (nvidia_80g/nvidia_180g/apple_silicon_ultra)
+// are the most expensive and should be reserved for work that actually needs them.
+// It is used ONLY as a claim-time preference (see ClaimTask's ORDER BY): so a small
+// job an idle cheap worker could take is not handed to — and does not tie up — an
+// expensive worker while a cheaper eligible class is online. It never filters: an
+// unknown class sorts at the cheap end (rank 0) so a new/unranked class is still
+// fully claimable, and a job whose only online supply is expensive is still claimed.
+// hwClassCostRankSQL below MUST mirror this table exactly (the SQL evaluates the same
+// rank for OTHER online workers); keep the two in lockstep.
+func hwClassCostRank(hwClass string) int {
+	switch hwClass {
+	case "cpu":
+		return 0
+	case "apple_silicon_base":
+		return 1
+	case "apple_silicon_pro":
+		return 2
+	case "nvidia_24g":
+		return 3
+	case "apple_silicon_max":
+		return 4
+	case "nvidia_48g":
+		return 5
+	case "nvidia_80g":
+		return 6
+	case "apple_silicon_ultra", "apple_silicon_cluster":
+		// A co-located cluster advertises summed member memory; it is as scarce/
+		// expensive as the top single-box tier, so it ranks alongside ultra.
+		return 7
+	case "nvidia_180g":
+		return 8
+	default:
+		return 0 // unknown/new class: treat as cheapest so it is never deprioritized
+	}
+}
+
+// hwClassCostRankSQL is the SQL transcription of hwClassCostRank: a CASE that yields
+// the same integer cost rank for a worker's hw_class column. ClaimTask uses it to ask
+// "is a strictly-CHEAPER eligible class online for this job?" without re-deriving the
+// table on the Go side for every candidate worker. Substituted with the worker-row
+// alias (e.g. "w2.hw_class"). MUST stay byte-for-byte consistent with the Go switch
+// above — if you add or reorder a class, change both.
+func hwClassCostRankSQL(col string) string {
+	return `CASE ` + col + `
+	          WHEN 'cpu' THEN 0
+	          WHEN 'apple_silicon_base' THEN 1
+	          WHEN 'apple_silicon_pro' THEN 2
+	          WHEN 'nvidia_24g' THEN 3
+	          WHEN 'apple_silicon_max' THEN 4
+	          WHEN 'nvidia_48g' THEN 5
+	          WHEN 'nvidia_80g' THEN 6
+	          WHEN 'apple_silicon_ultra' THEN 7
+	          WHEN 'apple_silicon_cluster' THEN 7
+	          WHEN 'nvidia_180g' THEN 8
+	          ELSE 0
+	        END`
+}
+
 // SelectRedundancyPeer picks a same-hardware-class worker to re-run a task for
 // within-class redundancy verification, excluding the worker that already ran it.
 // Thin wrapper over SelectRedundancyPeerExcluding (the anchor worker's class is
@@ -197,8 +258,10 @@ type ClaimedTask struct {
 //
 //  1. compute the supplier's tier from reputation + lifetime completed tasks,
 //  2. scan visible queued/retrying tasks of non-cancelled jobs the worker is
-//     HARD-FILTERED to be able to run (see the WHERE clause), priority-tier jobs
-//     jumping the line, then oldest,
+//     HARD-FILTERED to be able to run (see the WHERE clause), ordered priority-tier
+//     first, THEN the hardware-matched routing preference (defer tasks a strictly
+//     CHEAPER eligible class is online for, so an expensive worker does not tie
+//     itself up on work a cheaper idle class could take), then oldest,
 //  3. SKIP LOCKED so parallel pollers each grab a different row,
 //  4. stamp claimed_by / claimed_at / worker_id and return the dispatch.
 //
@@ -227,14 +290,21 @@ func (s *Store) ClaimTask(ctx context.Context, w WorkerAuth) (*ClaimedTask, erro
 	defer tx.Rollback(ctx)
 
 	// Reject unregistered workers loudly rather than silently claiming nothing.
-	var exists bool
+	// We also read the worker's hw_class here (same row, no extra round-trip) to
+	// compute its cost rank for the hardware-matched routing preference below.
+	var hwClass string
 	if err := tx.QueryRow(ctx,
-		`SELECT true FROM workers WHERE id = $1`, w.WorkerID,
-	).Scan(&exists); errors.Is(err, pgx.ErrNoRows) {
+		`SELECT COALESCE(hw_class,'') FROM workers WHERE id = $1`, w.WorkerID,
+	).Scan(&hwClass); errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound
 	} else if err != nil {
 		return nil, err
 	}
+	// Cost rank of THIS claiming worker (cheaper class = lower rank). Passed to the
+	// claim as $3 so the routing preference can ask "is a strictly-cheaper eligible
+	// class online?" against this single canonical Go table (hwClassCostRank) — the
+	// SQL only re-derives ranks for the OTHER online workers it compares against.
+	selfCostRank := hwClassCostRank(hwClass)
 
 	// Supplier tier gate (for trusted-tier jobs) from reputation + lifetime
 	// completed tasks across all the supplier's workers.
@@ -252,7 +322,8 @@ func (s *Store) ClaimTask(ctx context.Context, w WorkerAuth) (*ClaimedTask, erro
 	}
 	tier := reputationTier(rep, jobsDone)
 
-	// Claim the best eligible task: priority-tier jobs first, then oldest. The
+	// Claim the best eligible task: priority-tier jobs first, then the cheapest-
+	// sufficient-class routing preference (see the ORDER BY), then oldest. The
 	// claim flips the task to 'running' (the worker is about to execute it) and
 	// stamps started_at, so the stale-task requeue loop can detect a worker that
 	// claimed but never committed past the deadline. The `next` CTE JOINs the
@@ -261,7 +332,34 @@ func (s *Store) ClaimTask(ctx context.Context, w WorkerAuth) (*ClaimedTask, erro
 	var c ClaimedTask
 	err = tx.QueryRow(ctx,
 		`WITH next AS (
-		   SELECT t.id
+		   SELECT t.id,
+		     -- Hardware-matched routing (cost preference, NOT a filter): is a strictly
+		     -- CHEAPER hardware class than THIS claiming worker ($3 = its hwClassCostRank)
+		     -- online AND eligible for this job right now? "Eligible" reuses the EXACT
+		     -- hard-filter predicates this claim applies (live <60s, supplier active, not
+		     -- throttled, enough effective/total memory, the job's hw_classes pin,
+		     -- supported_jobs, and supported_models), so we only defer a task a cheaper
+		     -- class could ACTUALLY take. When true, an expensive worker steps back (ORDER
+		     -- BY below sorts these last) and lets the cheaper class grab it — a small embed
+		     -- job never ties up an nvidia_180g/apple_silicon_ultra box while a cpu/base
+		     -- worker is idle. If NO cheaper eligible class is online, this is false and the
+		     -- task ranks normally: the job is still claimed here (the cap is "cheapest
+		     -- SUFFICIENT class", never starvation). SKIP LOCKED + the hard filter above are
+		     -- untouched — this only re-orders tasks the claiming worker already passes.
+		     EXISTS (
+		       SELECT 1 FROM workers w2
+		         JOIN suppliers s2 ON s2.id = w2.supplier_id
+		       WHERE w2.id <> w.id
+		         AND w2.last_seen_at IS NOT NULL
+		         AND w2.last_seen_at > now() - interval '60 seconds'
+		         AND s2.status = 'active'
+		         AND NOT COALESCE(w2.throttled, false)
+		         AND (`+hwClassCostRankSQL("w2.hw_class")+`) < $3
+		         AND COALESCE(j.min_memory_gb,0) <= COALESCE(w2.effective_memory_gb, w2.memory_gb, 0)
+		         AND (j.hw_classes IS NULL OR w2.hw_class = ANY(j.hw_classes))
+		         AND COALESCE(w2.supported_jobs,'{}') @> ARRAY[j.job_type]
+		         AND (COALESCE(j.model_ref,'') = '' OR COALESCE(w2.supported_models,'{}') @> ARRAY[j.model_ref])
+		     ) AS cheaper_class_online
 		   FROM tasks t
 		     JOIN jobs j ON j.id = t.job_id
 		     JOIN workers w ON w.id = $1
@@ -306,8 +404,16 @@ func (s *Store) ClaimTask(ctx context.Context, w WorkerAuth) (*ClaimedTask, erro
 		             * (COALESCE(j.estimated_usd,0) / NULLIF(j.task_count,0))
 		           + COALESCE(j.estimated_usd,0) / NULLIF(j.task_count,0)
 		         ) <= j.max_usd)
-		   -- a task pinned to this worker jumps the line, then priority tier, then oldest.
-		   ORDER BY (t.claimed_by = $1) DESC, (j.tier = 'priority') DESC, t.created_at ASC
+		   -- Pinned-to-this-worker jumps the line, then priority tier, THEN the
+		   -- hardware-matched routing preference: within a tier, prefer tasks NO cheaper
+		   -- eligible class is online for (cheaper_class_online = false sorts first), so
+		   -- an expensive worker defers work a cheaper idle class could take instead of
+		   -- tying itself up on it; finally oldest-first. The cost preference sits BELOW
+		   -- pin + priority on purpose — a hedge/tiebreak pinned here, and a priority job,
+		   -- are still served promptly even by an expensive worker. It only re-orders
+		   -- already-eligible tasks; the hard filter above and SKIP LOCKED are unchanged.
+		   ORDER BY (t.claimed_by = $1) DESC, (j.tier = 'priority') DESC,
+		            cheaper_class_online ASC, t.created_at ASC
 		   FOR UPDATE OF t SKIP LOCKED
 		   LIMIT 1
 		 )
@@ -323,7 +429,7 @@ func (s *Store) ClaimTask(ctx context.Context, w WorkerAuth) (*ClaimedTask, erro
 		           COALESCE(j.job_type_spec,'null'::jsonb),
 		           COALESCE(j.offered_rate_usd_hr,0), COALESCE(tasks.chunk_index,0),
 		           tasks.is_honeypot`,
-		w.WorkerID, int(tier),
+		w.WorkerID, int(tier), selfCostRank,
 	).Scan(&c.TaskID, &c.JobID, &c.JobType, &c.ModelRef, &c.InputRef, &c.ResultKey,
 		&c.OutputRef, &c.Tier, &c.VerifPolicy, &c.JobTypeSpec, &c.OfferedRateUsdHr,
 		&c.ChunkIndex, &c.IsHoneypot)
