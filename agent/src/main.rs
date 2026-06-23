@@ -128,6 +128,27 @@ fn cpu_pct(sys: &mut System) -> f32 {
     sum / cpus.len() as f32
 }
 
+/// REAL memory reading for the throttle gate, against the resource that actually
+/// limits THIS box. On the CUDA lane (`device_label() == "cuda"`) that is VRAM,
+/// not host RAM — a GPU box has plenty of host RAM, so the host-RAM throttle would
+/// never trip even when the card is nearly full (e.g. a 24 GB card handed a ~20 GB
+/// job). We read free+total VRAM via nvidia-smi and feed it through the SAME
+/// `evaluate_memory_throttle` thresholds. If CUDA is active but VRAM can't be read
+/// we surface that and fall back to the host-RAM snapshot (mirrors
+/// `detect_and_benchmark`) rather than fabricating headroom. On Apple/CPU the
+/// gating resource is unified/host memory, so we keep the host-RAM path.
+fn throttle_snapshot() -> hardware::MemorySnapshot {
+    if models::device_label() == "cuda" {
+        match hardware::read_vram_snapshot() {
+            Some(vram) => return vram,
+            None => tracing::warn!(
+                "CUDA lane active but nvidia-smi VRAM read failed; gating on host RAM this cycle"
+            ),
+        }
+    }
+    hardware::read_memory_snapshot()
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -560,8 +581,9 @@ async fn run_agent(cfg: AgentConfig) -> Result<()> {
                 let cpu = cpu_pct(&mut sys);
                 // Real memory reading → throttle decision. Sent to the control
                 // plane (effective memory + throttled gate the safe-dispatch
-                // filter) and surfaced to the menu bar.
-                let throttle = cfg.evaluate_memory_throttle(&hardware::read_memory_snapshot(), None);
+                // filter) and surfaced to the menu bar. On the CUDA lane this is
+                // VRAM (the real limit on a GPU box); host/unified RAM otherwise.
+                let throttle = cfg.evaluate_memory_throttle(&throttle_snapshot(), None);
                 // Warm-routing (D3): report the models actually warm in the pool so the
                 // control plane can prefer this worker for those models. Real ids only —
                 // `loaded_model_ids` gates on a resolved OnceCell, never a load in flight.
@@ -636,8 +658,11 @@ async fn poll_and_spawn(
     // headroom or drive the box past its memory ceiling. Enforced here (before the
     // claim) and re-evaluated every cycle — so finishing a task and looping back
     // re-checks before the next claim, and a pressured Mac is never handed more
-    // work. The surfaced reason tells the operator exactly why work paused.
-    let throttle = cfg.evaluate_memory_throttle(&hardware::read_memory_snapshot(), None);
+    // work. The surfaced reason tells the operator exactly why work paused. On the
+    // CUDA lane the gating resource is VRAM (a GPU box has ample host RAM, so the
+    // host-RAM gate would never trip even with the card nearly full); host/unified
+    // RAM on Apple/CPU. `throttle_snapshot()` picks the right one per active device.
+    let throttle = cfg.evaluate_memory_throttle(&throttle_snapshot(), None);
     if throttle.throttled {
         tracing::info!(
             reason = throttle.reason.as_deref().unwrap_or("memory pressure"),

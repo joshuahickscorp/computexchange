@@ -291,6 +291,46 @@ mod tests {
     }
 
     #[test]
+    fn vram_tier_gating_uses_same_throttle_against_vram() {
+        // CUDA-lane gating: the SAME `evaluate_memory_throttle` is fed a
+        // VRAM-shaped snapshot (total = total VRAM, available = free VRAM). This is
+        // the exact bug from the task: a 24 GB card already holding ~20 GB (≈3.5 GB
+        // free) handed a ~16 GB-VRAM job must THROTTLE, where a GPU box's ample host
+        // RAM never would. We model a dedicated GPU box (headroom 0) so only the
+        // utilization ceiling + next-task estimate govern — VRAM, not host RAM.
+        let mut c = cfg(None, false);
+        c.memory_headroom_gb = 0.0; // dedicated GPU box: no host-RAM-style reserve
+        c.max_memory_pct = 90.0; // pause once VRAM is ≥90% resident
+
+        // 24 GB card, ~3.5 GB free → 85.4% used (< 90% ceiling) but a 16 GB job
+        // cannot fit the 3.5 GB of free VRAM → throttled on the next-task estimate.
+        let near_full = snap(24.0, 3.5);
+        let d = c.evaluate_memory_throttle(&near_full, Some(16.0));
+        assert!(
+            d.throttled,
+            "20GB-resident 24GB card must throttle a 16GB job"
+        );
+        assert!(d.reason.unwrap().contains("16.0 GB"));
+
+        // Same card, but now 22 GB resident → 91.7% used ≥ 90% ceiling: throttle
+        // even with no known next-task estimate (pure utilization gate on VRAM).
+        let d = c.evaluate_memory_throttle(&snap(24.0, 2.0), None);
+        assert!(d.throttled);
+        assert!(d.reason.unwrap().contains("pressure"));
+
+        // Same card freshly idle (22 GB free): a 16 GB job fits and 8.3% used is
+        // well under the ceiling → NOT throttled. Proves we gate on real VRAM
+        // headroom, not blanket-refuse on the CUDA lane.
+        let d = c.evaluate_memory_throttle(&snap(24.0, 22.0), Some(16.0));
+        assert!(
+            !d.throttled,
+            "idle 24GB card must accept a 16GB job: {:?}",
+            d.reason
+        );
+        assert!((d.effective_gb - 22.0).abs() < 0.01);
+    }
+
+    #[test]
     fn battery_blocks_only_when_power_only() {
         assert!(!cfg(None, true).is_eligible_to_run(12, true));
         assert!(cfg(None, true).is_eligible_to_run(12, false));
