@@ -64,7 +64,10 @@ fn classify(brand: &str) -> HardwareClass {
 /// never fabricated (BLACKHOLE: surface every failure).
 fn nvidia_gpu() -> Option<(String, f32)> {
     let out = Command::new("nvidia-smi")
-        .args(["--query-gpu=name,memory.total", "--format=csv,noheader,nounits"])
+        .args([
+            "--query-gpu=name,memory.total",
+            "--format=csv,noheader,nounits",
+        ])
         .output()
         .ok()?;
     if !out.status.success() {

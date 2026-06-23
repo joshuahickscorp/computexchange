@@ -36,23 +36,6 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
-      minio:
-        # bitnami/minio starts the server on launch (no custom command needed,
-        # which a services: entry can't reliably set) and creates the bucket from
-        # MINIO_DEFAULT_BUCKETS — so the control plane finds cx-jobs at startup.
-        image: bitnami/minio:latest
-        env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
-          MINIO_DEFAULT_BUCKETS: cx-jobs
-        ports:
-          - 9000:9000
-          - 9001:9001
-        options: >-
-          --health-cmd "curl -fsS http://localhost:9000/minio/health/live || exit 1"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 20
     env:
       DATABASE_URL: postgres://cx:cx@localhost:5432/cx?sslmode=disable
       S3_ENDPOINT: http://localhost:9000
@@ -69,6 +52,17 @@ jobs:
           cache-dependency-path: control/go.sum
       - name: install psql client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: start MinIO (bitnami image was retired; run the official one as a step)
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio server /data
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1 && { echo "minio up"; break; }
+            sleep 2
+          done
+          docker run --rm --network host -e MC_HOST_local=http://minioadmin:minioadmin@localhost:9000 \
+            minio/mc mb -p local/cx-jobs
       - name: apply schema (base tables for the integration suite)
         run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/schema.sql
       - name: build
