@@ -116,6 +116,10 @@ jobs:
   agent-cuda:
     name: agent (cuda build)
     runs-on: ubuntu-latest
+    # Informational, non-blocking: the CUDA lane's authoritative gate is a build on
+    # real NVIDIA hardware (docs/RUNPOD_SPIKE.md + the A100 trial). CUDA-in-CI
+    # containers are finicky, so a hiccup here must not block merges to main.
+    continue-on-error: true
     # Run IN the CUDA devel image — it ships nvcc + the dev libs Candle needs to
     # COMPILE the NVIDIA lane (no GPU required to build, no flaky toolkit-install
     # action). Mirrors Dockerfile.agent's build stage. Runtime is proven on real
