@@ -133,7 +133,16 @@ func clawbackEntry(supplierID, taskID uuid.UUID, amount float64) LedgerEntry {
 type Payout interface {
 	// Send transfers amountUSD to a supplier and returns the rail's transfer
 	// reference. It MUST NOT pretend success when no rail is configured.
-	Send(ctx context.Context, supplierID uuid.UUID, amountUSD float64) (ref string, err error)
+	//
+	// payoutKey is a stable, unique identifier of the SPECIFIC payout being made
+	// (the released ledger-entry id) — it is the idempotency discriminator on a
+	// money rail that supports one (the Stripe transfer below). It MUST be unique
+	// across distinct payouts so two separate credits of identical cents in
+	// different release cycles do not collide, and it MUST be stable across a
+	// genuine retry of the SAME payout so a retry is a true no-op. The released
+	// ledger-entry id satisfies both: a distinct entry has a distinct id, and a
+	// retried release of the same row reuses its id.
+	Send(ctx context.Context, supplierID uuid.UUID, amountUSD float64, payoutKey string) (ref string, err error)
 }
 
 // errPayoutUnconfigured is the explicit failure surfaced when no real rail is
@@ -144,7 +153,7 @@ var errPayoutUnconfigured = errors.New("payout rail not configured (Stripe Conne
 // mistake "no rail" for "money sent".
 type stubPayout struct{}
 
-func (stubPayout) Send(_ context.Context, _ uuid.UUID, _ float64) (string, error) {
+func (stubPayout) Send(_ context.Context, _ uuid.UUID, _ float64, _ string) (string, error) {
 	return "", errPayoutUnconfigured
 }
 
@@ -167,8 +176,10 @@ func newStripePayout(store *Store, secret string) StripePayout {
 
 // Send creates a Stripe transfer (amountUSD → the supplier's stripe_acct) and
 // returns the transfer id. The amount is converted to integer cents; the request
-// carries an idempotency key so a retried release never double-pays.
-func (p StripePayout) Send(ctx context.Context, supplierID uuid.UUID, amountUSD float64) (string, error) {
+// carries an idempotency key keyed on payoutKey (the released ledger-entry id) so
+// a retried release of the SAME credit is a no-op while two DISTINCT credits never
+// collide — even with identical cents in different cycles.
+func (p StripePayout) Send(ctx context.Context, supplierID uuid.UUID, amountUSD float64, payoutKey string) (string, error) {
 	if p.secret == "" {
 		return "", errPayoutUnconfigured
 	}
@@ -195,8 +206,7 @@ func (p StripePayout) Send(ctx context.Context, supplierID uuid.UUID, amountUSD 
 	}
 	req.Header.Set("Authorization", "Bearer "+p.secret)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	// One transfer per (supplier, amount) attempt — a retried release is a no-op.
-	req.Header.Set("Idempotency-Key", "cx-"+supplierID.String()+"-"+strconv.FormatInt(cents, 10))
+	req.Header.Set("Idempotency-Key", stripeIdempotencyKey(supplierID, cents, payoutKey))
 	resp, err := p.http.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("stripe transfer request: %w", err)
@@ -215,6 +225,27 @@ func (p StripePayout) Send(ctx context.Context, supplierID uuid.UUID, amountUSD 
 	return out.ID, nil
 }
 
+// stripeIdempotencyKey builds the Stripe Idempotency-Key for a single payout.
+//
+// The key MUST be unique across distinct payouts and stable across a genuine
+// retry of the SAME payout. payoutKey (the released ledger-entry id) is that
+// discriminator: a distinct credit has a distinct id, and a retried release of
+// the same row reuses its id. We still bind the key to supplier+cents so it can
+// never be reused for a different supplier or amount.
+//
+// Keying on (supplier, cents) ALONE was a real-money bug: two separate credits of
+// identical cents in different release cycles produced the same key, so Stripe
+// replayed the first transfer as a no-op and the second payout was silently
+// dropped. When payoutKey is empty we fall back to the legacy (supplier, cents)
+// scheme — never worse than before, and never a fabricated key.
+func stripeIdempotencyKey(supplierID uuid.UUID, cents int64, payoutKey string) string {
+	key := "cx-" + supplierID.String() + "-" + strconv.FormatInt(cents, 10)
+	if payoutKey != "" {
+		key += "-" + payoutKey
+	}
+	return key
+}
+
 // ManualExportPayout is the alpha "manual export" rail (the goal's vendor-neutral
 // "mock + manual export for alpha"): it moves NO money, but appends each owed
 // payout — supplier id, amount, timestamp — to a CSV file the operator settles
@@ -228,7 +259,7 @@ type ManualExportPayout struct {
 
 func newManualExportPayout(path string) *ManualExportPayout { return &ManualExportPayout{path: path} }
 
-func (p *ManualExportPayout) Send(_ context.Context, supplierID uuid.UUID, amountUSD float64) (string, error) {
+func (p *ManualExportPayout) Send(_ context.Context, supplierID uuid.UUID, amountUSD float64, _ string) (string, error) {
 	if amountUSD <= 0 {
 		return "", fmt.Errorf("non-positive payout amount %.6f USD", amountUSD)
 	}

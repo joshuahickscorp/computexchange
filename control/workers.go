@@ -121,7 +121,11 @@ func (wk *Workers) releasePayouts(ctx context.Context) error {
 		return err
 	}
 	for _, e := range due {
-		ref, serr := wk.payout.Send(ctx, e.SupplierID, e.AmountUSD)
+		// e.ID is the released supplier-credit row's id: the stable, unique payout
+		// key the rail uses for idempotency. Distinct credits (distinct ids) never
+		// collide even at identical cents; a retried release of the same row reuses
+		// its id, so a genuine retry stays a no-op.
+		ref, serr := wk.payout.Send(ctx, e.SupplierID, e.AmountUSD, e.ID.String())
 		if serr != nil {
 			// Honest deferral: the hold is over and the credit is owed, but no
 			// rail moved money. Mark 'ready' so earnings/audits can see it is
