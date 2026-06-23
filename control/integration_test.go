@@ -690,7 +690,7 @@ func TestPayoutHoldToReadyAndBlocked(t *testing.T) {
 	reset(t)
 	ctx := context.Background()
 	// stubPayout never fakes a transfer.
-	if _, err := (stubPayout{}).Send(ctx, demoSupplierUUID, 1.0); err == nil {
+	if _, err := (stubPayout{}).Send(ctx, demoSupplierUUID, 1.0, uuid.NewString()); err == nil {
 		t.Fatal("stubPayout.Send must return an error (no fake transfers)")
 	}
 	taskID := uuid.New()
