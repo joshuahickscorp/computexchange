@@ -131,21 +131,26 @@
   .pill.solid{background:var(--bone-hi);color:var(--bg);border-color:var(--bone-hi)}
   .pill.solid:hover{background:var(--signal);border-color:var(--signal)}
 
-  /* Action buttons (Launch, Add payment): SIBLINGS of the knob, same dark anodized metal,
-     rendered as a rounded KEY with the LABEL as the lit element (assets/btn-*). Composite
-     like the knob: base (disabled) + armed glow cross-faded + pressed frame on :active. */
-  .metalbtn{position:relative;display:block;width:100%;height:66px;border:0;background:none;cursor:pointer;outline:none;padding:0}
-  .metalbtn img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:block}
-  .mb-base{z-index:1}
-  .mb-glow{z-index:2;opacity:0;transition:opacity .25s var(--ease)}
-  .mb-press{z-index:3;opacity:0}
-  .metalbtn.is-armed .mb-glow{opacity:1;animation:mb-breathe 3.6s ease-in-out infinite}
-  .metalbtn:active .mb-press{opacity:1}
+  /* Action buttons: the metal KEY (assets/btn-*-slab) with the LABEL overlaid as crisp Geist
+     text that IS the light. Launch glows GREEN (go), Add payment glows RED (a blocker until
+     a method is added). Disabled = a dim engraving; pressed pushes in. The metal stays
+     monochrome; only the label carries the hue (same rule as the knob). */
+  @font-face{font-family:'Geist';src:url(assets/Geist.ttf) format('truetype');font-weight:100 900;font-display:swap}
+  .metalbtn{position:relative;display:grid;place-items:center;width:100%;height:84px;border:0;background:none;cursor:pointer;outline:none;padding:0;transition:transform 90ms var(--ease)}
+  .metalbtn .mb-slab{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:block}
+  .metalbtn .mb-label{position:relative;z-index:1;font:600 18px/1 'Geist',var(--sans);letter-spacing:.14em;text-transform:uppercase;color:var(--ash);text-shadow:0 1px 0 rgba(0,0,0,.6);transition:color .25s var(--ease),text-shadow .25s var(--ease)}
+  .metalbtn.is-armed .mb-label{animation:mb-breathe 3.6s ease-in-out infinite}
+  .metalbtn.go.is-armed .mb-label{color:#a6f5cb;text-shadow:0 1px 0 rgba(0,0,0,.6),0 0 9px rgba(55,210,122,.75),0 0 22px rgba(55,210,122,.42)}
+  .metalbtn.pay.is-armed .mb-label{color:#ffb6ae;text-shadow:0 1px 0 rgba(0,0,0,.6),0 0 9px rgba(229,84,74,.75),0 0 22px rgba(229,84,74,.42)}
+  .metalbtn:not([disabled]):active{transform:translateY(2px)}
+  .metalbtn:not([disabled]):active .mb-label{filter:brightness(.7)}
   .metalbtn[disabled]{cursor:not-allowed}
-  .metalbtn[disabled] .mb-glow{opacity:0;animation:none}
+  .metalbtn[disabled] .mb-label{animation:none;color:var(--ash);text-shadow:0 1px 0 rgba(0,0,0,.6)}
   .metalbtn:focus-visible{box-shadow:0 0 0 1px var(--line-hi);border-radius:var(--r)}
-  .metalbtn.sm{width:150px;height:48px}
-  @keyframes mb-breathe{0%,100%{opacity:.7}50%{opacity:1}}
+  .metalbtn.sm{width:172px;height:60px}
+  .metalbtn.sm .mb-label{font-size:13px;letter-spacing:.1em}
+  @keyframes mb-breathe{0%,100%{opacity:.82}50%{opacity:1}}
+  @media (prefers-reduced-motion:reduce){.metalbtn.is-armed .mb-label{animation:none}}
 
   .intake{border:1.5px dashed var(--line);border-radius:var(--r);padding:28px 16px;text-align:center;color:var(--mute);cursor:pointer;transition:border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
   .intake svg{width:24px;height:24px;display:block;margin:0 auto 8px;stroke-width:1.5}
@@ -165,11 +170,14 @@
   .run-right{display:flex;align-items:center;gap:8px}
   .run .st{color:var(--mute)}
   .run .st.done{color:var(--green)} .run .st.fail{color:var(--red)} .run .st.run{color:var(--green)}
-  /* run status colour (the second + last place hue appears): green=done/running, red=failed */
-  .run .dot{width:9px;height:9px;border-radius:50%;flex:none}
-  .run .dot.done{background:var(--green)} .run .dot.fail{background:var(--red)}
-  .run .dot.run{background:var(--green);animation:run-pulse 1.6s ease-in-out infinite}
-  @keyframes run-pulse{0%,100%{opacity:1}50%{opacity:.4}}
+  /* run status oracle: a turned-metal ring (Blender) with a NEON core in CSS, so the core
+     stays a vivid, app-matched green/red. done = green, failed = red, running = green pulse. */
+  .run .dot{position:relative;width:20px;height:20px;flex:none;background:url(assets/dot-ring@3x.png) center/contain no-repeat}
+  .run .dot::before{content:"";position:absolute;inset:22%;border-radius:50%}
+  .run .dot.done::before,.run .dot.run::before{background:radial-gradient(circle at 50% 42%,#7df7b3,#37d27a 72%);box-shadow:0 0 7px 1px rgba(55,210,122,.85)}
+  .run .dot.fail::before{background:radial-gradient(circle at 50% 42%,#ff8278,#e5544a 72%);box-shadow:0 0 7px 1px rgba(229,84,74,.85)}
+  .run .dot.run::before{animation:run-pulse 1.6s ease-in-out infinite}
+  @keyframes run-pulse{0%,100%{opacity:1}50%{opacity:.5}}
   .run .trace{width:54px;height:20px;display:none} .run[data-status="running"] .trace{display:block}
   .icon{width:26px;height:26px;border:none;background:none;color:var(--ash);border-radius:var(--r-sm);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;transition:background var(--dur) var(--ease),color var(--dur) var(--ease)}
   .icon:hover{background:var(--raise);color:var(--bone)} .icon svg{width:15px;height:15px;stroke-width:1.5}
@@ -197,38 +205,20 @@
     *{transition:none !important;animation:none !important}
     .knob.is-on .knob-glow{opacity:1}
   }
-  /* ===== SPLASH: the one place metal belongs beyond the knob, the mark alone. Base metal
-     Cx + the x backlight screen-blended on top + one specular sweep clipped to the mark. ===== */
+  /* ===== SPLASH: a static flat white Cx on the dark ground (the rail mark, sized up), no
+     movement, then a fade to the app. The metal-forged variant stays in git history and in
+     web/assets/cx-metal* if we want it back. ===== */
   .splash{position:fixed;inset:0;display:grid;place-items:center;z-index:60;
     background:radial-gradient(120% 100% at 50% 0%,#101014,#0a0a0c 55%,#08080a);
     transition:opacity .5s var(--ease)}
   .splash.hide{opacity:0;pointer-events:none}
-  .splash .mark{position:relative;width:168px;height:168px;animation:logo-settle .9s cubic-bezier(.2,0,0,1) both}
-  .splash .mark>img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
-  .splash .metal{z-index:1}
-  .splash .glow{z-index:2;opacity:0;animation:logo-glow 1.7s ease-in-out .25s both}
-  .splash .gloss{position:absolute;inset:0;z-index:3;mix-blend-mode:screen;transform:translateX(-120%);
-    background:linear-gradient(115deg,transparent 42%,rgba(255,255,255,.30) 50%,transparent 58%);
-    -webkit-mask:url(assets/cx-metal@3x.png) center/contain no-repeat;
-            mask:url(assets/cx-metal@3x.png) center/contain no-repeat;
-    animation:logo-sweep 1.8s ease-in-out .3s 1 both}
-  @keyframes logo-sweep{to{transform:translateX(120%)}}
-  @keyframes logo-glow{0%{opacity:0}60%,100%{opacity:1}}
-  @keyframes logo-settle{from{transform:scale(.96) rotate(-4deg);opacity:0}to{transform:none;opacity:1}}
-  @media (prefers-reduced-motion:reduce){
-    .splash .mark{animation:none}
-    .splash .glow{animation:none;opacity:1}
-    .splash .gloss{display:none}
-  }
+  .splash .mark{width:118px;height:118px}
+  .splash .mark>img{width:100%;height:100%;object-fit:contain;display:block}
 </style>
 </head>
 <body>
 <div class="splash" id="splash">
-  <div class="mark">
-    <img class="metal" src="assets/cx-metal@3x.png" srcset="assets/cx-metal@2x.png 2x, assets/cx-metal@3x.png 3x" alt="computexchange">
-    <img class="glow" src="assets/cx-metal-on@3x.png" srcset="assets/cx-metal-on@2x.png 2x, assets/cx-metal-on@3x.png 3x" alt="" aria-hidden="true">
-    <div class="gloss"></div>
-  </div>
+  <div class="mark"><img src="assets/cx-mark-white.png" alt="computexchange"></div>
 </div>
 <div class="app">
   <nav class="rail" aria-label="Sections">
@@ -245,16 +235,15 @@
     <div class="notif" id="notif"></div>
 
     <section class="view on" id="v-launch">
-      <div class="banner card" id="setup"><span>Add a payment method to run your first job.</span><button class="metalbtn sm is-armed" id="setupBtn" aria-label="Add payment"><img class="mb-base" src="assets/btn-add-payment-off@3x.png" alt=""><img class="mb-glow" src="assets/btn-add-payment-armed@3x.png" alt=""><img class="mb-press" src="assets/btn-add-payment-pressed@3x.png" alt=""></button></div>
+      <div class="banner card" id="setup"><span>Add a payment method to run your first job.</span><button class="metalbtn sm pay is-armed" id="setupBtn" aria-label="Add payment"><img class="mb-slab" src="assets/btn-add-payment-slab@3x.png" alt=""><span class="mb-label">Add payment</span></button></div>
       <div class="intake" id="intake">
         <input type="file" id="file" hidden>
         <svg class="intake-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h3.5l2 2H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
         <div id="intake-text">Connect a repo or drop your data</div>
       </div>
-      <button class="metalbtn" id="launchBtn" aria-label="Launch" disabled>
-        <img class="mb-base" src="assets/btn-launch-off@3x.png" alt="">
-        <img class="mb-glow" src="assets/btn-launch-armed@3x.png" alt="">
-        <img class="mb-press" src="assets/btn-launch-pressed@3x.png" alt="">
+      <button class="metalbtn go" id="launchBtn" aria-label="Launch" disabled>
+        <img class="mb-slab" src="assets/btn-launch-slab@3x.png" alt="">
+        <span class="mb-label">Launch</span>
       </button>
       <div class="runs"><p class="section-label">Runs</p><div id="jobs"></div></div>
     </section>
@@ -542,7 +531,7 @@
   var s=document.getElementById('splash'); if(!s) return;
   var rm=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   function hide(){ s.classList.add('hide'); setTimeout(function(){ s.style.display='none'; }, 600); }
-  var hold=rm?500:2100;   // hold for the settle + one sweep, then fade out; quick + static for reduced motion
+  var hold=rm?400:900;   // brief static hold, then fade to the app (the mark no longer animates)
   if(document.readyState==='complete') setTimeout(hide,hold);
   else window.addEventListener('load', function(){ setTimeout(hide,hold); });
 })();

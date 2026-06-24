@@ -37,15 +37,14 @@ not faked.
   Control-side only, mirrors `min_memory_gb`, +integration test. (0131c80)
 - **✅ NVIDIA lane productized** — `Dockerfile.agent` + CI cuda-build gate (CUDA_COMPUTE_CAP
   pinned) + the sandboxed BYO-container `custom` runner + `scripts/prove-cuda.sh`.
-- **🔨 Compliance stack** — the *audit trail* exists in code (`GET /v1/jobs/{id}/invoice`,
-  `/events`, `/failures` — exportable per-job compute records). What remains is **🚫
-  external**: a SOC 2 Type II audit (needs an audit firm, ~months), a HIPAA BAA + GDPR DPA
-  (need a lawyer). No amount of code produces these — they are sign-and-attest artifacts.
+- **✅ Compliance audit trail** — the exportable per-job compute records exist in code
+  (`GET /v1/jobs/{id}/invoice`, `/events`, `/failures`). The legal/audit attestations layered
+  on top (SOC 2, HIPAA BAA, GDPR DPA) are **vaulted** — not needed yet (see Vaulted, below).
 - **✅ Private Deployment routing** — `private_pool` jobs route ONLY to the buyer's bound
   suppliers (`private_pool_members` + `POST /v1/private-pool`), on top of the data-residency
   + Elite-reputation gates. The enterprise/privacy tier's technical core is done. What
-  remains is **🚫 product/sales**: naming, the 3× price point, and the SOC2/BAA/DPA bundle
-  (external, above).
+  remains is **🚫 product/sales**: naming and the 3× price point (the compliance bundle is
+  vaulted, below).
 - **🔨 Compute Autopilot IDE (Workflows)** — the `/v1/quote` autopilot front door is built;
   multi-step job *pipelines* (one job's output feeding the next, a visual designer) are a
   **multi-week feature build**, not a session task. Seam acknowledged.
@@ -56,10 +55,18 @@ not faked.
 - **🔨 Routing-intelligence dashboard** — the data exists (`GET /admin/drift` rolls up real
   committed durations per job_type/model); surfacing it to buyers is a frontend build.
 
+## In progress
+- **Compute Autopilot pipeline** — multi-step pipelines (one job's output feeding the next,
+  with a visual builder). Built as a real subsystem; see `control/pipeline.go` and the
+  Pipelines tab in the demo.
+
+## Vaulted (not needed yet)
+- **Legal + audit attestations** — SOC 2 Type II (audit firm), HIPAA BAA + GDPR DPA (lawyer).
+  Sign-and-attest artifacts no code produces; parked until a customer requires them.
+- **Payment guarantee** — needs a buyer-dispute mechanism first (none today beyond
+  honeypot/verification clawback). Revisit after disputes exist.
+
 ## Bottom line
-Everything code-feasible in the plan is **done and verified** (now + soon + the Elite gate
-+ Private Deployment routing + the NVIDIA lane). What is left cannot be produced by code in
-a session: a SOC 2 audit (audit firm), a BAA/DPA (lawyer), and feature builds that need a
-new subsystem first — the Autopilot pipeline IDE (a visual multi-step engine) and the
-payment guarantee (a buyer-dispute mechanism). Those are flagged here rather than faked —
-the honest definition of "complete."
+Everything code-feasible is **done and verified** (now + soon + the Elite gate + Private
+Deployment routing + the NVIDIA lane), and the Compute Autopilot pipeline is now under
+active build. The only parked items are the legal/audit attestations (vaulted above).
