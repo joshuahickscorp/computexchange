@@ -131,26 +131,23 @@
   .pill.solid{background:var(--bone-hi);color:var(--bg);border-color:var(--bone-hi)}
   .pill.solid:hover{background:var(--signal);border-color:var(--signal)}
 
-  /* Action buttons: the metal KEY (assets/btn-*-slab) with the LABEL overlaid as crisp Geist
-     text that IS the light. Launch glows GREEN (go), Add payment glows RED (a blocker until
-     a method is added). Disabled = a dim engraving; pressed pushes in. The metal stays
-     monochrome; only the label carries the hue (same rule as the knob). */
-  @font-face{font-family:'Geist';src:url(assets/Geist.ttf) format('truetype');font-weight:100 900;font-display:swap}
-  .metalbtn{position:relative;display:grid;place-items:center;width:100%;height:84px;border:0;background:none;cursor:pointer;outline:none;padding:0;transition:transform 90ms var(--ease)}
-  .metalbtn .mb-slab{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:block}
-  .metalbtn .mb-label{position:relative;z-index:1;font:600 18px/1 'Geist',var(--sans);letter-spacing:.14em;text-transform:uppercase;color:var(--ash);text-shadow:0 1px 0 rgba(0,0,0,.6);transition:color .25s var(--ease),text-shadow .25s var(--ease)}
-  .metalbtn.is-armed .mb-label{animation:mb-breathe 3.6s ease-in-out infinite}
-  .metalbtn.go.is-armed .mb-label{color:#a6f5cb;text-shadow:0 1px 0 rgba(0,0,0,.6),0 0 9px rgba(55,210,122,.75),0 0 22px rgba(55,210,122,.42)}
-  .metalbtn.pay.is-armed .mb-label{color:#ffb6ae;text-shadow:0 1px 0 rgba(0,0,0,.6),0 0 9px rgba(229,84,74,.75),0 0 22px rgba(229,84,74,.42)}
-  .metalbtn:not([disabled]):active{transform:translateY(2px)}
-  .metalbtn:not([disabled]):active .mb-label{filter:brightness(.7)}
+  /* Action buttons: the knob stretched into an OVAL with a recessed, backlit LABEL (the
+     SYSTEM font, never Geist). Composited like the knob: dark base (disabled) + the armed
+     glow cross-faded with the breathing opacity + the pressed frame on :active. The label is
+     cool-white (an action, not status), so green/red stay reserved for the knob + runs. */
+  .metalbtn{position:relative;width:100%;aspect-ratio:1242/331;border:0;background:none;cursor:pointer;outline:none;padding:0}
+  .metalbtn img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+  .mb-base{z-index:1}
+  .mb-glow{z-index:2;opacity:0;transition:opacity .25s var(--ease)}
+  .mb-press{z-index:3;opacity:0}
+  .metalbtn.is-armed .mb-glow{opacity:1;animation:mb-breathe 3.6s ease-in-out infinite}
+  .metalbtn:active .mb-press{opacity:1}
   .metalbtn[disabled]{cursor:not-allowed}
-  .metalbtn[disabled] .mb-label{animation:none;color:var(--ash);text-shadow:0 1px 0 rgba(0,0,0,.6)}
+  .metalbtn[disabled] .mb-glow{opacity:0;animation:none}
   .metalbtn:focus-visible{box-shadow:0 0 0 1px var(--line-hi);border-radius:var(--r)}
-  .metalbtn.sm{width:172px;height:60px}
-  .metalbtn.sm .mb-label{font-size:13px;letter-spacing:.1em}
-  @keyframes mb-breathe{0%,100%{opacity:.82}50%{opacity:1}}
-  @media (prefers-reduced-motion:reduce){.metalbtn.is-armed .mb-label{animation:none}}
+  .metalbtn.sm{width:208px;aspect-ratio:1348/604}
+  @keyframes mb-breathe{0%,100%{opacity:.7}50%{opacity:1}}
+  @media (prefers-reduced-motion:reduce){.metalbtn.is-armed .mb-glow{animation:none;opacity:1}}
 
   .intake{border:1.5px dashed var(--line);border-radius:var(--r);padding:28px 16px;text-align:center;color:var(--mute);cursor:pointer;transition:border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
   .intake svg{width:24px;height:24px;display:block;margin:0 auto 8px;stroke-width:1.5}
@@ -179,28 +176,20 @@
   .run .dot.run::before{animation:run-pulse 1.6s ease-in-out infinite}
   @keyframes run-pulse{0%,100%{opacity:1}50%{opacity:.5}}
 
-  /* ===== Compute Autopilot pipeline builder ===== */
-  .pipe-intro{font-size:13px;color:var(--mute);margin:2px 0 16px;line-height:1.55}
-  .pipe{display:flex;flex-direction:column}
+  /* ===== Autopilot pipeline preview: the read-only chain shown in Launch after we detect
+     the data. Each step lights green as it runs + completes (the oracle marker). ===== */
+  .pipe{display:flex;flex-direction:column;margin:14px 0 18px}
   .stage{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--line-soft);border-radius:var(--r);padding:12px 14px}
   .stage .dot{position:relative;width:20px;height:20px;flex:none;background:url(assets/dot-ring@3x.png) center/contain no-repeat}
   .stage .dot::before{content:"";position:absolute;inset:22%;border-radius:50%;background:#2b2b31}
   .stage .dot.run::before,.stage .dot.done::before{background:radial-gradient(circle at 50% 42%,#7df7b3,#37d27a 72%);box-shadow:0 0 7px 1px rgba(55,210,122,.85)}
   .stage .dot.run::before{animation:run-pulse 1.6s ease-in-out infinite}
   .stage .dot.fail::before{background:radial-gradient(circle at 50% 42%,#ff8278,#e5544a 72%);box-shadow:0 0 7px 1px rgba(229,84,74,.85)}
-  .stage-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:8px}
-  .stage-row{display:flex;align-items:center;gap:8px}
-  .stage select{flex:1;min-width:0;height:34px;background:var(--raise);border:1px solid var(--line);border-radius:var(--r-sm);color:var(--bone-hi);font:500 13px var(--sans);padding:0 10px;cursor:pointer;outline:none}
-  .stage select:focus{border-color:var(--line-hi)}
-  .stage .from{font-size:11px;color:var(--ash);letter-spacing:.04em;text-transform:uppercase;white-space:nowrap}
-  .stage .rm{flex:none;width:24px;height:24px;border:none;background:none;color:var(--ash);font-size:17px;line-height:1;cursor:pointer;border-radius:var(--r-sm)}
-  .stage .rm:hover{color:var(--red);background:var(--raise)}
-  .stage-conn{height:20px;width:1px;margin:0 auto;background:linear-gradient(var(--line-hi),var(--line));position:relative}
+  .stage-body{flex:1;min-width:0}
+  .stage-lead{font-size:13px;color:var(--bone-hi);font-weight:500}
+  .stage-sub{font-size:11px;color:var(--ash);margin-top:3px}
+  .stage-conn{height:18px;width:1px;margin:0 auto;background:linear-gradient(var(--line-hi),var(--line));position:relative}
   .stage-conn::after{content:"";position:absolute;left:50%;bottom:0;width:5px;height:5px;border-right:1px solid var(--line);border-bottom:1px solid var(--line);transform:translate(-50%,1px) rotate(45deg)}
-  .addstage{margin-top:14px;height:38px;width:100%;border:1px dashed var(--line);border-radius:var(--r);background:transparent;color:var(--mute);font:500 13px var(--sans);cursor:pointer;transition:border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
-  .addstage:hover{border-color:var(--line-hi);color:var(--bone)}
-  .pinput{width:100%;min-height:88px;resize:vertical;box-sizing:border-box;background:var(--card);border:1px solid var(--line-soft);border-radius:var(--r);color:var(--bone-hi);font:13px/1.6 var(--sans);padding:12px 14px;outline:none}
-  .pinput:focus{border-color:var(--line-hi)}
   .run .trace{width:54px;height:20px;display:none} .run[data-status="running"] .trace{display:block}
   .icon{width:26px;height:26px;border:none;background:none;color:var(--ash);border-radius:var(--r-sm);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;transition:background var(--dur) var(--ease),color var(--dur) var(--ease)}
   .icon:hover{background:var(--raise);color:var(--bone)} .icon svg{width:15px;height:15px;stroke-width:1.5}
@@ -247,7 +236,6 @@
   <nav class="rail" aria-label="Sections">
     <div class="brand"><img src="assets/cx-mark-white.png" srcset="assets/cx-mark-white.png 1x" alt="computexchange"></div>
     <button class="nav on" data-view="launch" aria-label="Launch"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6.3v11.4l9.5-5.7z"/></svg></button>
-    <button class="nav" data-view="pipeline" aria-label="Pipeline"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="5" r="2.3"/><circle cx="12" cy="19" r="2.3"/><path d="M12 7.3v9.4"/></svg></button>
     <button class="nav" data-view="earn" aria-label="Earn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M12 4v8"/><path d="M7.5 7.2a7 7 0 1 0 9 0"/></svg></button>
     <button class="nav acct" data-view="settings" aria-label="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8" r="3.2"/><path d="M5.5 20a6.5 6.5 0 0 1 13 0"/></svg></button>
   </nav>
@@ -259,32 +247,21 @@
     <div class="notif" id="notif"></div>
 
     <section class="view on" id="v-launch">
-      <div class="banner card" id="setup"><span>Add a payment method to run your first job.</span><button class="metalbtn sm pay is-armed" id="setupBtn" aria-label="Add payment"><img class="mb-slab" src="assets/btn-add-payment-slab@3x.png" alt=""><span class="mb-label">Add payment</span></button></div>
+      <div class="banner card" id="setup"><span>Add a payment method to run your first job.</span><button class="metalbtn sm is-armed" id="setupBtn" aria-label="Add payment"><img class="mb-base" src="assets/btn-add-payment-off@3x.png" alt=""><img class="mb-glow" src="assets/btn-add-payment-armed@3x.png" alt=""><img class="mb-press" src="assets/btn-add-payment-pressed@3x.png" alt=""></button></div>
       <div class="intake" id="intake">
         <input type="file" id="file" hidden>
         <svg class="intake-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h3.5l2 2H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
         <div id="intake-text">Connect a repo or drop your data</div>
       </div>
-      <button class="metalbtn go" id="launchBtn" aria-label="Launch" disabled>
-        <img class="mb-slab" src="assets/btn-launch-slab@3x.png" alt="">
-        <span class="mb-label">Launch</span>
+      <div class="pipe" id="pipePreview" hidden></div>
+      <button class="metalbtn" id="launchBtn" aria-label="Launch" disabled>
+        <img class="mb-base" src="assets/btn-launch-off@3x.png" alt="">
+        <img class="mb-glow" src="assets/btn-launch-armed@3x.png" alt="">
+        <img class="mb-press" src="assets/btn-launch-pressed@3x.png" alt="">
       </button>
       <div class="runs"><p class="section-label">Runs</p><div id="jobs"></div></div>
     </section>
 
-    <section class="view" id="v-pipeline">
-      <p class="section-label">Compute Autopilot</p>
-      <div class="pipe-intro">Chain workloads into one run. Each stage runs on your data, or on the previous stage's output. The control plane submits each stage as a real job and feeds one into the next.</div>
-      <div id="pipeStages" class="pipe"></div>
-      <button class="addstage" id="addStage">+ add stage</button>
-      <p class="section-label" style="margin-top:22px">Input · JSONL</p>
-      <textarea id="pipeInput" class="pinput" spellcheck="false" placeholder='{"text":"first record"}
-{"text":"second record"}'></textarea>
-      <button class="metalbtn go is-armed" id="pipeRun" aria-label="Run pipeline" style="margin-top:16px">
-        <img class="mb-slab" src="assets/btn-launch-slab@3x.png" alt="">
-        <span class="mb-label">Run pipeline</span>
-      </button>
-    </section>
 
     <section class="view" id="v-earn">
       <div class="power-wrap">
@@ -345,7 +322,7 @@
   function el(h){var d=document.createElement('div');d.innerHTML=h.trim();return d.firstChild;}
   function sha(){return Math.random().toString(16).slice(2,8);}
 
-  var views={launch:$('v-launch'),pipeline:$('v-pipeline'),earn:$('v-earn'),settings:$('v-settings')};
+  var views={launch:$('v-launch'),earn:$('v-earn'),settings:$('v-settings')};
   document.querySelectorAll('.nav[data-view]').forEach(function(b){
     b.addEventListener('click',function(){
       document.querySelectorAll('.nav').forEach(function(n){n.classList.remove('on');});
@@ -422,7 +399,7 @@
   setKnob(true);
 
   // ===== LAUNCH =====
-  var intake=$('intake'),intakeText=$('intake-text'),btn=$('launchBtn'),jobs=$('jobs');
+  var intake=$('intake'),intakeText=$('intake-text'),btn=$('launchBtn'),jobs=$('jobs'),pipePreview=$('pipePreview');
   var RERUN='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2 5"/><path d="M20 5v6h-6"/></svg>';
   var project=null, curQuote=null, liveFile=null, fileEl=$('file');
   function refreshArm(){var ok=!!project;btn.disabled=!ok;btn.classList.toggle('is-armed',ok);}
@@ -432,30 +409,47 @@
   // Identify what the data is from its type + a sampled shape. Pricing mirrors the
   // catalogue (per 1k units, or per audio-minute); a small margin is added. The real
   // server-side quote replaces this when the live wiring lands.
-  function classifyExt(ext){
-    if(['csv','tsv'].indexOf(ext)>=0)   return {job:'embed',    unit:'rows',    perK:0.001};
-    if(['json','jsonl'].indexOf(ext)>=0)return {job:'extract',  unit:'records', perK:0.002};
-    if(['txt','md'].indexOf(ext)>=0)    return {job:'embed',    unit:'lines',   perK:0.001};
-    if(['wav','mp3','m4a','flac','aac','ogg'].indexOf(ext)>=0) return {job:'transcribe', perMin:0.006};
-    return {job:'custom', metered:true};
+  // Autopilot: detect the WHOLE pipeline the data needs from its type. The buyer never
+  // composes anything; we recognise the shape and lay out the chain of CX workloads (the
+  // same patterns the server-side Concierge in intake.go detects). One click runs it all.
+  function pipelineFor(name){
+    var ext=(name.split('.').pop()||'').toLowerCase();
+    if(['wav','mp3','m4a','flac','aac','ogg'].indexOf(ext)>=0) return {pattern:'audio',
+      stages:[{op:'audio_transcribe',model:'whisper-tiny',label:'Transcribe audio'},
+              {op:'json_extraction',model:'llama-3.2-1b-instruct-q4',label:'Extract structured fields'}]};
+    if(['csv','tsv'].indexOf(ext)>=0) return {pattern:'tabular data',
+      stages:[{op:'embed',model:'all-minilm-l6-v2',label:'Embed each row'},
+              {op:'batch_classification',model:'llama-3.2-1b-instruct-q4',label:'Classify each row'}]};
+    if(['json','jsonl'].indexOf(ext)>=0) return {pattern:'records',
+      stages:[{op:'json_extraction',model:'llama-3.2-1b-instruct-q4',label:'Extract structured fields'}]};
+    if(['txt','md','html'].indexOf(ext)>=0) return {pattern:'documents',
+      stages:[{op:'embed',model:'all-minilm-l6-v2',label:'Embed text'},
+              {op:'batch_classification',model:'llama-3.2-1b-instruct-q4',label:'Topic label per document'}]};
+    if(['py','js','ts','go','rs','java','cpp','ipynb','zip','tar','gz'].indexOf(ext)>=0) return {pattern:'code',
+      stages:[{op:'custom',model:'sandboxed GPU container',label:'Build + run in a sandboxed container'}]};
+    return {pattern:'file', stages:[{op:'custom',model:'sandboxed container',label:'Run in a sandboxed container'}]};
   }
-  function showDetection(name,job,shape,quote){
-    project=name; curQuote=quote;
-    intake.classList.add('detected');
-    intakeText.innerHTML='<span class="d-name">'+name+'</span><span class="d-meta">detected · '+job+' · '+shape+' · '+quoteStr(quote)+' · click to reset</span>';
-    refreshArm();
+  function renderPipeline(stages){
+    var h='';
+    stages.forEach(function(s,i){
+      if(i>0)h+='<div class="stage-conn"></div>';
+      h+='<div class="stage ro" data-i="'+i+'"><span class="dot pending"></span><div class="stage-body">'
+        +'<div class="stage-lead">'+s.label+'</div>'
+        +'<div class="stage-sub num">'+s.model+(i===0?' · on your data':' · on the previous step')+'</div>'
+        +'</div></div>';
+    });
+    pipePreview.innerHTML=h; pipePreview.hidden=!stages.length;
   }
-  function resetIntake(){project=null;curQuote=null;liveFile=null;intake.classList.remove('detected');intakeText.textContent='Connect a repo or drop your data';refreshArm();}
+  function setPipeStage(i,c){var d=pipePreview.querySelector('.stage[data-i="'+i+'"] .dot');if(d)d.className='dot '+c;}
+  function resetPipe(){pipePreview.innerHTML='';pipePreview.hidden=true;}
+  function resetIntake(){project=null;curQuote=null;liveFile=null;intake.classList.remove('detected');intakeText.textContent='Connect a repo or drop your data';resetPipe();refreshArm();}
   function detectFile(file){
     liveFile=file;
-    var ext=(file.name.split('.').pop()||'').toLowerCase(), c=classifyExt(ext);
-    if(c.metered){showDetection(file.name,c.job,fmtBytes(file.size)+' · sandboxed container',null);return;}
-    if(c.perMin){var mins=Math.max(1,Math.round(file.size/1e6));showDetection(file.name,c.job,'~'+mins+' min audio',+(mins*c.perMin+0.02).toFixed(2));return;}
-    var fr=new FileReader();
-    fr.onload=function(){var s=String(fr.result),nl=(s.match(/\n/g)||[]).length||1,avg=s.length/nl,rows=Math.max(1,Math.round(file.size/avg));
-      showDetection(file.name,c.job,fmtN(rows)+' '+c.unit,+(rows/1000*c.perK+0.02).toFixed(2));};
-    fr.onerror=function(){showDetection(file.name,c.job,fmtBytes(file.size),null);};
-    fr.readAsText(file.slice(0,65536));
+    var pl=pipelineFor(file.name); pl.name=file.name; project=pl;
+    intake.classList.add('detected');
+    intakeText.innerHTML='<span class="d-name">'+file.name+'</span><span class="d-meta">detected · '+pl.pattern+' · '+fmtBytes(file.size)+' · '+pl.stages.length+'-step pipeline · click to reset</span>';
+    renderPipeline(pl.stages);
+    refreshArm();
   }
   intake.addEventListener('click',function(){if(project){resetIntake();}else{fileEl.click();}});
   fileEl.addEventListener('change',function(){if(fileEl.files&&fileEl.files[0])detectFile(fileEl.files[0]);});
@@ -498,9 +492,11 @@
     },360);
   }
   btn.addEventListener('click',function(){
-    if(btn.disabled)return;
-    if(isLive()&&liveFile){liveLaunch();resetIntake();return;}   // real prod job
-    var n=project.split('/').pop().replace(/\.[^.]+$/,'')||project;resetIntake();launch(n);   // demo simulation
+    if(btn.disabled||!project)return;
+    var pl=project, name=((pl.name||'pipeline').split('/').pop().replace(/\.[^.]+$/,''))||'pipeline';
+    btn.disabled=true; btn.classList.remove('is-armed');
+    if(isLive()&&liveFile) runPipelineLive(pl,name);   // real multi-stage pipeline on this server
+    else runPipelineDemo(pl,name);                      // demo simulation of the chain
   });
   jobs.addEventListener('click',function(e){
     if(e.target.closest('[data-dl]')){e.stopPropagation();toast('Downloaded results to ~/Downloads');}
@@ -531,110 +527,52 @@
     if(ext==='json'){try{var a=JSON.parse(text);if(Array.isArray(a))return a.map(function(x){return JSON.stringify(x);}).join('\n');}catch(e){}return text;}
     return text.split(/\r?\n/).filter(function(l){return l.trim();}).map(function(l){return JSON.stringify({text:l});}).join('\n');
   }
-  function liveLaunch(){
-    var f=liveFile;if(!f){toast('Drop a real data file to run a live job');return;}
-    var run=el(runHTML(f.name,'live','running'));jobs.prepend(run);attach(run);
-    var st=run.querySelector('.st'),trace=liveFeed(run.querySelector('.trace'),{w:54,h:20,n:20});
+  function addRun(name,src,status){var run=el(runHTML(name,src,status));jobs.prepend(run);attach(run);return run;}
+  function rearm(){btn.disabled=!project;if(project)btn.classList.add('is-armed');}
+  // Demo: walk the detected stages, lighting each as it runs then completes, then drop a run row.
+  function runPipelineDemo(pl,name){
+    var run=addRun(name,pl.stages.length+'-step · main@'+sha(),'running'),st=run.querySelector('.st');
+    var trace=liveFeed(run.querySelector('.trace'),{w:54,h:20,n:20});
     var tv=reduceMotion?null:setInterval(function(){trace.tick(0.4+Math.random()*0.4);},170);
-    function stop(){if(tv){clearInterval(tv);tv=null;}}
-    function fail(msg){stop();run.dataset.status='failed';run.querySelector('.dot').className='dot fail';st.className='st fail';st.textContent='failed';run.querySelector('.detail').innerHTML='<div class="preview">'+msg+'</div>';notify('Job failed',f.name);}
+    var i=0;(function step(){
+      if(i>=pl.stages.length){if(tv)clearInterval(tv);
+        run.dataset.status='done';run.querySelector('.dot').className='dot done';st.className='st done';st.textContent='done';
+        run.querySelector('.detail').innerHTML=doneDetail();notify('Pipeline complete',name);resetIntake();return;}
+      setPipeStage(i,'run');st.textContent='running · step '+(i+1)+'/'+pl.stages.length;
+      setTimeout(function(){setPipeStage(i,'done');i++;step();},1150);
+    })();
+  }
+  // Live: POST the detected stages to /v1/pipelines, then poll, lighting the preview + the row.
+  function runPipelineLive(pl,name){
+    var f=liveFile, run=addRun(name,'live · '+pl.stages.length+'-step','running'),st=run.querySelector('.st');
+    var trace=liveFeed(run.querySelector('.trace'),{w:54,h:20,n:20});
+    var tv=reduceMotion?null:setInterval(function(){trace.tick(0.4+Math.random()*0.4);},170);
+    function fail(msg){if(tv)clearInterval(tv);run.dataset.status='failed';run.querySelector('.dot').className='dot fail';st.className='st fail';st.textContent='failed';run.querySelector('.detail').innerHTML='<div class="preview">'+msg+'</div>';notify('Pipeline failed',name);rearm();}
     f.slice(0,1000000).text().then(function(text){
-      var body={job_type:{type:'embed'},model:{kind:'hf',ref:'all-minilm-l6-v2'},params:{},constraints:{min_memory_gb:0,max_duration_secs:0},verification:{redundancy_frac:0,honeypot_frac:0,payout_hold_secs:0},tier:'batch',input:toJSONL(f.name,text)};
-      return fetch('/v1/jobs',{method:'POST',headers:{'Authorization':'Bearer '+liveKey,'Content-Type':'application/json'},body:JSON.stringify(body)});
+      var spec=pl.stages.map(function(s,i){return {op:s.op,model:s.model,from:i===0?'input':'previous'};});
+      return fetch('/v1/pipelines',{method:'POST',headers:{'Authorization':'Bearer '+liveKey,'Content-Type':'application/json'},body:JSON.stringify({name:name,stages:spec,input:toJSONL(f.name,text)+'\n'})});
     }).then(function(res){return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});}).then(function(r){
       var j={};try{j=JSON.parse(r.t);}catch(e){}
       if(!r.ok){fail('submit '+r.status+': '+String(j.error||r.t).slice(0,160));return;}
-      st.textContent='running · queued';
-      notify('Job submitted',f.name+(j.estimated_usd!=null?' · est $'+(+j.estimated_usd).toFixed(2):''));
-      pollJob(j.job_id,run,st,stop);
+      st.textContent='running · queued';notify('Pipeline submitted',name);pollPipeline(j.pipeline_id,run,st,tv);
     }).catch(function(e){fail('network: '+e.message);});
   }
-  function pollJob(id,run,st,stop){
+  function pollPipeline(id,run,st,tv){
     var iv=setInterval(function(){
-      fetch('/v1/jobs/'+id,{headers:{'Authorization':'Bearer '+liveKey}}).then(function(res){return res.ok?res.json():null;}).then(function(j){
-        if(!j)return;
-        if(j.task_count)st.textContent='running · '+(j.tasks_done||0)+'/'+j.task_count;
-        if(j.status==='complete'){clearInterval(iv);stop();var usd=(j.actual_usd!=null?j.actual_usd:j.estimated_usd)||0;run.dataset.status='done';run.querySelector('.dot').className='dot done';st.className='st done';st.textContent='done · $'+(+usd).toFixed(2);run.querySelector('.detail').innerHTML='<div class="preview">complete · '+(j.task_count||0)+' tasks · billed $'+(+usd).toFixed(2)+'</div><div class="actions"><button class="mini" data-results="'+id+'">Download</button></div>';notify('Job complete',id);}
-        else if(j.status==='failed'||j.status==='cancelled'){clearInterval(iv);stop();run.dataset.status='failed';run.querySelector('.dot').className='dot fail';st.className='st fail';st.textContent=j.status;notify('Job '+j.status,id);}
+      fetch('/v1/pipelines/'+id,{headers:{'Authorization':'Bearer '+liveKey}}).then(function(res){return res.ok?res.json():null;}).then(function(p){
+        if(!p)return;var done=0,last='';
+        p.stages.forEach(function(s){var c=s.status==='complete'?'done':(s.status==='failed'||s.status==='cancelled')?'fail':(s.status==='running'||s.status==='queued'||s.status==='verifying')?'run':'pending';setPipeStage(s.index,c);if(s.status==='complete'){done++;last=s.job_id||last;}});
+        st.textContent='running · '+done+'/'+p.stages.length;
+        if(p.status==='complete'||p.status==='failed'){clearInterval(iv);if(tv)clearInterval(tv);var ok=p.status==='complete';
+          run.dataset.status=ok?'done':'failed';run.querySelector('.dot').className='dot '+(ok?'done':'fail');st.className='st '+(ok?'done':'fail');st.textContent=p.status;
+          if(ok)run.querySelector('.detail').innerHTML='<div class="preview">complete · '+p.stages.length+'-step pipeline</div><div class="actions"><button class="mini" data-results="'+last+'">Download</button></div>';
+          notify('Pipeline '+p.status,run.dataset.name);resetIntake();}
       }).catch(function(){});
-    },2500);
+    },2000);
   }
 
   // settings switches
   document.querySelectorAll('.switch').forEach(function(s){s.addEventListener('click',function(){s.classList.toggle('on');});});
-
-  // ===== Compute Autopilot pipeline builder =====
-  (function(){
-    var OPS={
-      audio_transcribe:{label:'Transcribe audio',models:['whisper-tiny','whisper-base']},
-      batch_classification:{label:'Classify',models:['llama-3.2-1b-instruct-q4','qwen2.5-7b-instruct']},
-      json_extraction:{label:'Extract JSON',models:['llama-3.2-1b-instruct-q4','qwen2.5-7b-instruct']},
-      embed:{label:'Embed text',models:['all-minilm-l6-v2']}
-    };
-    var stages=[{op:'batch_classification',model:'llama-3.2-1b-instruct-q4'},{op:'json_extraction',model:'llama-3.2-1b-instruct-q4'}];
-    var wrap=$('pipeStages'),runBtn=$('pipeRun');
-    if(!wrap||!runBtn)return;
-    var lbl=runBtn.querySelector('.mb-label'),busy=false;
-    function ops(sel){return Object.keys(OPS).map(function(k){return '<option value="'+k+'"'+(k===sel?' selected':'')+'>'+OPS[k].label+'</option>';}).join('');}
-    function mdls(op,sel){return OPS[op].models.map(function(m){return '<option'+(m===sel?' selected':'')+'>'+m+'</option>';}).join('');}
-    function render(){
-      var h='';
-      stages.forEach(function(s,i){
-        if(i>0)h+='<div class="stage-conn"></div>';
-        h+='<div class="stage" data-i="'+i+'"><span class="dot pending"></span><div class="stage-body">'
-          +'<div class="stage-row"><select class="op" data-i="'+i+'">'+ops(s.op)+'</select>'
-          +(stages.length>1?'<button class="rm" data-i="'+i+'" aria-label="Remove">×</button>':'')+'</div>'
-          +'<div class="stage-row"><select class="model" data-i="'+i+'">'+mdls(s.op,s.model)+'</select>'
-          +'<span class="from">'+(i===0?'on your data':'on previous output')+'</span></div></div></div>';
-      });
-      wrap.innerHTML=h;
-    }
-    wrap.addEventListener('change',function(e){
-      var i=+e.target.dataset.i;
-      if(e.target.classList.contains('op')){stages[i].op=e.target.value;stages[i].model=OPS[e.target.value].models[0];render();}
-      else if(e.target.classList.contains('model'))stages[i].model=e.target.value;
-    });
-    wrap.addEventListener('click',function(e){if(e.target.classList.contains('rm')){stages.splice(+e.target.dataset.i,1);render();}});
-    $('addStage').addEventListener('click',function(){if(stages.length<8){stages.push({op:'embed',model:'all-minilm-l6-v2'});render();}});
-    function setStage(i,c){var d=wrap.querySelector('.stage[data-i="'+i+'"] .dot');if(d)d.className='dot '+c;}
-    function done(word){lbl.textContent=word;setTimeout(function(){lbl.textContent='Run pipeline';busy=false;},1500);}
-    function runDemo(n){
-      var i=0;(function step(){
-        if(i>=n){done('Complete');notify('Pipeline complete','demo');return;}
-        setStage(i,'run');setTimeout(function(){setStage(i,'done');i++;step();},1250);
-      })();
-    }
-    function poll(id){
-      var iv=setInterval(function(){
-        fetch('/v1/pipelines/'+id,{headers:{'Authorization':'Bearer '+liveKey}}).then(function(r){return r.ok?r.json():null;}).then(function(p){
-          if(!p)return;
-          p.stages.forEach(function(st){
-            var c=st.status==='complete'?'done':(st.status==='failed'||st.status==='cancelled')?'fail':(st.status==='running'||st.status==='queued'||st.status==='verifying')?'run':'pending';
-            setStage(st.index,c);
-          });
-          if(p.status==='complete'||p.status==='failed'){clearInterval(iv);done(p.status==='complete'?'Complete':'Failed');notify('Pipeline '+p.status,id);}
-        }).catch(function(){});
-      },2000);
-    }
-    function runLive(spec,input){
-      fetch('/v1/pipelines',{method:'POST',headers:{'Authorization':'Bearer '+liveKey,'Content-Type':'application/json'},body:JSON.stringify({name:'pipeline',stages:spec,input:input})})
-        .then(function(r){return r.text().then(function(t){return{ok:r.ok,status:r.status,t:t};});})
-        .then(function(r){var j={};try{j=JSON.parse(r.t);}catch(e){}
-          if(!r.ok){toast('Pipeline '+r.status+': '+String(j.error||r.t).slice(0,120));done('Failed');return;}
-          notify('Pipeline submitted',j.pipeline_id);poll(j.pipeline_id);
-        }).catch(function(e){toast('Pipeline network: '+e.message);done('Failed');});
-    }
-    runBtn.addEventListener('click',function(){
-      if(busy)return;
-      var input=($('pipeInput').value||'').trim();
-      if(!input){toast('Add some JSONL input first');return;}
-      busy=true;lbl.textContent='Running';
-      stages.forEach(function(_,i){setStage(i,'pending');});
-      var spec=stages.map(function(s,i){return {op:s.op,model:s.model,from:i===0?'input':'previous'};});
-      if(isLive())runLive(spec,input+'\n');else runDemo(spec.length);
-    });
-    render();
-  })();
 })();
 </script>
 <script>
