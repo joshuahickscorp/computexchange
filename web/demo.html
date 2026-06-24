@@ -117,8 +117,10 @@
   .banner{display:flex;align-items:center;gap:12px;justify-content:space-between;padding:14px 16px;margin-bottom:18px;font-size:13px;color:var(--bone)}
   .pill{height:32px;padding:0 16px;border-radius:var(--r-pill);border:1px solid var(--line);background:transparent;color:var(--bone);font:500 12px var(--sans);cursor:pointer;transition:border-color var(--dur) var(--ease),color var(--dur) var(--ease),background var(--dur) var(--ease)}
   .pill:hover{border-color:var(--line-hi);color:var(--bone-hi)}
-  .pill.solid{background:var(--bone-hi);color:var(--bg);border-color:var(--bone-hi);box-shadow:inset 0 1px 0 rgba(255,255,255,.5)}
-  .pill.solid:hover{background:var(--signal);border-color:var(--signal)}
+  /* Action buttons wear their OWN metal (brushed steel, distinct from the knob's turned disc):
+     the render is the fill, the label sits on it, the armed state breathes. */
+  .pill.solid{background:#0c0c0e url(assets/button-armed@3x.png) center/cover;color:var(--bone-hi);border-color:var(--line-hi);text-shadow:0 1px 2px rgba(0,0,0,.55);box-shadow:inset 0 1px 0 rgba(255,255,255,.32)}
+  .pill.solid:hover{filter:brightness(1.12)}
 
   .intake{border:1.5px dashed var(--line);border-radius:var(--r);padding:28px 16px;text-align:center;color:var(--mute);cursor:pointer;transition:border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
   .intake svg{width:24px;height:24px;display:block;margin:0 auto 8px;stroke-width:1.5}
@@ -128,11 +130,11 @@
   .d-name{display:block;color:var(--bone-hi);font-size:14px;font-weight:500}
   .d-meta{display:block;color:var(--mute);font-size:12px;margin-top:5px}
 
-  .go{width:100%;height:50px;margin-top:18px;border:1px solid var(--bone-hi);border-radius:var(--r);background:var(--bone-hi);color:var(--bg);font:600 15px var(--sans);display:flex;align-items:center;justify-content:center;gap:8px;cursor:pointer;transition:background var(--dur) var(--ease),border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
+  .go{width:100%;height:54px;margin-top:18px;border:1px solid var(--line-hi);border-radius:var(--r);background:#0c0c0e url(assets/button-armed@3x.png) center/cover;color:var(--bone-hi);font:600 15px var(--sans);letter-spacing:.02em;text-shadow:0 1px 3px rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;gap:9px;cursor:pointer;transition:filter var(--dur) var(--ease)}
   .go svg{width:15px;height:15px}
-  .go:hover{background:var(--signal);border-color:var(--signal)}
+  .go:hover{filter:brightness(1.12)}
   .go:active{transform:translateY(1px)}
-  .go[disabled]{background:var(--card);border-color:var(--line);color:var(--ash);cursor:default;pointer-events:none}
+  .go[disabled]{background:#0a0a0c url(assets/button-off@3x.png) center/cover;border-color:var(--line);color:var(--ash);text-shadow:none;cursor:default;pointer-events:none}
   .go[disabled] svg{display:none}
   /* armed Launch echoes the knob: a machined top edge + a gentle breathing glow (alive) */
   .go:not([disabled]){box-shadow:inset 0 1px 0 rgba(255,255,255,.55);animation:btn-breathe 3.6s ease-in-out infinite}
