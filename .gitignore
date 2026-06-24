@@ -37,6 +37,13 @@ agent/agent.toml
 *.swp
 *~
 
+# ── Design sources ───────────────────────────────────────────────────────────
+# The layered logo master (logo/cx_logo.psd, ~8 MB) is the editable brand source,
+# kept local to keep clones lean. The flat source PNG + the generated masters
+# (cx-mark-white, cx-app-icon, cx-metal*) ARE committed, and scripts/cx_trace.py
+# + cx_logo.py regenerate every render from the PNG.
+*.psd
+
 # ── PROTECTED ASSETS (SACRED — see BLACKHOLE.md) ─────────────────────────────
 # Models, weights, datasets, and caches are expensive or impossible to
 # regenerate. They are gitignored so they are NEVER committed, but they must

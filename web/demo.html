@@ -4,6 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Computexchange</title>
+<link rel="icon" href="favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
+<link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
+<link rel="manifest" href="site.webmanifest">
+<meta name="theme-color" content="#0a0a0c">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600&display=swap" rel="stylesheet">
@@ -33,7 +39,10 @@
   .app{display:flex;min-height:100vh;max-width:600px;margin:0 auto}
   /* rail */
   .rail{width:60px;display:flex;flex-direction:column;align-items:center;gap:6px;padding:18px 0;border-right:1px solid var(--line-soft)}
-  .brand{width:30px;height:30px;border-radius:var(--r-sm);background:var(--raise);border:1px solid var(--line);color:var(--bone-hi);display:flex;align-items:center;justify-content:center;font-weight:600;font-size:14px;margin-bottom:10px}
+  /* brand mark: flat white Cx, no box, no chip (identity, not a control). The metal is spent
+     on the knob; the rail mark stays flat so the knob remains the single hero on screen. */
+  .brand{width:30px;height:30px;margin-bottom:10px;display:flex;align-items:center;justify-content:center}
+  .brand img{width:100%;height:100%;object-fit:contain;display:block}
   .nav{width:42px;height:42px;border:none;background:none;color:var(--ash);border-radius:var(--r-sm);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:background var(--dur) var(--ease),color var(--dur) var(--ease)}
   .nav svg{width:21px;height:21px}
   .nav:hover{color:var(--bone);background:var(--raise)}
@@ -188,12 +197,42 @@
     *{transition:none !important;animation:none !important}
     .knob.is-on .knob-glow{opacity:1}
   }
+  /* ===== SPLASH: the one place metal belongs beyond the knob, the mark alone. Base metal
+     Cx + the x backlight screen-blended on top + one specular sweep clipped to the mark. ===== */
+  .splash{position:fixed;inset:0;display:grid;place-items:center;z-index:60;
+    background:radial-gradient(120% 100% at 50% 0%,#101014,#0a0a0c 55%,#08080a);
+    transition:opacity .5s var(--ease)}
+  .splash.hide{opacity:0;pointer-events:none}
+  .splash .mark{position:relative;width:168px;height:168px;animation:logo-settle .9s cubic-bezier(.2,0,0,1) both}
+  .splash .mark>img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+  .splash .metal{z-index:1}
+  .splash .glow{z-index:2;opacity:0;animation:logo-glow 1.7s ease-in-out .25s both}
+  .splash .gloss{position:absolute;inset:0;z-index:3;mix-blend-mode:screen;transform:translateX(-120%);
+    background:linear-gradient(115deg,transparent 42%,rgba(255,255,255,.30) 50%,transparent 58%);
+    -webkit-mask:url(assets/cx-metal@3x.png) center/contain no-repeat;
+            mask:url(assets/cx-metal@3x.png) center/contain no-repeat;
+    animation:logo-sweep 1.8s ease-in-out .3s 1 both}
+  @keyframes logo-sweep{to{transform:translateX(120%)}}
+  @keyframes logo-glow{0%{opacity:0}60%,100%{opacity:1}}
+  @keyframes logo-settle{from{transform:scale(.96) rotate(-4deg);opacity:0}to{transform:none;opacity:1}}
+  @media (prefers-reduced-motion:reduce){
+    .splash .mark{animation:none}
+    .splash .glow{animation:none;opacity:1}
+    .splash .gloss{display:none}
+  }
 </style>
 </head>
 <body>
+<div class="splash" id="splash">
+  <div class="mark">
+    <img class="metal" src="assets/cx-metal@3x.png" srcset="assets/cx-metal@2x.png 2x, assets/cx-metal@3x.png 3x" alt="computexchange">
+    <img class="glow" src="assets/cx-metal-on@3x.png" srcset="assets/cx-metal-on@2x.png 2x, assets/cx-metal-on@3x.png 3x" alt="" aria-hidden="true">
+    <div class="gloss"></div>
+  </div>
+</div>
 <div class="app">
   <nav class="rail" aria-label="Sections">
-    <div class="brand">C</div>
+    <div class="brand"><img src="assets/cx-mark-white.png" srcset="assets/cx-mark-white.png 1x" alt="computexchange"></div>
     <button class="nav on" data-view="launch" aria-label="Launch"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6.3v11.4l9.5-5.7z"/></svg></button>
     <button class="nav" data-view="earn" aria-label="Earn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M12 4v8"/><path d="M7.5 7.2a7 7 0 1 0 9 0"/></svg></button>
     <button class="nav acct" data-view="settings" aria-label="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8" r="3.2"/><path d="M5.5 20a6.5 6.5 0 0 1 13 0"/></svg></button>
@@ -496,6 +535,16 @@
 
   // settings switches
   document.querySelectorAll('.switch').forEach(function(s){s.addEventListener('click',function(){s.classList.toggle('on');});});
+})();
+</script>
+<script>
+(function(){
+  var s=document.getElementById('splash'); if(!s) return;
+  var rm=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function hide(){ s.classList.add('hide'); setTimeout(function(){ s.style.display='none'; }, 600); }
+  var hold=rm?500:2100;   // hold for the settle + one sweep, then fade out; quick + static for reduced motion
+  if(document.readyState==='complete') setTimeout(hide,hold);
+  else window.addEventListener('load', function(){ setTimeout(hide,hold); });
 })();
 </script>
 </body>
