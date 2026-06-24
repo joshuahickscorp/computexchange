@@ -515,6 +515,16 @@ func (s *Store) EligiblePoolReputation(ctx context.Context, jobType, modelRef st
 	return r, err
 }
 
+// AddPrivatePoolMember binds a supplier to a buyer's Private Deployment pool (research
+// §3): only bound suppliers may claim that buyer's private_pool jobs. Idempotent.
+func (s *Store) AddPrivatePoolMember(ctx context.Context, buyerID, supplierID uuid.UUID) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO private_pool_members (buyer_id, supplier_id) VALUES ($1,$2)
+		 ON CONFLICT (buyer_id, supplier_id) DO NOTHING`,
+		buyerID, supplierID)
+	return err
+}
+
 // WarmEligibleWorkerCount counts the eligible workers (same predicate as
 // EligibleWorkerCount) that ALSO have modelRef WARM right now — a fresh
 // worker_model_state row for the model (last_seen_warm within the 60s liveness

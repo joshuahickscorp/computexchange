@@ -213,6 +213,13 @@ ON CONFLICT (id) DO NOTHING;
 -- Job-level queryable constraints (lifted out of verification_policy/manifest):
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS min_memory_gb      REAL DEFAULT 0;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS min_reputation     REAL DEFAULT 0;    -- Elite-supplier gate (research §6.4): claim only by reputation >= this
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS private_pool        BOOLEAN DEFAULT false; -- Private Deployment (research §3): route only to the buyer's bound suppliers
+CREATE TABLE IF NOT EXISTS private_pool_members (
+    buyer_id    UUID NOT NULL,
+    supplier_id UUID NOT NULL,
+    created_at  TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (buyer_id, supplier_id)
+);
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS hw_classes         TEXT[];           -- NULL = any class
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS data_residency     TEXT[];           -- NULL = unrestricted
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS split_size         INT;              -- adaptive chunk size chosen at submit

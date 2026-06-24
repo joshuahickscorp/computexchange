@@ -385,6 +385,11 @@ func (s *Store) ClaimTask(ctx context.Context, w WorkerAuth) (*ClaimedTask, erro
 		     -- min_reputation job is claimable only by a supplier who earned that
 		     -- reputation on the platform (0 = any supplier; the unchanged path).
 		     AND COALESCE(j.min_reputation,0) <= s.reputation
+		     -- Private Deployment (research §3): a private_pool job is claimable only by a
+		     -- supplier the buyer bound to their dedicated fleet (private_pool_members).
+		     AND (NOT COALESCE(j.private_pool,false) OR EXISTS (
+		           SELECT 1 FROM private_pool_members m
+		            WHERE m.buyer_id = j.buyer_id AND m.supplier_id = s.id))
 		     AND (j.tier <> 'trusted' OR $2 >= 2)
 		     AND (COALESCE(j.offered_rate_usd_hr,1e9) >= COALESCE(w.min_payout_usd_hr,0))
 		     -- Budget Governor (Plane C §12 / Plane D §14 D8): when the job has a hard
@@ -565,7 +570,8 @@ func (s *Store) SchedulerExplain(ctx context.Context, workerID uuid.UUID) (*Sche
 		`WITH w AS (SELECT * FROM workers WHERE id = $1),
 		      claimable AS (
 		        SELECT j.min_memory_gb, j.hw_classes, j.data_residency, j.job_type,
-		               j.model_ref, j.offered_rate_usd_hr, j.tier AS job_tier, j.min_reputation
+		               j.model_ref, j.offered_rate_usd_hr, j.tier AS job_tier, j.min_reputation,
+		               j.private_pool, j.buyer_id
 		        FROM tasks t
 		          JOIN jobs j ON j.id = t.job_id
 		        WHERE t.status IN ('queued','retrying')
@@ -583,6 +589,7 @@ func (s *Store) SchedulerExplain(ctx context.Context, workerID uuid.UUID) (*Sche
 		          WHEN NOT (COALESCE(c.model_ref,'') = '' OR COALESCE(w.supported_models,'{}') @> ARRAY[c.model_ref]) THEN 'model_mismatch'
 		          WHEN NOT (c.data_residency IS NULL OR s.data_country = ANY(c.data_residency)) THEN 'residency_mismatch'
 		          WHEN COALESCE(c.min_reputation,0) > s.reputation THEN 'reputation_too_low'
+		          WHEN COALESCE(c.private_pool,false) AND NOT EXISTS (SELECT 1 FROM private_pool_members m WHERE m.buyer_id = c.buyer_id AND m.supplier_id = s.id) THEN 'private_pool_excluded'
 		          WHEN NOT (c.job_tier <> 'trusted' OR $2 >= 2) THEN 'tier_gate'
 		          WHEN NOT (COALESCE(c.offered_rate_usd_hr,1e9) >= COALESCE(w.min_payout_usd_hr,0)) THEN 'payout_floor'
 		          ELSE 'eligible'
@@ -597,7 +604,7 @@ func (s *Store) SchedulerExplain(ctx context.Context, workerID uuid.UUID) (*Sche
 		   count(*) FILTER (WHERE reason = 'hw_class_mismatch'),
 		   count(*) FILTER (WHERE reason = 'residency_mismatch'),
 		   count(*) FILTER (WHERE reason = 'throttled'),
-		   count(*) FILTER (WHERE reason = 'payout_floor' OR reason = 'tier_gate' OR reason = 'reputation_too_low'),
+		   count(*) FILTER (WHERE reason = 'payout_floor' OR reason = 'tier_gate' OR reason = 'reputation_too_low' OR reason = 'private_pool_excluded'),
 		   count(*) FILTER (WHERE reason = 'supplier_inactive'),
 		   count(*) FILTER (WHERE reason = 'eligible')
 		 FROM classified`,

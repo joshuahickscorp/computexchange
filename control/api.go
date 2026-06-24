@@ -83,6 +83,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /v1/price-estimate", s.authBuyer(http.HandlerFunc(s.handlePriceEstimate)))
 	mux.Handle("POST /v1/quote", s.authBuyer(http.HandlerFunc(s.handleQuote))) // Plane C: scan + price, no spend
 	mux.Handle("POST /v1/webhooks", s.authBuyer(http.HandlerFunc(s.handleRegisterWebhook)))
+	mux.Handle("POST /v1/private-pool", s.authBuyer(http.HandlerFunc(s.handleAddPrivatePoolMember))) // Private Deployment (research §3)
 
 	// Concierge intake + buyer billing (intake.go, billing.go). The callback is
 	// unauthed — GitHub redirects to it with no bearer; the buyer is recovered from
@@ -238,6 +239,9 @@ type jobSubmit struct {
 	// enterprise work is reachable only by suppliers who earned a high reputation ON the
 	// platform, an asset they cannot port to a direct deal. 0 (default) = any supplier.
 	MinReputation float32 `json:"min_reputation,omitempty"`
+	// PrivatePool routes this job ONLY to the buyer's bound suppliers (Private Deployment
+	// tier, research §3): their dedicated fleet, so the data never touches a shared pool.
+	PrivatePool bool `json:"private_pool,omitempty"`
 }
 
 // defaultSplitSize is the JSONL chunk size (lines per task) when params omits it.
@@ -483,6 +487,7 @@ func (s *Server) createJob(ctx context.Context, buyerID uuid.UUID, sub jobSubmit
 		TaskCount:          len(tasks),
 		MinMemoryGB:        sub.Constraints.MinMemoryGB,
 		MinReputation:      sub.MinReputation,
+		PrivatePool:        sub.PrivatePool,
 		HWClasses:          sub.Constraints.HWClasses,
 		DataResidency:      sub.Constraints.DataResidency,
 		JobTypeSpec:        spec,
@@ -598,6 +603,30 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 		MaxUSD:       j.MaxUSD,
 		BudgetState:  j.BudgetState,
 	})
+}
+
+// handleAddPrivatePoolMember binds a supplier to the buyer's Private Deployment pool
+// (research §3): thereafter only bound suppliers may claim that buyer's private_pool
+// jobs. POST /v1/private-pool {"supplier_id":"<uuid>"} → 204. Idempotent.
+func (s *Server) handleAddPrivatePoolMember(w http.ResponseWriter, r *http.Request) {
+	auth := r.Context().Value(ctxBuyer).(*AuthResult)
+	var body struct {
+		SupplierID string `json:"supplier_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	sid, err := uuid.Parse(body.SupplierID)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "supplier_id must be a uuid")
+		return
+	}
+	if err := s.store.AddPrivatePoolMember(r.Context(), auth.BuyerID, sid); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleJobResults returns a presigned GET of the merged buyer-ready artifact for

@@ -72,6 +72,17 @@ func (s *Store) Migrate(ctx context.Context) error {
 		// self-migrates to the columns the hard-filter claim + result merge need.
 		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS min_memory_gb REAL DEFAULT 0`,
 		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS min_reputation REAL DEFAULT 0`,
+		// Private Deployment tier (research §3): a private_pool job routes ONLY to the
+		// buyer's own bound suppliers (their dedicated Mac/GPU fleet), so "data never
+		// leaves our boxes" is contractual, not marketing. private_pool_members binds
+		// a buyer to the suppliers allowed to run their private work.
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS private_pool BOOLEAN DEFAULT false`,
+		`CREATE TABLE IF NOT EXISTS private_pool_members (
+		   buyer_id    UUID NOT NULL,
+		   supplier_id UUID NOT NULL,
+		   created_at  TIMESTAMPTZ DEFAULT now(),
+		   PRIMARY KEY (buyer_id, supplier_id)
+		 )`,
 		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS hw_classes TEXT[]`,
 		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS data_residency TEXT[]`,
 		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS split_size INT`,
@@ -796,14 +807,14 @@ func (s *Store) CreateJobWithTasks(ctx context.Context, j *jobRow, tasks []taskR
 		   (id, buyer_id, status, job_type, model_ref, input_ref, output_ref,
 		    tier, verification_policy, estimated_usd, actual_usd, task_count, tasks_done,
 		    min_memory_gb, hw_classes, data_residency, job_type_spec, split_size,
-		    offered_rate_usd_hr, eta_secs, max_usd, budget_state, quote_id, min_reputation)
+		    offered_rate_usd_hr, eta_secs, max_usd, budget_state, quote_id, min_reputation, private_pool)
 		 VALUES ($1,$2,'queued',$3,$4,$5,$6,$7,$8,$9,0,$10,0,
-		         $11,$12,$13,$14,$15,$16,$17,$18,'tracking',$19,$20)`,
+		         $11,$12,$13,$14,$15,$16,$17,$18,'tracking',$19,$20,$21)`,
 		j.ID, j.BuyerID, j.JobType, j.ModelRef, j.InputRef, j.OutputRef,
 		j.Tier, j.VerificationPolicy, j.EstimatedUSD, j.TaskCount,
 		j.MinMemoryGB, nullStrSlice(j.HWClasses), nullStrSlice(j.DataResidency),
 		nullJSON(j.JobTypeSpec), j.SplitSize, j.OfferedRateUsdHr, j.ETASecs,
-		nullPosFloat(j.MaxUSD), nullUUID(j.QuoteID), j.MinReputation,
+		nullPosFloat(j.MaxUSD), nullUUID(j.QuoteID), j.MinReputation, j.PrivatePool,
 	)
 	if err != nil {
 		return err
@@ -849,6 +860,7 @@ type jobRow struct {
 	MaxUSD             float64   // buyer hard spend cap (Budget Governor); 0 = no cap
 	QuoteID            uuid.UUID // advisory quote bound to this job (Plane D D7); zero = none → persisted NULL
 	MinReputation      float32   // Elite-supplier gate: claim only by suppliers with reputation >= this (0 = any)
+	PrivatePool        bool      // Private Deployment: route ONLY to the buyer's bound suppliers (private_pool_members)
 }
 
 // taskRow mirrors the tasks columns we write at creation. Each task is one chunk
