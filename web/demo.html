@@ -12,6 +12,7 @@
     --bg:#0a0a0c; --card:#101013; --raise:#16161a;
     --line:#222226; --line-soft:#1a1a1e; --line-hi:#33333a;
     --ash:#6c6c72; --mute:#8d8d94; --bone:#cbc8c1; --bone-hi:#ebe7e0; --signal:#ffffff;
+    --green:#37d27a; --red:#e5544a;   /* status ONLY: the knob light + run statuses. nothing else takes a hue */
     --serif:"Cormorant Garamond",serif;
     --sans:-apple-system,BlinkMacSystemFont,"SF Pro Display","Inter",system-ui,sans-serif;
     --r:14px; --r-sm:10px; --r-pill:999px;
@@ -69,17 +70,22 @@
   .knob{position:relative;width:240px;height:240px;margin:0 auto;cursor:pointer;outline:none}
   .knob img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:block}
   .knob-base{z-index:1}
-  .knob-glow{z-index:2;opacity:0;transition:opacity var(--dur-slow) var(--ease)}
-  .knob-press{z-index:3;opacity:0;transition:opacity 90ms var(--ease)}
+  .knob-red{z-index:2;opacity:0;transition:opacity var(--dur-slow) var(--ease)}   /* offline: red, steady */
+  .knob-glow{z-index:3;opacity:0;transition:opacity var(--dur-slow) var(--ease)}  /* online: green, breathing */
+  .knob-press{z-index:4;opacity:0;transition:opacity 90ms var(--ease)}
   .knob-shadow{position:absolute;left:50%;bottom:8%;width:60%;height:10%;transform:translateX(-50%);
     background:radial-gradient(ellipse,rgba(0,0,0,.7),transparent 70%);filter:blur(7px);z-index:0}
-  .knob.is-on .knob-glow{opacity:1;animation:knob-breathe 3.6s ease-in-out infinite}
+  .knob.is-on .knob-glow{opacity:1;animation:knob-breathe 3.6s ease-in-out infinite}  /* online: green breathes */
+  .knob:not(.is-on) .knob-red{opacity:1}                                              /* offline: red, steady */
   .knob:active .knob-press{opacity:1}
   .knob:focus-visible{box-shadow:0 0 0 1px var(--line-hi);border-radius:50%}
   @keyframes knob-breathe{0%,100%{opacity:.6} 50%{opacity:1}}
 
   .pstate{font-size:12px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--bone-hi);margin-top:18px}
   .pstate.off{color:var(--ash)}
+  /* tiny status dot echoing the knob light: green online, red offline (same two values) */
+  .sdot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--green);vertical-align:middle;margin:-2px 9px 0 0;transition:background var(--dur) var(--ease)}
+  .pstate.off .sdot{background:var(--red)}
   .phint{font-size:11px;color:var(--mute);margin-top:5px}
   .prun{font-size:11px;color:var(--ash);margin-top:8px}
 
@@ -102,27 +108,35 @@
   .row .l{display:flex;align-items:center;gap:10px;min-width:0}
   .row .k{font-size:10px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--mute)}
   .r-meta{color:var(--mute)}
-  /* status markers: small rendered-metal pucks echoing the power knob (assets/dot-*.png).
-     State reads at 16px by TONE: running carries a live breathing glow halo (the knob's
-     cue), done is bright metal, failed is dimmed and inert. */
+  /* machine + payout markers: small rendered-metal pucks echoing the knob, kept MONOCHROME
+     (connected = bright metal, paused = dimmed). Hue is reserved for status: the knob light
+     and the run statuses only. Run markers are coloured dots (see .run .dot). */
   .marker{position:relative;width:16px;height:16px;flex:none;background-size:contain;background-repeat:no-repeat;background-position:center}
   .marker.done{background-image:url(assets/dot-done@3x.png)}
   .marker.fail{background-image:url(assets/dot-fail@3x.png);filter:brightness(.58)}
-  .marker.run{background-image:url(assets/dot-on@3x.png)}
-  .marker.run::after{content:"";position:absolute;inset:-6px;border-radius:50%;pointer-events:none;
-    background:radial-gradient(circle,rgba(255,255,255,.5),rgba(255,255,255,0) 66%);animation:dot-breathe 3.6s ease-in-out infinite}
-  @keyframes dot-breathe{0%,100%{opacity:.45} 50%{opacity:1}}
 
   /* ===== LAUNCH ===== */
   .banner{display:flex;align-items:center;gap:12px;justify-content:space-between;padding:14px 16px;margin-bottom:18px;font-size:13px;color:var(--bone)}
   .pill{height:32px;padding:0 16px;border-radius:var(--r-pill);border:1px solid var(--line);background:transparent;color:var(--bone);font:500 12px var(--sans);cursor:pointer;transition:border-color var(--dur) var(--ease),color var(--dur) var(--ease),background var(--dur) var(--ease)}
   .pill:hover{border-color:var(--line-hi);color:var(--bone-hi)}
-  /* Action buttons ARE the oracle, elongated: dark anodized metal (button-off), a glowing
-     perimeter that breathes when present (button-armed), pushed on press (button-press).
-     Same render family + bloom as the power knob; the label sits inside the glow. */
-  .pill.solid{position:relative;isolation:isolate;overflow:hidden;background:#0a0a0c url(assets/button-off@3x.png) center/100% 100% no-repeat;color:var(--bone-hi);border-color:var(--line-hi);text-transform:uppercase;letter-spacing:.05em;text-shadow:0 1px 2px rgba(0,0,0,.6)}
-  .pill.solid::before{content:"";position:absolute;inset:0;z-index:-1;background:url(assets/button-armed@3x.png) center/100% 100% no-repeat;animation:btn-breathe 3.6s ease-in-out infinite;pointer-events:none}
-  .pill.solid:active{transform:translateY(1px)} .pill.solid:active::before{background-image:url(assets/button-press@3x.png)}
+  .pill.solid{background:var(--bone-hi);color:var(--bg);border-color:var(--bone-hi)}
+  .pill.solid:hover{background:var(--signal);border-color:var(--signal)}
+
+  /* Action buttons (Launch, Add payment): SIBLINGS of the knob, same dark anodized metal,
+     rendered as a rounded KEY with the LABEL as the lit element (assets/btn-*). Composite
+     like the knob: base (disabled) + armed glow cross-faded + pressed frame on :active. */
+  .metalbtn{position:relative;display:block;width:100%;height:66px;border:0;background:none;cursor:pointer;outline:none;padding:0}
+  .metalbtn img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:block}
+  .mb-base{z-index:1}
+  .mb-glow{z-index:2;opacity:0;transition:opacity .25s var(--ease)}
+  .mb-press{z-index:3;opacity:0}
+  .metalbtn.is-armed .mb-glow{opacity:1;animation:mb-breathe 3.6s ease-in-out infinite}
+  .metalbtn:active .mb-press{opacity:1}
+  .metalbtn[disabled]{cursor:not-allowed}
+  .metalbtn[disabled] .mb-glow{opacity:0;animation:none}
+  .metalbtn:focus-visible{box-shadow:0 0 0 1px var(--line-hi);border-radius:var(--r)}
+  .metalbtn.sm{width:150px;height:48px}
+  @keyframes mb-breathe{0%,100%{opacity:.7}50%{opacity:1}}
 
   .intake{border:1.5px dashed var(--line);border-radius:var(--r);padding:28px 16px;text-align:center;color:var(--mute);cursor:pointer;transition:border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
   .intake svg{width:24px;height:24px;display:block;margin:0 auto 8px;stroke-width:1.5}
@@ -132,15 +146,7 @@
   .d-name{display:block;color:var(--bone-hi);font-size:14px;font-weight:500}
   .d-meta{display:block;color:var(--mute);font-size:12px;margin-top:5px}
 
-  .go{position:relative;isolation:isolate;overflow:hidden;width:100%;height:56px;margin-top:18px;border:1px solid var(--line-hi);border-radius:var(--r);background:#0a0a0c url(assets/button-off@3x.png) center/100% 100% no-repeat;color:var(--bone-hi);font:600 14px var(--sans);letter-spacing:.09em;text-transform:uppercase;text-shadow:0 1px 3px rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;gap:9px;cursor:pointer;transition:transform 90ms var(--ease)}
-  .go::before{content:"";position:absolute;inset:0;z-index:-1;background:url(assets/button-armed@3x.png) center/100% 100% no-repeat;opacity:0;transition:opacity var(--dur-slow) var(--ease);pointer-events:none}
-  .go svg{width:14px;height:14px}
-  .go:not([disabled])::before{opacity:1;animation:btn-breathe 3.6s ease-in-out infinite}      /* armed glow breathes, like the knob */
-  .go:not([disabled]):active{transform:translateY(2px)}                                       /* the push */
-  .go:not([disabled]):active::before{background-image:url(assets/button-press@3x.png)}         /* pressed-down render */
-  .go[disabled]{color:var(--ash);cursor:default;pointer-events:none}
-  .go[disabled] svg{display:none}
-  @keyframes btn-breathe{0%,100%{opacity:.58} 50%{opacity:1}}
+  #launchBtn{margin-top:18px}
 
   .runs{margin-top:30px}
   .run{border-top:1px solid var(--line-soft)}
@@ -148,7 +154,13 @@
   .run .l{display:flex;align-items:center;gap:10px;min-width:0}
   .run .src{color:var(--ash);font-size:12px}
   .run-right{display:flex;align-items:center;gap:8px}
-  .run .st{color:var(--mute)} .run[data-status="running"] .st{color:var(--bone-hi)} .run[data-status="failed"] .st{color:var(--ash)}
+  .run .st{color:var(--mute)}
+  .run .st.done{color:var(--green)} .run .st.fail{color:var(--red)} .run .st.run{color:var(--green)}
+  /* run status colour (the second + last place hue appears): green=done/running, red=failed */
+  .run .dot{width:9px;height:9px;border-radius:50%;flex:none}
+  .run .dot.done{background:var(--green)} .run .dot.fail{background:var(--red)}
+  .run .dot.run{background:var(--green);animation:run-pulse 1.6s ease-in-out infinite}
+  @keyframes run-pulse{0%,100%{opacity:1}50%{opacity:.4}}
   .run .trace{width:54px;height:20px;display:none} .run[data-status="running"] .trace{display:block}
   .icon{width:26px;height:26px;border:none;background:none;color:var(--ash);border-radius:var(--r-sm);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;transition:background var(--dur) var(--ease),color var(--dur) var(--ease)}
   .icon:hover{background:var(--raise);color:var(--bone)} .icon svg{width:15px;height:15px;stroke-width:1.5}
@@ -182,7 +194,7 @@
 <div class="app">
   <nav class="rail" aria-label="Sections">
     <div class="brand">C</div>
-    <button class="nav on" data-view="launch" aria-label="Launch"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg></button>
+    <button class="nav on" data-view="launch" aria-label="Launch"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6.3v11.4l9.5-5.7z"/></svg></button>
     <button class="nav" data-view="earn" aria-label="Earn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M12 4v8"/><path d="M7.5 7.2a7 7 0 1 0 9 0"/></svg></button>
     <button class="nav acct" data-view="settings" aria-label="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8" r="3.2"/><path d="M5.5 20a6.5 6.5 0 0 1 13 0"/></svg></button>
   </nav>
@@ -194,13 +206,17 @@
     <div class="notif" id="notif"></div>
 
     <section class="view on" id="v-launch">
-      <div class="banner card" id="setup"><span>Add a payment method to run your first job.</span><button class="pill solid" id="setupBtn">Add payment</button></div>
+      <div class="banner card" id="setup"><span>Add a payment method to run your first job.</span><button class="metalbtn sm is-armed" id="setupBtn" aria-label="Add payment"><img class="mb-base" src="assets/btn-add-payment-off@3x.png" alt=""><img class="mb-glow" src="assets/btn-add-payment-armed@3x.png" alt=""><img class="mb-press" src="assets/btn-add-payment-pressed@3x.png" alt=""></button></div>
       <div class="intake" id="intake">
         <input type="file" id="file" hidden>
         <svg class="intake-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h3.5l2 2H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
         <div id="intake-text">Connect a repo or drop your data</div>
       </div>
-      <button class="go" id="launchBtn" disabled><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg><span id="launchLabel">Launch</span></button>
+      <button class="metalbtn" id="launchBtn" aria-label="Launch" disabled>
+        <img class="mb-base" src="assets/btn-launch-off@3x.png" alt="">
+        <img class="mb-glow" src="assets/btn-launch-armed@3x.png" alt="">
+        <img class="mb-press" src="assets/btn-launch-pressed@3x.png" alt="">
+      </button>
       <div class="runs"><p class="section-label">Runs</p><div id="jobs"></div></div>
     </section>
 
@@ -209,10 +225,11 @@
         <div class="knob is-on" id="knob" tabindex="0" role="button" aria-pressed="true" aria-label="Power">
           <div class="knob-shadow"></div>
           <img class="knob-base" src="assets/knob-off@3x.png" alt="">
+          <img class="knob-red" src="assets/knob-red@3x.png" alt="">
           <img class="knob-glow" src="assets/knob-on@3x.png" alt="">
           <img class="knob-press" src="assets/knob-pressed@3x.png" alt="">
         </div>
-        <div class="pstate" id="pstate">Online · Earning</div>
+        <div class="pstate" id="pstate"><span class="sdot"></span><span id="ptext">Online · Earning</span></div>
         <div class="phint" id="phint">tap to go offline</div>
         <div class="prun" id="running">running · batch embed</div>
       </div>
@@ -303,7 +320,7 @@
   var reduceMotion=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   // ===== EARN =====
-  var knob=$('knob'),pstate=$('pstate'),phint=$('phint'),running=$('running'),earned=$('earned'),mDot=$('mDot'),mState=$('mState'),monitor=$('monitor'),tput=$('tput');
+  var knob=$('knob'),pstate=$('pstate'),ptext=$('ptext'),phint=$('phint'),running=$('running'),earned=$('earned'),mDot=$('mDot'),mState=$('mState'),monitor=$('monitor'),tput=$('tput');
   var feed=liveFeed($('feed'),{w:300,h:46,n:48});
   var onln=true,total=3.18,earnTimer=null,feedTimer=null;
   function startFeed(){
@@ -318,7 +335,7 @@
     onln=on;
     knob.classList.toggle('is-on',on);
     knob.setAttribute('aria-pressed',String(on));
-    pstate.textContent=on?'Online · Earning':'Offline';
+    ptext.textContent=on?'Online · Earning':'Offline';
     pstate.classList.toggle('off',!on);
     phint.textContent=on?'tap to go offline':'tap to go online';
     running.style.display=on?'':'none';
@@ -339,10 +356,10 @@
   setKnob(true);
 
   // ===== LAUNCH =====
-  var intake=$('intake'),intakeText=$('intake-text'),btn=$('launchBtn'),launchLabel=$('launchLabel'),jobs=$('jobs');
+  var intake=$('intake'),intakeText=$('intake-text'),btn=$('launchBtn'),jobs=$('jobs');
   var RERUN='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2 5"/><path d="M20 5v6h-6"/></svg>';
   var project=null, curQuote=null, liveFile=null, fileEl=$('file');
-  function refreshArm(){btn.disabled=!project;}
+  function refreshArm(){var ok=!!project;btn.disabled=!ok;btn.classList.toggle('is-armed',ok);}
   function fmtN(n){return n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?Math.round(n/1e3)+'k':''+n;}
   function fmtBytes(b){return b>=1e9?(b/1e9).toFixed(1)+' GB':b>=1e6?Math.round(b/1e6)+' MB':Math.max(1,Math.round(b/1e3))+' KB';}
   function quoteStr(q){return q==null?'metered · GPU-second':'~$'+q.toFixed(2);}
@@ -384,11 +401,11 @@
   function failDetail(){return '<div class="preview">failed · malformed input at line 4002 (buyer input)</div><div class="actions"><span class="r-meta num">refunded $1.20</span><button class="mini" data-fix>Fix &amp; re-run</button></div>';}
 
   function runHTML(name,src,status){
-    var mk='marker '+(status==='running'?'run':status==='failed'?'fail':'done');
+    var sc=status==='running'?'run':status==='failed'?'fail':'done', mk='dot '+sc;
     var st=status==='running'?'running':status;
     return '<div class="run" data-status="'+status+'" data-name="'+name+'">'
       +'<div class="run-main"><span class="l"><span class="'+mk+'"></span>'+name+' <span class="src num">'+src+'</span></span>'
-      +'<span class="run-right"><svg class="trace" viewBox="0 0 54 20" preserveAspectRatio="none"></svg><span class="st">'+st+'</span><button class="icon rerun" aria-label="Re-run" title="Re-run">'+RERUN+'</button></span></div>'
+      +'<span class="run-right"><svg class="trace" viewBox="0 0 54 20" preserveAspectRatio="none"></svg><span class="st '+sc+'">'+st+'</span><button class="icon rerun" aria-label="Re-run" title="Re-run">'+RERUN+'</button></span></div>'
       +'<div class="detail">'+(status==='failed'?failDetail():status==='done'?doneDetail():'')+'</div></div>';
   }
   function attach(run){
@@ -408,7 +425,7 @@
     iv=setInterval(function(){
       t++; st.textContent='running · '+t+'/8';
       if(t>=8){clearInterval(iv);if(tv)clearInterval(tv);
-        run.dataset.status='done';run.querySelector('.marker').className='marker done';st.textContent='done';
+        run.dataset.status='done';run.querySelector('.dot').className='dot done';st.className='st done';st.textContent='done';
         run.querySelector('.detail').innerHTML=doneDetail();
         notify('Job complete',name);
       }
@@ -454,7 +471,7 @@
     var st=run.querySelector('.st'),trace=liveFeed(run.querySelector('.trace'),{w:54,h:20,n:20});
     var tv=reduceMotion?null:setInterval(function(){trace.tick(0.4+Math.random()*0.4);},170);
     function stop(){if(tv){clearInterval(tv);tv=null;}}
-    function fail(msg){stop();run.dataset.status='failed';run.querySelector('.marker').className='marker fail';st.textContent='failed';run.querySelector('.detail').innerHTML='<div class="preview">'+msg+'</div>';notify('Job failed',f.name);}
+    function fail(msg){stop();run.dataset.status='failed';run.querySelector('.dot').className='dot fail';st.className='st fail';st.textContent='failed';run.querySelector('.detail').innerHTML='<div class="preview">'+msg+'</div>';notify('Job failed',f.name);}
     f.slice(0,1000000).text().then(function(text){
       var body={job_type:{type:'embed'},model:{kind:'hf',ref:'all-minilm-l6-v2'},params:{},constraints:{min_memory_gb:0,max_duration_secs:0},verification:{redundancy_frac:0,honeypot_frac:0,payout_hold_secs:0},tier:'batch',input:toJSONL(f.name,text)};
       return fetch('/v1/jobs',{method:'POST',headers:{'Authorization':'Bearer '+liveKey,'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -471,8 +488,8 @@
       fetch('/v1/jobs/'+id,{headers:{'Authorization':'Bearer '+liveKey}}).then(function(res){return res.ok?res.json():null;}).then(function(j){
         if(!j)return;
         if(j.task_count)st.textContent='running · '+(j.tasks_done||0)+'/'+j.task_count;
-        if(j.status==='complete'){clearInterval(iv);stop();var usd=(j.actual_usd!=null?j.actual_usd:j.estimated_usd)||0;run.dataset.status='done';run.querySelector('.marker').className='marker done';st.textContent='done · $'+(+usd).toFixed(2);run.querySelector('.detail').innerHTML='<div class="preview">complete · '+(j.task_count||0)+' tasks · billed $'+(+usd).toFixed(2)+'</div><div class="actions"><button class="mini" data-results="'+id+'">Download</button></div>';notify('Job complete',id);}
-        else if(j.status==='failed'||j.status==='cancelled'){clearInterval(iv);stop();run.dataset.status='failed';run.querySelector('.marker').className='marker fail';st.textContent=j.status;notify('Job '+j.status,id);}
+        if(j.status==='complete'){clearInterval(iv);stop();var usd=(j.actual_usd!=null?j.actual_usd:j.estimated_usd)||0;run.dataset.status='done';run.querySelector('.dot').className='dot done';st.className='st done';st.textContent='done · $'+(+usd).toFixed(2);run.querySelector('.detail').innerHTML='<div class="preview">complete · '+(j.task_count||0)+' tasks · billed $'+(+usd).toFixed(2)+'</div><div class="actions"><button class="mini" data-results="'+id+'">Download</button></div>';notify('Job complete',id);}
+        else if(j.status==='failed'||j.status==='cancelled'){clearInterval(iv);stop();run.dataset.status='failed';run.querySelector('.dot').className='dot fail';st.className='st fail';st.textContent=j.status;notify('Job '+j.status,id);}
       }).catch(function(){});
     },2500);
   }

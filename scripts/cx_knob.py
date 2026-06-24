@@ -175,7 +175,16 @@ ct.links.new(glare.outputs["Image"], comp.inputs["Image"])
 def render(path):
     sc.render.filepath = path; bpy.ops.render.render(write_still=True)
 
-em.inputs["Strength"].default_value = 0.0; render(OUT + "knob-off@3x.png")
-em.inputs["Strength"].default_value = 9.0; render(OUT + "knob-on@3x.png")
-puck.location.z -= 0.02; render(OUT + "knob-pressed@3x.png")
+# Status light is SEMANTIC: green when online, red when offline. The metal disc never
+# changes colour — only the emissive glyph + ring carry the hue, so the surface stays
+# monochrome and the colour is pure signal. Four composited layers (Appendix B): a DARK
+# base that the green/red lights cross-fade over, so the green breath troughs to dark and
+# never bleeds red through. In the app the knob is never fully dark (offline shows red).
+em.inputs["Strength"].default_value = 0.0; render(OUT + "knob-off@3x.png")    # BASE: dark, unlit
+em.inputs["Color"].default_value = (0.20, 0.82, 0.48, 1)  # green
+em.inputs["Strength"].default_value = 9.0; render(OUT + "knob-on@3x.png")     # ONLINE: green, breathing
+em.inputs["Color"].default_value = (0.90, 0.33, 0.29, 1)  # red
+em.inputs["Strength"].default_value = 7.0; render(OUT + "knob-red@3x.png")    # OFFLINE: red, steady
+em.inputs["Color"].default_value = (0.20, 0.82, 0.48, 1); em.inputs["Strength"].default_value = 9.0
+puck.location.z -= 0.02; render(OUT + "knob-pressed@3x.png")                  # pressed (green, pushed)
 print("done ->", OUT)
