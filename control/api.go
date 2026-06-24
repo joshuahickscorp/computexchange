@@ -96,6 +96,8 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /v1/billing/status", s.authBuyer(http.HandlerFunc(s.handleBillingStatus)))
 	mux.Handle("GET /v1/sources/{id}/repos", s.authBuyer(http.HandlerFunc(s.handleListRepos)))
 	mux.Handle("POST /v1/intake/launch", s.authBuyer(http.HandlerFunc(s.handleLaunchIntake)))
+	mux.Handle("POST /v1/pipelines", s.authBuyer(http.HandlerFunc(s.handleCreatePipeline)))
+	mux.Handle("GET /v1/pipelines/{id}", s.authBuyer(http.HandlerFunc(s.handleGetPipeline)))
 	mux.Handle("POST /v1/deliver", s.authBuyer(http.HandlerFunc(s.handleDeliver)))
 	mux.HandleFunc("POST /v1/stripe/webhook", s.handleStripeWebhook) // unauthed; verified by signature
 
@@ -1394,7 +1396,8 @@ func (s *Server) finalizeJobIfDone(ctx context.Context, jobID uuid.UUID) error {
 	// Best-effort external charge: gated on Stripe + a saved card, idempotent by
 	// job id. A no-op (and unchanged lifecycle) when billing isn't configured.
 	s.chargeForJob(ctx, jobID)
-	s.advanceIntake(ctx, jobID) // multi-stage chain: no-op unless this job is an intake stage
+	s.advanceIntake(ctx, jobID)   // multi-stage chain: no-op unless this job is an intake stage
+	s.advancePipeline(ctx, jobID) // user-defined pipeline chain: no-op unless this job is a pipeline stage
 	return nil
 }
 

@@ -2413,3 +2413,122 @@ func TestPollNoWaitUnchanged(t *testing.T) {
 		t.Fatalf("no-wait poll returned %s, want %s", disp.TaskID, taskID)
 	}
 }
+
+// --- Compute Autopilot pipeline: output->input chaining ---
+
+// driveOneTask claims the next queued task, PUTs an embed result, and commits it — the
+// minimal worker loop for a single-task job (committing the final task finalizes the job
+// synchronously, which is what fires advancePipeline).
+func driveOneTask(t *testing.T, ctx context.Context) {
+	t.Helper()
+	code, body := req(t, "GET", "/v1/worker/poll", nil, workerTok())
+	if code != 200 {
+		t.Fatalf("poll: want 200, got %d: %s", code, body)
+	}
+	var disp TaskDispatch
+	if err := json.Unmarshal(body, &disp); err != nil {
+		t.Fatalf("dispatch decode: %v", err)
+	}
+	if err := itStorage.PutObject(ctx, disp.ResultKey, embedResultJSON(1), "application/json"); err != nil {
+		t.Fatalf("put result: %v", err)
+	}
+	commit := TaskCommit{TaskID: disp.TaskID, ResultKey: disp.ResultKey, DurationMS: 10, TokensUsed: 8}
+	if code, b := req(t, "POST", "/v1/worker/task/"+disp.TaskID.String()+"/commit", commit, workerTok(), jsonCT()); code != 204 {
+		t.Fatalf("commit: want 204, got %d: %s", code, b)
+	}
+}
+
+// TestPipelineChaining exercises the user-defined pipeline orchestration end to end: a
+// two-stage pipeline launches stage 0 on the supplied input, and when stage 0 completes the
+// completion hook (advancePipeline) must auto-submit stage 1 on stage 0's merged output, and
+// the pipeline must report complete only once every stage has completed. Both stages are
+// embed so the merge format is identical — this tests the ORCHESTRATION (the chain fires,
+// links, advances, and derives status), not cross-op data semantics.
+func TestPipelineChaining(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+
+	// 1. Submit a 2-stage pipeline: stage 0 reads the input, stage 1 chains on stage 0.
+	body := map[string]any{
+		"name": "embed then re-embed",
+		"stages": []map[string]any{
+			{"op": "embed", "model": "all-minilm-l6-v2", "from": "input"},
+			{"op": "embed", "model": "all-minilm-l6-v2", "from": "previous"},
+		},
+		"input": `{"id":"r0","text":"hello pipeline"}` + "\n",
+	}
+	code, out := req(t, "POST", "/v1/pipelines", body, buyerKey(), jsonCT())
+	if code != http.StatusAccepted {
+		t.Fatalf("create pipeline: want 202, got %d: %s", code, out)
+	}
+	var cr struct {
+		PipelineID string           `json:"pipeline_id"`
+		Launched   []map[string]any `json:"launched"`
+	}
+	if err := json.Unmarshal(out, &cr); err != nil {
+		t.Fatalf("create decode: %v (%s)", err, out)
+	}
+	if cr.PipelineID == "" || len(cr.Launched) != 1 {
+		t.Fatalf("want pipeline_id + exactly 1 launched stage (stage 0), got %s", out)
+	}
+
+	// 2. Drive stage 0's job to completion → the completion hook chains stage 1.
+	driveOneTask(t, ctx)
+
+	// 3. Stage 0 must be complete and stage 1 must now be chained (have a job).
+	code, out = req(t, "GET", "/v1/pipelines/"+cr.PipelineID, nil, buyerKey())
+	if code != 200 {
+		t.Fatalf("get pipeline: %d %s", code, out)
+	}
+	var pv PipelineView
+	if err := json.Unmarshal(out, &pv); err != nil {
+		t.Fatalf("pipeline decode: %v (%s)", err, out)
+	}
+	if len(pv.Stages) != 2 {
+		t.Fatalf("want 2 stages, got %d (%s)", len(pv.Stages), out)
+	}
+	if pv.Stages[0].Status != "complete" {
+		t.Fatalf("stage 0: want complete, got %q", pv.Stages[0].Status)
+	}
+	if pv.Stages[1].JobID == "" {
+		t.Fatalf("stage 1 was not chained (no job_id) after stage 0 completed: %s", out)
+	}
+	if pv.Status != "running" {
+		t.Fatalf("pipeline overall: want running (stage 1 not done), got %q", pv.Status)
+	}
+
+	// 4. Drive stage 1 to completion → the whole pipeline is complete.
+	driveOneTask(t, ctx)
+	code, out = req(t, "GET", "/v1/pipelines/"+cr.PipelineID, nil, buyerKey())
+	if code != 200 {
+		t.Fatalf("get pipeline (2): %d %s", code, out)
+	}
+	if err := json.Unmarshal(out, &pv); err != nil {
+		t.Fatalf("pipeline decode (2): %v (%s)", err, out)
+	}
+	if pv.Status != "complete" {
+		t.Fatalf("pipeline: want complete, got %q (stages: %s)", pv.Status, out)
+	}
+}
+
+// TestPipelineValidation rejects malformed pipelines honestly.
+func TestPipelineValidation(t *testing.T) {
+	reset(t)
+	cases := []struct {
+		name string
+		body map[string]any
+	}{
+		{"no stages", map[string]any{"name": "x", "stages": []map[string]any{}, "input": "x\n"}},
+		{"unknown op", map[string]any{"name": "x", "stages": []map[string]any{{"op": "mine_bitcoin", "model": "m", "from": "input"}}, "input": "x\n"}},
+		{"stage 0 from previous", map[string]any{"name": "x", "stages": []map[string]any{{"op": "embed", "model": "m", "from": "previous"}}, "input": "x\n"}},
+		{"no input", map[string]any{"name": "x", "stages": []map[string]any{{"op": "embed", "model": "m", "from": "input"}}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			code, out := req(t, "POST", "/v1/pipelines", c.body, buyerKey(), jsonCT())
+			if code != http.StatusBadRequest {
+				t.Fatalf("%s: want 400, got %d: %s", c.name, code, out)
+			}
+		})
+	}
+}

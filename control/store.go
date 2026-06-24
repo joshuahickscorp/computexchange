@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -157,6 +158,24 @@ func (s *Store) Migrate(ctx context.Context) error {
 		   stage_index INT
 		 )`,
 		`CREATE INDEX IF NOT EXISTS intake_jobs_intake_idx ON intake_jobs (intake_id)`,
+		// Compute Autopilot: user-defined pipelines (pipeline.go). A pipeline is an ordered
+		// stage spec; pipeline_jobs links each launched stage to its real CX job, exactly
+		// like intake_jobs, so advancePipeline can chain output->input as stages complete.
+		`CREATE TABLE IF NOT EXISTS pipelines (
+		   id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		   buyer_id   UUID,
+		   name       TEXT,
+		   spec       JSONB,
+		   status     TEXT DEFAULT 'running',
+		   created_at TIMESTAMPTZ DEFAULT now()
+		 )`,
+		`CREATE INDEX IF NOT EXISTS pipelines_buyer_idx ON pipelines (buyer_id)`,
+		`CREATE TABLE IF NOT EXISTS pipeline_jobs (
+		   job_id      UUID PRIMARY KEY,
+		   pipeline_id UUID,
+		   stage_index INT
+		 )`,
+		`CREATE INDEX IF NOT EXISTS pipeline_jobs_pipeline_idx ON pipeline_jobs (pipeline_id)`,
 	}
 	for _, q := range stmts {
 		if _, err := s.pool.Exec(ctx, q); err != nil {
@@ -347,6 +366,156 @@ func (s *Store) JobOutputRef(ctx context.Context, jobID uuid.UUID) (string, erro
 	var ref string
 	err := s.pool.QueryRow(ctx, `SELECT COALESCE(output_ref,'') FROM jobs WHERE id=$1`, jobID).Scan(&ref)
 	return ref, err
+}
+
+// --- Compute Autopilot pipelines (user-defined multi-step chains, pipeline.go) ---
+
+// CreatePipeline persists a composed pipeline (its stage spec as JSONB) and returns its id.
+func (s *Store) CreatePipeline(ctx context.Context, buyerID uuid.UUID, name string, spec []byte) (uuid.UUID, error) {
+	if name == "" {
+		name = "pipeline"
+	}
+	var id uuid.UUID
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO pipelines (buyer_id, name, spec, status) VALUES ($1, $2, $3, 'running') RETURNING id`,
+		buyerID, name, spec,
+	).Scan(&id)
+	return id, err
+}
+
+// LinkPipelineJob links a launched stage job to its pipeline + stage index (mirrors
+// InsertIntakeJobLink; one job belongs to at most one pipeline stage).
+func (s *Store) LinkPipelineJob(ctx context.Context, jobID, pipelineID uuid.UUID, stageIndex int) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO pipeline_jobs (job_id, pipeline_id, stage_index) VALUES ($1, $2, $3) ON CONFLICT (job_id) DO NOTHING`,
+		jobID, pipelineID, stageIndex)
+	return err
+}
+
+// PipelineForJob resolves a completed job back to its pipeline + stage (ok=false for a job
+// that is not part of any pipeline — the common case).
+func (s *Store) PipelineForJob(ctx context.Context, jobID uuid.UUID) (pipelineID uuid.UUID, stageIndex int, ok bool) {
+	err := s.pool.QueryRow(ctx, `SELECT pipeline_id, stage_index FROM pipeline_jobs WHERE job_id=$1`, jobID).Scan(&pipelineID, &stageIndex)
+	return pipelineID, stageIndex, err == nil
+}
+
+// PipelineSpec returns a pipeline's stage spec JSON.
+func (s *Store) PipelineSpec(ctx context.Context, pipelineID uuid.UUID) ([]byte, error) {
+	var spec []byte
+	err := s.pool.QueryRow(ctx, `SELECT spec FROM pipelines WHERE id=$1`, pipelineID).Scan(&spec)
+	return spec, err
+}
+
+// PipelineStageSubmitted reports whether a stage of a pipeline already has a job.
+func (s *Store) PipelineStageSubmitted(ctx context.Context, pipelineID uuid.UUID, stageIndex int) bool {
+	var n int
+	_ = s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM pipeline_jobs WHERE pipeline_id=$1 AND stage_index=$2`, pipelineID, stageIndex).Scan(&n)
+	return n > 0
+}
+
+// PipelineBuyer returns a pipeline's owning buyer (so a chained stage charges the right buyer).
+func (s *Store) PipelineBuyer(ctx context.Context, pipelineID uuid.UUID) (uuid.UUID, error) {
+	var b uuid.UUID
+	err := s.pool.QueryRow(ctx, `SELECT buyer_id FROM pipelines WHERE id=$1`, pipelineID).Scan(&b)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = errNotFound
+	}
+	return b, err
+}
+
+// SetPipelineStatus updates the cached overall status; GetPipelineView derives the
+// authoritative status from the stage jobs regardless.
+func (s *Store) SetPipelineStatus(ctx context.Context, pipelineID uuid.UUID, status string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE pipelines SET status=$2 WHERE id=$1`, pipelineID, status)
+	return err
+}
+
+// GetPipelineView assembles the buyer-facing pipeline: each spec stage joined to its job's
+// live status, with an overall status DERIVED from the stages (failed if any stage failed,
+// complete only when every stage completed). Buyer-scoped.
+func (s *Store) GetPipelineView(ctx context.Context, buyerID, pipelineID uuid.UUID) (*PipelineView, error) {
+	var name, status string
+	var spec []byte
+	var createdAt time.Time
+	err := s.pool.QueryRow(ctx,
+		`SELECT name, spec, status, created_at FROM pipelines WHERE id=$1 AND buyer_id=$2`,
+		pipelineID, buyerID,
+	).Scan(&name, &spec, &status, &createdAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, errNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	var stages []pipelineStage
+	if err := json.Unmarshal(spec, &stages); err != nil {
+		return nil, err
+	}
+
+	type jobInfo struct {
+		id           uuid.UUID
+		status       string
+		tasksDone    int
+		taskCount    int
+		estimatedUSD float64
+		actualUSD    float64
+	}
+	byStage := map[int]jobInfo{}
+	rows, err := s.pool.Query(ctx,
+		`SELECT pj.stage_index, j.id, j.status, COALESCE(j.tasks_done,0), COALESCE(j.task_count,0),
+		        COALESCE(j.estimated_usd,0), COALESCE(j.actual_usd,0)
+		 FROM pipeline_jobs pj JOIN jobs j ON j.id = pj.job_id
+		 WHERE pj.pipeline_id=$1`, pipelineID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var idx int
+		var ji jobInfo
+		if err := rows.Scan(&idx, &ji.id, &ji.status, &ji.tasksDone, &ji.taskCount, &ji.estimatedUSD, &ji.actualUSD); err != nil {
+			return nil, err
+		}
+		byStage[idx] = ji
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	views := make([]PipelineStageView, len(stages))
+	anyFailed, allComplete := false, true
+	for i, st := range stages {
+		v := PipelineStageView{Index: i, Op: st.Op, Model: st.Model, From: st.From, Status: "pending"}
+		if ji, ok := byStage[i]; ok {
+			v.JobID = ji.id.String()
+			v.Status = ji.status
+			v.TasksDone = ji.tasksDone
+			v.TaskCount = ji.taskCount
+			v.EstimatedUSD = ji.estimatedUSD
+			v.ActualUSD = ji.actualUSD
+		}
+		if v.Status == "failed" || v.Status == "cancelled" {
+			anyFailed = true
+		}
+		if v.Status != "complete" {
+			allComplete = false
+		}
+		views[i] = v
+	}
+	overall := "running"
+	if anyFailed {
+		overall = "failed"
+	} else if allComplete {
+		overall = "complete"
+	}
+
+	return &PipelineView{
+		ID:        pipelineID.String(),
+		Name:      name,
+		Status:    overall,
+		CreatedAt: createdAt.UTC().Format(time.RFC3339),
+		Stages:    views,
+	}, nil
 }
 
 // nullStrSlice maps an empty/nil slice to nil so it encodes as a SQL NULL (not an
