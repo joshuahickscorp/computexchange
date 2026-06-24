@@ -233,6 +233,11 @@ type jobSubmit struct {
 	// (and best-effort input bytes) before persisting the binding; a mismatch is 409.
 	// Empty (the default) keeps the unbound submission path unchanged.
 	QuoteID string `json:"quote_id,omitempty"`
+	// MinReputation routes this job only to suppliers whose reputation is >= this (0..1).
+	// The Elite-supplier moat (DEEP_RESEARCH_V2 §6.4 anti-defection): high-margin /
+	// enterprise work is reachable only by suppliers who earned a high reputation ON the
+	// platform, an asset they cannot port to a direct deal. 0 (default) = any supplier.
+	MinReputation float32 `json:"min_reputation,omitempty"`
 }
 
 // defaultSplitSize is the JSONL chunk size (lines per task) when params omits it.
@@ -477,6 +482,7 @@ func (s *Server) createJob(ctx context.Context, buyerID uuid.UUID, sub jobSubmit
 		EstimatedUSD:       estimate,
 		TaskCount:          len(tasks),
 		MinMemoryGB:        sub.Constraints.MinMemoryGB,
+		MinReputation:      sub.MinReputation,
 		HWClasses:          sub.Constraints.HWClasses,
 		DataResidency:      sub.Constraints.DataResidency,
 		JobTypeSpec:        spec,

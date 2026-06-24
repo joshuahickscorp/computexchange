@@ -381,6 +381,10 @@ func (s *Store) ClaimTask(ctx context.Context, w WorkerAuth) (*ClaimedTask, erro
 		     AND COALESCE(w.supported_jobs,'{}') @> ARRAY[j.job_type]
 		     AND (COALESCE(j.model_ref,'') = '' OR COALESCE(w.supported_models,'{}') @> ARRAY[j.model_ref])
 		     AND (j.data_residency IS NULL OR s.data_country = ANY(j.data_residency))
+		     -- Elite-supplier gate (DEEP_RESEARCH_V2 §6.4 anti-defection): a high
+		     -- min_reputation job is claimable only by a supplier who earned that
+		     -- reputation on the platform (0 = any supplier; the unchanged path).
+		     AND COALESCE(j.min_reputation,0) <= s.reputation
 		     AND (j.tier <> 'trusted' OR $2 >= 2)
 		     AND (COALESCE(j.offered_rate_usd_hr,1e9) >= COALESCE(w.min_payout_usd_hr,0))
 		     -- Budget Governor (Plane C §12 / Plane D §14 D8): when the job has a hard
@@ -561,7 +565,7 @@ func (s *Store) SchedulerExplain(ctx context.Context, workerID uuid.UUID) (*Sche
 		`WITH w AS (SELECT * FROM workers WHERE id = $1),
 		      claimable AS (
 		        SELECT j.min_memory_gb, j.hw_classes, j.data_residency, j.job_type,
-		               j.model_ref, j.offered_rate_usd_hr, j.tier AS job_tier
+		               j.model_ref, j.offered_rate_usd_hr, j.tier AS job_tier, j.min_reputation
 		        FROM tasks t
 		          JOIN jobs j ON j.id = t.job_id
 		        WHERE t.status IN ('queued','retrying')
@@ -578,6 +582,7 @@ func (s *Store) SchedulerExplain(ctx context.Context, workerID uuid.UUID) (*Sche
 		          WHEN NOT (COALESCE(w.supported_jobs,'{}') @> ARRAY[c.job_type]) THEN 'job_type_mismatch'
 		          WHEN NOT (COALESCE(c.model_ref,'') = '' OR COALESCE(w.supported_models,'{}') @> ARRAY[c.model_ref]) THEN 'model_mismatch'
 		          WHEN NOT (c.data_residency IS NULL OR s.data_country = ANY(c.data_residency)) THEN 'residency_mismatch'
+		          WHEN COALESCE(c.min_reputation,0) > s.reputation THEN 'reputation_too_low'
 		          WHEN NOT (c.job_tier <> 'trusted' OR $2 >= 2) THEN 'tier_gate'
 		          WHEN NOT (COALESCE(c.offered_rate_usd_hr,1e9) >= COALESCE(w.min_payout_usd_hr,0)) THEN 'payout_floor'
 		          ELSE 'eligible'
@@ -592,7 +597,7 @@ func (s *Store) SchedulerExplain(ctx context.Context, workerID uuid.UUID) (*Sche
 		   count(*) FILTER (WHERE reason = 'hw_class_mismatch'),
 		   count(*) FILTER (WHERE reason = 'residency_mismatch'),
 		   count(*) FILTER (WHERE reason = 'throttled'),
-		   count(*) FILTER (WHERE reason = 'payout_floor' OR reason = 'tier_gate'),
+		   count(*) FILTER (WHERE reason = 'payout_floor' OR reason = 'tier_gate' OR reason = 'reputation_too_low'),
 		   count(*) FILTER (WHERE reason = 'supplier_inactive'),
 		   count(*) FILTER (WHERE reason = 'eligible')
 		 FROM classified`,

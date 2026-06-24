@@ -71,6 +71,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		// so a control plane that only ran Migrate (not the full schema.sql) still
 		// self-migrates to the columns the hard-filter claim + result merge need.
 		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS min_memory_gb REAL DEFAULT 0`,
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS min_reputation REAL DEFAULT 0`,
 		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS hw_classes TEXT[]`,
 		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS data_residency TEXT[]`,
 		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS split_size INT`,
@@ -795,14 +796,14 @@ func (s *Store) CreateJobWithTasks(ctx context.Context, j *jobRow, tasks []taskR
 		   (id, buyer_id, status, job_type, model_ref, input_ref, output_ref,
 		    tier, verification_policy, estimated_usd, actual_usd, task_count, tasks_done,
 		    min_memory_gb, hw_classes, data_residency, job_type_spec, split_size,
-		    offered_rate_usd_hr, eta_secs, max_usd, budget_state, quote_id)
+		    offered_rate_usd_hr, eta_secs, max_usd, budget_state, quote_id, min_reputation)
 		 VALUES ($1,$2,'queued',$3,$4,$5,$6,$7,$8,$9,0,$10,0,
-		         $11,$12,$13,$14,$15,$16,$17,$18,'tracking',$19)`,
+		         $11,$12,$13,$14,$15,$16,$17,$18,'tracking',$19,$20)`,
 		j.ID, j.BuyerID, j.JobType, j.ModelRef, j.InputRef, j.OutputRef,
 		j.Tier, j.VerificationPolicy, j.EstimatedUSD, j.TaskCount,
 		j.MinMemoryGB, nullStrSlice(j.HWClasses), nullStrSlice(j.DataResidency),
 		nullJSON(j.JobTypeSpec), j.SplitSize, j.OfferedRateUsdHr, j.ETASecs,
-		nullPosFloat(j.MaxUSD), nullUUID(j.QuoteID),
+		nullPosFloat(j.MaxUSD), nullUUID(j.QuoteID), j.MinReputation,
 	)
 	if err != nil {
 		return err
@@ -847,6 +848,7 @@ type jobRow struct {
 	ETASecs            int
 	MaxUSD             float64   // buyer hard spend cap (Budget Governor); 0 = no cap
 	QuoteID            uuid.UUID // advisory quote bound to this job (Plane D D7); zero = none → persisted NULL
+	MinReputation      float32   // Elite-supplier gate: claim only by suppliers with reputation >= this (0 = any)
 }
 
 // taskRow mirrors the tasks columns we write at creation. Each task is one chunk

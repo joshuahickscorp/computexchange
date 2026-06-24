@@ -1494,6 +1494,47 @@ func TestClaimHardFilter(t *testing.T) {
 			}
 		})
 	}
+
+	// Reputation gate (Elite tier, research §6.4): a job with a high min_reputation is
+	// NOT claimable by a low-reputation supplier, and becomes claimable once the
+	// supplier's reputation clears the bar — the supplier-stickiness moat, in SQL.
+	t.Run("reputation_gate", func(t *testing.T) {
+		restoreWorker(t)
+		if _, err := itPool.Exec(ctx, `TRUNCATE tasks, jobs CASCADE`); err != nil {
+			t.Fatal(err)
+		}
+		jobID, taskID := uuid.New(), uuid.New()
+		if _, err := itPool.Exec(ctx,
+			`INSERT INTO jobs (id, buyer_id, status, job_type, model_ref, input_ref, tier,
+			                   task_count, tasks_done, min_memory_gb, offered_rate_usd_hr, min_reputation)
+			 VALUES ($1,$2,'queued','embed','all-minilm-l6-v2','jobs/x/input.jsonl','batch',1,0,0,1,0.90)`,
+			jobID, demoBuyerUUID); err != nil {
+			t.Fatalf("insert job: %v", err)
+		}
+		if _, err := itPool.Exec(ctx,
+			`INSERT INTO tasks (id, job_id, status, input_ref, result_key, chunk_index, visible_at)
+			 VALUES ($1,$2,'queued','jobs/x/tasks/0/input.jsonl','jobs/x/tasks/0/result.json',0, now())`,
+			taskID, jobID); err != nil {
+			t.Fatalf("insert task: %v", err)
+		}
+		if _, err := itPool.Exec(ctx, `UPDATE suppliers SET reputation=0.50 WHERE id=$1`, demoSupplierUUID); err != nil {
+			t.Fatal(err)
+		}
+		if claims(t) {
+			t.Fatal("0.50-reputation supplier must NOT claim a min_reputation=0.90 job")
+		}
+		// Clear the bar; reset the task (a rejected claim leaves it queued) and retry.
+		if _, err := itPool.Exec(ctx, `UPDATE tasks SET claimed_by=NULL, started_at=NULL, status='queued' WHERE id=$1`, taskID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := itPool.Exec(ctx, `UPDATE suppliers SET reputation=0.95 WHERE id=$1`, demoSupplierUUID); err != nil {
+			t.Fatal(err)
+		}
+		if !claims(t) {
+			t.Fatal("0.95-reputation supplier SHOULD claim a min_reputation=0.90 job")
+		}
+		itPool.Exec(ctx, `UPDATE suppliers SET reputation=0.90 WHERE id=$1`, demoSupplierUUID)
+	})
 }
 
 // TestSchedulerExplain proves GET /admin/scheduler/explain (Plane D §17 D11): for a
