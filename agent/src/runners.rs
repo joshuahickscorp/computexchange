@@ -1182,6 +1182,12 @@ fn normalize_label(s: &str) -> String {
 /// outside the provided set, and the choice is stable (no randomness).
 fn closest_label(generation: &str, labels: &[String]) -> (String, bool) {
     debug_assert!(!labels.is_empty());
+    // 0. a bare ordinal ("3") maps to the 3rd label — the prompt numbers the list.
+    if let Ok(n) = generation.trim().parse::<usize>() {
+        if n >= 1 && n <= labels.len() {
+            return (labels[n - 1].clone(), true);
+        }
+    }
     let g = normalize_label(generation);
     let norm: Vec<String> = labels.iter().map(|l| normalize_label(l)).collect();
     // 1. exact normalized match.
@@ -1206,18 +1212,39 @@ fn closest_label(generation: &str, labels: &[String]) -> (String, bool) {
                 return (labels[i].clone(), true);
             }
         }
+        // 5. fuzzy: the label sharing the longest leading run with the generation
+        // (>= 4 chars) wins — maps "financialservices" -> "finance", "engineeringintern"
+        // -> "engineering", etc. Deterministic, and still confined to the provided set
+        // (we never invent a label outside it).
+        let mut best = (0usize, 0usize);
+        for (i, n) in norm.iter().enumerate() {
+            let shared = g.chars().zip(n.chars()).take_while(|(a, b)| a == b).count();
+            if shared > best.1 {
+                best = (i, shared);
+            }
+        }
+        if best.1 >= 4 {
+            return (labels[best.0].clone(), true);
+        }
     }
     (labels[0].clone(), false)
 }
 
-/// Build the classification prompt: instruct the model to answer with exactly one
-/// label, nothing else. Keeps the generation short and the mapping robust.
+/// Build the classification prompt: a numbered list + a strict copy-from-list
+/// instruction keeps a small model in-set, and "pick the closest" stops it inventing
+/// its own categories on messy real text. Short generation, robust mapping.
 fn classification_prompt(text: &str, labels: &[String]) -> String {
+    let list = labels
+        .iter()
+        .enumerate()
+        .map(|(i, l)| format!("{}. {}", i + 1, l))
+        .collect::<Vec<_>>()
+        .join("\n");
     format!(
-        "Classify the text into exactly one of these labels: {}.\n\
-         Reply with only the single best label and nothing else.\n\nText: {}\n\nLabel:",
-        labels.join(", "),
-        text
+        "You are a strict text classifier. Choose the SINGLE best label for the text \
+         from this exact list:\n{list}\n\nReply with ONLY the label text, copied exactly \
+         from the list, and nothing else. If none fits perfectly, choose the closest one \
+         from the list.\n\nText: {text}\n\nLabel:"
     )
 }
 
@@ -2408,6 +2435,13 @@ mod tests {
         // Wrapped in chatter → contains-match.
         assert_eq!(
             closest_label("The sentiment is positive overall", &labels),
+            ("positive".into(), true)
+        );
+        // A numbered answer ("2") maps to the 2nd label.
+        assert_eq!(closest_label("2", &labels), ("negative".into(), true));
+        // Fuzzy leading-run fallback keeps a near-miss in-set.
+        assert_eq!(
+            closest_label("positivity", &labels),
             ("positive".into(), true)
         );
         // No match → first label, flagged low-confidence (never invents a label).
