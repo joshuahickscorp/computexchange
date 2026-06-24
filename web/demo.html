@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Computexchange</title>
+<title>computexchange</title>
 <link rel="icon" href="favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
@@ -131,24 +131,6 @@
   .pill.solid{background:var(--bone-hi);color:var(--bg);border-color:var(--bone-hi)}
   .pill.solid:hover{background:var(--signal);border-color:var(--signal)}
 
-  /* Action buttons: the knob stretched into an OVAL with a recessed, backlit LABEL (the
-     SYSTEM font, never Geist). Composited like the knob: dark base (disabled) + the armed
-     glow cross-faded with the breathing opacity + the pressed frame on :active. The label is
-     cool-white (an action, not status), so green/red stay reserved for the knob + runs. */
-  .metalbtn{position:relative;width:100%;aspect-ratio:1242/331;border:0;background:none;cursor:pointer;outline:none;padding:0}
-  .metalbtn img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
-  .mb-base{z-index:1}
-  .mb-glow{z-index:2;opacity:0;transition:opacity .25s var(--ease)}
-  .mb-press{z-index:3;opacity:0}
-  .metalbtn.is-armed .mb-glow{opacity:1;animation:mb-breathe 3.6s ease-in-out infinite}
-  .metalbtn:active .mb-press{opacity:1}
-  .metalbtn[disabled]{cursor:not-allowed}
-  .metalbtn[disabled] .mb-glow{opacity:0;animation:none}
-  .metalbtn:focus-visible{box-shadow:0 0 0 1px var(--line-hi);border-radius:var(--r)}
-  .metalbtn.sm{width:208px;aspect-ratio:1348/604}
-  @keyframes mb-breathe{0%,100%{opacity:.7}50%{opacity:1}}
-  @media (prefers-reduced-motion:reduce){.metalbtn.is-armed .mb-glow{animation:none;opacity:1}}
-
   .intake{border:1.5px dashed var(--line);border-radius:var(--r);padding:28px 16px;text-align:center;color:var(--mute);cursor:pointer;transition:border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
   .intake svg{width:24px;height:24px;display:block;margin:0 auto 8px;stroke-width:1.5}
   .intake:hover,.intake.drag{border-color:var(--line-hi);color:var(--bone)}
@@ -156,8 +138,6 @@
   .intake.detected .intake-icon{display:none}
   .d-name{display:block;color:var(--bone-hi);font-size:14px;font-weight:500}
   .d-meta{display:block;color:var(--mute);font-size:12px;margin-top:5px}
-
-  #launchBtn{margin-top:18px}
 
   .runs{margin-top:30px}
   .run{border-top:1px solid var(--line-soft)}
@@ -247,18 +227,14 @@
     <div class="notif" id="notif"></div>
 
     <section class="view on" id="v-launch">
-      <div class="banner card" id="setup"><span>Add a payment method to run your first job.</span><button class="metalbtn sm is-armed" id="setupBtn" aria-label="Add payment"><img class="mb-base" src="assets/btn-add-payment-off@3x.png" alt=""><img class="mb-glow" src="assets/btn-add-payment-armed@3x.png" alt=""><img class="mb-press" src="assets/btn-add-payment-pressed@3x.png" alt=""></button></div>
+      <div class="banner card" id="setup"><span>Add a payment method to run your first job.</span><button id="add-payment">Add payment</button></div>
       <div class="intake" id="intake">
         <input type="file" id="file" hidden>
         <svg class="intake-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h3.5l2 2H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
         <div id="intake-text">Connect a repo or drop your data</div>
       </div>
       <div class="pipe" id="pipePreview" hidden></div>
-      <button class="metalbtn" id="launchBtn" aria-label="Launch" disabled>
-        <img class="mb-base" src="assets/btn-launch-off@3x.png" alt="">
-        <img class="mb-glow" src="assets/btn-launch-armed@3x.png" alt="">
-        <img class="mb-press" src="assets/btn-launch-pressed@3x.png" alt="">
-      </button>
+      <button id="launch" disabled>Launch</button>
       <div class="runs"><p class="section-label">Runs</p><div id="jobs"></div></div>
     </section>
 
@@ -399,7 +375,7 @@
   setKnob(true);
 
   // ===== LAUNCH =====
-  var intake=$('intake'),intakeText=$('intake-text'),btn=$('launchBtn'),jobs=$('jobs'),pipePreview=$('pipePreview');
+  var intake=$('intake'),intakeText=$('intake-text'),btn=$('launch'),jobs=$('jobs'),pipePreview=$('pipePreview');
   var RERUN='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2 5"/><path d="M20 5v6h-6"/></svg>';
   var project=null, curQuote=null, liveFile=null, fileEl=$('file');
   function refreshArm(){var ok=!!project;btn.disabled=!ok;btn.classList.toggle('is-armed',ok);}
@@ -507,7 +483,7 @@
   });
   [['support-pipeline','main@a1b2c3','done'],['nightly-embeds','main@9f0e1d','done'],['ticket-classify','main@77c2b0','failed']].forEach(function(r){var run=el(runHTML(r[0],r[1],r[2]));jobs.appendChild(run);attach(run);});
 
-  $('setupBtn').addEventListener('click',function(){$('setup').style.display='none';toast('Payment method added');});
+  $('add-payment').addEventListener('click',function(){$('setup').style.display='none';toast('Payment method added');});
 
   // ---- live mode: real prod jobs via the /v1 API (same-origin when served at /demo) ----
   // A pasted buyer key turns Launch into a real submission against THIS server. Without
