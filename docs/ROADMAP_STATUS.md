@@ -41,23 +41,25 @@ not faked.
   `/events`, `/failures` — exportable per-job compute records). What remains is **🚫
   external**: a SOC 2 Type II audit (needs an audit firm, ~months), a HIPAA BAA + GDPR DPA
   (need a lawyer). No amount of code produces these — they are sign-and-attest artifacts.
-- **🔨 Private Deployment tier** — the enablers are in code (data-residency routing ✅,
-  single-box/LAN/offline-capable architecture, the reputation/Elite gate). What remains is
-  **a dedicated-pool binding** (a buyer's jobs route only to their own suppliers — a clean
-  follow-on claim-filter + a buyer↔pool table) and **🚫 product/sales**: naming, the 3×
-  price point, and the compliance bundle above.
+- **✅ Private Deployment routing** — `private_pool` jobs route ONLY to the buyer's bound
+  suppliers (`private_pool_members` + `POST /v1/private-pool`), on top of the data-residency
+  + Elite-reputation gates. The enterprise/privacy tier's technical core is done. What
+  remains is **🚫 product/sales**: naming, the 3× price point, and the SOC2/BAA/DPA bundle
+  (external, above).
 - **🔨 Compute Autopilot IDE (Workflows)** — the `/v1/quote` autopilot front door is built;
   multi-step job *pipelines* (one job's output feeding the next, a visual designer) are a
   **multi-week feature build**, not a session task. Seam acknowledged.
-- **🔨 Anti-defection — payment guarantee** — the Elite gate is done; the payout-side
-  guarantee (platform pays the supplier even on a buyer dispute, capped per quarter) is a
-  designed payout-path setting, not yet built. Contained follow-on.
+- **🔨 Anti-defection — payment guarantee** — the Elite gate ✅ + private-pool ✅ are the
+  built anti-defection levers. The payout-side guarantee (platform pays the supplier even
+  on a buyer dispute) first needs a **buyer-dispute mechanism** — none exists today (only
+  honeypot/verification clawback), so it's a real feature build, not a quick setting.
 - **🔨 Routing-intelligence dashboard** — the data exists (`GET /admin/drift` rolls up real
   committed durations per job_type/model); surfacing it to buyers is a frontend build.
 
 ## Bottom line
 Everything code-feasible in the plan is **done and verified** (now + soon + the Elite gate
-+ the NVIDIA lane). What is left is genuinely external: a SOC 2 audit (audit firm), BAA/DPA
-(lawyer), and two multi-week product builds (the Autopilot pipeline IDE, the Private
-Deployment go-to-market). Those are flagged here rather than faked — the honest definition
-of "complete."
++ Private Deployment routing + the NVIDIA lane). What is left cannot be produced by code in
+a session: a SOC 2 audit (audit firm), a BAA/DPA (lawyer), and feature builds that need a
+new subsystem first — the Autopilot pipeline IDE (a visual multi-step engine) and the
+payment guarantee (a buyer-dispute mechanism). Those are flagged here rather than faked —
+the honest definition of "complete."
