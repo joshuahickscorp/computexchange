@@ -294,19 +294,26 @@ func TestSplitSizeOfDefault(t *testing.T) {
 // items/chunk than generation, and everything stays in the [1,4096] band.
 func TestAdaptiveSplitSize(t *testing.T) {
 	// Explicit override always wins, regardless of job type.
-	if got := adaptiveSplitSize("embed", json.RawMessage(`{"split_size":7}`)); got != 7 {
+	if got := adaptiveSplitSize("embed", json.RawMessage(`{"split_size":7}`), 0); got != 7 {
 		t.Fatalf("explicit override: got %d, want 7", got)
 	}
-	embed := adaptiveSplitSize("embed", nil)
-	infer := adaptiveSplitSize("batch_infer", nil)
+	embed := adaptiveSplitSize("embed", nil, 0)
+	infer := adaptiveSplitSize("batch_infer", nil, 0)
 	if embed <= infer {
 		t.Fatalf("embeddings should pack more items/chunk than generation: embed=%d infer=%d", embed, infer)
 	}
 	for _, jt := range []string{"embed", "batch_infer", "image_gen", "rerank", "unknown_type"} {
-		n := adaptiveSplitSize(jt, nil)
+		n := adaptiveSplitSize(jt, nil, 0)
 		if n < 1 || n > 4096 {
 			t.Fatalf("%s split size %d out of [1,4096]", jt, n)
 		}
+	}
+	// Length-aware: long prompts shrink generation tasks (prefill-bound); embed is not.
+	if short, long := adaptiveSplitSize("batch_classification", nil, 120), adaptiveSplitSize("batch_classification", nil, 1200); long >= short {
+		t.Fatalf("long-prompt classification should split smaller: short=%d long=%d", short, long)
+	}
+	if adaptiveSplitSize("embed", nil, 1200) != adaptiveSplitSize("embed", nil, 120) {
+		t.Fatalf("embed split must not depend on input length")
 	}
 }
 

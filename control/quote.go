@@ -151,7 +151,15 @@ type QuoteExecution struct {
 	ModelMinMemoryGB     float32 `json:"model_min_memory_gb"`   // catalogue floor; the per-task memory requirement
 	OOMRisk              string  `json:"oom_risk"`              // low|medium|high
 	ColdStartRisk        string  `json:"cold_start_risk"`       // low|medium|high
+	SLAEligible          bool    `json:"sla_eligible"`          // supply >= threshold → a project-SLA ETA is offerable (research §6.2 launch gate)
+	PoolReputation       float64 `json:"pool_reputation"`       // avg reputation (0..1) of the eligible supplier pool (routing transparency, research §4)
 }
+
+// slaMinEligibleWorkers is the minimum eligible supply before a project-priced SLA ETA
+// is offered (DEEP_RESEARCH_V2 §6.2 launch gate; "probably 5-10"). Below it the quote is
+// advisory only — the failure mode (SLA miss, no revenue, lost buyer) is worse than
+// declining to promise.
+const slaMinEligibleWorkers = 5
 
 type QuoteCost struct {
 	MinUSD                  float64 `json:"min_usd"`
@@ -189,7 +197,11 @@ func (s *Server) buildQuote(ctx context.Context, sub jobSubmit, inputBytes []byt
 	tier := sub.Tier
 	scan := scanJSONL(inputBytes)
 
-	split := adaptiveSplitSize(jobType, sub.Params)
+	avgLineBytes := 0.0
+	if scan.Records > 0 {
+		avgLineBytes = float64(len(inputBytes)) / float64(scan.Records)
+	}
+	split := adaptiveSplitSize(jobType, sub.Params, avgLineBytes)
 	tasks := 0
 	if scan.Records > 0 && split > 0 {
 		tasks = (scan.Records + split - 1) / split
@@ -228,6 +240,18 @@ func (s *Server) buildQuote(ctx context.Context, sub jobSubmit, inputBytes []byt
 
 	oomRisk, coldRisk, conf, warnings := assessRisk(scan, eligibleNow, warmEligible, modelMinMem)
 
+	// Supply-density gate (DEEP_RESEARCH_V2 §6.2 launch gate) + routing transparency
+	// (§4): only promise a project-SLA ETA when enough workers are eligible right now,
+	// and surface the eligible pool's average reputation so the buyer sees the quality
+	// of supply their job routes to.
+	poolRep, _ := s.store.EligiblePoolReputation(ctx, jobType, sub.Model.Ref, minMem)
+	slaEligible := eligibleNow >= slaMinEligibleWorkers
+	if !slaEligible {
+		warnings = append(warnings, fmt.Sprintf(
+			"supply below the SLA threshold (%d eligible, need %d): ETA is advisory only, no project-SLA guarantee",
+			eligibleNow, slaMinEligibleWorkers))
+	}
+
 	// Memory-floor feedback (Plane D D4): if the model's floor exceeds the MEDIAN
 	// effective memory of eligible workers (from the rolling samples), the typical
 	// eligible box is tight on this model even though the binary count passed —
@@ -263,6 +287,8 @@ func (s *Server) buildQuote(ctx context.Context, sub jobSubmit, inputBytes []byt
 			ModelMinMemoryGB:     modelMinMem,
 			OOMRisk:              oomRisk,
 			ColdStartRisk:        coldRisk,
+			SLAEligible:          slaEligible,
+			PoolReputation:       poolRep,
 		},
 		Cost: QuoteCost{
 			MinUSD: costMin, ExpectedUSD: expected, MaxUSD: costMax,
@@ -466,6 +492,27 @@ func (s *Store) EligibleWorkerCount(ctx context.Context, jobType, modelRef strin
 		jobType, modelRef, minMemGB,
 	).Scan(&n)
 	return n, err
+}
+
+// EligiblePoolReputation is the AVERAGE supplier reputation across the workers that
+// would pass the claim hard filter for this job right now (the same predicate as
+// EligibleWorkerCount). Surfaced to the buyer as routing transparency (DEEP_RESEARCH_V2
+// §4): the quality of the pool their project routes to. 0 when the pool is empty.
+func (s *Store) EligiblePoolReputation(ctx context.Context, jobType, modelRef string, minMemGB float32) (float64, error) {
+	var r float64
+	err := s.pool.QueryRow(ctx,
+		`SELECT COALESCE(AVG(s.reputation), 0)
+		   FROM workers w JOIN suppliers s ON s.id = w.supplier_id
+		  WHERE w.last_seen_at IS NOT NULL
+		    AND w.last_seen_at > now() - interval '60 seconds'
+		    AND s.status = 'active'
+		    AND NOT COALESCE(w.throttled, false)
+		    AND COALESCE($3,0) <= COALESCE(w.effective_memory_gb, w.memory_gb, 0)
+		    AND COALESCE(w.supported_jobs,'{}') @> ARRAY[$1]
+		    AND ($2 = '' OR COALESCE(w.supported_models,'{}') @> ARRAY[$2])`,
+		jobType, modelRef, minMemGB,
+	).Scan(&r)
+	return r, err
 }
 
 // WarmEligibleWorkerCount counts the eligible workers (same predicate as

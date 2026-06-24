@@ -322,8 +322,13 @@ func (s *Server) createJob(ctx context.Context, buyerID uuid.UUID, sub jobSubmit
 	}
 	// Adaptive chunk sizing: an explicit params.split_size always wins; otherwise
 	// pick a per-job-type default that targets ~30–60s/task (embeddings pack far
-	// more items/chunk than generation). See adaptiveSplitSize.
-	splitSize := adaptiveSplitSize(sub.JobType.Type, sub.Params)
+	// more items/chunk than generation), scaled DOWN for long prompts so a
+	// prefill-bound generation job splits into right-sized tasks. See adaptiveSplitSize.
+	avgLineBytes := 0.0
+	if rec := scanJSONL(inputBytes).Records; rec > 0 {
+		avgLineBytes = float64(len(inputBytes)) / float64(rec)
+	}
+	splitSize := adaptiveSplitSize(sub.JobType.Type, sub.Params, avgLineBytes)
 	lines := splitJSONL(inputBytes, splitSize)
 	if len(lines) == 0 {
 		return JobSubmitResponse{}, &httpError{http.StatusBadRequest, "input is empty: at least one JSONL line is required"}
@@ -1660,6 +1665,30 @@ func throughputOf(jobType string) float64 {
 	return 10
 }
 
+// effectiveThroughput scales a GENERATION job's items/sec down for long inputs.
+// Classification / extraction / completion are prefill-bound: the model reads the
+// whole prompt before emitting a token, so a 1.2 KB posting is far slower than a
+// one-line tweet — but the base jobTypeThroughput figures assume short texts (the
+// jobscraper real-project run estimated 90s vs ~108s actual for exactly this reason).
+// We scale items/sec by the prompt-length ratio past a short-text reference. Embed /
+// transcribe / rerank are not prompt-length-bound this way. avgLineBytes <= 0 means
+// "unknown" → no scaling. Drift feedback (observed p90) refines further once history
+// exists; this fixes the COLD-START estimate before any history is recorded.
+func effectiveThroughput(jobType string, avgLineBytes float64) float64 {
+	base := throughputOf(jobType)
+	switch jobType {
+	case "batch_classification", "json_extraction", "batch_infer":
+		const refBytes = 140.0
+		if avgLineBytes > refBytes {
+			base *= refBytes / avgLineBytes
+		}
+	}
+	if base < 0.2 {
+		base = 0.2
+	}
+	return base
+}
+
 // targetTaskSecs is the per-task duration adaptive chunk sizing aims for, so a
 // task is big enough to amortize dispatch overhead but small enough to hedge and
 // retry cheaply (~30–60s; we target the midpoint).
@@ -1670,7 +1699,7 @@ const targetTaskSecs = 45
 // throughput(jobType) × targetTaskSecs, clamped to a sane [1,4096] band, so an
 // embed job packs far more items per chunk than a generation job for the same
 // ~45s target.
-func adaptiveSplitSize(jobType string, params json.RawMessage) int {
+func adaptiveSplitSize(jobType string, params json.RawMessage, avgLineBytes float64) int {
 	if len(params) > 0 {
 		var p struct {
 			SplitSize int `json:"split_size"`
@@ -1679,7 +1708,7 @@ func adaptiveSplitSize(jobType string, params json.RawMessage) int {
 			return p.SplitSize
 		}
 	}
-	n := int(throughputOf(jobType) * targetTaskSecs)
+	n := int(effectiveThroughput(jobType, avgLineBytes) * targetTaskSecs)
 	if n < 1 {
 		n = 1
 	}
