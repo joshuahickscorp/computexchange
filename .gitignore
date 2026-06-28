@@ -59,3 +59,6 @@ data/
 *.safetensors
 *.mlx
 *.bin
+
+# agent worktrees / local tooling
+.claude/
