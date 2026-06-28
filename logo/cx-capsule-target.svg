@@ -1,0 +1,95 @@
+<svg viewBox="0 0 760 360" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="t d">
+  <title id="t">computexchange action capsules, target render v3</title>
+  <desc id="d">Two fully round dark anodized metal capsules at button scale on a near black surface, polished and shiny with a deep single inset. Add payment is a wider, shorter, secondary capsule sitting inline at the right of a row of muted body text. Launch is a narrower, taller, primary capsule centered below. Each capsule hugs its own label, a white glowing system font word set into a recessed channel.</desc>
+
+  <defs>
+    <radialGradient id="bgGlow" cx="380" cy="180" r="460" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#101015"/>
+      <stop offset="1" stop-color="#070709"/>
+    </radialGradient>
+
+    <linearGradient id="metalBody" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0"    stop-color="#535360"/>
+      <stop offset="0.13" stop-color="#2a2932"/>
+      <stop offset="0.5"  stop-color="#0e0d12"/>
+      <stop offset="0.84" stop-color="#1d1c24"/>
+      <stop offset="1"    stop-color="#38373f"/>
+    </linearGradient>
+
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0"    stop-color="#ffffff" stop-opacity="0.52"/>
+      <stop offset="0.10" stop-color="#ffffff" stop-opacity="0.14"/>
+      <stop offset="0.32" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+
+    <linearGradient id="rimStroke" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0"    stop-color="#ffffff" stop-opacity="0.80"/>
+      <stop offset="0.42" stop-color="#ffffff" stop-opacity="0.16"/>
+      <stop offset="1"    stop-color="#ffffff" stop-opacity="0.06"/>
+    </linearGradient>
+
+    <linearGradient id="recessFloor" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#030304"/>
+      <stop offset="1" stop-color="#100f15"/>
+    </linearGradient>
+
+    <linearGradient id="recessShade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0"    stop-color="#000000" stop-opacity="0.82"/>
+      <stop offset="0.55" stop-color="#000000" stop-opacity="0"/>
+    </linearGradient>
+
+    <linearGradient id="recessLip" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="1"   stop-color="#ccd8ea" stop-opacity="0.30"/>
+    </linearGradient>
+
+    <filter id="softShadow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="6"/>
+    </filter>
+
+    <filter id="labelGlow" x="-80%" y="-240%" width="260%" height="580%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="2.6" result="blur"/>
+      <feColorMatrix in="blur" type="matrix"
+        values="0 0 0 0 0.80
+                0 0 0 0 0.89
+                0 0 0 0 1
+                0 0 0 0.85 0" result="glow"/>
+      <feMerge>
+        <feMergeNode in="glow"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect x="0" y="0" width="760" height="360" fill="url(#bgGlow)"/>
+
+  <text x="42" y="42" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif" font-size="13" letter-spacing="0.5" fill="#63666e">computexchange · action capsule · target render v3</text>
+
+  <!-- ROW: muted body text + Add payment (inline, secondary, wider and shorter) -->
+  <text x="60" y="145" dominant-baseline="central" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif" font-size="14.5" fill="#7e818a">Add a payment method to run your first job.</text>
+
+  <ellipse cx="626" cy="173" rx="74" ry="6" fill="#000000" opacity="0.50" filter="url(#softShadow)"/>
+  <rect x="552" y="122" width="148" height="46" rx="23" fill="url(#metalBody)" stroke="#050506" stroke-width="1"/>
+  <rect x="552" y="122" width="148" height="46" rx="23" fill="url(#gloss)"/>
+  <rect x="552.75" y="122.75" width="146.5" height="44.5" rx="22.25" fill="none" stroke="url(#rimStroke)" stroke-width="1.5"/>
+  <rect x="565" y="131" width="122" height="28" rx="14" fill="url(#recessFloor)" stroke="#000000" stroke-opacity="0.55" stroke-width="0.75"/>
+  <rect x="565" y="131" width="122" height="28" rx="14" fill="url(#recessShade)"/>
+  <rect x="565" y="131" width="122" height="28" rx="14" fill="none" stroke="url(#recessLip)" stroke-width="1"/>
+  <text x="626" y="146" text-anchor="middle" dominant-baseline="central" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif" font-size="14" font-weight="500" letter-spacing="0.2" fill="#000000" fill-opacity="0.5">Add payment</text>
+  <g filter="url(#labelGlow)">
+    <text x="626" y="145" text-anchor="middle" dominant-baseline="central" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif" font-size="14" font-weight="500" letter-spacing="0.2" fill="#f2f5ff">Add payment</text>
+  </g>
+
+  <!-- LAUNCH (centered, primary, narrower and taller) -->
+  <ellipse cx="380" cy="299" rx="66" ry="7" fill="#000000" opacity="0.55" filter="url(#softShadow)"/>
+  <rect x="319" y="237" width="122" height="56" rx="28" fill="url(#metalBody)" stroke="#050506" stroke-width="1"/>
+  <rect x="319" y="237" width="122" height="56" rx="28" fill="url(#gloss)"/>
+  <rect x="319.75" y="237.75" width="120.5" height="54.5" rx="27.25" fill="none" stroke="url(#rimStroke)" stroke-width="1.6"/>
+  <rect x="333" y="248" width="94" height="34" rx="17" fill="url(#recessFloor)" stroke="#000000" stroke-opacity="0.55" stroke-width="0.75"/>
+  <rect x="333" y="248" width="94" height="34" rx="17" fill="url(#recessShade)"/>
+  <rect x="333" y="248" width="94" height="34" rx="17" fill="none" stroke="url(#recessLip)" stroke-width="1"/>
+  <text x="380" y="266.2" text-anchor="middle" dominant-baseline="central" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif" font-size="17" font-weight="600" letter-spacing="0.2" fill="#000000" fill-opacity="0.5">Launch</text>
+  <g filter="url(#labelGlow)">
+    <text x="380" y="265" text-anchor="middle" dominant-baseline="central" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif" font-size="17" font-weight="600" letter-spacing="0.2" fill="#f2f5ff">Launch</text>
+  </g>
+</svg>

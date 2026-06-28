@@ -142,7 +142,10 @@ func (v *Verifier) verifyTaskResult(ctx context.Context, info *CommitTaskInfo, c
 		// chunk identity in a unit context): vote over exactly the two blobs the
 		// caller fetched, preserving the original 2-result behavior.
 		if len(all) == 0 {
-			peerSup := info.SupplierID // best-effort; the peer's supplier is unknown here
+			peerSup := info.peerSupplierID // the real redundancy peer when the commit handler knew it
+			if peerSup == uuid.Nil {
+				peerSup = info.SupplierID // truly unknown (e.g. unit context) — preserve prior behavior
+			}
 			all = []chunkVote{
 				{supplierID: info.SupplierID, bytes: commitBytes},
 				{supplierID: peerSup, bytes: redundancyBytes},

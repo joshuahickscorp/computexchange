@@ -1188,6 +1188,10 @@ type CommitTaskInfo struct {
 	ModelRef     string // parent job's model_ref (tiebreak peer selection)
 	MinMemoryGB  float32
 	ChunkIndex   int // this task's chunk position (tiebreak pairing + N-way vote)
+	// peerSupplierID is the redundancy peer's supplier, set by the commit handler
+	// when a sibling result exists. Used only by the no-object-store verification
+	// fallback so a 2-blob disagreement docks the RIGHT supplier (uuid.Nil = unknown).
+	peerSupplierID uuid.UUID
 }
 
 // CommitTask stores the result ref and flips the task to complete. Returns the
@@ -1947,7 +1951,137 @@ func (s *Store) DuePayouts(ctx context.Context, limit int) ([]DueHeldEntry, erro
 // MarkPayout sets a ledger entry's payout_status (and optional payout_ref). Used
 // by the payout-release loop: 'released' with a ref on a real transfer, or
 // 'ready' (no ref) when the rail is unconfigured and the transfer is deferred.
+// SetChargeStatus records the outcome of a job's off-session buyer charge
+// (not_attempted|charged|failed|no_payment_method) so charging state is queryable
+// rather than log-only. Best-effort: a failure here never blocks the lifecycle.
+func (s *Store) SetChargeStatus(ctx context.Context, jobID uuid.UUID, status string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE jobs SET charge_status = $2 WHERE id = $1`, jobID, status)
+	return err
+}
+
+// RecordDispute records a buyer's dispute against a job's result, atomically verifying
+// the job belongs to that buyer (the INSERT...SELECT yields no row — errNotFound — when
+// it does not, so a buyer can never dispute another's job). Returns the new dispute id.
+// This is the foundation primitive for optimistic-verification recompute + the payout
+// guarantee; resolution (operator bisection / tolerance-aware FP) is the frontier seam.
+func (s *Store) RecordDispute(ctx context.Context, jobID, buyerID uuid.UUID, reason string) (uuid.UUID, error) {
+	var id uuid.UUID
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO disputes (job_id, buyer_id, reason)
+		 SELECT $1, $2, $3 WHERE EXISTS (SELECT 1 FROM jobs WHERE id = $1 AND buyer_id = $2)
+		 RETURNING id`,
+		jobID, buyerID, reason).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, errNotFound
+	}
+	return id, err
+}
+
+// DisputeRow is an unresolved dispute the resolver works on.
+type DisputeRow struct {
+	ID, JobID uuid.UUID
+	Status    string
+}
+
+// ActiveDisputes returns disputes still needing resolution: 'open'/'no_peer' need a
+// re-verify dispatched; 'reverifying' awaits the independent re-run's objective verdict.
+func (s *Store) ActiveDisputes(ctx context.Context, limit int) ([]DisputeRow, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, job_id, status FROM disputes
+		  WHERE status IN ('open','no_peer','reverifying') ORDER BY created_at LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DisputeRow
+	for rows.Next() {
+		var d DisputeRow
+		if err := rows.Scan(&d.ID, &d.JobID, &d.Status); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// ReverifyTargetRow is the disputed job's primary completed task + the routing facts a
+// re-verification peer needs.
+type ReverifyTargetRow struct {
+	TaskID, AnchorWorker uuid.UUID
+	JobType, ModelRef    string
+	InputRef             string
+	MinMemGB             float32
+	ChunkIndex           int
+}
+
+// ReverifyTarget returns the disputed job's primary completed task (chunk 0, not a
+// redundancy/honeypot) to independently re-run. ok=false when the job has no such
+// completed task to re-verify.
+func (s *Store) ReverifyTarget(ctx context.Context, jobID uuid.UUID) (ReverifyTargetRow, bool, error) {
+	var t ReverifyTargetRow
+	err := s.pool.QueryRow(ctx,
+		`SELECT tk.id, tk.worker_id, j.job_type, COALESCE(j.model_ref,''),
+		        tk.input_ref, COALESCE(j.min_memory_gb,0), tk.chunk_index
+		   FROM tasks tk JOIN jobs j ON j.id = tk.job_id
+		  WHERE tk.job_id = $1 AND tk.status = 'complete'
+		        AND COALESCE(tk.is_redundancy,false) = false
+		        AND COALESCE(tk.is_honeypot,false) = false
+		        AND tk.worker_id IS NOT NULL
+		  ORDER BY tk.chunk_index LIMIT 1`, jobID).
+		Scan(&t.TaskID, &t.AnchorWorker, &t.JobType, &t.ModelRef, &t.InputRef, &t.MinMemGB, &t.ChunkIndex)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return t, false, nil
+	}
+	if err != nil {
+		return t, false, err
+	}
+	return t, true, nil
+}
+
+// SetDisputeReverifying records the dispatched re-verify task and flips to 'reverifying'.
+func (s *Store) SetDisputeReverifying(ctx context.Context, id, reverifyTaskID uuid.UUID) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE disputes SET status = 'reverifying', reverify_task_id = $2 WHERE id = $1`,
+		id, reverifyTaskID)
+	return err
+}
+
+// SetDisputeStatus updates a dispute's status (stamping resolved_at on a terminal one).
+func (s *Store) SetDisputeStatus(ctx context.Context, id uuid.UUID, status string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE disputes SET status = $2,
+		        resolved_at = CASE WHEN $2 IN ('resolved','rejected') THEN now() ELSE resolved_at END
+		  WHERE id = $1`, id, status)
+	return err
+}
+
+// JobHasPendingTasks reports whether a job still has queued/running tasks — the resolver
+// waits on this so a re-verify (and any cascaded tiebreak) fully settles before verdict.
+func (s *Store) JobHasPendingTasks(ctx context.Context, jobID uuid.UUID) (bool, error) {
+	var n int
+	err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM tasks WHERE job_id = $1 AND status IN ('queued','retrying','running')`,
+		jobID).Scan(&n)
+	return n > 0, err
+}
+
+// TaskHasClawback reports whether a confirmed-bad clawback was recorded against a task —
+// the OBJECTIVE verdict signal for a dispute (the original result was wrong).
+func (s *Store) TaskHasClawback(ctx context.Context, taskID uuid.UUID) (bool, error) {
+	var exists bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM ledger_entries WHERE kind = 'clawback' AND task_id = $1)`,
+		taskID).Scan(&exists)
+	return exists, err
+}
+
 func (s *Store) MarkPayout(ctx context.Context, entryID uuid.UUID, status, ref string) error {
+	// Invariant (BLACKHOLE: never fake a transfer): a credit may only be marked
+	// 'released' WITH a real rail reference. Enforced here and, structurally, by the
+	// ledger_released_requires_ref CHECK constraint in db/schema.sql.
+	if status == PayoutReleased && ref == "" {
+		return fmt.Errorf("refusing to mark ledger entry %s 'released' without a payout reference", entryID)
+	}
 	if ref == "" {
 		_, err := s.pool.Exec(ctx,
 			`UPDATE ledger_entries SET payout_status = $2 WHERE id = $1`, entryID, status)

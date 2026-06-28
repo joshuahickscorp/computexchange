@@ -1641,6 +1641,62 @@ impl JobRunner for ClusterRunner {
 }
 
 // ---------------------------------------------------------------------------
+// MlxRunner — MLX serving-lane SEAM (frontier: vLLM-MLX continuous batching)
+// ---------------------------------------------------------------------------
+
+/// The opt-in MLX serving lane. Apple's MLX + continuous batching is the
+/// highest-throughput single-node inference path on Apple Silicon (published
+/// benchmarks: ~20–87% faster than llama.cpp under 14B; vLLM-MLX continuous batching
+/// ~3.4–4.3× aggregate throughput at concurrency — docs/PRODUCTION_AUDIT.md §2.1). CX
+/// serves on Candle today. This runner is the SEAM for the MLX lane: when an operator
+/// sets `inference_backend = "mlx"` in agent.toml it is inserted FIRST (see main.rs),
+/// so generative LLM jobs route here and surface an honest, typed boundary — the MLX
+/// runtime (mlx-rs / Metal FFI) is not yet wired on this host. It NEVER fabricates a
+/// forward pass (BLACKHOLE: surface the boundary). With the default Candle backend the
+/// runner is not inserted at all, so normal dispatch is byte-for-byte unchanged. The
+/// future MLX integration replaces `run`'s body; `can_run` already gates the lane.
+pub struct MlxRunner;
+
+#[async_trait]
+impl JobRunner for MlxRunner {
+    async fn can_run(&self, manifest: &JobManifest, _cap: &WorkerCapability) -> bool {
+        // The Llama-backed generative LLM job types the MLX lane serves. Embed (MiniLM),
+        // audio_transcribe (whisper), and rerank (MiniLM embeddings) are NOT MLX-lane
+        // targets and stay on Candle. A giant cluster model yields to ClusterRunner so it
+        // surfaces the correct Plane B boundary (defense-in-depth with main.rs's dispatch
+        // order, which keeps ClusterRunner first).
+        !is_cluster_model(&manifest.model.model_ref)
+            && matches!(
+                manifest.job_type,
+                JobType::BatchInfer { .. }
+                    | JobType::BatchClassification { .. }
+                    | JobType::JsonExtraction { .. }
+            )
+    }
+
+    async fn run(
+        &self,
+        manifest: &JobManifest,
+        _input: &[u8],
+        _pool: &ModelPool,
+    ) -> Result<JobOutput, RunError> {
+        Err(RunError::ExternalSubstrate {
+            model: short_model_id(&manifest.model.model_ref, "mlx-model"),
+            detail:
+                "MLX serving lane (vLLM-MLX continuous batching) selected via inference_backend=mlx, \
+                 but the MLX runtime is not yet wired on this host — it requires the mlx-rs / Metal FFI \
+                 integration (frontier seam, docs/PRODUCTION_AUDIT.md §2.1). The Candle lane remains the \
+                 default; this seam surfaces the boundary and never fabricates a result."
+                    .to_string(),
+        })
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "mlx"
+    }
+}
+
+// ---------------------------------------------------------------------------
 // CustomRunner — general-compute SEAM (ACCRETION.md §7-8)
 // ---------------------------------------------------------------------------
 
@@ -2339,6 +2395,46 @@ mod tests {
                     assert!(model.contains("405b"));
                     assert!(detail.contains("Thunderbolt"));
                 }
+                other => panic!("expected ExternalSubstrate boundary, got {other:?}"),
+            }
+        });
+    }
+
+    /// The MLX serving-lane seam: MlxRunner claims the generative LLM job types (so
+    /// when an operator sets inference_backend=mlx and it is inserted first, those
+    /// route to it), declines embed (MiniLM stays on Candle), and its `run` surfaces
+    /// the MLX boundary rather than fabricating a forward pass.
+    #[test]
+    fn mlx_runner_gates_llm_jobs_and_surfaces_boundary() {
+        let cap = cap_with(HardwareClass::AppleSiliconMax, 64.0);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let infer = test_manifest(JobType::BatchInfer {
+                max_tokens: 16,
+                temperature: 0.0,
+            });
+            assert!(MlxRunner.can_run(&infer, &cap).await);
+            // embed is not an MLX-lane target → stays on Candle.
+            let embed = test_manifest(JobType::Embed {
+                batch_size: 8,
+                binary: false,
+            });
+            assert!(!MlxRunner.can_run(&embed, &cap).await);
+            // rerank is MiniLM-embedding-based, not a generative LLM → stays on Candle.
+            let rerank = test_manifest(JobType::Rerank { top_k: 5 });
+            assert!(!MlxRunner.can_run(&rerank, &cap).await);
+            // a giant cluster model yields to ClusterRunner so the correct Plane B
+            // boundary is surfaced — even for a generative job type.
+            let mut giant = test_manifest(JobType::BatchInfer {
+                max_tokens: 16,
+                temperature: 0.0,
+            });
+            giant.model.model_ref = "llama-3.1-405b-instruct-q4".into();
+            assert!(!MlxRunner.can_run(&giant, &cap).await);
+            // run() surfaces the boundary; it must NOT fabricate a result.
+            let pool = ModelPool::new();
+            match MlxRunner.run(&infer, b"", &pool).await {
+                Err(RunError::ExternalSubstrate { detail, .. }) => assert!(detail.contains("MLX")),
                 other => panic!("expected ExternalSubstrate boundary, got {other:?}"),
             }
         });

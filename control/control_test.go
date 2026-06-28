@@ -14,6 +14,81 @@ import (
 	"github.com/google/uuid"
 )
 
+// TestObserveMiddlewareRequestID proves the access-log middleware: it generates a
+// correlation id when the request has none, propagates an incoming one verbatim,
+// echoes it on the response, and passes the handler's status through unchanged.
+func TestObserveMiddlewareRequestID(t *testing.T) {
+	h := observe(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	}))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/jobs/x", nil))
+	if rec.Header().Get("X-Request-ID") == "" {
+		t.Fatal("observe must set X-Request-ID when the request has none")
+	}
+	if rec.Code != http.StatusTeapot {
+		t.Fatalf("observe must pass the handler status through: got %d", rec.Code)
+	}
+
+	rec2 := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/jobs/x", nil)
+	req.Header.Set("X-Request-ID", "trace-123")
+	h.ServeHTTP(rec2, req)
+	if got := rec2.Header().Get("X-Request-ID"); got != "trace-123" {
+		t.Fatalf("observe must propagate an incoming X-Request-ID: got %q", got)
+	}
+}
+
+// TestSecureHTMLHeaders proves the defensive headers set on same-origin HTML
+// responses (anti-MIME-sniff, anti-clickjacking, no referrer leakage).
+func TestSecureHTMLHeaders(t *testing.T) {
+	rec := httptest.NewRecorder()
+	secureHTMLHeaders(rec)
+	for k, want := range map[string]string{
+		"X-Content-Type-Options": "nosniff",
+		"X-Frame-Options":        "SAMEORIGIN",
+		"Referrer-Policy":        "no-referrer",
+	} {
+		if got := rec.Header().Get(k); got != want {
+			t.Fatalf("%s = %q, want %q", k, got, want)
+		}
+	}
+}
+
+// TestStoreBreaker proves the object-store circuit breaker: it stays closed under
+// healthy/mixed traffic, OPENS only after `threshold` consecutive fully-failed
+// calls, fails fast until the cooldown elapses, then closes; and a single healthy
+// call resets the failure count (so a missing object / success never trips it).
+func TestStoreBreaker(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0)
+	b := newStoreBreaker(3, 10*time.Second)
+
+	if !b.allow(t0) {
+		t.Fatal("a fresh breaker must allow")
+	}
+	// Two failures then a healthy call must NOT open it (reset on health).
+	b.record(t0, false)
+	b.record(t0, false)
+	b.record(t0, true)
+	if !b.allow(t0) {
+		t.Fatal("a healthy call must reset the failure count before the threshold")
+	}
+	// Three consecutive failures trip it open for the cooldown.
+	b.record(t0, false)
+	b.record(t0, false)
+	b.record(t0, false)
+	if b.allow(t0) {
+		t.Fatal("breaker must open after the threshold of consecutive failures")
+	}
+	if b.allow(t0.Add(9 * time.Second)) {
+		t.Fatal("breaker must stay open during the cooldown")
+	}
+	if !b.allow(t0.Add(11 * time.Second)) {
+		t.Fatal("breaker must close once the cooldown elapses")
+	}
+}
+
 // control_test.go — pure-function + handler-seam unit tests. No DB, no object
 // store: every test here exercises logic that is either pure or short-circuits
 // before any I/O (the auth 401 paths reject before the store lookup). Tests that

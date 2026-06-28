@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync/atomic"
+	"time"
 )
 
 // metrics.go — hand-rolled Prometheus text exposition (NO client dependency).
@@ -61,7 +62,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(w, "cx_budget_stops_total", "Capped jobs paused before breach by the Budget Governor.", metrics.budgetStops.Load())
 	writeCounter(w, "cx_long_poll_timeouts_total", "Worker long-poll waits that returned empty on timeout.", metrics.longPollTimeouts.Load())
 
-	ctx, cancel := context.WithTimeout(r.Context(), 2_000_000_000)
+	// Bound the metric DB queries; widened to 10s so a slow scrape under load still
+	// completes rather than truncating the exposition.
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
 	fmt.Fprintf(w, "# HELP cx_active_workers Workers seen within the last 60s.\n")

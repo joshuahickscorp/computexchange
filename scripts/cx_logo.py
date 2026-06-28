@@ -1,5 +1,5 @@
-# computexchange splash mark: the metal Cx. A SIBLING of cx_knob.py / cx_button.py.
-# The C is the machined, anodized BODY (the flat-letterform metal recipe from cx_button:
+# computexchange splash mark: the metal Cx. A SIBLING of cx_knob.py.
+# The C is the machined, anodized BODY (a flat-letterform metal recipe:
 # linear brushing, no radial pinch, so a wide letter does not smear). The x is the
 # engraved, backlit EMISSIVE glyph sitting in the C's counter, the same relationship the
 # power glyph has to the knob face. Same lights + Glare bloom as the knob.
@@ -65,7 +65,7 @@ X = build("x", paths["x"], thickness=0.10, bevel=0.012)
 X.location.z = 0.02   # nudge the glyph forward in the counter so its glow catches
 
 # ---------- materials ----------
-# C: the cx_button flat-letterform metal (linear brushed grain, no radial pinch).
+# C: the flat-letterform metal (linear brushed grain, no radial pinch).
 m = bpy.data.materials.new("CxMetal"); m.use_nodes = True
 nt = m.node_tree; bsdf = nt.nodes["Principled BSDF"]
 bsdf.inputs["Base Color"].default_value = (0.075, 0.075, 0.09, 1)

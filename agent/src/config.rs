@@ -32,6 +32,18 @@ fn default_max_memory_pct() -> f32 {
 /// the operator config contract and are consumed by Phase 2 (CPU throttling,
 /// reservation-price reporting, model cache placement); they are parsed and
 /// validated today even though the honest-stub loop does not yet act on them.
+/// Which on-device runtime serves generative LLM jobs. `candle` (default) is the
+/// wired path; `mlx` opts into the MLX serving-lane SEAM (vLLM-MLX continuous
+/// batching — see `runners::MlxRunner`), which surfaces an honest boundary until the
+/// MLX runtime (mlx-rs / Metal FFI) is wired. Set in agent.toml: `inference_backend = "mlx"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InferenceBackend {
+    #[default]
+    Candle,
+    Mlx,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct AgentConfig {
@@ -70,6 +82,10 @@ pub struct AgentConfig {
     /// S3 I/O with compute and lets distinct models run in parallel.
     #[serde(default)]
     pub max_concurrent_tasks: Option<usize>,
+    /// On-device inference runtime for generative LLM jobs (`candle` default, or
+    /// `mlx` to route them to the MLX serving-lane seam). See `InferenceBackend`.
+    #[serde(default)]
+    pub inference_backend: InferenceBackend,
 }
 
 /// The outcome of a memory-throttle evaluation. Pure data carried into the
@@ -220,6 +236,7 @@ mod tests {
             max_memory_pct: 85.0,
             data_dir: PathBuf::from("/tmp"),
             max_concurrent_tasks: None,
+            inference_backend: InferenceBackend::default(),
         }
     }
 

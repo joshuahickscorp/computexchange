@@ -67,6 +67,7 @@ const (
 	staleInterval    = 30 * time.Second
 	webhookInterval  = 20 * time.Second
 	hedgeInterval    = 30 * time.Second
+	disputeInterval  = 20 * time.Second // buyer-dispute re-verification + resolution
 	staleTaskTimeout = 30 * time.Minute // claim older than this with no commit → stale
 	staleBackoff     = 1 * time.Minute  // delay before a requeued task is visible
 	maxTaskRetries   = 3                // requeue this many times before failing
@@ -89,6 +90,7 @@ func (wk *Workers) Run(ctx context.Context) {
 	go wk.tick(ctx, webhookInterval, "webhook-sweep", wk.sweepAndDeliver)
 	go wk.tick(ctx, hedgeInterval, "straggler-hedge", wk.hedgeStragglers)
 	go wk.tick(ctx, reconcileInterval, "ledger-reconcile", wk.reconcileLedger)
+	go wk.tick(ctx, disputeInterval, "dispute-resolve", wk.resolveDisputes)
 	<-ctx.Done()
 	log.Print("workers: shutting down")
 }
@@ -160,10 +162,92 @@ func (wk *Workers) requeueStaleTasks(ctx context.Context) error {
 			log.Printf("workers: task %s failed after %d retries (job %s refunded)", t.ID, t.RetryCount, t.JobID)
 			continue
 		}
-		if rerr := wk.store.RequeueStaleTask(ctx, t.ID, staleBackoff); rerr != nil {
+		// Exponential backoff by prior retries (1m, 2m, 4m, 8m, 16m capped) so a
+		// systematically-broken worker isn't re-handed the same task on a tight loop.
+		shift := t.RetryCount
+		if shift > 4 {
+			shift = 4
+		}
+		backoff := staleBackoff << uint(shift)
+		if rerr := wk.store.RequeueStaleTask(ctx, t.ID, backoff); rerr != nil {
 			return rerr
 		}
-		log.Printf("workers: requeued stale task %s (retry %d)", t.ID, t.RetryCount+1)
+		log.Printf("workers: requeued stale task %s (retry %d, backoff %s)", t.ID, t.RetryCount+1, backoff)
+	}
+	return nil
+}
+
+// resolveDisputes drives the buyer-dispute lifecycle — the local execution of optimistic
+// verification (docs/PRODUCTION_AUDIT.md §2.3). For each open dispute it dispatches an
+// INDEPENDENT re-verification of the disputed job's primary result, reusing the proven
+// redundancy path: a DIFFERENT same-class supplier re-runs the chunk (InsertTiebreakTask),
+// and the existing verifier compares + clawbacks on a real mismatch. The dispute is then
+// resolved off that OBJECTIVE verdict — upheld if the original was clawed back, rejected if
+// the re-run agreed. When no distinct same-class supplier is free it surfaces 'no_peer'
+// (the honest boundary: re-verification needs a second supplier, like cross-machine
+// redundancy) and retries on a later tick. It NEVER moves money itself — clawback/refund
+// flow only through the existing verifier on a confirmed mismatch. (The OPTIMIZED resolver
+// — operator-level bisection, Verde/TAO — remains the frontier; this is the full-rerun baseline.)
+func (wk *Workers) resolveDisputes(ctx context.Context) error {
+	active, err := wk.store.ActiveDisputes(ctx, sweepBatch)
+	if err != nil {
+		return err
+	}
+	for _, d := range active {
+		switch d.Status {
+		case "open", "no_peer":
+			target, ok, terr := wk.store.ReverifyTarget(ctx, d.JobID)
+			if terr != nil {
+				return terr
+			}
+			if !ok {
+				// No completed primary result to re-verify (e.g. the job never finished).
+				if serr := wk.store.SetDisputeStatus(ctx, d.ID, "unresolvable"); serr != nil {
+					return serr
+				}
+				continue
+			}
+			peer, perr := wk.store.SelectRedundancyPeerExcluding(ctx, target.JobType, target.ModelRef, target.MinMemGB, target.AnchorWorker, nil)
+			if perr != nil {
+				// No distinct same-class supplier free → surface the boundary, retry later.
+				if serr := wk.store.SetDisputeStatus(ctx, d.ID, "no_peer"); serr != nil {
+					return serr
+				}
+				continue
+			}
+			reverifyID, ierr := wk.store.InsertTiebreakTask(ctx, d.JobID, target.TaskID, peer, target.InputRef, target.ChunkIndex)
+			if ierr != nil {
+				return ierr
+			}
+			if serr := wk.store.SetDisputeReverifying(ctx, d.ID, reverifyID); serr != nil {
+				return serr
+			}
+			_ = wk.store.InsertJobEvent(ctx, d.JobID, nil, "dispute_reverifying", "Dispute: independent re-verification dispatched", nil)
+		case "reverifying":
+			pending, perr := wk.store.JobHasPendingTasks(ctx, d.JobID)
+			if perr != nil {
+				return perr
+			}
+			if pending {
+				continue // wait until the re-verify (and any cascaded tiebreak) settles
+			}
+			verdict, text := "rejected", "Dispute rejected: independent re-verification agreed with the original result"
+			if target, ok, terr := wk.store.ReverifyTarget(ctx, d.JobID); terr != nil {
+				return terr
+			} else if ok {
+				clawed, cerr := wk.store.TaskHasClawback(ctx, target.TaskID)
+				if cerr != nil {
+					return cerr
+				}
+				if clawed {
+					verdict, text = "resolved", "Dispute upheld: independent re-verification found the original result was wrong (clawed back)"
+				}
+			}
+			if serr := wk.store.SetDisputeStatus(ctx, d.ID, verdict); serr != nil {
+				return serr
+			}
+			_ = wk.store.InsertJobEvent(ctx, d.JobID, nil, "dispute_"+verdict, text, nil)
+		}
 	}
 	return nil
 }

@@ -103,6 +103,15 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
     payout_ref    TEXT                     -- Stripe/Trolley transfer ID
 );
 
+-- A SUPPLIER payout may only be 'released' WITH a real rail reference — never a faked
+-- transfer (BLACKHOLE). Enforced structurally so no code path or bug can record a payout
+-- without proof of money movement. Scoped to supplier_credit: buyer_charge and
+-- platform_take are internal bookkeeping rows marked 'released' (settled, no transfer ref).
+-- Idempotent (drop+add) so re-applying the schema is safe.
+ALTER TABLE ledger_entries DROP CONSTRAINT IF EXISTS ledger_released_requires_ref;
+ALTER TABLE ledger_entries ADD CONSTRAINT ledger_released_requires_ref
+    CHECK (kind <> 'supplier_credit' OR payout_status <> 'released' OR payout_ref IS NOT NULL);
+
 -- A task produces exactly one ledger entry per kind (buyer_charge / supplier_credit
 -- / platform_take / clawback). This uniqueness makes InsertLedgerEntries idempotent
 -- under retry (ON CONFLICT DO NOTHING) so a double-commit can never double-charge a
@@ -225,6 +234,7 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS data_residency     TEXT[];           -
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS split_size         INT;              -- adaptive chunk size chosen at submit
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS offered_rate_usd_hr REAL;            -- price-derived $/hr a worker earns running this (min-payout gate)
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS eta_secs           INT;              -- predicted completion seconds at submit
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS charge_status      TEXT NOT NULL DEFAULT 'not_attempted'; -- not_attempted|charged|failed|no_payment_method (queryable charge state, not log-only)
 -- Full submitted JobType (tag + variant fields: labels/schema/max_tokens/...), so
 -- the poll dispatch can carry buyer params to the agent, not just the bare tag.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS job_type_spec      JSONB;
@@ -352,6 +362,7 @@ CREATE INDEX IF NOT EXISTS tasks_status_visible_idx ON tasks (status, visible_at
 CREATE INDEX IF NOT EXISTS tasks_ready_unclaimed_idx ON tasks (status, (COALESCE(visible_at, created_at)), created_at)
     WHERE claimed_by IS NULL AND status IN ('queued','retrying');  -- hot SKIP-LOCKED claim path
 CREATE INDEX IF NOT EXISTS ledger_supplier_payout_idx ON ledger_entries (supplier_id, payout_status);
+CREATE INDEX IF NOT EXISTS ledger_kind_idx             ON ledger_entries (kind);  -- reconcile/audit sums by kind
 CREATE INDEX IF NOT EXISTS workers_hwclass_seen_idx  ON workers (hw_class, last_seen_at);
 CREATE INDEX IF NOT EXISTS webhooks_job_idx          ON webhooks (job_id);
 CREATE INDEX IF NOT EXISTS models_job_type_idx       ON models (job_type);
@@ -359,6 +370,25 @@ CREATE INDEX IF NOT EXISTS tasks_job_chunk_idx        ON tasks (job_id, chunk_in
 CREATE INDEX IF NOT EXISTS workers_supplier_idx       ON workers (supplier_id);
 CREATE INDEX IF NOT EXISTS quotes_buyer_created_idx   ON quotes (buyer_id, created_at DESC);  -- buyer quote history + admin drift
 CREATE INDEX IF NOT EXISTS job_events_job_idx         ON job_events (job_id, created_at);       -- buyer event timeline (ordered)
+
+-- disputes: the buyer-dispute record — the anti-defection / optimistic-verification
+-- primitive ROADMAP_STATUS flags as missing ("a buyer-dispute mechanism — none exists
+-- today"). A buyer files a dispute on a completed job's result; RESOLUTION by optimistic
+-- recompute (Verde-style operator bisection / TAO tolerance-aware FP verification —
+-- docs/PRODUCTION_AUDIT.md §2.3) is the frontier seam: recorded here, not yet auto-resolved.
+CREATE TABLE IF NOT EXISTS disputes (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    job_id      UUID NOT NULL REFERENCES jobs,
+    buyer_id    UUID NOT NULL,
+    reason      TEXT,
+    status      TEXT NOT NULL DEFAULT 'open',  -- open|resolved|rejected
+    created_at  TIMESTAMPTZ DEFAULT now(),
+    resolved_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS disputes_job_idx ON disputes (job_id, created_at);
+-- reverify_task_id links a dispute to the independent re-run dispatched to resolve it
+-- (status flow: open|no_peer -> reverifying -> resolved|rejected|unresolvable).
+ALTER TABLE disputes ADD COLUMN IF NOT EXISTS reverify_task_id UUID;
 CREATE INDEX IF NOT EXISTS task_failures_job_idx      ON task_failures (job_id, created_at DESC); -- failure drill-down by job
 
 -- ─────────────────────────────────────────────────────────────────────────────

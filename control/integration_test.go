@@ -91,7 +91,7 @@ func reset(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
 	if _, err := itPool.Exec(ctx,
-		`TRUNCATE tasks, jobs, webhooks, ledger_entries, benchmark_results RESTART IDENTITY CASCADE`); err != nil {
+		`TRUNCATE tasks, jobs, webhooks, ledger_entries, benchmark_results, disputes RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatalf("reset truncate: %v", err)
 	}
 	// Workers/worker_tokens are NOT truncated above (FK from worker_tokens). Drop
@@ -2530,5 +2530,91 @@ func TestPipelineValidation(t *testing.T) {
 				t.Fatalf("%s: want 400, got %d: %s", c.name, code, out)
 			}
 		})
+	}
+}
+
+// TestFileDispute proves the buyer-dispute seam (optimistic-verification / payout-
+// guarantee foundation): the owning buyer can file a dispute (202 + an id + the honest
+// boundary note), and a buyer can NOT dispute a job that is not theirs (404, nothing
+// recorded). Resolution by optimistic recompute is intentionally NOT exercised — it is
+// the external/future work behind the seam.
+func TestFileDispute(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+	jobID := uuid.New()
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO jobs (id, buyer_id, status, job_type, input_ref, task_count, tasks_done)
+		 VALUES ($1,$2,'complete','embed','jobs/x/input.jsonl',1,1)`,
+		jobID, demoBuyerUUID); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+
+	// Owner files a dispute → 202 with an id + status open.
+	code, body := req(t, "POST", "/v1/jobs/"+jobID.String()+"/dispute",
+		map[string]string{"reason": "result looks wrong"}, buyerKey(), jsonCT())
+	if code != http.StatusAccepted {
+		t.Fatalf("file dispute: want 202, got %d: %s", code, body)
+	}
+	var got struct {
+		DisputeID string `json:"dispute_id"`
+		Status    string `json:"status"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil || got.DisputeID == "" || got.Status != "open" {
+		t.Fatalf("dispute response missing id/status: %s", body)
+	}
+	var n int
+	if err := itPool.QueryRow(ctx, `SELECT count(*) FROM disputes WHERE job_id=$1`, jobID).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("dispute not recorded: n=%d err=%v", n, err)
+	}
+
+	// A buyer cannot dispute a job that is not theirs (random/unknown id) → 404, and
+	// nothing is recorded (the INSERT...SELECT...WHERE EXISTS yields no row).
+	other := uuid.New()
+	code2, _ := req(t, "POST", "/v1/jobs/"+other.String()+"/dispute",
+		map[string]string{"reason": "x"}, buyerKey(), jsonCT())
+	if code2 != http.StatusNotFound {
+		t.Fatalf("dispute on non-owned job: want 404, got %d", code2)
+	}
+	if err := itPool.QueryRow(ctx, `SELECT count(*) FROM disputes WHERE job_id=$1`, other).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("non-owned dispute must not be recorded: n=%d err=%v", n, err)
+	}
+}
+
+// TestDisputeResolverNoPeer proves the optimistic-verification resolver's honest
+// boundary: when the only same-class supplier for the disputed job IS the original
+// (no distinct peer to independently re-run on), the resolver surfaces 'no_peer' and
+// retries later — it never fakes a resolution. The agree/disagree verdict paths flow
+// through the existing redundancy verifier (covered by the tiebreak tests).
+func TestDisputeResolverNoPeer(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+	jobID, taskID := uuid.New(), uuid.New()
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO jobs (id, buyer_id, status, job_type, input_ref, task_count, tasks_done)
+		 VALUES ($1,$2,'complete','embed','jobs/x/input.jsonl',1,1)`, jobID, demoBuyerUUID); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO tasks (id, job_id, worker_id, status, input_ref, result_key, chunk_index, completed_at)
+		 VALUES ($1,$2,$3,'complete','jobs/x/tasks/0/input.jsonl','jobs/x/tasks/0/result.json',0, now())`,
+		taskID, jobID, demoWorkerUUID); err != nil {
+		t.Fatalf("insert task: %v", err)
+	}
+	code, body := req(t, "POST", "/v1/jobs/"+jobID.String()+"/dispute",
+		map[string]string{"reason": "x"}, buyerKey(), jsonCT())
+	if code != http.StatusAccepted {
+		t.Fatalf("file dispute: %d %s", code, body)
+	}
+
+	wk := NewWorkers(itStore, itStorage, stubPayout{})
+	if err := wk.resolveDisputes(ctx); err != nil {
+		t.Fatalf("resolveDisputes: %v", err)
+	}
+	var status string
+	if err := itPool.QueryRow(ctx, `SELECT status FROM disputes WHERE job_id=$1`, jobID).Scan(&status); err != nil {
+		t.Fatalf("read dispute: %v", err)
+	}
+	if status != "no_peer" {
+		t.Fatalf("want 'no_peer' (no distinct same-class supplier to re-verify), got %q", status)
 	}
 }

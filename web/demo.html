@@ -18,7 +18,7 @@
     --bg:#0a0a0c; --card:#101013; --raise:#16161a;
     --line:#222226; --line-soft:#1a1a1e; --line-hi:#33333a;
     --ash:#6c6c72; --mute:#8d8d94; --bone:#cbc8c1; --bone-hi:#ebe7e0; --signal:#ffffff;
-    --green:#37d27a; --red:#e5544a;   /* status ONLY: the knob light + run statuses. nothing else takes a hue */
+    --green:#37d27a; --red:#e5544a; --yellow:#f3bf1a;   /* status ONLY: knob light, run statuses (green/red), fixed markers (yellow) */
     --serif:"Cormorant Garamond",serif;
     --sans:-apple-system,BlinkMacSystemFont,"SF Pro Display","Inter",system-ui,sans-serif;
     --r:14px; --r-sm:10px; --r-pill:999px;
@@ -31,12 +31,12 @@
     background:radial-gradient(120% 100% at 50% 0%, #101014 0%, #0a0a0c 55%, #08080a 100%);
     background-attachment:fixed;
     color:var(--bone); -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
-    font:400 13px/1.5 var(--sans);
+    font:400 13px/1.6 var(--sans);
   }
   ::selection{background:var(--bone-hi);color:var(--bg)}
   :focus-visible{outline:none;box-shadow:0 0 0 1px var(--line-hi);border-radius:var(--r-sm)}
 
-  .app{display:flex;min-height:100vh;max-width:600px;margin:0 auto}
+  .app{display:flex;min-height:100vh;max-width:700px;margin:0 auto}
   /* rail */
   .rail{width:60px;display:flex;flex-direction:column;align-items:center;gap:6px;padding:18px 0;border-right:1px solid var(--line-soft)}
   /* brand mark: flat white Cx, no box, no chip (identity, not a control). The metal is spent
@@ -62,7 +62,9 @@
   .notif-item{padding:10px 11px;font-size:13px;border-radius:var(--r-sm);color:var(--bone)} .notif-item:hover{background:var(--raise)}
   .notif-item .t{color:var(--ash);font-size:11px;margin-top:2px}
 
-  .view{display:none;max-width:540px;width:100%;margin:0 auto;padding:8px 22px 40px} .view.on{display:block}
+  /* centered content column with room at the edges + a quiet radial lift behind the hero (Section C) */
+  .view{display:none;max-width:620px;width:100%;margin:0 auto;padding:44px 30px 72px;
+    background:radial-gradient(72% 50% at 50% 22%, rgba(255,255,255,.025), rgba(255,255,255,0) 70%)} .view.on{display:block}
   .section-label{font-size:10px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--mute);margin:0 0 12px}
 
   .card{
@@ -75,7 +77,7 @@
   .num{font-variant-numeric:tabular-nums}
 
   /* ===== EARN ===== */
-  .power-wrap{text-align:center;padding:18px 0 2px}
+  .power-wrap{text-align:center;padding:24px 0 0}
   .knob{position:relative;width:240px;height:240px;margin:0 auto;cursor:pointer;outline:none}
   .knob img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:block}
   .knob-base{z-index:1}
@@ -90,48 +92,50 @@
   .knob:focus-visible{box-shadow:0 0 0 1px var(--line-hi);border-radius:50%}
   @keyframes knob-breathe{0%,100%{opacity:.6} 50%{opacity:1}}
 
-  .pstate{font-size:12px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--bone-hi);margin-top:18px}
+  .pstate{font-size:12px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--bone-hi);margin-top:22px}
   .pstate.off{color:var(--ash)}
   /* tiny status dot echoing the knob light: green online, red offline (same two values) */
   .sdot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--green);vertical-align:middle;margin:-2px 9px 0 0;transition:background var(--dur) var(--ease)}
   .pstate.off .sdot{background:var(--red)}
-  .phint{font-size:11px;color:var(--mute);margin-top:5px}
-  .prun{font-size:11px;color:var(--ash);margin-top:8px}
+  /* secondary voice: one muted color + size, relaxed line-height (Section D) */
+  .phint{font-size:12px;line-height:1.6;color:var(--mute);margin-top:8px}
+  .prun{font-size:12px;line-height:1.6;color:var(--mute);margin-top:10px}
 
-  .figures{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-top:30px;padding-bottom:28px;border-bottom:1px solid var(--line-soft)}
+  .figures{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-top:56px;padding-bottom:40px;border-bottom:1px solid var(--line-soft)}
   .fig{flex:1} .fig.mid{flex:0 0 auto;text-align:center} .fig.end{text-align:right}
   .fig .k{font-size:10px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--mute)}
   .fig .v{font-size:16px;font-weight:500;color:var(--bone-hi);margin-top:6px}
   .fig .v.live{color:var(--signal)}
   .monument{font-family:var(--serif);font-weight:600;font-size:60px;line-height:.9;letter-spacing:-.01em;color:var(--bone-hi);margin-top:2px}
 
-  .monitor{margin-top:22px;padding:14px 16px}
+  .monitor{margin-top:40px;padding:18px 18px}
   .monitor.hide{display:none}
   .monitor-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
   .monitor-h .k{font-size:10px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--mute)}
   .monitor-h .v{font-size:13px;font-weight:500;color:var(--bone-hi)}
   .monitor svg{display:block;width:100%;height:46px}
 
-  .row{display:flex;align-items:center;justify-content:space-between;padding:14px 2px;border-top:1px solid var(--line-soft);font-size:13px}
+  .row{display:flex;align-items:center;justify-content:space-between;padding:18px 2px;border-top:1px solid var(--line-soft);font-size:13px}
   .row:first-of-type{border-top:none}
+  .monitor + .row{margin-top:24px}   /* breathing room before the Machine/Payout rows */
   .row .l{display:flex;align-items:center;gap:10px;min-width:0}
   .row .k{font-size:10px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--mute)}
   .r-meta{color:var(--mute)}
-  /* machine + payout markers: small rendered-metal pucks echoing the knob, kept MONOCHROME
-     (connected = bright metal, paused = dimmed). Hue is reserved for status: the knob light
-     and the run statuses only. Run markers are coloured dots (see .run .dot). */
-  .marker{position:relative;width:16px;height:16px;flex:none;background-size:contain;background-repeat:no-repeat;background-position:center}
-  .marker.done{background-image:url(assets/dot-done@3x.png)}
-  .marker.fail{background-image:url(assets/dot-fail@3x.png);filter:brightness(.58)}
+  /* machine + payout are fixed facts (your machine; payout is Stripe-only), not pass/fail. They get
+     the third light in the oracle series: a static YELLOW (green = done, red = failed, yellow = fixed).
+     Same turned-metal ring as the run lights, with a yellow neon core. */
+  .marker{position:relative;width:16px;height:16px;flex:none;background:url(assets/dot-ring@3x.png) center/contain no-repeat}
+  .marker::before{content:"";position:absolute;inset:22%;border-radius:50%;
+    background:radial-gradient(circle at 50% 42%,#ffeaa6,#f3bf1a 72%);box-shadow:0 0 7px 1px rgba(243,191,26,.85)}
 
   /* ===== LAUNCH ===== */
-  .banner{display:flex;align-items:center;gap:12px;justify-content:space-between;padding:14px 16px;margin-bottom:18px;font-size:13px;color:var(--bone)}
+  .banner{display:flex;align-items:center;gap:16px;justify-content:space-between;padding:18px 20px;margin-bottom:40px;font-size:12px;line-height:1.6;color:var(--mute)}
   .pill{height:32px;padding:0 16px;border-radius:var(--r-pill);border:1px solid var(--line);background:transparent;color:var(--bone);font:500 12px var(--sans);cursor:pointer;transition:border-color var(--dur) var(--ease),color var(--dur) var(--ease),background var(--dur) var(--ease)}
   .pill:hover{border-color:var(--line-hi);color:var(--bone-hi)}
   .pill.solid{background:var(--bone-hi);color:var(--bg);border-color:var(--bone-hi)}
   .pill.solid:hover{background:var(--signal);border-color:var(--signal)}
 
-  .intake{border:1.5px dashed var(--line);border-radius:var(--r);padding:28px 16px;text-align:center;color:var(--mute);cursor:pointer;transition:border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
+  .intake{border:1.5px dashed var(--line);border-radius:var(--r);padding:40px 16px;text-align:center;color:var(--mute);cursor:pointer;transition:border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
   .intake svg{width:24px;height:24px;display:block;margin:0 auto 8px;stroke-width:1.5}
   .intake:hover,.intake.drag{border-color:var(--line-hi);color:var(--bone)}
   .intake.detected{border-style:solid;border-color:var(--line)}
@@ -139,7 +143,9 @@
   .d-name{display:block;color:var(--bone-hi);font-size:14px;font-weight:500}
   .d-meta{display:block;color:var(--mute);font-size:12px;margin-top:5px}
 
-  .runs{margin-top:30px}
+  /* the Launch button floats in open space, centered, with big air above and below */
+  .launch-row{display:flex;justify-content:center;margin:56px 0}
+  .runs{margin-top:56px}
   .run{border-top:1px solid var(--line-soft)}
   .run-main{display:flex;align-items:center;justify-content:space-between;padding:13px 2px;font-size:13px;cursor:pointer}
   .run .l{display:flex;align-items:center;gap:10px;min-width:0}
@@ -193,9 +199,37 @@
   .keyin:focus{outline:none;border-color:var(--line-hi)}
   .live-badge{margin-left:10px;font-size:9px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--bg);background:var(--bone-hi);padding:3px 8px;border-radius:var(--r-pill)}
 
+  /* computexchange action capsule · brushed-steel shell image, live label in the dark channel */
+  .cx-key{ position:relative; display:inline-flex; padding:0; border:0; background:none;
+    height:44px; cursor:pointer; outline:none; transition:transform .08s ease; }
+  .cx-key--lg{ height:44px; }   /* same height as base -> bevel matches Add payment exactly */
+  .cx-key .cx-key-metal{ display:block; height:100%; width:auto; pointer-events:none;
+    filter:drop-shadow(0 2px 6px rgba(0,0,0,.55)); }
+  .cx-key .cx-key-label{ position:absolute; inset:0; display:grid; place-items:center;
+    font:600 14px/1 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;
+    letter-spacing:.02em; color:#f6f8ff;
+    text-shadow:0 1px 2px rgba(0,0,0,.7), 0 0 10px rgba(205,228,255,.45);
+    pointer-events:none; user-select:none; -webkit-user-select:none; }
+  .cx-key--lg .cx-key-label{ font-size:14px; }
+  .cx-key.is-armed .cx-key-label{ animation:cx-key-breathe 3.6s ease-in-out infinite; }
+  @keyframes cx-key-breathe{
+    0%,100%{ text-shadow:0 1px 1.5px rgba(0,0,0,.55), 0 0 7px  rgba(205,228,255,.38); }
+    50%    { text-shadow:0 1px 1.5px rgba(0,0,0,.55), 0 0 12px rgba(205,228,255,.62); } }
+  .cx-key .cx-key-icon{ position:absolute; inset:0; display:grid; place-items:center; pointer-events:none; }
+  .cx-key .cx-key-icon svg{ width:26px; height:26px; color:#f6f8ff;
+    filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.6)) drop-shadow(0 0 7px rgba(205,228,255,.42)); }
+  .cx-key.is-armed .cx-key-icon svg{ animation:cx-key-iconglow 3.6s ease-in-out infinite; }
+  @keyframes cx-key-iconglow{
+    0%,100%{ filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.6)) drop-shadow(0 0 5px  rgba(205,228,255,.30)); }
+    50%    { filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.6)) drop-shadow(0 0 11px rgba(205,228,255,.55)); } }
+  .cx-key:active{ transform:translateY(1px) scale(.997); }
+  .cx-key[disabled]{ cursor:not-allowed; }
+  .cx-key[disabled] .cx-key-label{ color:#f6f8ff; opacity:.5; text-shadow:0 1px 1px rgba(0,0,0,.4); animation:none; }
+
   @media (prefers-reduced-motion:reduce){
     *{transition:none !important;animation:none !important}
     .knob.is-on .knob-glow{opacity:1}
+    .cx-key.is-armed .cx-key-label{ animation:none; }
   }
   /* ===== SPLASH: a static flat white Cx on the dark ground (the rail mark, sized up), no
      movement, then a fade to the app. The metal-forged variant stays in git history and in
@@ -227,14 +261,16 @@
     <div class="notif" id="notif"></div>
 
     <section class="view on" id="v-launch">
-      <div class="banner card" id="setup"><span>Add a payment method to run your first job.</span><button id="add-payment">Add payment</button></div>
+      <div class="banner card" id="setup"><span>Add a payment method to run your first job.</span><button class="cx-key is-armed" id="add-payment" aria-label="Add payment"><img class="cx-key-metal" src="assets/btn-add-payment-shell@3x.png" alt=""><span class="cx-key-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="5" width="19" height="14" rx="2.5"/><path d="M2.5 9.5h19"/></svg></span></button></div>
       <div class="intake" id="intake">
         <input type="file" id="file" hidden>
         <svg class="intake-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h3.5l2 2H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
         <div id="intake-text">Connect a repo or drop your data</div>
       </div>
       <div class="pipe" id="pipePreview" hidden></div>
-      <button id="launch" disabled>Launch</button>
+      <div class="launch-row">
+        <button class="cx-key cx-key--lg" id="launch" disabled><img class="cx-key-metal" src="assets/btn-launch-shell@3x.png" alt=""><span class="cx-key-label">Launch</span></button>
+      </div>
       <div class="runs"><p class="section-label">Runs</p><div id="jobs"></div></div>
     </section>
 
@@ -261,8 +297,8 @@
         <div class="monitor-h"><span class="k">Throughput</span><span class="v num" id="tput">1.24k tok/s</span></div>
         <svg id="feed" viewBox="0 0 300 46" preserveAspectRatio="none" aria-hidden="true"></svg>
       </div>
-      <div class="row"><span class="l"><span class="k">Machine</span><span class="marker done" id="mDot"></span>Mac Studio · M2 Max</span><span class="r-meta" id="mState">42 GB free</span></div>
-      <div class="row"><span class="l"><span class="k">Payout</span><span class="marker done"></span>Stripe</span><span class="r-meta">connected</span></div>
+      <div class="row"><span class="l"><span class="k">Machine</span><span class="marker" id="mDot"></span>Mac Studio · M2 Max</span><span class="r-meta" id="mState">42 GB free</span></div>
+      <div class="row"><span class="l"><span class="k">Payout</span><span class="marker"></span>Stripe</span><span class="r-meta">connected</span></div>
     </section>
 
     <section class="view" id="v-settings">
@@ -297,6 +333,8 @@
   var $=function(id){return document.getElementById(id);};
   function el(h){var d=document.createElement('div');d.innerHTML=h.trim();return d.firstChild;}
   function sha(){return Math.random().toString(16).slice(2,8);}
+  // Escape untrusted text (file names, server error strings) before it touches innerHTML.
+  function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
 
   var views={launch:$('v-launch'),earn:$('v-earn'),settings:$('v-settings')};
   document.querySelectorAll('.nav[data-view]').forEach(function(b){
@@ -339,7 +377,7 @@
   var reduceMotion=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   // ===== EARN =====
-  var knob=$('knob'),pstate=$('pstate'),ptext=$('ptext'),phint=$('phint'),running=$('running'),earned=$('earned'),mDot=$('mDot'),mState=$('mState'),monitor=$('monitor'),tput=$('tput');
+  var knob=$('knob'),pstate=$('pstate'),ptext=$('ptext'),phint=$('phint'),running=$('running'),earned=$('earned'),mState=$('mState'),monitor=$('monitor'),tput=$('tput');
   var feed=liveFeed($('feed'),{w:300,h:46,n:48});
   var onln=true,total=3.18,earnTimer=null,feedTimer=null;
   function startFeed(){
@@ -359,7 +397,6 @@
     phint.textContent=on?'tap to go offline':'tap to go online';
     running.style.display=on?'':'none';
     earned.classList.toggle('live',on);
-    mDot.className=on?'marker done':'marker fail';
     mState.textContent=on?'42 GB free':'paused';
     monitor.classList.toggle('hide',!on);
     if(on){
@@ -423,7 +460,7 @@
     liveFile=file;
     var pl=pipelineFor(file.name); pl.name=file.name; project=pl;
     intake.classList.add('detected');
-    intakeText.innerHTML='<span class="d-name">'+file.name+'</span><span class="d-meta">detected · '+pl.pattern+' · '+fmtBytes(file.size)+' · '+pl.stages.length+'-step pipeline · click to reset</span>';
+    intakeText.innerHTML='<span class="d-name">'+esc(file.name)+'</span><span class="d-meta">detected · '+esc(pl.pattern)+' · '+fmtBytes(file.size)+' · '+pl.stages.length+'-step pipeline · click to reset</span>';
     renderPipeline(pl.stages);
     refreshArm();
   }
@@ -439,8 +476,8 @@
   function runHTML(name,src,status){
     var sc=status==='running'?'run':status==='failed'?'fail':'done', mk='dot '+sc;
     var st=status==='running'?'running':status;
-    return '<div class="run" data-status="'+status+'" data-name="'+name+'">'
-      +'<div class="run-main"><span class="l"><span class="'+mk+'"></span>'+name+' <span class="src num">'+src+'</span></span>'
+    return '<div class="run" data-status="'+status+'" data-name="'+esc(name)+'">'
+      +'<div class="run-main"><span class="l"><span class="'+mk+'"></span>'+esc(name)+' <span class="src num">'+esc(src)+'</span></span>'
       +'<span class="run-right"><svg class="trace" viewBox="0 0 54 20" preserveAspectRatio="none"></svg><span class="st '+sc+'">'+st+'</span><button class="icon rerun" aria-label="Re-run" title="Re-run">'+RERUN+'</button></span></div>'
       +'<div class="detail">'+(status==='failed'?failDetail():status==='done'?doneDetail():'')+'</div></div>';
   }
@@ -523,27 +560,37 @@
     var f=liveFile, run=addRun(name,'live · '+pl.stages.length+'-step','running'),st=run.querySelector('.st');
     var trace=liveFeed(run.querySelector('.trace'),{w:54,h:20,n:20});
     var tv=reduceMotion?null:setInterval(function(){trace.tick(0.4+Math.random()*0.4);},170);
-    function fail(msg){if(tv)clearInterval(tv);run.dataset.status='failed';run.querySelector('.dot').className='dot fail';st.className='st fail';st.textContent='failed';run.querySelector('.detail').innerHTML='<div class="preview">'+msg+'</div>';notify('Pipeline failed',name);rearm();}
+    function fail(msg){if(tv)clearInterval(tv);run.dataset.status='failed';run.querySelector('.dot').className='dot fail';st.className='st fail';st.textContent='failed';run.querySelector('.detail').innerHTML='<div class="preview">'+esc(msg)+'</div>';notify('Pipeline failed',name);rearm();}
+    if(f.size>1000000){notify('Large file truncated','only the first 1 MB is sent in this demo');}
     f.slice(0,1000000).text().then(function(text){
       var spec=pl.stages.map(function(s,i){return {op:s.op,model:s.model,from:i===0?'input':'previous'};});
       return fetch('/v1/pipelines',{method:'POST',headers:{'Authorization':'Bearer '+liveKey,'Content-Type':'application/json'},body:JSON.stringify({name:name,stages:spec,input:toJSONL(f.name,text)+'\n'})});
     }).then(function(res){return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});}).then(function(r){
       var j={};try{j=JSON.parse(r.t);}catch(e){}
       if(!r.ok){fail('submit '+r.status+': '+String(j.error||r.t).slice(0,160));return;}
-      st.textContent='running · queued';notify('Pipeline submitted',name);pollPipeline(j.pipeline_id,run,st,tv);
+      st.textContent='running · queued';notify('Pipeline submitted',name);pollPipeline(j.pipeline_id,run,st,tv,fail);
     }).catch(function(e){fail('network: '+e.message);});
   }
-  function pollPipeline(id,run,st,tv){
-    var iv=setInterval(function(){
-      fetch('/v1/pipelines/'+id,{headers:{'Authorization':'Bearer '+liveKey}}).then(function(res){return res.ok?res.json():null;}).then(function(p){
+  // Poll a live pipeline. Surfaces failures instead of swallowing them (BLACKHOLE):
+  // a 401/403 stops immediately; transient errors retry a few times then fail; an
+  // overall attempt cap prevents an unbounded poll if the pipeline never resolves.
+  function pollPipeline(id,run,st,tv,fail){
+    var iv=null,errs=0,attempts=0,MAX=1800; // ~1h at 2s, then time out
+    iv=setInterval(function(){
+      if(++attempts>MAX){clearInterval(iv);fail('timed out waiting for pipeline');return;}
+      fetch('/v1/pipelines/'+id,{headers:{'Authorization':'Bearer '+liveKey}}).then(function(res){
+        if(res.status===401||res.status===403){clearInterval(iv);fail('key invalid or expired ('+res.status+')');return null;}
+        if(!res.ok){if(++errs>=3){clearInterval(iv);fail('polling failed: '+res.status);}return null;}
+        errs=0;return res.json();
+      }).then(function(p){
         if(!p)return;var done=0,last='';
         p.stages.forEach(function(s){var c=s.status==='complete'?'done':(s.status==='failed'||s.status==='cancelled')?'fail':(s.status==='running'||s.status==='queued'||s.status==='verifying')?'run':'pending';setPipeStage(s.index,c);if(s.status==='complete'){done++;last=s.job_id||last;}});
         st.textContent='running · '+done+'/'+p.stages.length;
         if(p.status==='complete'||p.status==='failed'){clearInterval(iv);if(tv)clearInterval(tv);var ok=p.status==='complete';
           run.dataset.status=ok?'done':'failed';run.querySelector('.dot').className='dot '+(ok?'done':'fail');st.className='st '+(ok?'done':'fail');st.textContent=p.status;
-          if(ok)run.querySelector('.detail').innerHTML='<div class="preview">complete · '+p.stages.length+'-step pipeline</div><div class="actions"><button class="mini" data-results="'+last+'">Download</button></div>';
+          if(ok)run.querySelector('.detail').innerHTML='<div class="preview">complete · '+p.stages.length+'-step pipeline</div><div class="actions"><button class="mini" data-results="'+esc(last)+'">Download</button></div>';
           notify('Pipeline '+p.status,run.dataset.name);resetIntake();}
-      }).catch(function(){});
+      }).catch(function(){if(++errs>=3){clearInterval(iv);fail('network error during poll');}});
     },2000);
   }
 

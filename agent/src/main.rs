@@ -560,7 +560,19 @@ async fn run_agent(cfg: AgentConfig) -> Result<()> {
     let ctx = WorkCtx {
         client: Arc::new(client),
         cap: Arc::new(cap),
-        runners: Arc::new(default_runners()),
+        runners: Arc::new({
+            let mut rs = default_runners();
+            // MLX serving-lane seam: only when the operator opts in. Inserted right AFTER
+            // ClusterRunner (index 0) so a giant cluster model still routes to the Plane B
+            // seam, but BEFORE the Candle generative runners so MLX-lane jobs route here.
+            // (MlxRunner::can_run also yields cluster models, defense-in-depth.) Default
+            // Candle backend leaves dispatch byte-for-byte unchanged.
+            if cfg.inference_backend == config::InferenceBackend::Mlx {
+                rs.insert(1, Box::new(runners::MlxRunner));
+                tracing::info!("inference_backend=mlx: MLX serving-lane seam active (generative LLM jobs route to the MLX boundary until the runtime is wired)");
+            }
+            rs
+        }),
         pool: ModelPool::new(),
         s3,
         min_payout_usd_per_hr: cfg.min_payout_usd_per_hr,

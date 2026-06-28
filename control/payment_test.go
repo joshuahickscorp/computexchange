@@ -10,6 +10,16 @@ import (
 	"github.com/google/uuid"
 )
 
+// TestMarkPayoutRefusesReleasedWithoutRef proves the money invariant: a credit can
+// never be marked 'released' without a real rail reference (BLACKHOLE: never fake a
+// transfer). The guard returns before any DB call, so a zero-value Store suffices.
+func TestMarkPayoutRefusesReleasedWithoutRef(t *testing.T) {
+	s := &Store{}
+	if err := s.MarkPayout(context.Background(), uuid.New(), PayoutReleased, ""); err == nil {
+		t.Fatal("MarkPayout(released, \"\") must error — releasing without a payout ref would fake a transfer")
+	}
+}
+
 // TestManualExportPayout proves the alpha "manual export" payout adapter: it
 // appends each owed payout to the export file (never overwriting), returns a
 // "manual-export" ref (never a fabricated transfer id), and refuses a non-positive

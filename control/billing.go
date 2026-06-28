@@ -243,11 +243,15 @@ func (s *Server) chargeForJob(ctx context.Context, jobID uuid.UUID) {
 	}
 	cust, pm, err := s.store.GetBillingCustomer(ctx, buyerID)
 	if err != nil || cust == "" || pm == "" {
+		_ = s.store.SetChargeStatus(ctx, jobID, "no_payment_method")
 		return // no saved card → nothing to charge off-session (still owed in the ledger)
 	}
 	if _, err := chargeBuyer(ctx, s.store, buyerID, usd, "job-"+jobID.String()); err != nil {
+		_ = s.store.SetChargeStatus(ctx, jobID, "failed")
 		log.Printf("billing: charge for job %s failed (owed, will reconcile): %v", jobID, err)
+		return
 	}
+	_ = s.store.SetChargeStatus(ctx, jobID, "charged")
 }
 
 // stripeGet does a GET against the Stripe API (used by the Connect status check).

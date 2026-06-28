@@ -1,6 +1,6 @@
 module computeexchange/control
 
-go 1.26
+go 1.26.4 // patched stdlib (net/http2, net, crypto/x509, mime, net/textproto) — see govulncheck
 
 require (
 	github.com/google/uuid v1.6.0

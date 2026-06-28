@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/minio/minio-go/v7"
@@ -34,6 +35,7 @@ type Storage struct {
 	internal *minio.Client // control-side PutObject/GetObject
 	public   *minio.Client // signs presigned URLs the agent reaches
 	bucket   string
+	breaker  *storeBreaker // fail-fast guard for a sustained store outage
 }
 
 // NewStorage builds the object client from the environment, ensures the bucket
@@ -71,7 +73,8 @@ func NewStorage(ctx context.Context) (*Storage, error) {
 		return nil, fmt.Errorf("building public S3 client: %w", err)
 	}
 
-	st := &Storage{internal: internal, public: public, bucket: bucket}
+	st := &Storage{internal: internal, public: public, bucket: bucket,
+		breaker: newStoreBreaker(5, 10*time.Second)} // open after 5 fully-failed calls; cool down 10s
 
 	// Bucket check at startup — surface an unreachable or misconfigured store now.
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -132,31 +135,110 @@ func (s *Storage) PresignPut(ctx context.Context, key string, ttl time.Duration)
 	return u.String(), nil
 }
 
-// PutObject writes bytes to key via the internal client (input upload at submit).
+// errStoreCircuitOpen is returned (fast) while the breaker is open after a sustained
+// object-store outage, instead of making every caller grind through full retries.
+var errStoreCircuitOpen = fmt.Errorf("object store circuit open (recent sustained failures); failing fast")
+
+// storeBreaker is a minimal circuit breaker over the object store: after `threshold`
+// consecutive fully-failed calls it OPENS for `cooldown`, so a sustained outage can't
+// tie up the bounded DB pool / request goroutines with every caller retrying. Any
+// call the store ANSWERS (success, or a definitive reply like NoSuchKey — the store
+// is up) closes it. Pure atomics with an injected clock → unit-testable, no store.
+type storeBreaker struct {
+	failures  atomic.Int32
+	openUntil atomic.Int64 // unix nanos; > now = open
+	threshold int32
+	cooldown  time.Duration
+}
+
+func newStoreBreaker(threshold int32, cooldown time.Duration) *storeBreaker {
+	return &storeBreaker{threshold: threshold, cooldown: cooldown}
+}
+
+// allow reports whether a call may proceed (breaker closed, or cooldown elapsed).
+func (b *storeBreaker) allow(now time.Time) bool { return now.UnixNano() >= b.openUntil.Load() }
+
+// record updates the breaker after a call: healthy resets it; a fully-failed call
+// increments and trips the breaker once the threshold is reached.
+func (b *storeBreaker) record(now time.Time, healthy bool) {
+	if healthy {
+		b.failures.Store(0)
+		b.openUntil.Store(0)
+		return
+	}
+	if b.failures.Add(1) >= b.threshold {
+		b.openUntil.Store(now.Add(b.cooldown).UnixNano())
+		b.failures.Store(0)
+	}
+}
+
+// withRetry runs op with bounded backoff (3 attempts, ctx-aware) for transient
+// store/network errors, gated by the circuit breaker — the single source of truth
+// for the object-store retry policy. op returns retry=true to try again, or
+// retry=false to stop now (err==nil on success, or a definitive error the caller
+// already wrapped, e.g. a missing object that must NOT be retried). A call the store
+// answers closes the breaker; a call that exhausts transient retries trips it.
+func (s *Storage) withRetry(ctx context.Context, op func() (retry bool, err error)) error {
+	if !s.breaker.allow(time.Now()) {
+		return errStoreCircuitOpen
+	}
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(attempt) * 200 * time.Millisecond):
+			}
+		}
+		retry, err := op()
+		if !retry {
+			s.breaker.record(time.Now(), true) // store responded (success or definitive) → healthy
+			return err
+		}
+		lastErr = err
+	}
+	s.breaker.record(time.Now(), false) // exhausted transient retries → a real store failure
+	return lastErr
+}
+
+// PutObject writes bytes to key via the internal client (input upload at submit,
+// result merge). Idempotent on the key, so it retries transient store blips.
 func (s *Storage) PutObject(ctx context.Context, key string, data []byte, contentType string) error {
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	_, err := s.internal.PutObject(ctx, s.bucket, key, bytes.NewReader(data), int64(len(data)),
-		minio.PutObjectOptions{ContentType: contentType})
-	if err != nil {
-		return fmt.Errorf("put object %q: %w", key, err)
-	}
-	return nil
+	// A PUT to a fixed key is idempotent → safe to retry through a transient blip.
+	return s.withRetry(ctx, func() (bool, error) {
+		if _, err := s.internal.PutObject(ctx, s.bucket, key, bytes.NewReader(data), int64(len(data)),
+			minio.PutObjectOptions{ContentType: contentType}); err != nil {
+			return true, fmt.Errorf("put object %q: %w", key, err)
+		}
+		return false, nil
+	})
 }
 
-// GetObject reads the whole object at key via the internal client (result fetch
-// at verification). Errors loudly if the object is missing — the verification
-// path must never treat an absent result as a pass.
+// GetObject reads the whole object at key via the internal client (result fetch at
+// verification). Transient errors retry; a missing object (NoSuchKey) is definitive
+// and surfaced loudly — the verification path must never treat an absent result as
+// a pass (so it is never retried away, never swallowed).
 func (s *Storage) GetObject(ctx context.Context, key string) ([]byte, error) {
-	obj, err := s.internal.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("get object %q: %w", key, err)
-	}
-	defer obj.Close()
-	data, err := io.ReadAll(obj)
-	if err != nil {
-		return nil, fmt.Errorf("read object %q: %w", key, err)
-	}
-	return data, nil
+	var data []byte
+	err := s.withRetry(ctx, func() (bool, error) {
+		obj, err := s.internal.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
+		if err != nil {
+			return true, err
+		}
+		d, rerr := io.ReadAll(obj)
+		obj.Close()
+		if rerr == nil {
+			data = d
+			return false, nil
+		}
+		if minio.ToErrorResponse(rerr).Code == "NoSuchKey" {
+			return false, fmt.Errorf("get object %q: %w", key, rerr)
+		}
+		return true, fmt.Errorf("get object %q: %w", key, rerr)
+	})
+	return data, err
 }

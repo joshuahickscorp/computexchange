@@ -78,6 +78,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /v1/jobs/{id}/invoice", s.authBuyer(http.HandlerFunc(s.handleJobInvoice)))
 	mux.Handle("GET /v1/jobs/{id}/events", s.authBuyer(http.HandlerFunc(s.handleJobEvents)))     // Plane C/D: buyer timeline
 	mux.Handle("GET /v1/jobs/{id}/failures", s.authBuyer(http.HandlerFunc(s.handleJobFailures))) // Plane C/D: typed failure history
+	mux.Handle("POST /v1/jobs/{id}/dispute", s.authBuyer(http.HandlerFunc(s.handleFileDispute))) // buyer-dispute seam (optimistic-verification / payout-guarantee foundation)
 	mux.Handle("DELETE /v1/jobs/{id}", s.authBuyer(http.HandlerFunc(s.handleCancelJob)))
 	mux.Handle("GET /v1/models", s.authBuyer(http.HandlerFunc(s.handleModels)))
 	mux.Handle("GET /v1/price-estimate", s.authBuyer(http.HandlerFunc(s.handlePriceEstimate)))
@@ -130,10 +131,42 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /admin/scheduler/explain", s.authAdmin(http.HandlerFunc(s.handleAdminSchedulerExplain)))
 	mux.Handle("POST /admin/workers/{id}/suspend", s.authAdmin(http.HandlerFunc(s.handleAdminSuspend)))
 
-	return s.ipLimiter.limitByIP(mux)
+	return observe(s.ipLimiter.limitByIP(mux))
 }
 
 // --- middleware ---
+
+// statusRecorder captures the response status for access logging. Unwrap lets
+// http.ResponseController reach the underlying writer (Flush/Hijack) if ever needed.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int)        { r.status = code; r.ResponseWriter.WriteHeader(code) }
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
+// observe assigns each request a correlation id (propagated from X-Request-ID or
+// generated), echoes it on the response, and emits one structured access-log line
+// (method · path · status · latency · id) so a buyer/supplier request can be traced
+// end to end. High-frequency /healthz + /metrics are skipped to keep logs signal-dense.
+func observe(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rid := r.Header.Get("X-Request-ID")
+		if rid == "" {
+			rid = uuid.NewString()
+		}
+		w.Header().Set("X-Request-ID", rid)
+		if r.URL.Path == "/healthz" || r.URL.Path == "/metrics" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		log.Printf("req id=%s %s %s %d %dms", rid, r.Method, r.URL.Path, rec.status, time.Since(start).Milliseconds())
+	})
+}
 
 // authBuyer authenticates a Bearer api_key and stashes the AuthResult.
 func (s *Server) authBuyer(next http.Handler) http.Handler {
@@ -1059,6 +1092,42 @@ func (s *Server) handleRegisterWebhook(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleFileDispute records a buyer dispute against a completed job's result — the
+// anti-defection / optimistic-verification primitive ROADMAP_STATUS flags as missing.
+// It records the dispute (scoped to the buyer's OWN job; another buyer's job → 404)
+// and emits a buyer-visible event. RESOLUTION by optimistic recompute (operator-level
+// bisection / tolerance-aware FP verification — docs/PRODUCTION_AUDIT.md §2.3) is the
+// frontier seam: surfaced here in the response, never faked.
+func (s *Server) handleFileDispute(w http.ResponseWriter, r *http.Request) {
+	auth := r.Context().Value(ctxBuyer).(*AuthResult)
+	jobID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body) // reason is optional
+	id, err := s.store.RecordDispute(r.Context(), jobID, auth.BuyerID, body.Reason)
+	if errors.Is(err, errNotFound) {
+		writeErr(w, http.StatusNotFound, "job not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "recording dispute: "+err.Error())
+		return
+	}
+	_ = s.store.InsertJobEvent(r.Context(), jobID, nil, "dispute_filed",
+		"Buyer filed a dispute on this job's result", nil)
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"dispute_id": id,
+		"status":     "open",
+		"note": "Dispute recorded. Resolution by optimistic recompute (operator-level bisection / " +
+			"tolerance-aware FP verification) is the frontier seam (docs/PRODUCTION_AUDIT.md §2.3) and is not yet auto-resolved.",
+	})
+}
+
 // --- worker handlers ---
 
 func (s *Server) handleWorkerRegister(w http.ResponseWriter, r *http.Request) {
@@ -1324,7 +1393,8 @@ func (s *Server) handleWorkerCommit(w http.ResponseWriter, r *http.Request) {
 	// different worker, fetch its result too for a within-class comparison. None
 	// yet → nil, which the verifier treats as "nothing to compare" (honest).
 	var redundancyBytes []byte
-	if peerKey, _, perr := s.store.PeerResultKey(ctx, info.TaskID); perr == nil && peerKey != "" {
+	if peerKey, peerSup, perr := s.store.PeerResultKey(ctx, info.TaskID); perr == nil && peerKey != "" {
+		info.peerSupplierID = peerSup // for the verifier's no-object-store fallback (dock the right supplier)
 		if b, gerr := s.storage.GetObject(ctx, peerKey); gerr == nil {
 			redundancyBytes = b
 		}
@@ -1568,6 +1638,17 @@ func (s *Server) handleJobInvoice(w http.ResponseWriter, r *http.Request) {
 // handleDashboard serves the static operator dashboard at the root, same-origin
 // with the API so its fetches need no CORS. Path is web/dashboard.html, overridable
 // via DASHBOARD_PATH; a missing file is a clear 404, never a faked page.
+// secureHTMLHeaders sets defensive headers on same-origin HTML responses:
+// anti-MIME-sniff, anti-clickjacking (same-origin framing only), no referrer
+// leakage. Deliberately NO Content-Security-Policy — the demo and dashboard use
+// inline <script> and fetch presigned object-store URLs, which a strict CSP would break.
+func secureHTMLHeaders(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("X-Frame-Options", "SAMEORIGIN")
+	h.Set("Referrer-Policy", "no-referrer")
+}
+
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	path := os.Getenv("DASHBOARD_PATH")
 	if path == "" {
@@ -1578,6 +1659,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "dashboard not found at "+path+" (set DASHBOARD_PATH)")
 		return
 	}
+	secureHTMLHeaders(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(b)
 }
@@ -1597,6 +1679,7 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "app skeleton not found at "+path+" (set APP_PATH)")
 		return
 	}
+	secureHTMLHeaders(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(b)
 }
@@ -1616,6 +1699,7 @@ func (s *Server) handleDemo(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "demo not found at "+path+" (set DEMO_PATH)")
 		return
 	}
+	secureHTMLHeaders(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(b)
 }

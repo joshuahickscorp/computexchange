@@ -113,6 +113,12 @@ services:
       S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
     ports:
       - "127.0.0.1:8080:8080"   # Caddy proxies computexchange.net -> here
+    healthcheck:
+      test: ["CMD", "/control", "healthcheck"]   # distroless self-probe of /healthz (no shell/curl in the image)
+      interval: 10s
+      timeout: 4s
+      retries: 5
+      start_period: 15s
     restart: unless-stopped
 
 volumes:
