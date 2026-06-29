@@ -2907,6 +2907,48 @@ func TestSignupTokenAuthenticatesAndSandboxGate(t *testing.T) {
 	}
 }
 
+// TestMeReturnsAuthenticatedIdentity proves GET /v1/me, gated by the signup session
+// token, reports the buyer's own identity: email matches signup, buyer_id is set, and
+// is_admin is false for a self-serve account.
+func TestMeReturnsAuthenticatedIdentity(t *testing.T) {
+	reset(t)
+	email := uniqueEmail("me")
+	code, out := req(t, "POST", "/v1/signup", map[string]any{"email": email, "password": "hunter2hunter2"}, jsonCT())
+	if code != http.StatusCreated {
+		t.Fatalf("signup: want 201, got %d: %s", code, out)
+	}
+	var su struct {
+		BuyerID string `json:"buyer_id"`
+		Token   string `json:"token"`
+	}
+	if err := json.Unmarshal(out, &su); err != nil {
+		t.Fatalf("signup decode: %v (%s)", err, out)
+	}
+
+	code, out = req(t, "GET", "/v1/me", nil, hdr{"Authorization", "Bearer " + su.Token})
+	if code != http.StatusOK {
+		t.Fatalf("GET /v1/me: want 200, got %d: %s", code, out)
+	}
+	var me struct {
+		BuyerID                string  `json:"buyer_id"`
+		Email                  string  `json:"email"`
+		IsAdmin                bool    `json:"is_admin"`
+		FreeCreditRemainingUSD float64 `json:"free_credit_remaining_usd"`
+	}
+	if err := json.Unmarshal(out, &me); err != nil {
+		t.Fatalf("/v1/me decode: %v (%s)", err, out)
+	}
+	if me.Email != email {
+		t.Fatalf("/v1/me email: want %q, got %q", email, me.Email)
+	}
+	if me.BuyerID == "" || me.BuyerID != su.BuyerID {
+		t.Fatalf("/v1/me buyer_id: want %q, got %q", su.BuyerID, me.BuyerID)
+	}
+	if me.IsAdmin {
+		t.Fatalf("/v1/me is_admin: want false for a self-serve account, got true")
+	}
+}
+
 // TestSignupDuplicateEmailConflicts proves the UNIQUE email is enforced honestly.
 func TestSignupDuplicateEmailConflicts(t *testing.T) {
 	reset(t)

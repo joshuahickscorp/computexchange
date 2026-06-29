@@ -13,6 +13,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://js.stripe.com/v3/"></script>
 <style>
   :root{
     /* ===== the concrete field ===== */
@@ -359,6 +360,20 @@
   .auth-note{font-size:11px;line-height:1.6;color:var(--ash);margin:16px 0 0;display:flex;align-items:flex-start;gap:9px}
   .auth-note .pip{margin-top:4px}
 
+  /* the Stripe publishable-key field sits down in a cut channel, like the live-key + spend-cap inputs */
+  .pkin{height:32px;width:240px;border-radius:var(--r-sm);background:rgba(0,0,0,.28);color:var(--bone-hi);padding:0 12px;font:400 12px var(--mono);border:none;box-shadow:inset 0 0 0 1px var(--hair),inset 0 2px 6px rgba(0,0,0,.4)}
+  .pkin:focus{outline:none;box-shadow:inset 0 0 0 1px var(--reveal-hi),inset 0 2px 6px rgba(0,0,0,.4)}
+  /* the Stripe Elements card field mounts into a cut channel · same recessed material as the snippets */
+  .cardmount{margin-top:14px;border-radius:var(--r);padding:16px 16px;
+    background:linear-gradient(180deg,rgba(0,0,0,.24),rgba(0,0,0,.08));
+    box-shadow:inset 0 1px 0 var(--reveal),inset 0 3px 12px rgba(0,0,0,.5)}
+  .cardmount-h{font-size:10px;font-weight:500;letter-spacing:.2em;text-transform:uppercase;color:var(--bone-hi);margin:0 0 12px}
+  /* Stripe injects an iframe here; give it a quiet seated channel + room to breathe */
+  .cardfield{padding:11px 13px;border-radius:var(--r-sm);background:rgba(0,0,0,.28);box-shadow:inset 0 0 0 1px var(--hair),inset 0 2px 6px rgba(0,0,0,.4)}
+  .cardmount-cta{display:flex;align-items:center;gap:12px;margin-top:14px}
+  .cardmount-err{font-size:12px;line-height:1.6;color:var(--red-core);margin:12px 0 0;display:none}
+  .cardmount-err.show{display:block}
+
   /* ===== SUPPLIER ONBOARDING (Settings · payout): capture tax_id + tax_country, open the
      Stripe Connect account-link in a new tab, and render connect_status / payouts_enabled /
      tax_on_file with anodized pips. Honest 503 when STRIPE is unset · never a faked connection. */
@@ -482,9 +497,9 @@
 
     <section class="view" id="v-settings">
       <div style="display:flex;align-items:center;gap:12px;margin:6px 0 26px">
-        <div class="avatar">AR</div>
-        <div style="flex:1;min-width:0"><div style="color:var(--bone-hi);font-weight:500">Alex Rivera</div><div style="font-size:13px;color:var(--mute)">alex@acme.co</div></div>
-        <button class="mini" data-toast="Signed out">Sign out</button>
+        <div class="avatar" id="userAvatar">AR</div>
+        <div style="flex:1;min-width:0"><div style="color:var(--bone-hi);font-weight:500" id="userName">Alex Rivera</div><div style="font-size:13px;color:var(--mute)" id="userEmail">alex@acme.co</div></div>
+        <button class="mini" id="signOut" hidden>Sign out</button>
       </div>
       <p class="section-label">Connections</p>
       <div class="row"><span class="l">GitHub</span><button class="mini" data-toast="Connecting to GitHub">Connect</button></div>
@@ -743,7 +758,24 @@
   });
   [['support-pipeline','main@a1b2c3','done'],['nightly-embeds','main@9f0e1d','done'],['ticket-classify','main@77c2b0','failed']].forEach(function(r){var run=el(runHTML(r[0],r[1],r[2]));jobs.appendChild(run);attach(run);});
 
-  $('add-payment').addEventListener('click',function(){$('setup').style.display='none';toast('Payment method added');});
+  // The Launch banner's Add-payment button. Live -> real card capture (jump to Settings · Billing,
+  // where the Stripe Elements panel mounts); never fakes a saved card. Not live -> illustrative.
+  $('add-payment').addEventListener('click',function(){
+    if(isLive()){gotoBillingCapture();return;}
+    $('setup').style.display='none';toast('Add a payment method in Settings · Billing once you go live');
+  });
+  // Switch to the Settings view and kick off the real card-capture flow against the live billing panel.
+  function gotoBillingCapture(){
+    var nav=document.querySelector('.nav[data-view="settings"]'); if(nav)nav.click();
+    renderBilling();
+    // renderBilling re-renders async (it fetches status); start capture once the Add-payment control exists.
+    var tries=0;(function wait(){
+      var add=$('addPaymentSet');
+      if(add){startBillingSetup();return;}
+      if(++tries>40)return;   // status may show a card already on file (no button) · then nothing to do
+      setTimeout(wait,60);
+    })();
+  }
 
   // ---- live mode: real prod jobs via the /v1 API (same-origin when served at /demo) ----
   // A pasted buyer key turns Launch into a real submission against THIS server. Without
@@ -965,9 +997,13 @@
   }
   function capHTML(){
     var cap='';try{cap=localStorage.getItem('cx_spend_cap')||'';}catch(e){}
+    var pk='';try{pk=localStorage.getItem('cx_pk')||'';}catch(e){}
     return '<div class="capwrap"><span class="l"><span class="pip idle"></span>Hard spend cap</span>'
       +'<span class="capfield"><span class="cur">$</span><input id="spendCap" class="capin" type="number" min="0" step="1" inputmode="decimal" placeholder="none" value="'+esc(cap)+'" aria-label="Hard spend cap in USD"></span></div>'
-      +'<p class="set-note">Sent as max_usd on each job you launch. Stored locally in this browser.</p>';
+      +'<p class="set-note">Sent as max_usd on each job you launch. Stored locally in this browser.</p>'
+      +'<div class="capwrap"><span class="l"><span class="'+(pk?'pip':'pip idle')+'"></span>Stripe publishable key</span>'
+      +'<span class="capfield"><input id="stripePk" class="pkin" type="text" autocapitalize="off" spellcheck="false" placeholder="pk_live_… or pk_test_…" value="'+esc(pk)+'" aria-label="Stripe publishable key"></span></div>'
+      +'<p class="set-note">The publishable (pk_) key only · safe to keep in this browser. Never paste a secret (sk_) key here. Needed to capture a card in this harness.</p>';
   }
   function wireSpendFeed(){
     var svg=$('spendFeed'); if(!svg)return;
@@ -978,28 +1014,82 @@
       try{if(v)localStorage.setItem('cx_spend_cap',v);else localStorage.removeItem('cx_spend_cap');}catch(e){}
       toast(v?'Spend cap set · $'+v+' max per job':'Spend cap cleared');
     });
+    var pkEl=$('stripePk');
+    if(pkEl)pkEl.addEventListener('change',function(){
+      var v=(pkEl.value||'').trim();
+      try{if(v)localStorage.setItem('cx_pk',v);else localStorage.removeItem('cx_pk');}catch(e){}
+      var pip=pkEl.closest('.capwrap'); if(pip){var p=pip.querySelector('.pip');if(p)p.className=v?'pip':'pip idle';}
+      toast(v?'Stripe publishable key saved · safe in this browser':'Stripe publishable key cleared');
+    });
     var add=$('addPaymentSet');
     if(add)add.addEventListener('click',startBillingSetup);
   }
-  // POST /v1/billing/setup -> a SetupIntent client_secret. With no live Stripe creds the server
-  // returns the honest unconfigured 503; surface it plainly, never fake a saved card.
+  function cxPk(){try{return (localStorage.getItem('cx_pk')||'').trim();}catch(e){return '';}}
+  // Real Stripe Elements card capture · closes the one gap (the SetupIntent was ready but no card
+  // was ever collected). Flow: require a publishable (pk_) key first; POST /v1/billing/setup for a
+  // SetupIntent client_secret (honest 503 when Stripe is unconfigured · never a faked card); mount a
+  // Stripe Elements card field in an on-doctrine cut channel; stripe.confirmCardSetup(client_secret).
+  // Success -> re-read GET /v1/billing/status (renderBilling) so has_card reflects truth. Errors via
+  // the inline error line (BLACKHOLE · stripe error.message surfaced, never swallowed).
+  var stripeJs=null, cardElement=null;
+  function cardError(msg){var e=$('cardErr');if(!e)return;e.textContent=msg||'';e.classList.toggle('show',!!msg);}
   function startBillingSetup(){
-    var add=$('addPaymentSet'); if(add)add.disabled=true;
+    var add=$('addPaymentSet'); if(!add)return;
+    if(!isLive()){toast('Paste a live buyer key first');return;}
+    var pk=cxPk();
+    if(!pk){
+      toast('Paste your Stripe publishable (pk_) key in Billing first');
+      var pkEl=$('stripePk'); if(pkEl)pkEl.focus();
+      return;
+    }
+    if(!window.Stripe){toast('Stripe.js is not loaded · check your connection and reload');return;}
+    add.disabled=true;
     fetch('/v1/billing/setup',{method:'POST',headers:authHeaders(true),body:'{}'}).then(function(res){
       return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});
     }).then(function(r){
       var j={};try{j=JSON.parse(r.t);}catch(e){}
-      if(r.status===503){toast('Card setup unavailable · billing is not configured on this server');if(add)add.disabled=false;return;}
-      if(!r.ok){toast('Card setup failed · '+String((j&&j.error)||r.status));if(add)add.disabled=false;return;}
-      if(j&&j.client_secret){
-        // Stripe.js is not bundled in this test harness; the SetupIntent is real, the card-collection
-        // UI is not. Honest about that rather than faking a confirmed card.
-        notify('Payment setup ready','complete card entry in your buyer app');
-        toast('SetupIntent created · finish card entry in the buyer app (Stripe.js)');
-        var note=$('payNote'); if(note)note.textContent='SetupIntent issued · card not yet confirmed (no Stripe.js in this harness)';
-      }else{toast('Card setup returned no client_secret');}
-      if(add)add.disabled=false;
-    }).catch(function(e){toast('Card setup failed · '+e.message);if(add)add.disabled=false;});
+      if(r.status===503){toast('Stripe not configured on this server');add.disabled=false;return;}
+      if(!r.ok){toast('Card setup failed · '+String((j&&j.error)||r.status));add.disabled=false;return;}
+      if(!j||!j.client_secret){toast('Card setup returned no client_secret');add.disabled=false;return;}
+      mountCardCapture(pk,j.client_secret,add);
+    }).catch(function(e){toast('Card setup failed · '+e.message);add.disabled=false;});
+  }
+  // Mount an on-doctrine card panel where the Add-payment button was, create a Stripe Elements card
+  // field, and confirm the SetupIntent on submit. The pk_ key is a public client value.
+  function mountCardCapture(pk,clientSecret,add){
+    var panel=$('cardMount');
+    if(!panel){panel=el('<div class="cardmount" id="cardMount"></div>');add.parentNode.insertBefore(panel,add.nextSibling);}
+    panel.innerHTML='<p class="cardmount-h">Card details · Stripe</p>'
+      +'<div class="cardfield" id="cardField"></div>'
+      +'<p class="cardmount-err" id="cardErr" role="alert"></p>'
+      +'<div class="cardmount-cta"><button class="pill solid" id="cardSave">Save card</button>'
+      +'<button class="mini" id="cardCancel">Cancel</button>'
+      +'<span class="auth-hint">Entered straight into Stripe · we never see the number.</span></div>';
+    cardError('');
+    try{
+      if(!stripeJs)stripeJs=window.Stripe(pk);
+      var elements=stripeJs.elements();
+      // Style the Stripe iframe to match the concrete field · muted text, anodized red errors.
+      cardElement=elements.create('card',{style:{base:{color:'#e7e3dc',fontFamily:'"Geist Mono",ui-monospace,Menlo,monospace',fontSize:'13px','::placeholder':{color:'#83838b'}},invalid:{color:'#dc8079',iconColor:'#dc8079'}}});
+      cardElement.mount('#cardField');
+    }catch(e){cardError('Could not initialise Stripe · check the publishable key. '+(e&&e.message||''));if(add)add.disabled=false;return;}
+    cardElement.on('change',function(ev){cardError(ev&&ev.error?ev.error.message:'');});
+    var saveBtn=$('cardSave'), cancelBtn=$('cardCancel');
+    if(cancelBtn)cancelBtn.addEventListener('click',function(){teardownCard(panel);if(add)add.disabled=false;});
+    if(saveBtn)saveBtn.addEventListener('click',function(){
+      cardError('');saveBtn.disabled=true;
+      stripeJs.confirmCardSetup(clientSecret,{payment_method:{card:cardElement}}).then(function(result){
+        if(result.error){cardError(result.error.message||'Card could not be saved.');saveBtn.disabled=false;return;}
+        teardownCard(panel);
+        notify('Card saved','charges enabled on this server');
+        toast('Card saved');
+        renderBilling();   // re-read GET /v1/billing/status so has_card reflects truth
+      }).catch(function(e){cardError('Card could not be saved · '+(e&&e.message||''));saveBtn.disabled=false;});
+    });
+  }
+  function teardownCard(panel){
+    if(cardElement){try{cardElement.unmount();}catch(e){}cardElement=null;}
+    if(panel&&panel.parentNode)panel.parentNode.removeChild(panel);
   }
   // Pull per-job invoices for the live job ids this browser recorded, newest first. Each is a
   // real GET /v1/jobs/{id}/invoice; misses are skipped (not faked). MTD = sum of charged_usd.
@@ -1105,7 +1195,56 @@
     });
   }
 
-  function renderSettingsPanels(){renderApiKeys();renderBilling();renderSupplier();}
+  // ---- LOGGED-IN IDENTITY (Settings user card). Live -> GET /v1/me {buyer_id,email,is_admin,
+  //      free_credit_remaining_usd}; render the real signed-in identity, replacing the mock. email
+  //      is "" for an api-key-only/seeded buyer -> show "api key session". Show remaining sandbox
+  //      credit only when > 0. Not live -> keep an illustrative placeholder. Server text via esc(). ----
+  var userAvatarEl=$('userAvatar'), userNameEl=$('userName'), userEmailEl=$('userEmail'), signOutBtn=$('signOut');
+  function initials(s){var p=String(s||'').replace(/@.*/,'').split(/[.\s_+-]+/).filter(Boolean);
+    return ((p[0]||'')[0]||'')+((p[1]||'')[0]||'')||(String(s||'?')[0]||'?');}
+  function renderUserCard(){
+    if(!userNameEl)return;
+    if(!isLive()){
+      // illustrative placeholder when there is no key
+      if(userAvatarEl)userAvatarEl.textContent='CX';
+      userNameEl.textContent='Not signed in';
+      userEmailEl.textContent='create an account or paste a key in Launch';
+      if(signOutBtn)signOutBtn.hidden=true;
+      return;
+    }
+    if(signOutBtn)signOutBtn.hidden=false;
+    userNameEl.textContent='Signed in';
+    userEmailEl.textContent='loading…';
+    fetch('/v1/me',{headers:authHeaders(false)}).then(function(res){
+      return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});
+    }).then(function(r){
+      var j={};try{j=JSON.parse(r.t);}catch(e){}
+      if(!r.ok){userNameEl.textContent='Signed in';userEmailEl.textContent='could not load account · '+esc(String((j&&j.error)||r.status));return;}
+      var email=(j&&j.email||'').trim();
+      var credit=Number(j&&j.free_credit_remaining_usd)||0;
+      if(userAvatarEl)userAvatarEl.textContent=(email?initials(email):'CX').toUpperCase();
+      userNameEl.textContent=email||'api key session';
+      userEmailEl.textContent=credit>0?('sandbox credit · '+money(credit)+' remaining'):(j&&j.is_admin?'admin':'live key session');
+    }).catch(function(e){userNameEl.textContent='Signed in';userEmailEl.textContent=esc('could not load account · '+e.message);});
+  }
+  // ---- SIGN OUT. POST /v1/logout with the cx_key bearer (best-effort revoke of the cx_sess_
+  //      session), then clear localStorage cx_key + cx_email regardless of the response, and return
+  //      the UI to the signup/login gate. ----
+  function doLogout(){
+    if(signOutBtn)signOutBtn.disabled=true;
+    var finish=function(){
+      liveKey='';
+      try{localStorage.removeItem('cx_key');localStorage.removeItem('cx_email');}catch(e){}
+      if(keyIn)keyIn.value='';
+      syncLive();renderSettingsPanels();renderAuth();
+      if(signOutBtn)signOutBtn.disabled=false;
+      toast('Signed out');
+    };
+    fetch('/v1/logout',{method:'POST',headers:authHeaders(false)}).then(finish).catch(finish);
+  }
+  if(signOutBtn)signOutBtn.addEventListener('click',doLogout);
+
+  function renderSettingsPanels(){renderUserCard();renderApiKeys();renderBilling();renderSupplier();}
   renderSettingsPanels();
 
   // ===== QUICKSTART empty-state: buyer activation. Three copy-paste snippets · curl, the

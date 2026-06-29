@@ -271,6 +271,23 @@ func (s *Store) BuyerFreeCreditRemaining(ctx context.Context, buyerID uuid.UUID)
 	return remaining, err
 }
 
+// BuyerEmail returns the account email for a buyer. A seeded/api-key-only buyer has
+// no buyers row, so this returns "" (not an error) on pgx.ErrNoRows · the /v1/me
+// handler then reports an empty email rather than failing for that buyer.
+func (s *Store) BuyerEmail(ctx context.Context, buyerID uuid.UUID) (string, error) {
+	var email string
+	err := s.pool.QueryRow(ctx,
+		`SELECT email FROM buyers WHERE id = $1`, buyerID,
+	).Scan(&email)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return email, nil
+}
+
 // errEmailTaken is returned by CreateBuyerAccount on a duplicate email (UNIQUE
 // violation), so signup can answer 409 instead of a generic 500.
 var errEmailTaken = errors.New("email already registered")
@@ -406,6 +423,31 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleMe returns the authenticated buyer identity so the frontend can show who is
+// signed in and the remaining sandbox credit. authBuyer-gated: buyer_id + is_admin
+// come straight from the AuthResult in context; email is looked up (empty for a
+// seeded/api-key-only buyer with no buyers row), and free_credit_remaining_usd reuses
+// the same per-buyer accounting the submit gate reads.
+func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	auth := r.Context().Value(ctxBuyer).(*AuthResult)
+	email, err := s.store.BuyerEmail(r.Context(), auth.BuyerID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "reading account: "+err.Error())
+		return
+	}
+	free, err := s.store.BuyerFreeCreditRemaining(r.Context(), auth.BuyerID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "reading credit: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"buyer_id":                  auth.BuyerID,
+		"email":                     email,
+		"is_admin":                  auth.IsAdmin,
+		"free_credit_remaining_usd": free,
+	})
 }
 
 // --- small helpers ---
