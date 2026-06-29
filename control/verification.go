@@ -108,6 +108,7 @@ func (v *Verifier) verifyTaskResult(ctx context.Context, info *CommitTaskInfo, c
 				if err := v.store.DockReputation(ctx, info.SupplierID, EventHoneypotFail); err != nil {
 					return OutcomeFail, err
 				}
+				_ = v.store.RecordVerificationEvent(ctx, info.JobID, info.TaskID, info.SupplierID, "honeypot_fail")
 				if err := v.store.ClawbackTaskCredit(ctx, info.SupplierID, info.TaskID); err != nil {
 					return OutcomeFail, err
 				}
@@ -122,6 +123,7 @@ func (v *Verifier) verifyTaskResult(ctx context.Context, info *CommitTaskInfo, c
 			if err := v.store.DockReputation(ctx, info.SupplierID, EventHoneypotPass); err != nil {
 				return OutcomePass, err
 			}
+			_ = v.store.RecordVerificationEvent(ctx, info.JobID, info.TaskID, info.SupplierID, "honeypot_pass")
 			return OutcomePass, nil
 		}
 		// honeypot flagged but no known answer on file: fall through to normal
@@ -147,7 +149,7 @@ func (v *Verifier) verifyTaskResult(ctx context.Context, info *CommitTaskInfo, c
 				peerSup = info.SupplierID // truly unknown (e.g. unit context) — preserve prior behavior
 			}
 			all = []chunkVote{
-				{supplierID: info.SupplierID, bytes: commitBytes},
+				{supplierID: info.SupplierID, taskID: info.TaskID, bytes: commitBytes},
 				{supplierID: peerSup, bytes: redundancyBytes},
 			}
 		}
@@ -168,6 +170,7 @@ func (v *Verifier) verifyTaskResult(ctx context.Context, info *CommitTaskInfo, c
 			// primary provisionally — no credit either way. A supplier at or below the
 			// trusted floor always gets the tiebreak. Detection is never suppressed:
 			// the outcome stays pass_with_penalty whether or not we re-dispatch.
+			_ = v.store.RecordVerificationEvent(ctx, info.JobID, info.TaskID, info.SupplierID, "redundancy_mismatch")
 			if v.checkSampled(info.TaskID, checkProb()) {
 				if err := v.dispatchTiebreak(ctx, info, all); err != nil {
 					return OutcomePassWithPenalty, err
@@ -180,6 +183,7 @@ func (v *Verifier) verifyTaskResult(ctx context.Context, info *CommitTaskInfo, c
 			if err := v.store.DockReputation(ctx, info.SupplierID, EventRedundancyMatch); err != nil {
 				return OutcomePass, err
 			}
+			_ = v.store.RecordVerificationEvent(ctx, info.JobID, info.TaskID, info.SupplierID, "redundancy_match")
 		}
 	} else if info.IsRedundancy {
 		// Redundancy-coverage gap, made EXPLICIT (V2): this task was injected
@@ -293,8 +297,12 @@ func taskSample(taskID uuid.UUID) float64 {
 }
 
 // chunkVote is one committed result for a chunk plus the bytes the vote compares.
+// taskID identifies the committed task behind the result so the tiebreak receipt
+// (verification_events) references the right task; it is uuid.Nil in the no-object-
+// store fallback where only the two blobs the caller fetched are known.
 type chunkVote struct {
 	supplierID uuid.UUID
+	taskID     uuid.UUID
 	bytes      []byte
 }
 
@@ -328,7 +336,7 @@ func (v *Verifier) gatherChunkResults(ctx context.Context, info *CommitTaskInfo,
 			}
 			b = fetched
 		}
-		out = append(out, chunkVote{supplierID: cr.SupplierID, bytes: b})
+		out = append(out, chunkVote{supplierID: cr.SupplierID, taskID: cr.TaskID, bytes: b})
 	}
 	return out, nil
 }
@@ -362,11 +370,13 @@ func (v *Verifier) resolveTiebreak(ctx context.Context, info *CommitTaskInfo, al
 			if err := v.store.DockReputation(ctx, c.supplierID, EventRedundancyMatch); err != nil {
 				return OutcomeFail, err
 			}
+			_ = v.store.RecordVerificationEvent(ctx, info.JobID, c.taskID, c.supplierID, "tiebreak_win")
 		} else {
 			mismatch = true
 			if err := v.store.DockReputation(ctx, c.supplierID, EventMismatch); err != nil {
 				return OutcomeFail, err
 			}
+			_ = v.store.RecordVerificationEvent(ctx, info.JobID, c.taskID, c.supplierID, "tiebreak_loss")
 		}
 	}
 	if mismatch {

@@ -90,6 +90,22 @@ CREATE TABLE IF NOT EXISTS tasks (
 -- inputs without a second table.
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS input_ref TEXT;
 
+-- E3 · autovacuum tuning for the hottest table. `tasks` churns constantly: every
+-- claim/start/commit/fail/requeue is an UPDATE, so dead tuples (and the visibility
+-- bloat that slows the FOR UPDATE SKIP LOCKED claim scan) accumulate fast. The DB
+-- defaults (scale_factor 0.2 = vacuum/analyze only after 20% of the table turns
+-- over) are tuned for cold tables and let bloat ride on a queue. Drop to small
+-- scale factors with flat thresholds so autovacuum fires on absolute churn, and
+-- raise the cost limit so a vacuum keeps pace instead of falling behind under load.
+-- Idempotent (ALTER ... SET is a no-op replay) and table-scoped · no global GUC change.
+ALTER TABLE tasks SET (
+    autovacuum_vacuum_scale_factor  = 0.02,
+    autovacuum_vacuum_threshold     = 50,
+    autovacuum_analyze_scale_factor = 0.02,
+    autovacuum_analyze_threshold    = 50,
+    autovacuum_vacuum_cost_limit    = 1000
+);
+
 CREATE TABLE IF NOT EXISTS ledger_entries (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     created_at    TIMESTAMPTZ DEFAULT now(),
@@ -124,6 +140,36 @@ CREATE UNIQUE INDEX IF NOT EXISTS ledger_task_kind_uniq ON ledger_entries (task_
 -- in api_keys/worker_tokens MUST be seeded for any request to authenticate).
 -- ─────────────────────────────────────────────────────────────────────────────
 
+-- Self-serve buyer accounts. Until now a buyer_id was a free-floating UUID minted
+-- by the seed / referenced by api_keys; there was no way to sign UP. This is the
+-- account of record: a UNIQUE email + a bcrypt password_hash (cost >= 12, set in
+-- control/accounts.go · NEVER a plaintext or a fast hash). free_credit_usd is the
+-- sandbox grant a new buyer gets so they can run jobs before adding a card; the 402
+-- submit gate exempts spend up to this, then requires a card honestly. The id is the
+-- buyer_id every existing buyer-scoped table already keys on, so accounts slot in
+-- without a data migration. password_hash is nullable so a seeded / API-key-only
+-- buyer (no password) is representable; login requires a non-null hash.
+CREATE TABLE IF NOT EXISTS buyers (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email           TEXT UNIQUE NOT NULL,
+    password_hash   TEXT,                      -- bcrypt; NULL = no password set (seed / API-key-only)
+    free_credit_usd NUMERIC(12,6) NOT NULL DEFAULT 0,  -- sandbox grant; 402 gate exempts spend up to this
+    created_at      TIMESTAMPTZ DEFAULT now()
+);
+
+-- Opaque session tokens for the web/app login flow, hashed at rest exactly like
+-- api_keys/worker_tokens (only the SHA-256 hash is stored; the raw token is shown
+-- once at login and never recoverable). authBuyer accepts a cx_sess_ bearer as well
+-- as an api key. expires_at bounds the session; revoked supports explicit logout.
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,               -- SHA-256 of the raw cx_sess_ token
+    buyer_id   UUID NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    revoked    BOOLEAN DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS sessions_buyer_idx ON sessions (buyer_id);
+
 CREATE TABLE IF NOT EXISTS api_keys (
     id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     buyer_id   UUID,
@@ -132,6 +178,13 @@ CREATE TABLE IF NOT EXISTS api_keys (
     created_at TIMESTAMPTZ DEFAULT now(),
     revoked    BOOLEAN DEFAULT false
 );
+-- Buyer-managed key lifecycle (POST/GET/DELETE /v1/keys). `name` is a human label;
+-- `masked` is a NON-secret display hint captured at mint (prefix + last4) so the list
+-- view can show which key is which WITHOUT ever reconstructing the raw secret (only
+-- key_hash is stored · the raw value is revealed once and is unrecoverable). Idempotent
+-- ALTERs so older DBs created before the lifecycle columns upgrade cleanly.
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS name   TEXT;
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS masked TEXT;
 
 CREATE TABLE IF NOT EXISTS worker_tokens (
     token_hash  TEXT PRIMARY KEY,         -- SHA-256 hash of the raw token; raw is shown once at mint, never stored
@@ -203,6 +256,7 @@ CREATE TABLE IF NOT EXISTS models (
 -- whisper-tiny|base. Keep these in lockstep with the agent's resolver.
 INSERT INTO models (id, family, quant, kind, dim, job_type, price_per_1k, price_per_unit, min_memory_gb, hf_repo) VALUES
     ('all-minilm-l6-v2', 'minilm', NULL,   'embed',   384,  'embed',            0.00100000, NULL,        2, 'sentence-transformers/all-MiniLM-L6-v2'),
+    ('bge-small-en-v1.5', 'bge',   NULL,   'embed',   384,  'embed',            0.00100000, NULL,        2, 'BAAI/bge-small-en-v1.5'),
     ('llama-3.2-1b-instruct-q4', 'llama', 'q4_k_m', 'gguf', NULL, 'batch_infer', 0.00200000, NULL,        4, 'unsloth/Llama-3.2-1B-Instruct-GGUF'),
     ('qwen2.5-7b-instruct-q4', 'qwen', 'q4_k_m', 'gguf', NULL, 'batch_infer',    0.00800000, NULL,       40, 'Qwen/Qwen2.5-7B-Instruct-GGUF'),
     ('whisper-tiny',     'whisper', NULL,  'whisper', NULL,  'audio_transcribe', NULL,       0.00400000,  1, 'openai/whisper-tiny'),
@@ -274,6 +328,12 @@ ALTER TABLE workers ADD COLUMN IF NOT EXISTS throttled          BOOLEAN DEFAULT 
 -- Supplier jurisdiction (data-residency match) + quarantine timestamp.
 ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS data_country   TEXT;            -- ISO country the supplier operates in
 ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS quarantined_at TIMESTAMPTZ;     -- set by auto-quarantine (Verification V2)
+
+-- Stripe Connect payout readiness, flipped by the account.updated webhook
+-- (control/suppliers.go). A supplier can only be PAID once Stripe says its
+-- connected account can receive transfers; this column is the cached view the
+-- status endpoint reads without a live Stripe call. Default false (not yet able).
+ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS payouts_enabled BOOLEAN DEFAULT false;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Plane C / Compute Autopilot (docs/PLANE_C.md) — quote intelligence.
@@ -386,6 +446,24 @@ CREATE TABLE IF NOT EXISTS disputes (
     resolved_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS disputes_job_idx ON disputes (job_id, created_at);
+
+-- verification_events is the append-only RECEIPT log: the verification machinery
+-- (control/verification.go) already applies reputation deltas on every outcome, but
+-- the OUTCOMES themselves were not persisted, so a buyer could not see what was
+-- checked. Each row is one verification fact emitted co-located with its reputation
+-- dock (honeypot pass/fail, redundancy match/mismatch, tiebreak win/loss). Writes are
+-- best-effort and NEVER block the verify/money path; the aggregate is grouped by
+-- job_id for the buyer-facing job-status `verification` block. kind is the closed set
+-- {honeypot_pass|honeypot_fail|redundancy_match|redundancy_mismatch|tiebreak_win|tiebreak_loss}.
+CREATE TABLE IF NOT EXISTS verification_events (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    job_id      UUID NOT NULL REFERENCES jobs,
+    task_id     UUID,
+    supplier_id UUID,
+    kind        TEXT NOT NULL,  -- honeypot_pass|honeypot_fail|redundancy_match|redundancy_mismatch|tiebreak_win|tiebreak_loss
+    created_at  TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS verification_events_job_idx ON verification_events (job_id, created_at);
 -- reverify_task_id links a dispute to the independent re-run dispatched to resolve it
 -- (status flow: open|no_peer -> reverifying -> resolved|rejected|unresolvable).
 ALTER TABLE disputes ADD COLUMN IF NOT EXISTS reverify_task_id UUID;

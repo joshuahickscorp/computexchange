@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -102,6 +104,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 		`ALTER TABLE workers ADD COLUMN IF NOT EXISTS thermal_ok BOOLEAN DEFAULT true`,
 		`ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS data_country TEXT`,
 		`ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS quarantined_at TIMESTAMPTZ`,
+		// Stripe Connect payout readiness (suppliers.go): flipped by the account.updated
+		// webhook once Stripe says the connected account can receive transfers.
+		`ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS payouts_enabled BOOLEAN DEFAULT false`,
 		`CREATE INDEX IF NOT EXISTS tasks_job_chunk_idx ON tasks (job_id, chunk_index)`,
 		`CREATE INDEX IF NOT EXISTS workers_supplier_idx ON workers (supplier_id)`,
 		// Quote-to-actual drift feedback (Plane D D6 / errata C-Errata-6). MIRRORS
@@ -176,6 +181,26 @@ func (s *Store) Migrate(ctx context.Context) error {
 		   stage_index INT
 		 )`,
 		`CREATE INDEX IF NOT EXISTS pipeline_jobs_pipeline_idx ON pipeline_jobs (pipeline_id)`,
+		// Self-serve buyer accounts (accounts.go) + opaque session tokens. MIRRORS
+		// db/schema.sql so a control plane that only ran Migrate self-migrates. buyers
+		// is the account of record: UNIQUE email + bcrypt password_hash + a sandbox
+		// free_credit_usd grant. sessions are hashed-at-rest opaque tokens (like
+		// api_keys/worker_tokens) the login flow issues and authBuyer accepts.
+		`CREATE TABLE IF NOT EXISTS buyers (
+		   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		   email           TEXT UNIQUE NOT NULL,
+		   password_hash   TEXT,
+		   free_credit_usd NUMERIC(12,6) NOT NULL DEFAULT 0,
+		   created_at      TIMESTAMPTZ DEFAULT now()
+		 )`,
+		`CREATE TABLE IF NOT EXISTS sessions (
+		   token_hash TEXT PRIMARY KEY,
+		   buyer_id   UUID NOT NULL,
+		   created_at TIMESTAMPTZ DEFAULT now(),
+		   expires_at TIMESTAMPTZ NOT NULL,
+		   revoked    BOOLEAN DEFAULT false
+		 )`,
+		`CREATE INDEX IF NOT EXISTS sessions_buyer_idx ON sessions (buyer_id)`,
 	}
 	for _, q := range stmts {
 		if _, err := s.pool.Exec(ctx, q); err != nil {
@@ -628,6 +653,112 @@ func (s *Store) CreateWorkerToken(ctx context.Context, workerID, supplierID uuid
 	return raw, nil
 }
 
+// --- buyer API-key lifecycle (POST/GET/DELETE /v1/keys) ---
+
+// APIKeyRow is one masked api_key as shown in the list view. `Masked` is the
+// non-secret display hint (prefix + last4) captured at mint; the raw secret is
+// NEVER reconstructable (only key_hash is stored).
+type APIKeyRow struct {
+	ID        uuid.UUID `json:"id"`
+	Name      string    `json:"name"`
+	Masked    string    `json:"masked"`
+	CreatedAt time.Time `json:"created_at"`
+	Revoked   bool      `json:"revoked"`
+}
+
+// CreateAPIKey mints a buyer API key the same way CreateWorkerToken mints a worker
+// token: it generates a random raw secret, stores ONLY its SHA-256 hash plus a
+// non-secret display hint (prefix + last4), and returns the raw secret ONCE. The
+// raw value is unrecoverable afterwards (it is never stored). `test` selects the
+// cx_test_ prefix (vs. cx_live_) so callers can tell environments apart; it does
+// not change auth · both authenticate identically (no scopes/spend here by design).
+// is_admin is left at its default (false): minting a key never grants admin.
+func (s *Store) CreateAPIKey(ctx context.Context, buyerID uuid.UUID, name string, test bool) (id uuid.UUID, raw, masked string, err error) {
+	prefix := "cx_live_"
+	if test {
+		prefix = "cx_test_"
+	}
+	raw = newSecret(prefix)
+	if raw == "" {
+		return uuid.Nil, "", "", errors.New("api key: entropy failure")
+	}
+	masked = maskKey(raw)
+	err = s.pool.QueryRow(ctx,
+		`INSERT INTO api_keys (buyer_id, key_hash, name, masked, is_admin, revoked)
+		 VALUES ($1, $2, $3, $4, false, false)
+		 RETURNING id`,
+		buyerID, hashKey(raw), name, masked,
+	).Scan(&id)
+	if err != nil {
+		return uuid.Nil, "", "", err
+	}
+	return id, raw, masked, nil
+}
+
+// ListAPIKeys returns the caller's keys as masked rows (never the raw secret ·
+// only key_hash is stored, so there is nothing to leak even on a full DB read).
+// Scoped to buyerID; revoked keys are included so the UI can show their state.
+func (s *Store) ListAPIKeys(ctx context.Context, buyerID uuid.UUID) ([]APIKeyRow, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, COALESCE(name,''), COALESCE(masked,''), created_at, revoked
+		   FROM api_keys
+		  WHERE buyer_id = $1
+		  ORDER BY created_at DESC`,
+		buyerID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []APIKeyRow{}
+	for rows.Next() {
+		var r APIKeyRow
+		if err := rows.Scan(&r.ID, &r.Name, &r.Masked, &r.CreatedAt, &r.Revoked); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// RevokeAPIKey revokes one key, scoped to the owning buyer so a caller can never
+// revoke another buyer's key. Idempotent: revoking an already-revoked (or
+// never-existed-for-this-buyer) key is a no-op success · the endpoint is 204
+// either way, matching the DELETE contract. Returns whether a row was found so
+// the handler can distinguish "revoked" from "not yours / not found" if needed.
+func (s *Store) RevokeAPIKey(ctx context.Context, buyerID, id uuid.UUID) (bool, error) {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE api_keys SET revoked = true
+		  WHERE id = $1 AND buyer_id = $2`,
+		id, buyerID,
+	)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// maskKey builds the non-secret display hint for an api_key: the cx_live_/cx_test_
+// prefix plus the last 4 chars of the secret, joined by an ellipsis. It is derived
+// from the raw secret ONLY at mint time and persisted; it is never enough to
+// reconstruct the key (4 trailing chars of 32 bytes of entropy).
+func maskKey(raw string) string {
+	// CX key tags are "cx_live_" / "cx_test_" (two underscores); the random tail is
+	// base64url and may itself contain "_", so take up to the SECOND underscore. Never
+	// LastIndex · that would leak almost the whole secret into the masked hint.
+	prefix := raw
+	if i1 := strings.IndexByte(raw, '_'); i1 >= 0 {
+		if i2 := strings.IndexByte(raw[i1+1:], '_'); i2 >= 0 {
+			prefix = raw[:i1+1+i2+1]
+		}
+	}
+	last4 := raw
+	if len(raw) >= 4 {
+		last4 = raw[len(raw)-4:]
+	}
+	return prefix + "..." + last4
+}
+
 // --- workers + benchmarks ---
 
 // UpsertWorker inserts or refreshes a worker row and persists its benchmark
@@ -1065,6 +1196,8 @@ type JobView struct {
 	CreatedAt    time.Time
 	MaxUSD       float64
 	BudgetState  string
+	ChargeStatus string
+	Verification Verification
 }
 
 // GetJob loads a job scoped to a buyer (buyers see only their own jobs).
@@ -1075,18 +1208,28 @@ func (s *Store) GetJob(ctx context.Context, jobID, buyerID uuid.UUID) (*JobView,
 		        COALESCE(task_count,0), COALESCE(tasks_done,0),
 		        COALESCE(estimated_usd,0), COALESCE(actual_usd,0),
 		        COALESCE(eta_secs,0), created_at,
-		        COALESCE(max_usd,0), COALESCE(budget_state,'tracking')
+		        COALESCE(max_usd,0), COALESCE(budget_state,'tracking'),
+		        COALESCE(charge_status,'not_attempted')
 		 FROM jobs WHERE id = $1 AND buyer_id = $2`,
 		jobID, buyerID,
 	).Scan(&j.ID, &j.BuyerID, &j.Status, &j.JobType, &j.Tier, &j.OutputRef,
 		&j.TaskCount, &j.TasksDone, &j.EstimatedUSD, &j.ActualUSD, &j.ETASecs, &j.CreatedAt,
-		&j.MaxUSD, &j.BudgetState)
+		&j.MaxUSD, &j.BudgetState, &j.ChargeStatus)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
+	// Assemble the verification receipt (counts from the append-only log + latest
+	// dispute). A read failure here must not hide the job: log and leave the
+	// zero-value aggregate (label "unverified"), never fabricate counts.
+	vr, verr := s.JobVerification(ctx, j.ID)
+	if verr != nil {
+		log.Printf("job verification aggregate (job %s): %v", j.ID, verr)
+		vr.Label = deriveVerificationLabel(vr)
+	}
+	j.Verification = vr
 	return &j, nil
 }
 
@@ -1957,6 +2100,73 @@ func (s *Store) DuePayouts(ctx context.Context, limit int) ([]DueHeldEntry, erro
 func (s *Store) SetChargeStatus(ctx context.Context, jobID uuid.UUID, status string) error {
 	_, err := s.pool.Exec(ctx, `UPDATE jobs SET charge_status = $2 WHERE id = $1`, jobID, status)
 	return err
+}
+
+// RecordVerificationEvent appends one row to the append-only verification_events
+// receipt log. It is BEST-EFFORT and must NEVER block the verify/money path: a write
+// failure is logged and swallowed (return nil) so a flaky receipt insert can never
+// fail a reputation dock or a payout. kind is one of the closed set
+// {honeypot_pass|honeypot_fail|redundancy_match|redundancy_mismatch|tiebreak_win|
+// tiebreak_loss}; taskID/supplierID may be uuid.Nil when not known, stored as NULL.
+func (s *Store) RecordVerificationEvent(ctx context.Context, jobID, taskID, supplierID uuid.UUID, kind string) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO verification_events (job_id, task_id, supplier_id, kind) VALUES ($1,$2,$3,$4)`,
+		jobID, nullUUID(taskID), nullUUID(supplierID), kind)
+	if err != nil {
+		log.Printf("verification event (job %s kind %s): %v", jobID, kind, err)
+	}
+	return nil
+}
+
+// JobVerification aggregates a job's verification_events log into the buyer-facing
+// receipt block, plus the latest dispute's status (disputes table; ” when none).
+// Counts come from a single grouped query; only outcomes that actually occurred are
+// present, so the aggregate never overstates what was checked. `checked` is every
+// task that underwent ANY verification (the sum of all event kinds). The honest label
+// is derived from the counts by deriveVerificationLabel.
+func (s *Store) JobVerification(ctx context.Context, jobID uuid.UUID) (Verification, error) {
+	var v Verification
+	rows, err := s.pool.Query(ctx,
+		`SELECT kind, count(*) FROM verification_events WHERE job_id = $1 GROUP BY kind`, jobID)
+	if err != nil {
+		return v, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var kind string
+		var n int
+		if err := rows.Scan(&kind, &n); err != nil {
+			return v, err
+		}
+		v.Checked += n
+		switch kind {
+		case "honeypot_pass":
+			v.HoneypotsPassed += n
+		case "honeypot_fail":
+			v.HoneypotsFailed += n
+		case "redundancy_match":
+			v.RedundancyMatched += n
+		case "redundancy_mismatch":
+			v.RedundancyMismatched += n
+		case "tiebreak_win", "tiebreak_loss":
+			v.Tiebreaks += n
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return v, err
+	}
+	// Latest dispute for the job ('' when none). A no-row scan is the normal "no
+	// dispute" case, not an error.
+	var disputeStatus string
+	err = s.pool.QueryRow(ctx,
+		`SELECT status FROM disputes WHERE job_id = $1 ORDER BY created_at DESC LIMIT 1`, jobID,
+	).Scan(&disputeStatus)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return v, err
+	}
+	v.DisputeStatus = disputeStatus
+	v.Label = deriveVerificationLabel(v)
+	return v, nil
 }
 
 // RecordDispute records a buyer's dispute against a job's result, atomically verifying

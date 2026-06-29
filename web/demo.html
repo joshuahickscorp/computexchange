@@ -9,236 +9,418 @@
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
 <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
 <link rel="manifest" href="site.webmanifest">
-<meta name="theme-color" content="#0a0a0c">
+<meta name="theme-color" content="#060606">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://js.stripe.com/v3/"></script>
 <style>
   :root{
-    --bg:#0a0a0c; --card:#101013; --raise:#16161a;
-    --line:#222226; --line-soft:#1a1a1e; --line-hi:#33333a;
-    --ash:#6c6c72; --mute:#8d8d94; --bone:#cbc8c1; --bone-hi:#ebe7e0; --signal:#ffffff;
-    --green:#37d27a; --red:#e5544a; --yellow:#f3bf1a;   /* status ONLY: knob light, run statuses (green/red), fixed markers (yellow) */
+    /* ===== the concrete field ===== */
+    --bg:#060606;                          /* board-formed concrete, never true black */
+
+    /* ===== material light: hairlines + reveals, never drawn boxes ===== */
+    --reveal:rgba(255,255,255,.05);        /* a lit top edge where a surface lifts */
+    --reveal-hi:rgba(255,255,255,.09);
+    --hair:rgba(255,255,255,.045);         /* a single low-opacity separating line */
+    --hair-soft:rgba(255,255,255,.03);
+    --seat:rgba(0,0,0,.45);                /* ambient darkening where a panel meets the field */
+
+    /* ===== text: one muted system of voices ===== */
+    --ash:#595960;                         /* faintest: hashes, idle glyphs */
+    --mute:#83838b;                        /* the single secondary voice */
+    --bone:#bfbcb5;                        /* read */
+    --bone-hi:#e7e3dc;                     /* announce */
+    --signal:#ffffff;                      /* light from within */
+
+    /* ===== status ONLY, anodized (deep + desaturated, not a bright LED): green done/live, red failed ===== */
+    --green:#4c9d6e; --green-core:#69c096;
+    --red:#c0554b;   --red-core:#dc8079;
+
+    /* ===== type: Geist Mono carries the whole UI; one Cormorant monument figure ===== */
+    --mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:var(--mono);                    /* every existing var(--sans) now resolves to Geist Mono */
     --serif:"Cormorant Garamond",serif;
-    --sans:-apple-system,BlinkMacSystemFont,"SF Pro Display","Inter",system-ui,sans-serif;
     --r:14px; --r-sm:10px; --r-pill:999px;
-    --dur:.16s; --dur-slow:.26s; --ease:cubic-bezier(.2,0,0,1);
-    --pad:18px; --gap:16px;
+    --dur:.18s; --dur-slow:.32s; --ease:cubic-bezier(.2,0,0,1);
+    --pad:20px; --gap:16px;
   }
   *{box-sizing:border-box}
   html,body{margin:0;height:100%}
   body{
-    background:radial-gradient(120% 100% at 50% 0%, #101014 0%, #0a0a0c 55%, #08080a 100%);
+    /* concrete: a near-black plane, a single low-contrast lift behind the hero, and the
+       barely-there ghost of Ando form-tie marks. Felt, not seen. */
+    background:
+      radial-gradient(78% 56% at 50% 2%, rgba(255,255,255,.024), rgba(255,255,255,0) 60%),
+      radial-gradient(rgba(255,255,255,.014) 1px, transparent 1.6px) 0 0/104px 104px,
+      var(--bg);
     background-attachment:fixed;
     color:var(--bone); -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
-    font:400 13px/1.6 var(--sans);
+    font:400 13px/1.6 var(--mono);
+    font-variant-numeric:tabular-nums;     /* every figure sits in aligned columns */
   }
   ::selection{background:var(--bone-hi);color:var(--bg)}
-  :focus-visible{outline:none;box-shadow:0 0 0 1px var(--line-hi);border-radius:var(--r-sm)}
+  :focus-visible{outline:none;box-shadow:0 0 0 1px var(--reveal-hi);border-radius:var(--r-sm)}
 
   .app{display:flex;min-height:100vh;max-width:700px;margin:0 auto}
-  /* rail */
-  .rail{width:60px;display:flex;flex-direction:column;align-items:center;gap:6px;padding:18px 0;border-right:1px solid var(--line-soft)}
-  /* brand mark: flat white Cx, no box, no chip (identity, not a control). The metal is spent
-     on the knob; the rail mark stays flat so the knob remains the single hero on screen. */
-  .brand{width:30px;height:30px;margin-bottom:10px;display:flex;align-items:center;justify-content:center}
+  /* rail: a darker reveal in the concrete, not a bordered column */
+  .rail{width:60px;display:flex;flex-direction:column;align-items:center;gap:8px;padding:22px 0;box-shadow:1px 0 0 var(--hair-soft)}
+  /* brand mark: flat white Cx (identity, not a control). Metal is spent only on the instrument. */
+  .brand{width:28px;height:28px;margin-bottom:14px;display:flex;align-items:center;justify-content:center;opacity:.92}
   .brand img{width:100%;height:100%;object-fit:contain;display:block}
-  .nav{width:42px;height:42px;border:none;background:none;color:var(--ash);border-radius:var(--r-sm);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:background var(--dur) var(--ease),color var(--dur) var(--ease)}
-  .nav svg{width:21px;height:21px}
-  .nav:hover{color:var(--bone);background:var(--raise)}
-  .nav.on{color:var(--bone-hi);background:var(--raise)}
+  .nav{width:42px;height:42px;border:none;background:none;color:var(--ash);border-radius:var(--r-sm);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:color var(--dur) var(--ease)}
+  .nav svg{width:20px;height:20px}
+  .nav:hover{color:var(--mute)}
+  .nav.on{color:var(--bone-hi)}            /* active lifted by light, not a filled box */
   .nav.acct{margin-top:auto}
 
   /* main + header */
   .main{flex:1;min-width:0;display:flex;flex-direction:column}
-  .top{display:flex;align-items:center;justify-content:space-between;padding:18px 22px}
-  .eyebrow{font-size:11px;font-weight:500;letter-spacing:.18em;text-transform:uppercase;color:var(--mute)}
-  .bell{position:relative;width:34px;height:34px;border:none;background:none;color:var(--ash);border-radius:var(--r-sm);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background var(--dur) var(--ease),color var(--dur) var(--ease)}
-  .bell:hover{background:var(--raise);color:var(--bone)} .bell svg{width:18px;height:18px}
-  .badge{position:absolute;top:7px;right:8px;width:7px;height:7px;border-radius:50%;background:var(--signal)}
+  .top{display:flex;align-items:center;justify-content:space-between;padding:22px 24px}
+  .eyebrow{font-size:10px;font-weight:500;letter-spacing:.26em;text-transform:uppercase;color:var(--mute)}
+  .bell{position:relative;width:34px;height:34px;border:none;background:none;color:var(--ash);border-radius:var(--r-sm);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:color var(--dur) var(--ease)}
+  .bell:hover{color:var(--mute)} .bell svg{width:18px;height:18px}
+  .badge{position:absolute;top:7px;right:8px;width:6px;height:6px;border-radius:50%;background:var(--signal)}
   .badge.hide{display:none}
-  .notif{position:absolute;top:52px;right:18px;width:268px;background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:6px;display:none;z-index:8;box-shadow:0 1px 0 rgba(255,255,255,.03) inset,0 8px 24px rgba(0,0,0,.4)}
+  .notif{position:absolute;top:54px;right:20px;width:270px;border-radius:var(--r);padding:6px;display:none;z-index:8;
+    background:linear-gradient(180deg,rgba(255,255,255,.022),rgba(0,0,0,.18));
+    box-shadow:inset 0 1px 0 var(--reveal),0 1px 0 var(--seat),0 24px 48px -28px rgba(0,0,0,.9)}
   .notif.open{display:block}
-  .notif-item{padding:10px 11px;font-size:13px;border-radius:var(--r-sm);color:var(--bone)} .notif-item:hover{background:var(--raise)}
-  .notif-item .t{color:var(--ash);font-size:11px;margin-top:2px}
+  .notif-item{padding:10px 11px;font-size:12px;border-radius:var(--r-sm);color:var(--bone)} .notif-item:hover{background:rgba(255,255,255,.03)}
+  .notif-item .t{color:var(--ash);font-size:10px;letter-spacing:.04em;margin-top:3px}
 
-  /* centered content column with room at the edges + a quiet radial lift behind the hero (Section C) */
-  .view{display:none;max-width:620px;width:100%;margin:0 auto;padding:44px 30px 72px;
-    background:radial-gradient(72% 50% at 50% 22%, rgba(255,255,255,.025), rgba(255,255,255,0) 70%)} .view.on{display:block}
-  .section-label{font-size:10px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--mute);margin:0 0 12px}
+  /* centered column in the void; the hero lift lives on the field behind it */
+  .view{display:none;max-width:600px;width:100%;margin:0 auto;padding:48px 32px 88px} .view.on{display:block}
+  /* the apothecary label, one consistent register everywhere */
+  .section-label{font-size:10px;font-weight:500;letter-spacing:.22em;text-transform:uppercase;color:var(--mute);margin:0 0 14px}
 
+  /* cast panel: a slab set into the wall. Two-layer surface, a lit top reveal, content recessed
+     so it sits down inside, ambient darkening where it meets the field. No drawn box, no float. */
   .card{
-    background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(0,0,0,.14));
-    border:1px solid var(--line-soft);border-radius:var(--r);
-    box-shadow:0 1px 0 rgba(255,255,255,.03) inset,0 1px 2px rgba(0,0,0,.3);
+    position:relative;border-radius:var(--r);
+    background:linear-gradient(180deg,rgba(255,255,255,.022),rgba(255,255,255,.006) 22%,rgba(0,0,0,.16));
+    box-shadow:inset 0 1px 0 var(--reveal),inset 0 -22px 30px -28px rgba(0,0,0,.8),0 1px 0 var(--seat);
   }
 
   /* numerals */
   .num{font-variant-numeric:tabular-nums}
 
   /* ===== EARN ===== */
-  .power-wrap{text-align:center;padding:24px 0 0}
-  .knob{position:relative;width:240px;height:240px;margin:0 auto;cursor:pointer;outline:none}
+  .power-wrap{text-align:center;padding:8px 0 0}    /* the instrument on its plinth, air around it */
+  .knob{position:relative;width:236px;height:236px;margin:0 auto;cursor:pointer;outline:none}
   .knob img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:block}
   .knob-base{z-index:1}
   .knob-red{z-index:2;opacity:0;transition:opacity var(--dur-slow) var(--ease)}   /* offline: red, steady */
   .knob-glow{z-index:3;opacity:0;transition:opacity var(--dur-slow) var(--ease)}  /* online: green, breathing */
   .knob-press{z-index:4;opacity:0;transition:opacity 90ms var(--ease)}
-  .knob-shadow{position:absolute;left:50%;bottom:8%;width:60%;height:10%;transform:translateX(-50%);
-    background:radial-gradient(ellipse,rgba(0,0,0,.7),transparent 70%);filter:blur(7px);z-index:0}
-  .knob.is-on .knob-glow{opacity:1;animation:knob-breathe 3.6s ease-in-out infinite}  /* online: green breathes */
-  .knob:not(.is-on) .knob-red{opacity:1}                                              /* offline: red, steady */
+  .knob-shadow{position:absolute;left:50%;bottom:8%;width:58%;height:9%;transform:translateX(-50%);
+    background:radial-gradient(ellipse,rgba(0,0,0,.72),transparent 70%);filter:blur(8px);z-index:0}
+  .knob.is-on .knob-glow{opacity:1;animation:knob-breathe 4s ease-in-out infinite}  /* online: green breathes */
+  .knob:not(.is-on) .knob-red{opacity:1}                                            /* offline: red, steady */
   .knob:active .knob-press{opacity:1}
-  .knob:focus-visible{box-shadow:0 0 0 1px var(--line-hi);border-radius:50%}
-  @keyframes knob-breathe{0%,100%{opacity:.6} 50%{opacity:1}}
+  .knob:focus-visible{box-shadow:0 0 0 1px var(--reveal-hi);border-radius:50%}
+  @keyframes knob-breathe{0%,100%{opacity:.62} 50%{opacity:1}}
 
-  .pstate{font-size:12px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--bone-hi);margin-top:22px}
+  .pstate{font-size:11px;font-weight:500;letter-spacing:.2em;text-transform:uppercase;color:var(--bone-hi);margin-top:30px}
   .pstate.off{color:var(--ash)}
-  /* tiny status dot echoing the knob light: green online, red offline (same two values) */
-  .sdot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--green);vertical-align:middle;margin:-2px 9px 0 0;transition:background var(--dur) var(--ease)}
-  .pstate.off .sdot{background:var(--red)}
-  /* secondary voice: one muted color + size, relaxed line-height (Section D) */
-  .phint{font-size:12px;line-height:1.6;color:var(--mute);margin-top:8px}
-  .prun{font-size:12px;line-height:1.6;color:var(--mute);margin-top:10px}
+  /* anodized status dot echoing the knob ring: light rising from within, not a flat circle */
+  .sdot{display:inline-block;width:7px;height:7px;border-radius:50%;vertical-align:middle;margin:-2px 10px 0 0;
+    background:radial-gradient(circle at 50% 40%,var(--green-core),var(--green) 72%);box-shadow:0 0 5px 0 rgba(76,157,110,.55);
+    transition:background var(--dur) var(--ease),box-shadow var(--dur) var(--ease)}
+  .pstate.off .sdot{background:radial-gradient(circle at 50% 40%,var(--red-core),var(--red) 72%);box-shadow:0 0 5px 0 rgba(192,85,75,.55)}
+  /* the single secondary voice: one muted colour + size, relaxed line-height */
+  .phint{font-size:12px;line-height:1.6;color:var(--mute);margin-top:10px}
+  .prun{font-size:12px;line-height:1.6;color:var(--mute);margin-top:12px}
 
-  .figures{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-top:56px;padding-bottom:40px;border-bottom:1px solid var(--line-soft)}
+  /* totals: the monument between two quiet weights, a hairline above + below, no box */
+  .figures{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-top:64px;padding:28px 0 36px;border-top:1px solid var(--hair-soft);border-bottom:1px solid var(--hair-soft)}
   .fig{flex:1} .fig.mid{flex:0 0 auto;text-align:center} .fig.end{text-align:right}
-  .fig .k{font-size:10px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--mute)}
-  .fig .v{font-size:16px;font-weight:500;color:var(--bone-hi);margin-top:6px}
+  .fig .k{font-size:10px;font-weight:500;letter-spacing:.2em;text-transform:uppercase;color:var(--mute)}
+  .fig .v{font-size:15px;font-weight:500;color:var(--bone-hi);margin-top:8px}
   .fig .v.live{color:var(--signal)}
-  .monument{font-family:var(--serif);font-weight:600;font-size:60px;line-height:.9;letter-spacing:-.01em;color:var(--bone-hi);margin-top:2px}
+  /* the one Cormorant monument: proportional display numerals (the single exception to tabular) */
+  .monument{font-family:var(--serif);font-weight:600;font-size:62px;line-height:.9;letter-spacing:-.02em;color:var(--bone-hi);margin-top:2px;font-variant-numeric:normal}
 
-  .monitor{margin-top:40px;padding:18px 18px}
+  .monitor{margin-top:48px;padding:20px 20px 16px}
   .monitor.hide{display:none}
-  .monitor-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
-  .monitor-h .k{font-size:10px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--mute)}
+  .monitor-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+  .monitor-h .k{font-size:10px;font-weight:500;letter-spacing:.2em;text-transform:uppercase;color:var(--mute)}
   .monitor-h .v{font-size:13px;font-weight:500;color:var(--bone-hi)}
-  .monitor svg{display:block;width:100%;height:46px}
+  .monitor svg{display:block;width:100%;height:48px}
 
-  .row{display:flex;align-items:center;justify-content:space-between;padding:18px 2px;border-top:1px solid var(--line-soft);font-size:13px}
+  .row{display:flex;align-items:center;justify-content:space-between;padding:18px 2px;border-top:1px solid var(--hair-soft);font-size:13px}
   .row:first-of-type{border-top:none}
-  .monitor + .row{margin-top:24px}   /* breathing room before the Machine/Payout rows */
-  .row .l{display:flex;align-items:center;gap:10px;min-width:0}
-  .row .k{font-size:10px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--mute)}
+  .monitor + .row{margin-top:32px}   /* breathing room before the Machine/Payout rows */
+  .row .l{display:flex;align-items:center;gap:12px;min-width:0;color:var(--bone)}
+  .row .k{font-size:10px;font-weight:500;letter-spacing:.2em;text-transform:uppercase;color:var(--mute)}
   .r-meta{color:var(--mute)}
-  /* machine + payout are fixed facts (your machine; payout is Stripe-only), not pass/fail. They get
-     the third light in the oracle series: a static YELLOW (green = done, red = failed, yellow = fixed).
-     Same turned-metal ring as the run lights, with a yellow neon core. */
-  .marker{position:relative;width:16px;height:16px;flex:none;background:url(assets/dot-ring@3x.png) center/contain no-repeat}
-  .marker::before{content:"";position:absolute;inset:22%;border-radius:50%;
-    background:radial-gradient(circle at 50% 42%,#ffeaa6,#f3bf1a 72%);box-shadow:0 0 7px 1px rgba(243,191,26,.85)}
+  /* Machine + Payout are fixed facts, not pass/fail: flat line-glyph ring tokens, quiet + subordinate.
+     No metal puck, no colour, no glow. The bottom of the procession. */
+  .marker{position:relative;width:12px;height:12px;flex:none;border-radius:50%;box-shadow:inset 0 0 0 1.5px rgba(255,255,255,.2)}
 
   /* ===== LAUNCH ===== */
-  .banner{display:flex;align-items:center;gap:16px;justify-content:space-between;padding:18px 20px;margin-bottom:40px;font-size:12px;line-height:1.6;color:var(--mute)}
-  .pill{height:32px;padding:0 16px;border-radius:var(--r-pill);border:1px solid var(--line);background:transparent;color:var(--bone);font:500 12px var(--sans);cursor:pointer;transition:border-color var(--dur) var(--ease),color var(--dur) var(--ease),background var(--dur) var(--ease)}
-  .pill:hover{border-color:var(--line-hi);color:var(--bone-hi)}
-  .pill.solid{background:var(--bone-hi);color:var(--bg);border-color:var(--bone-hi)}
-  .pill.solid:hover{background:var(--signal);border-color:var(--signal)}
+  .banner{display:flex;align-items:center;gap:16px;justify-content:space-between;padding:20px 22px;margin-bottom:48px;font-size:12px;line-height:1.6;color:var(--mute)}
+  /* secondary flat controls: separated by a hairline, never a drawn box */
+  .pill{height:34px;padding:0 16px;border-radius:var(--r-pill);background:transparent;color:var(--bone);font:500 11px var(--mono);letter-spacing:.04em;cursor:pointer;box-shadow:inset 0 0 0 1px var(--hair);transition:color var(--dur) var(--ease),box-shadow var(--dur) var(--ease),background var(--dur) var(--ease)}
+  .pill:hover{color:var(--bone-hi);box-shadow:inset 0 0 0 1px var(--reveal-hi)}
+  .pill.solid{background:var(--bone-hi);color:var(--bg);box-shadow:none}
+  .pill.solid:hover{background:var(--signal)}
 
-  .intake{border:1.5px dashed var(--line);border-radius:var(--r);padding:40px 16px;text-align:center;color:var(--mute);cursor:pointer;transition:border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
-  .intake svg{width:24px;height:24px;display:block;margin:0 auto 8px;stroke-width:1.5}
-  .intake:hover,.intake.drag{border-color:var(--line-hi);color:var(--bone)}
-  .intake.detected{border-style:solid;border-color:var(--line)}
+  /* drop zone: a slot cut into the concrete (a recessed reveal), never a dashed box */
+  .intake{border:none;border-radius:var(--r);padding:44px 16px;text-align:center;color:var(--mute);cursor:pointer;
+    background:linear-gradient(180deg,rgba(0,0,0,.24),rgba(0,0,0,.08));
+    box-shadow:inset 0 1px 0 var(--reveal),inset 0 3px 12px rgba(0,0,0,.55);
+    transition:color var(--dur) var(--ease),box-shadow var(--dur) var(--ease)}
+  .intake svg{width:22px;height:22px;display:block;margin:0 auto 10px;stroke-width:1.4;color:var(--ash)}
+  .intake:hover,.intake.drag{color:var(--bone);box-shadow:inset 0 1px 0 var(--reveal-hi),inset 0 3px 14px rgba(0,0,0,.72)}
   .intake.detected .intake-icon{display:none}
-  .d-name{display:block;color:var(--bone-hi);font-size:14px;font-weight:500}
-  .d-meta{display:block;color:var(--mute);font-size:12px;margin-top:5px}
+  .d-name{display:block;color:var(--bone-hi);font-size:13px;font-weight:500}
+  .d-meta{display:block;color:var(--mute);font-size:11px;margin-top:6px;letter-spacing:.02em}
 
-  /* the Launch button floats in open space, centered, with big air above and below */
-  .launch-row{display:flex;justify-content:center;margin:56px 0}
-  .runs{margin-top:56px}
-  .run{border-top:1px solid var(--line-soft)}
-  .run-main{display:flex;align-items:center;justify-content:space-between;padding:13px 2px;font-size:13px;cursor:pointer}
-  .run .l{display:flex;align-items:center;gap:10px;min-width:0}
-  .run .src{color:var(--ash);font-size:12px}
-  .run-right{display:flex;align-items:center;gap:8px}
-  .run .st{color:var(--mute)}
+  /* the Launch control floats on its plinth, big air above + below */
+  .launch-row{display:flex;justify-content:center;margin:64px 0}
+  .runs{margin-top:64px}
+  .run{border-top:1px solid var(--hair-soft)}
+  .run-main{display:flex;align-items:center;justify-content:space-between;padding:14px 2px;font-size:13px;cursor:pointer}
+  .run .l{display:flex;align-items:center;gap:12px;min-width:0;color:var(--bone)}
+  .run .src{color:var(--ash);font-size:11px}
+  .run-right{display:flex;align-items:center;gap:10px}
+  .run .st{color:var(--mute);font-size:12px}
   .run .st.done{color:var(--green)} .run .st.fail{color:var(--red)} .run .st.run{color:var(--green)}
-  /* run status oracle: a turned-metal ring (Blender) with a NEON core in CSS, so the core
-     stays a vivid, app-matched green/red. done = green, failed = red, running = green pulse. */
-  .run .dot{position:relative;width:20px;height:20px;flex:none;background:url(assets/dot-ring@3x.png) center/contain no-repeat}
-  .run .dot::before{content:"";position:absolute;inset:22%;border-radius:50%}
-  .run .dot.done::before,.run .dot.run::before{background:radial-gradient(circle at 50% 42%,#7df7b3,#37d27a 72%);box-shadow:0 0 7px 1px rgba(55,210,122,.85)}
-  .run .dot.fail::before{background:radial-gradient(circle at 50% 42%,#ff8278,#e5544a 72%);box-shadow:0 0 7px 1px rgba(229,84,74,.85)}
-  .run .dot.run::before{animation:run-pulse 1.6s ease-in-out infinite}
-  @keyframes run-pulse{0%,100%{opacity:1}50%{opacity:.5}}
+  /* run status: a machined ring with anodized light rising from within. done/live green, failed red. */
+  .run .dot{position:relative;width:18px;height:18px;flex:none;background:url(assets/dot-ring@3x.png) center/contain no-repeat}
+  .run .dot::before{content:"";position:absolute;inset:24%;border-radius:50%}
+  .run .dot.done::before,.run .dot.run::before{background:radial-gradient(circle at 50% 40%,var(--green-core),var(--green) 74%);box-shadow:0 0 5px 0 rgba(76,157,110,.5)}
+  .run .dot.fail::before{background:radial-gradient(circle at 50% 40%,var(--red-core),var(--red) 74%);box-shadow:0 0 5px 0 rgba(192,85,75,.5)}
+  .run .dot.run::before{animation:run-pulse 2s ease-in-out infinite}
+  @keyframes run-pulse{0%,100%{opacity:1}50%{opacity:.45}}
 
   /* ===== Autopilot pipeline preview: the read-only chain shown in Launch after we detect
      the data. Each step lights green as it runs + completes (the oracle marker). ===== */
-  .pipe{display:flex;flex-direction:column;margin:14px 0 18px}
-  .stage{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--line-soft);border-radius:var(--r);padding:12px 14px}
-  .stage .dot{position:relative;width:20px;height:20px;flex:none;background:url(assets/dot-ring@3x.png) center/contain no-repeat}
-  .stage .dot::before{content:"";position:absolute;inset:22%;border-radius:50%;background:#2b2b31}
-  .stage .dot.run::before,.stage .dot.done::before{background:radial-gradient(circle at 50% 42%,#7df7b3,#37d27a 72%);box-shadow:0 0 7px 1px rgba(55,210,122,.85)}
-  .stage .dot.run::before{animation:run-pulse 1.6s ease-in-out infinite}
-  .stage .dot.fail::before{background:radial-gradient(circle at 50% 42%,#ff8278,#e5544a 72%);box-shadow:0 0 7px 1px rgba(229,84,74,.85)}
+  .pipe{display:flex;flex-direction:column;margin:16px 0 20px}
+  .stage{display:flex;align-items:center;gap:14px;border-radius:var(--r);padding:14px 16px;
+    background:linear-gradient(180deg,rgba(255,255,255,.018),rgba(0,0,0,.14));
+    box-shadow:inset 0 1px 0 var(--reveal),0 1px 0 var(--seat)}
+  .stage .dot{position:relative;width:18px;height:18px;flex:none;background:url(assets/dot-ring@3x.png) center/contain no-repeat}
+  .stage .dot::before{content:"";position:absolute;inset:24%;border-radius:50%;background:#1a1a1e}
+  .stage .dot.run::before,.stage .dot.done::before{background:radial-gradient(circle at 50% 40%,var(--green-core),var(--green) 74%);box-shadow:0 0 5px 0 rgba(76,157,110,.5)}
+  .stage .dot.run::before{animation:run-pulse 2s ease-in-out infinite}
+  .stage .dot.fail::before{background:radial-gradient(circle at 50% 40%,var(--red-core),var(--red) 74%);box-shadow:0 0 5px 0 rgba(192,85,75,.5)}
   .stage-body{flex:1;min-width:0}
   .stage-lead{font-size:13px;color:var(--bone-hi);font-weight:500}
-  .stage-sub{font-size:11px;color:var(--ash);margin-top:3px}
-  .stage-conn{height:18px;width:1px;margin:0 auto;background:linear-gradient(var(--line-hi),var(--line));position:relative}
-  .stage-conn::after{content:"";position:absolute;left:50%;bottom:0;width:5px;height:5px;border-right:1px solid var(--line);border-bottom:1px solid var(--line);transform:translate(-50%,1px) rotate(45deg)}
-  .run .trace{width:54px;height:20px;display:none} .run[data-status="running"] .trace{display:block}
-  .icon{width:26px;height:26px;border:none;background:none;color:var(--ash);border-radius:var(--r-sm);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;transition:background var(--dur) var(--ease),color var(--dur) var(--ease)}
-  .icon:hover{background:var(--raise);color:var(--bone)} .icon svg{width:15px;height:15px;stroke-width:1.5}
-  .detail{display:none;padding:0 2px 14px} .detail.open{display:block}
-  .preview{font-size:12px;color:var(--mute);background:var(--card);border:1px solid var(--line-soft);border-radius:var(--r-sm);padding:10px 12px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
-  .actions{display:flex;align-items:center;gap:8px;margin-top:10px}
-  .mini{height:32px;padding:0 14px;border:1px solid var(--line);border-radius:var(--r-sm);background:transparent;color:var(--bone);font:500 13px var(--sans);cursor:pointer;transition:border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
-  .mini:hover{border-color:var(--line-hi);color:var(--bone-hi)}
+  .stage-sub{font-size:11px;color:var(--ash);margin-top:4px}
+  .stage-conn{height:18px;width:1px;margin:0 auto;background:linear-gradient(var(--reveal-hi),transparent);position:relative}
+  .stage-conn::after{content:"";position:absolute;left:50%;bottom:0;width:5px;height:5px;border-right:1px solid var(--hair);border-bottom:1px solid var(--hair);transform:translate(-50%,1px) rotate(45deg)}
+  .run .trace{width:52px;height:18px;display:none} .run[data-status="running"] .trace{display:block}
+  .icon{width:26px;height:26px;border:none;background:none;color:var(--ash);border-radius:var(--r-sm);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;transition:color var(--dur) var(--ease)}
+  .icon:hover{color:var(--mute)} .icon svg{width:15px;height:15px;stroke-width:1.5}
+  .detail{display:none;padding:0 2px 16px} .detail.open{display:block}
+  .preview{font-size:12px;color:var(--mute);border-radius:var(--r-sm);padding:11px 13px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;
+    background:linear-gradient(180deg,rgba(0,0,0,.22),rgba(0,0,0,.08));box-shadow:inset 0 1px 0 var(--reveal)}
+  .actions{display:flex;align-items:center;gap:10px;margin-top:12px}
+  .mini{height:32px;padding:0 14px;border-radius:var(--r-sm);background:transparent;color:var(--bone);font:500 12px var(--mono);letter-spacing:.02em;cursor:pointer;box-shadow:inset 0 0 0 1px var(--hair);transition:color var(--dur) var(--ease),box-shadow var(--dur) var(--ease)}
+  .mini:hover{color:var(--bone-hi);box-shadow:inset 0 0 0 1px var(--reveal-hi)}
+
+  /* ===== VERIFICATION RECEIPT: the moat made visible. The hero of a finished run.
+     Honest, derived from the job's verification object · never implies cryptographic proof.
+     Anodized check rows on hairlines, tabular counts, one quiet heading. ===== */
+  .verification{margin:0 0 16px;padding:14px 14px 4px;border-radius:var(--r);
+    background:linear-gradient(180deg,rgba(255,255,255,.018),rgba(0,0,0,.14));
+    box-shadow:inset 0 1px 0 var(--reveal),0 1px 0 var(--seat)}
+  .verification .vh{font-size:10px;font-weight:500;letter-spacing:.2em;text-transform:uppercase;color:var(--bone-hi);margin:0 0 4px;display:flex;align-items:center;gap:9px}
+  .verification .vh.unverified{color:var(--mute)}
+  .verification .vh .vlabel{color:var(--mute);letter-spacing:.04em;text-transform:none;font-size:11px}
+  /* the verification mark: an anodized check rising from within, echoing the run dot */
+  .vmark{display:inline-block;width:8px;height:8px;border-radius:50%;flex:none;
+    background:radial-gradient(circle at 50% 40%,var(--green-core),var(--green) 72%);box-shadow:0 0 5px 0 rgba(76,157,110,.5)}
+  .vmark.red{background:radial-gradient(circle at 50% 40%,var(--red-core),var(--red) 72%);box-shadow:0 0 5px 0 rgba(192,85,75,.5)}
+  .vmark.idle{background:none;box-shadow:inset 0 0 0 1.5px rgba(255,255,255,.2)}
+  .vrow{display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-top:1px solid var(--hair-soft);font-size:12px;color:var(--bone)}
+  .vrow:first-of-type{border-top:none}
+  .vrow .vl{display:flex;align-items:center;gap:9px;min-width:0}
+  .vrow .vc{color:var(--mute);font-variant-numeric:tabular-nums}
+  .vrow.bad .vl{color:var(--bone-hi)} .vrow.bad .vc{color:var(--red)}
+  .vrow.charge-bad .vl{color:var(--red)} .vrow.charge-bad .vc{color:var(--red)}
+
+  /* ===== QUICKSTART empty-state: buyer activation. Copy-paste the first job. Calm, on-doctrine. ===== */
+  .quickstart{margin-top:8px}
+  .qs-lead{font-size:13px;line-height:1.6;color:var(--mute);margin:0 0 22px}
+  .qs-tabs{display:flex;gap:8px;margin-bottom:14px}
+  .qs-tab{height:30px;padding:0 13px;border-radius:var(--r-pill);background:transparent;color:var(--mute);font:500 11px var(--mono);letter-spacing:.04em;cursor:pointer;box-shadow:inset 0 0 0 1px var(--hair);transition:color var(--dur) var(--ease),box-shadow var(--dur) var(--ease)}
+  .qs-tab:hover{color:var(--bone)}
+  .qs-tab.on{color:var(--bg);background:var(--bone-hi);box-shadow:none}
+  /* the snippet sits down in a cut channel, like the intake slot · recessed, never a drawn box */
+  .qs-snip{position:relative;border-radius:var(--r);padding:16px 16px;
+    background:linear-gradient(180deg,rgba(0,0,0,.24),rgba(0,0,0,.08));
+    box-shadow:inset 0 1px 0 var(--reveal),inset 0 3px 12px rgba(0,0,0,.5)}
+  .qs-pane{display:none} .qs-pane.on{display:block}
+  .qs-code{margin:0;font:400 12px/1.7 var(--mono);color:var(--bone);white-space:pre;overflow-x:auto;font-variant-numeric:tabular-nums}
+  .qs-code .cm{color:var(--ash)}        /* comment voice */
+  .qs-code .st{color:var(--bone-hi)}    /* the key / a literal that announces */
+  .qs-copy{position:absolute;top:11px;right:11px;height:28px;padding:0 11px;border-radius:var(--r-sm);background:transparent;color:var(--mute);font:500 11px var(--mono);letter-spacing:.04em;cursor:pointer;box-shadow:inset 0 0 0 1px var(--hair);transition:color var(--dur) var(--ease),box-shadow var(--dur) var(--ease)}
+  .qs-copy:hover{color:var(--bone-hi);box-shadow:inset 0 0 0 1px var(--reveal-hi)}
+  .qs-cta{margin-top:22px;display:flex;align-items:center;gap:14px}
+  .qs-cta .qs-hint{font-size:11px;color:var(--ash)}
+  /* the Quickstart affordance in the Runs header: a quiet text toggle, lifted by light when on */
+  .runs-h{display:flex;align-items:baseline;justify-content:space-between}
+  .qs-toggle{border:none;background:none;padding:0;margin:0 0 14px;font:500 10px var(--mono);letter-spacing:.22em;text-transform:uppercase;color:var(--ash);cursor:pointer;transition:color var(--dur) var(--ease)}
+  .qs-toggle:hover{color:var(--mute)} .qs-toggle.on{color:var(--bone-hi)}
 
   /* ===== SETTINGS ===== */
-  .avatar{width:42px;height:42px;border-radius:var(--r-pill);background:var(--raise);border:1px solid var(--line);color:var(--bone-hi);display:flex;align-items:center;justify-content:center;font-weight:600;font-size:14px;flex:none}
-  .switch{width:40px;height:24px;border-radius:var(--r-pill);border:1px solid var(--line);background:var(--card);cursor:pointer;position:relative;flex:none;transition:background var(--dur) var(--ease),border-color var(--dur) var(--ease)}
-  .switch::after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:var(--ash);transition:left var(--dur) var(--ease),background var(--dur) var(--ease)}
-  .switch.on{background:var(--bone-hi);border-color:var(--bone-hi)} .switch.on::after{left:18px;background:var(--bg)}
+  .avatar{width:42px;height:42px;border-radius:var(--r-pill);color:var(--bone-hi);display:flex;align-items:center;justify-content:center;font-weight:600;font-size:13px;flex:none;
+    background:linear-gradient(180deg,rgba(255,255,255,.04),rgba(0,0,0,.2));box-shadow:inset 0 1px 0 var(--reveal),inset 0 0 0 1px var(--hair)}
+  .switch{width:40px;height:24px;border-radius:var(--r-pill);background:rgba(0,0,0,.3);cursor:pointer;position:relative;flex:none;box-shadow:inset 0 0 0 1px var(--hair),inset 0 1px 3px rgba(0,0,0,.5);transition:background var(--dur) var(--ease)}
+  .switch::after{content:"";position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:var(--mute);transition:left var(--dur) var(--ease),background var(--dur) var(--ease)}
+  .switch.on{background:rgba(231,227,220,.9)} .switch.on::after{left:19px;background:var(--bg)}
 
-  .toasts{position:fixed;bottom:20px;right:20px;display:flex;flex-direction:column;gap:8px;z-index:20}
-  .toast{background:var(--raise);border:1px solid var(--line);color:var(--bone);padding:11px 15px;border-radius:var(--r-sm);font-size:13px;opacity:0;transform:translateY(8px);transition:opacity var(--dur-slow) var(--ease),transform var(--dur-slow) var(--ease);max-width:300px;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+  .toasts{position:fixed;bottom:22px;right:22px;display:flex;flex-direction:column;gap:8px;z-index:20}
+  .toast{color:var(--bone);padding:12px 15px;border-radius:var(--r-sm);font-size:12px;opacity:0;transform:translateY(8px);transition:opacity var(--dur-slow) var(--ease),transform var(--dur-slow) var(--ease);max-width:300px;
+    background:linear-gradient(180deg,rgba(255,255,255,.03),rgba(0,0,0,.2));box-shadow:inset 0 1px 0 var(--reveal),0 20px 44px -26px rgba(0,0,0,.9)}
   .toast.show{opacity:1;transform:none}
 
-  .keyin{height:32px;width:210px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--card);color:var(--bone-hi);padding:0 12px;font:400 13px var(--sans)}
-  .keyin:focus{outline:none;border-color:var(--line-hi)}
+  .keyin{height:32px;width:200px;border-radius:var(--r-sm);background:rgba(0,0,0,.28);color:var(--bone-hi);padding:0 12px;font:400 12px var(--mono);border:none;box-shadow:inset 0 0 0 1px var(--hair),inset 0 2px 6px rgba(0,0,0,.4)}
+  .keyin:focus{outline:none;box-shadow:inset 0 0 0 1px var(--reveal-hi),inset 0 2px 6px rgba(0,0,0,.4)}
   .live-badge{margin-left:10px;font-size:9px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--bg);background:var(--bone-hi);padding:3px 8px;border-radius:var(--r-pill)}
 
-  /* computexchange action capsule · brushed-steel shell image, live label in the dark channel */
+  /* ===== Settings · billing + usage + API-keys panels. Same material language as the rest:
+     hairline rows, cast/recessed panels, anodized status only, no drawn boxes. ===== */
+  .set-note{font-size:11px;line-height:1.6;color:var(--ash);margin:10px 2px 0}
+  .set-note.warn{color:var(--mute)}
+  /* status pip: configured/connected -> anodized green; unconfigured/absent -> idle ring; failed -> red */
+  .pip{display:inline-block;width:7px;height:7px;border-radius:50%;flex:none;margin-right:9px;vertical-align:middle;
+    background:radial-gradient(circle at 50% 40%,var(--green-core),var(--green) 72%);box-shadow:0 0 5px 0 rgba(76,157,110,.5)}
+  .pip.idle{background:none;box-shadow:inset 0 0 0 1.5px rgba(255,255,255,.2)}
+  .pip.red{background:radial-gradient(circle at 50% 40%,var(--red-core),var(--red) 72%);box-shadow:0 0 5px 0 rgba(192,85,75,.5)}
+
+  /* the spend-trend monitor reuses the EARN sparkline material */
+  .usage{margin-top:16px;padding:18px 18px 14px}
+  .usage-h{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:12px}
+  .usage-h .k{font-size:10px;font-weight:500;letter-spacing:.2em;text-transform:uppercase;color:var(--mute)}
+  .usage-h .v{font-size:13px;font-weight:500;color:var(--bone-hi)}
+  .usage svg{display:block;width:100%;height:46px}
+  .usage-sub{font-size:11px;color:var(--ash);margin-top:8px;letter-spacing:.02em}
+
+  /* per-job invoice line items · tabular figures on hairlines, quiet drift voice */
+  .lineitem{display:flex;align-items:center;justify-content:space-between;padding:11px 2px;border-top:1px solid var(--hair-soft);font-size:12px}
+  .lineitem:first-of-type{border-top:none}
+  .lineitem .li-l{display:flex;align-items:center;gap:10px;min-width:0;color:var(--bone)}
+  .lineitem .li-t{color:var(--ash);font-size:11px}
+  .lineitem .li-amt{color:var(--bone-hi);font-variant-numeric:tabular-nums}
+  .lineitem .li-amt .drift{color:var(--mute);margin-left:8px;font-size:11px}
+
+  /* the hard spend-cap input sits down in a cut channel, like the live-key field */
+  .capwrap{display:flex;align-items:center;justify-content:space-between;padding:18px 2px;border-top:1px solid var(--hair-soft)}
+  .capfield{display:inline-flex;align-items:center;gap:8px}
+  .capfield .cur{color:var(--mute);font-size:13px}
+  .capin{height:32px;width:104px;border-radius:var(--r-sm);background:rgba(0,0,0,.28);color:var(--bone-hi);padding:0 12px;font:400 12px var(--mono);border:none;text-align:right;font-variant-numeric:tabular-nums;box-shadow:inset 0 0 0 1px var(--hair),inset 0 2px 6px rgba(0,0,0,.4)}
+  .capin:focus{outline:none;box-shadow:inset 0 0 0 1px var(--reveal-hi),inset 0 2px 6px rgba(0,0,0,.4)}
+
+  /* API-key list · masked rows on hairlines, a quiet revoke text-control per row */
+  .keyrow{display:flex;align-items:center;justify-content:space-between;padding:14px 2px;border-top:1px solid var(--hair-soft);font-size:13px}
+  .keyrow:first-of-type{border-top:none}
+  .keyrow .kr-l{min-width:0}
+  .keyrow .kr-name{color:var(--bone-hi);font-weight:500}
+  .keyrow .kr-meta{color:var(--ash);font-size:11px;margin-top:4px;letter-spacing:.02em}
+  .keyrow .kr-mask{color:var(--mute);font-variant-numeric:tabular-nums}
+  .keyrow.revoked .kr-name,.keyrow.revoked .kr-mask{color:var(--ash);text-decoration:line-through}
+  .kr-revoke{border:none;background:none;padding:4px 6px;margin:0;font:500 11px var(--mono);letter-spacing:.04em;color:var(--ash);cursor:pointer;transition:color var(--dur) var(--ease)}
+  .kr-revoke:hover{color:var(--red-core)}
+  .kr-revoked-tag{font:500 11px var(--mono);letter-spacing:.04em;color:var(--ash)}
+
+  /* the reveal-once affordance · the raw secret sits in a cut channel with a copy control + a
+     one-time warning. Shown once after Create, never re-displayable (the masked row replaces it). */
+  .reveal{position:relative;margin-top:14px;border-radius:var(--r);padding:14px 16px;
+    background:linear-gradient(180deg,rgba(0,0,0,.24),rgba(0,0,0,.08));
+    box-shadow:inset 0 1px 0 var(--reveal),inset 0 3px 12px rgba(0,0,0,.5)}
+  .reveal-h{font-size:10px;font-weight:500;letter-spacing:.2em;text-transform:uppercase;color:var(--bone-hi);margin:0 0 10px}
+  .reveal-key{display:flex;align-items:center;gap:10px}
+  .reveal-secret{flex:1;min-width:0;font:500 12px var(--mono);color:var(--signal);overflow-x:auto;white-space:nowrap;font-variant-numeric:tabular-nums}
+  .reveal-warn{font-size:11px;line-height:1.6;color:var(--mute);margin:10px 0 0}
+
+  /* ===== SELF-SERVE ENTRY: first-run signup/login for a buyer with no key yet. A cast panel
+     at the top of Launch · a quiet two-tab toggle (create / sign in), instrument-like fields in
+     cut channels, one solid submit, an honest inline error line, and a note about the sandbox
+     lane (run jobs on a test key first, add a card later). Hidden the moment a key exists. ===== */
+  .auth{margin:0 0 48px;padding:24px 22px 22px}
+  .auth-lead{font-size:13px;line-height:1.6;color:var(--mute);margin:0 0 18px}
+  .auth-tabs{display:flex;gap:8px;margin-bottom:18px}
+  .auth-tab{height:30px;padding:0 14px;border-radius:var(--r-pill);background:transparent;color:var(--mute);font:500 11px var(--mono);letter-spacing:.04em;cursor:pointer;box-shadow:inset 0 0 0 1px var(--hair);transition:color var(--dur) var(--ease),box-shadow var(--dur) var(--ease)}
+  .auth-tab:hover{color:var(--bone)}
+  .auth-tab.on{color:var(--bg);background:var(--bone-hi);box-shadow:none}
+  .auth-field{display:block;margin-bottom:12px}
+  .auth-field .al{display:block;font-size:10px;font-weight:500;letter-spacing:.2em;text-transform:uppercase;color:var(--mute);margin:0 0 7px}
+  /* the field sits down in a cut channel, like the live-key + spend-cap inputs */
+  .auth-in{height:36px;width:100%;border-radius:var(--r-sm);background:rgba(0,0,0,.28);color:var(--bone-hi);padding:0 13px;font:400 13px var(--mono);border:none;box-shadow:inset 0 0 0 1px var(--hair),inset 0 2px 6px rgba(0,0,0,.4)}
+  .auth-in:focus{outline:none;box-shadow:inset 0 0 0 1px var(--reveal-hi),inset 0 2px 6px rgba(0,0,0,.4)}
+  .auth-cta{display:flex;align-items:center;gap:14px;margin-top:18px}
+  .auth-hint{font-size:11px;line-height:1.6;color:var(--ash)}
+  /* honest inline error · the single anodized red voice, no box, surfaced never swallowed */
+  .auth-err{font-size:12px;line-height:1.6;color:var(--red-core);margin:14px 0 0;display:none}
+  .auth-err.show{display:block}
+  .auth-note{font-size:11px;line-height:1.6;color:var(--ash);margin:16px 0 0;display:flex;align-items:flex-start;gap:9px}
+  .auth-note .pip{margin-top:4px}
+
+  /* the Stripe publishable-key field sits down in a cut channel, like the live-key + spend-cap inputs */
+  .pkin{height:32px;width:240px;border-radius:var(--r-sm);background:rgba(0,0,0,.28);color:var(--bone-hi);padding:0 12px;font:400 12px var(--mono);border:none;box-shadow:inset 0 0 0 1px var(--hair),inset 0 2px 6px rgba(0,0,0,.4)}
+  .pkin:focus{outline:none;box-shadow:inset 0 0 0 1px var(--reveal-hi),inset 0 2px 6px rgba(0,0,0,.4)}
+  /* the Stripe Elements card field mounts into a cut channel · same recessed material as the snippets */
+  .cardmount{margin-top:14px;border-radius:var(--r);padding:16px 16px;
+    background:linear-gradient(180deg,rgba(0,0,0,.24),rgba(0,0,0,.08));
+    box-shadow:inset 0 1px 0 var(--reveal),inset 0 3px 12px rgba(0,0,0,.5)}
+  .cardmount-h{font-size:10px;font-weight:500;letter-spacing:.2em;text-transform:uppercase;color:var(--bone-hi);margin:0 0 12px}
+  /* Stripe injects an iframe here; give it a quiet seated channel + room to breathe */
+  .cardfield{padding:11px 13px;border-radius:var(--r-sm);background:rgba(0,0,0,.28);box-shadow:inset 0 0 0 1px var(--hair),inset 0 2px 6px rgba(0,0,0,.4)}
+  .cardmount-cta{display:flex;align-items:center;gap:12px;margin-top:14px}
+  .cardmount-err{font-size:12px;line-height:1.6;color:var(--red-core);margin:12px 0 0;display:none}
+  .cardmount-err.show{display:block}
+
+  /* ===== SUPPLIER ONBOARDING (Settings · payout): capture tax_id + tax_country, open the
+     Stripe Connect account-link in a new tab, and render connect_status / payouts_enabled /
+     tax_on_file with anodized pips. Honest 503 when STRIPE is unset · never a faked connection. */
+  .sup-field{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 2px;border-top:1px solid var(--hair-soft)}
+  .sup-field:first-of-type{border-top:none}
+  .sup-field .sl{color:var(--bone);font-size:13px}
+  .sup-in{height:32px;width:200px;border-radius:var(--r-sm);background:rgba(0,0,0,.28);color:var(--bone-hi);padding:0 12px;font:400 12px var(--mono);border:none;box-shadow:inset 0 0 0 1px var(--hair),inset 0 2px 6px rgba(0,0,0,.4)}
+  .sup-in:focus{outline:none;box-shadow:inset 0 0 0 1px var(--reveal-hi),inset 0 2px 6px rgba(0,0,0,.4)}
+  .sup-in.short{width:104px;text-transform:uppercase}
+
+  /* computexchange action capsule · brushed-steel shell image, label rising from the dark channel */
   .cx-key{ position:relative; display:inline-flex; padding:0; border:0; background:none;
     height:44px; cursor:pointer; outline:none; transition:transform .08s ease; }
   .cx-key--lg{ height:44px; }   /* same height as base -> bevel matches Add payment exactly */
   .cx-key .cx-key-metal{ display:block; height:100%; width:auto; pointer-events:none;
-    filter:drop-shadow(0 2px 6px rgba(0,0,0,.55)); }
+    filter:drop-shadow(0 2px 6px rgba(0,0,0,.6)); }
   .cx-key .cx-key-label{ position:absolute; inset:0; display:grid; place-items:center;
-    font:600 14px/1 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;
-    letter-spacing:.02em; color:#f6f8ff;
-    text-shadow:0 1px 2px rgba(0,0,0,.7), 0 0 10px rgba(205,228,255,.45);
+    font:600 13px/1 var(--mono); letter-spacing:.04em; color:#f3f6ff;
+    text-shadow:0 1px 2px rgba(0,0,0,.7), 0 0 10px rgba(205,228,255,.4);
     pointer-events:none; user-select:none; -webkit-user-select:none; }
-  .cx-key--lg .cx-key-label{ font-size:14px; }
-  .cx-key.is-armed .cx-key-label{ animation:cx-key-breathe 3.6s ease-in-out infinite; }
+  .cx-key--lg .cx-key-label{ font-size:13px; }
+  .cx-key.is-armed .cx-key-label{ animation:cx-key-breathe 4s ease-in-out infinite; }
   @keyframes cx-key-breathe{
-    0%,100%{ text-shadow:0 1px 1.5px rgba(0,0,0,.55), 0 0 7px  rgba(205,228,255,.38); }
-    50%    { text-shadow:0 1px 1.5px rgba(0,0,0,.55), 0 0 12px rgba(205,228,255,.62); } }
+    0%,100%{ text-shadow:0 1px 1.5px rgba(0,0,0,.55), 0 0 7px  rgba(205,228,255,.34); }
+    50%    { text-shadow:0 1px 1.5px rgba(0,0,0,.55), 0 0 12px rgba(205,228,255,.58); } }
   .cx-key .cx-key-icon{ position:absolute; inset:0; display:grid; place-items:center; pointer-events:none; }
-  .cx-key .cx-key-icon svg{ width:26px; height:26px; color:#f6f8ff;
-    filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.6)) drop-shadow(0 0 7px rgba(205,228,255,.42)); }
-  .cx-key.is-armed .cx-key-icon svg{ animation:cx-key-iconglow 3.6s ease-in-out infinite; }
+  .cx-key .cx-key-icon svg{ width:24px; height:24px; color:#f3f6ff;
+    filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.6)) drop-shadow(0 0 7px rgba(205,228,255,.4)); }
+  .cx-key.is-armed .cx-key-icon svg{ animation:cx-key-iconglow 4s ease-in-out infinite; }
   @keyframes cx-key-iconglow{
-    0%,100%{ filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.6)) drop-shadow(0 0 5px  rgba(205,228,255,.30)); }
-    50%    { filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.6)) drop-shadow(0 0 11px rgba(205,228,255,.55)); } }
+    0%,100%{ filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.6)) drop-shadow(0 0 5px  rgba(205,228,255,.28)); }
+    50%    { filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.6)) drop-shadow(0 0 11px rgba(205,228,255,.52)); } }
   .cx-key:active{ transform:translateY(1px) scale(.997); }
   .cx-key[disabled]{ cursor:not-allowed; }
-  .cx-key[disabled] .cx-key-label{ color:#f6f8ff; opacity:.5; text-shadow:0 1px 1px rgba(0,0,0,.4); animation:none; }
+  .cx-key[disabled] .cx-key-label{ color:#f3f6ff; opacity:.45; text-shadow:0 1px 1px rgba(0,0,0,.4); animation:none; }
 
   @media (prefers-reduced-motion:reduce){
     *{transition:none !important;animation:none !important}
     .knob.is-on .knob-glow{opacity:1}
     .cx-key.is-armed .cx-key-label{ animation:none; }
   }
-  /* ===== SPLASH: a static flat white Cx on the dark ground (the rail mark, sized up), no
-     movement, then a fade to the app. The metal-forged variant stays in git history and in
-     web/assets/cx-metal* if we want it back. ===== */
+  /* ===== SPLASH: a static flat white Cx on the concrete field, a brief hold then a fade. ===== */
   .splash{position:fixed;inset:0;display:grid;place-items:center;z-index:60;
-    background:radial-gradient(120% 100% at 50% 0%,#101014,#0a0a0c 55%,#08080a);
+    background:radial-gradient(78% 56% at 50% 2%,rgba(255,255,255,.02),rgba(255,255,255,0) 60%),var(--bg);
     transition:opacity .5s var(--ease)}
   .splash.hide{opacity:0;pointer-events:none}
-  .splash .mark{width:118px;height:118px}
+  .splash .mark{width:104px;height:104px;opacity:.95}
   .splash .mark>img{width:100%;height:100%;object-fit:contain;display:block}
 </style>
 </head>
@@ -261,6 +443,18 @@
     <div class="notif" id="notif"></div>
 
     <section class="view on" id="v-launch">
+      <div class="auth card" id="auth" hidden>
+        <p class="auth-lead">Create an account to run your first job. You get a sandbox key right away · run jobs on free credit, add a card later.</p>
+        <div class="auth-tabs">
+          <button class="auth-tab on" id="authTabSignup" data-mode="signup">Create account</button>
+          <button class="auth-tab" id="authTabLogin" data-mode="login">Sign in</button>
+        </div>
+        <label class="auth-field"><span class="al">Email</span><input class="auth-in" id="authEmail" type="email" autocomplete="email" autocapitalize="off" spellcheck="false" placeholder="you@company.com" aria-label="Email"></label>
+        <label class="auth-field"><span class="al">Password</span><input class="auth-in" id="authPassword" type="password" autocomplete="current-password" placeholder="at least 8 characters" aria-label="Password"></label>
+        <p class="auth-err" id="authErr" role="alert"></p>
+        <div class="auth-cta"><button class="pill solid" id="authSubmit">Create account</button><span class="auth-hint" id="authHint">Sandbox lane · a cx_test_ key plus free credit, instantly.</span></div>
+        <p class="auth-note"><span class="pip idle"></span><span>No card required to start. The free credit covers your first runs on the sandbox key; adding a card is required only once you exceed it.</span></p>
+      </div>
       <div class="banner card" id="setup"><span>Add a payment method to run your first job.</span><button class="cx-key is-armed" id="add-payment" aria-label="Add payment"><img class="cx-key-metal" src="assets/btn-add-payment-shell@3x.png" alt=""><span class="cx-key-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="5" width="19" height="14" rx="2.5"/><path d="M2.5 9.5h19"/></svg></span></button></div>
       <div class="intake" id="intake">
         <input type="file" id="file" hidden>
@@ -271,7 +465,7 @@
       <div class="launch-row">
         <button class="cx-key cx-key--lg" id="launch" disabled><img class="cx-key-metal" src="assets/btn-launch-shell@3x.png" alt=""><span class="cx-key-label">Launch</span></button>
       </div>
-      <div class="runs"><p class="section-label">Runs</p><div id="jobs"></div></div>
+      <div class="runs"><div class="runs-h"><p class="section-label">Runs</p><button class="qs-toggle" id="qsToggle" aria-pressed="false">Quickstart</button></div><div id="jobs"></div><div id="quickstart" hidden></div></div>
     </section>
 
 
@@ -303,23 +497,23 @@
 
     <section class="view" id="v-settings">
       <div style="display:flex;align-items:center;gap:12px;margin:6px 0 26px">
-        <div class="avatar">AR</div>
-        <div style="flex:1;min-width:0"><div style="color:var(--bone-hi);font-weight:500">Alex Rivera</div><div style="font-size:13px;color:var(--mute)">alex@acme.co</div></div>
-        <button class="mini" data-toast="Signed out">Sign out</button>
+        <div class="avatar" id="userAvatar">AR</div>
+        <div style="flex:1;min-width:0"><div style="color:var(--bone-hi);font-weight:500" id="userName">Alex Rivera</div><div style="font-size:13px;color:var(--mute)" id="userEmail">alex@acme.co</div></div>
+        <button class="mini" id="signOut" hidden>Sign out</button>
       </div>
       <p class="section-label">Connections</p>
       <div class="row"><span class="l">GitHub</span><button class="mini" data-toast="Connecting to GitHub">Connect</button></div>
-      <p class="section-label" style="margin-top:24px">Billing</p>
-      <div class="row"><span class="l">Payment method</span><span class="r-meta num">•••• 4242 · Visa</span></div>
-      <div class="row"><span class="l">Payout</span><span class="r-meta">Stripe · connected</span></div>
+      <p class="section-label" style="margin-top:24px">Billing &amp; usage</p>
+      <div id="billing"></div>
       <p class="section-label" style="margin-top:24px">Supplier agent</p>
       <div class="row"><span class="l">Quiet hours · 10pm to 8am</span><button class="switch on" aria-label="Quiet hours"></button></div>
       <div class="row"><span class="l">Run on power only</span><button class="switch" aria-label="Power only"></button></div>
       <div class="row"><span class="l">Memory headroom</span><span class="r-meta num">16 GB</span></div>
       <div class="row"><span class="l">Minimum payout</span><span class="r-meta num">$0.50 / hr</span></div>
+      <p class="section-label" style="margin-top:24px">Payout onboarding</p>
+      <div id="supplier"></div>
       <p class="section-label" style="margin-top:24px">API keys</p>
-      <div class="row"><span class="l num">cx_live_••••••••••••4f2a</span><span class="r-meta">created Jun 12</span></div>
-      <div style="margin-top:14px"><button class="pill solid" data-toast="New API key created">Create key</button></div>
+      <div id="apikeys"></div>
       <div class="row"><span class="l">Live test key</span><input id="liveKey" class="keyin" type="password" placeholder="cx_live_…" aria-label="Live buyer API key"></div>
       <div class="d-meta" style="margin-top:8px">Paste a buyer key to run real jobs against this server from Launch. Stored locally in this browser. Test harness only, never the shipped client.</div>
       <p class="section-label" style="margin-top:24px">Appearance</p>
@@ -470,8 +664,52 @@
   intake.addEventListener('dragleave',function(e){e.preventDefault();intake.classList.remove('drag');});
   intake.addEventListener('drop',function(e){e.preventDefault();intake.classList.remove('drag');var f=e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files[0];if(f)detectFile(f);});
 
-  function doneDetail(){return '<div class="preview num">[ 0.0131, -0.0412, 0.0098, 0.0457, 0.0203, … ]  · 384-dim × 2,100,000 rows</div><div class="actions"><button class="mini" data-dl>Download</button><button class="mini" data-pr>Open PR</button></div>';}
-  function failDetail(){return '<div class="preview">failed · malformed input at line 4002 (buyer input)</div><div class="actions"><span class="r-meta num">refunded $1.20</span><button class="mini" data-fix>Fix &amp; re-run</button></div>';}
+  // ===== VERIFICATION RECEIPT =====
+  // Render the buyer-facing verification object (control/types.go JobStatus.verification, the
+  // shared wire contract) + the job's charge_status as an honest receipt: anodized check rows,
+  // tabular counts, one derived heading. NEVER implies cryptographic proof · the heading text is
+  // exactly the label the server derived ("verified" | "honeypot-checked" | "unverified"). All
+  // dynamic text passes through esc(). chg is the charge_status string (optional).
+  function vrow(ok,label,count){
+    var cls=ok===false?'vmark red':ok==null?'vmark idle':'vmark';
+    var rc=ok===false?' bad':'';
+    return '<div class="vrow'+rc+'"><span class="vl"><span class="'+cls+'"></span>'+esc(label)+'</span>'
+      +(count==null?'':'<span class="vc">'+esc(String(count))+'</span>')+'</div>';
+  }
+  function verificationReceipt(v,chg){
+    if(!v)return '';
+    var label=v.label||'unverified';
+    var head=label==='verified'?'verified · multi-supplier cross-check'
+      :label==='honeypot-checked'?'honeypot-checked':'unverified';
+    var hcls=label==='unverified'?'vh unverified':'vh';
+    var mk=label==='unverified'?'vmark idle':'vmark';
+    var rows='';
+    if((v.honeypots_passed|0)>0) rows+=vrow(true,'Honeypots passed',v.honeypots_passed);
+    if((v.honeypots_failed|0)>0) rows+=vrow(false,'Honeypots failed',v.honeypots_failed);
+    if((v.redundancy_matched|0)>0) rows+=vrow(true,'Redundancy matched',v.redundancy_matched);
+    if((v.redundancy_mismatched|0)>0) rows+=vrow(false,'Redundancy mismatched',v.redundancy_mismatched);
+    if((v.tiebreaks|0)>0) rows+=vrow(true,'Tiebreaks held',v.tiebreaks);
+    if(v.dispute_status) rows+=vrow(v.dispute_status==='resolved'?true:v.dispute_status==='rejected'||v.dispute_status==='unresolvable'?false:null,'Dispute',v.dispute_status);
+    // a finished run that underwent some check but matched nothing positive still earns an honest line
+    if(!rows&&(v.checked|0)>0) rows+=vrow(null,'Checked',v.checked);
+    // charge_status: a quiet line, red when the charge failed or there was no method on file
+    if(chg==='failed') rows+='<div class="vrow charge-bad"><span class="vl"><span class="vmark red"></span>charge: failed</span></div>';
+    else if(chg==='no_payment_method') rows+='<div class="vrow charge-bad"><span class="vl"><span class="vmark red"></span>charge: no payment method</span></div>';
+    if(!rows)return '';
+    return '<div class="verification"><div class="'+hcls+'"><span class="'+mk+'"></span><span class="vlabel">'+esc(head)+'</span></div>'+rows+'</div>';
+  }
+  // Representative static receipts for the 3 SEEDED demo runs (no live data) · clearly a demo,
+  // each consistent with what the live contract would carry for that run.
+  var DEMO_VERIFY={
+    'support-pipeline':{checked:18,honeypots_passed:6,honeypots_failed:0,redundancy_matched:12,redundancy_mismatched:0,tiebreaks:1,dispute_status:'',label:'verified'},
+    'nightly-embeds':{checked:9,honeypots_passed:9,honeypots_failed:0,redundancy_matched:0,redundancy_mismatched:0,tiebreaks:0,dispute_status:'',label:'honeypot-checked'},
+    'ticket-classify':{checked:4,honeypots_passed:3,honeypots_failed:1,redundancy_matched:0,redundancy_mismatched:0,tiebreaks:0,dispute_status:'open',label:'honeypot-checked'}
+  };
+  // A fresh demo-simulated run (Launch / re-run with no live key) earns a representative receipt too.
+  var DEMO_VERIFY_FRESH={checked:8,honeypots_passed:3,honeypots_failed:0,redundancy_matched:5,redundancy_mismatched:0,tiebreaks:0,dispute_status:'',label:'verified'};
+  function doneDetail(v,chg){return verificationReceipt(v,chg)+'<div class="preview num">[ 0.0131, -0.0412, 0.0098, 0.0457, 0.0203, … ]  · 384-dim × 2,100,000 rows</div><div class="actions"><button class="mini" data-dl>Download</button><button class="mini" data-pr>Open PR</button></div>';}
+  // Seeded failure is a buyer-input fault (refunded), so charge_status is not_attempted · no charge line.
+  function failDetail(name){var v=name&&DEMO_VERIFY[name];return (v?verificationReceipt(v,'not_attempted'):'')+'<div class="preview">failed · malformed input at line 4002 (buyer input)</div><div class="actions"><span class="r-meta num">refunded $1.20</span><button class="mini" data-fix>Fix &amp; re-run</button></div>';}
 
   function runHTML(name,src,status){
     var sc=status==='running'?'run':status==='failed'?'fail':'done', mk='dot '+sc;
@@ -479,7 +717,7 @@
     return '<div class="run" data-status="'+status+'" data-name="'+esc(name)+'">'
       +'<div class="run-main"><span class="l"><span class="'+mk+'"></span>'+esc(name)+' <span class="src num">'+esc(src)+'</span></span>'
       +'<span class="run-right"><svg class="trace" viewBox="0 0 54 20" preserveAspectRatio="none"></svg><span class="st '+sc+'">'+st+'</span><button class="icon rerun" aria-label="Re-run" title="Re-run">'+RERUN+'</button></span></div>'
-      +'<div class="detail">'+(status==='failed'?failDetail():status==='done'?doneDetail():'')+'</div></div>';
+      +'<div class="detail">'+(status==='failed'?failDetail(name):status==='done'?doneDetail(DEMO_VERIFY[name]):'')+'</div></div>';
   }
   function attach(run){
     run.querySelector('.run-main').addEventListener('click',function(e){
@@ -499,7 +737,7 @@
       t++; st.textContent='running · '+t+'/8';
       if(t>=8){clearInterval(iv);if(tv)clearInterval(tv);
         run.dataset.status='done';run.querySelector('.dot').className='dot done';st.className='st done';st.textContent='done';
-        run.querySelector('.detail').innerHTML=doneDetail();
+        run.querySelector('.detail').innerHTML=doneDetail(DEMO_VERIFY_FRESH);
         notify('Job complete',name);
       }
     },360);
@@ -520,7 +758,24 @@
   });
   [['support-pipeline','main@a1b2c3','done'],['nightly-embeds','main@9f0e1d','done'],['ticket-classify','main@77c2b0','failed']].forEach(function(r){var run=el(runHTML(r[0],r[1],r[2]));jobs.appendChild(run);attach(run);});
 
-  $('add-payment').addEventListener('click',function(){$('setup').style.display='none';toast('Payment method added');});
+  // The Launch banner's Add-payment button. Live -> real card capture (jump to Settings · Billing,
+  // where the Stripe Elements panel mounts); never fakes a saved card. Not live -> illustrative.
+  $('add-payment').addEventListener('click',function(){
+    if(isLive()){gotoBillingCapture();return;}
+    $('setup').style.display='none';toast('Add a payment method in Settings · Billing once you go live');
+  });
+  // Switch to the Settings view and kick off the real card-capture flow against the live billing panel.
+  function gotoBillingCapture(){
+    var nav=document.querySelector('.nav[data-view="settings"]'); if(nav)nav.click();
+    renderBilling();
+    // renderBilling re-renders async (it fetches status); start capture once the Add-payment control exists.
+    var tries=0;(function wait(){
+      var add=$('addPaymentSet');
+      if(add){startBillingSetup();return;}
+      if(++tries>40)return;   // status may show a card already on file (no button) · then nothing to do
+      setTimeout(wait,60);
+    })();
+  }
 
   // ---- live mode: real prod jobs via the /v1 API (same-origin when served at /demo) ----
   // A pasted buyer key turns Launch into a real submission against THIS server. Without
@@ -529,9 +784,532 @@
   var liveBadge=$('liveBadge'), keyIn=$('liveKey'), liveKey='';
   try{liveKey=localStorage.getItem('cx_key')||'';}catch(e){}
   function isLive(){return !!liveKey;}
-  function syncLive(){if(liveBadge)liveBadge.hidden=!isLive();if(keyIn&&!keyIn.value&&liveKey)keyIn.value=liveKey;}
-  if(keyIn)keyIn.addEventListener('change',function(){liveKey=(keyIn.value||'').trim();try{localStorage.setItem('cx_key',liveKey);}catch(e){}syncLive();toast(isLive()?'Live mode on · Launch runs real jobs on this server':'Live mode off');});
+  function syncLive(){if(liveBadge)liveBadge.hidden=!isLive();if(keyIn&&!keyIn.value&&liveKey)keyIn.value=liveKey;renderAuth();}
+  if(keyIn)keyIn.addEventListener('change',function(){liveKey=(keyIn.value||'').trim();try{localStorage.setItem('cx_key',liveKey);}catch(e){}syncLive();renderQuickstart();renderSettingsPanels();toast(isLive()?'Live mode on · Launch runs real jobs on this server':'Live mode off');});
+
+  // ===== SELF-SERVE ENTRY (signup / login) =====================================================
+  // A first-run gate at the top of Launch for a buyer with no key yet. Create-account hits
+  // POST /v1/signup {email,password} -> 201 {buyer_id,token,email}; sign-in hits POST /v1/login
+  // {email,password} -> 200 {buyer_id,token} or an honest 401. On success the returned opaque
+  // token is stored as localStorage cx_key (the same credential authBuyer + Launch already use),
+  // entering live mode, and the quickstart is shown. Errors surface inline (BLACKHOLE · never a
+  // silent accept). The gate hides itself the instant a key exists. All server text via esc().
+  var authEl=$('auth'),authEmail=$('authEmail'),authPassword=$('authPassword'),
+      authErrEl=$('authErr'),authSubmitBtn=$('authSubmit'),authHint=$('authHint'),authMode='signup';
+  function authError(msg){if(!authErrEl)return;authErrEl.textContent=msg||'';authErrEl.classList.toggle('show',!!msg);}
+  function setAuthMode(mode){
+    authMode=mode==='login'?'login':'signup';
+    document.querySelectorAll('.auth-tab').forEach(function(b){b.classList.toggle('on',b.dataset.mode===authMode);});
+    if(authSubmitBtn)authSubmitBtn.textContent=authMode==='login'?'Sign in':'Create account';
+    if(authHint)authHint.textContent=authMode==='login'
+      ? 'Welcome back · your key loads into this browser.'
+      : 'Sandbox lane · a cx_test_ key plus free credit, instantly.';
+    if(authPassword)authPassword.setAttribute('autocomplete',authMode==='login'?'current-password':'new-password');
+    authError('');
+  }
+  // Show the gate only when there is no key yet; hide (and clear the password) once live.
+  function renderAuth(){
+    if(!authEl)return;
+    authEl.hidden=isLive();
+    if(isLive()&&authPassword)authPassword.value='';
+  }
+  function adoptToken(token){
+    liveKey=(token||'').trim();
+    try{localStorage.setItem('cx_key',liveKey);}catch(e){}
+    if(keyIn)keyIn.value=liveKey;             // mirror into the Settings live-key field
+    syncLive();renderQuickstart();renderSettingsPanels();
+  }
+  // The account email, captured at signup/login, is what the supplier endpoints key on
+  // (a pasted api key carries no email, so supplier onboarding needs a signed-in account).
+  function cxEmail(){try{return localStorage.getItem('cx_email')||'';}catch(e){return '';}}
+  function doAuth(){
+    if(!authSubmitBtn)return;
+    var email=(authEmail&&authEmail.value||'').trim(), password=(authPassword&&authPassword.value||'');
+    if(!email||email.indexOf('@')<0){authError('Enter a valid email address.');return;}
+    if(!password||password.length<8){authError('Password must be at least 8 characters.');return;}
+    authError('');authSubmitBtn.disabled=true;
+    var path=authMode==='login'?'/v1/login':'/v1/signup';
+    fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email,password:password})})
+      .then(function(res){return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});})
+      .then(function(r){
+        var j={};try{j=JSON.parse(r.t);}catch(e){}
+        if(!r.ok){
+          // Honest inline errors · 401 bad creds, 409 already-registered, 503 unconfigured, else the server string.
+          var msg=(j&&j.error)?String(j.error)
+            :r.status===401?'Email or password is incorrect.'
+            :r.status===409?'That email is already registered · sign in instead.'
+            :r.status===503?'Sign-up is not available on this server yet.'
+            :'Request failed · '+r.status;
+          authError(msg);authSubmitBtn.disabled=false;return;
+        }
+        if(!j||!j.token){authError('No token returned · cannot enter live mode.');authSubmitBtn.disabled=false;return;}
+        adoptToken(j.token);
+        try{localStorage.setItem('cx_email',(j.email||email||'').trim());}catch(e){}
+        notify(authMode==='login'?'Signed in':'Account created',esc(j.email||email));
+        toast(authMode==='login'?'Signed in · live mode on':'Welcome · sandbox key loaded, run a job now');
+        authSubmitBtn.disabled=false;
+      })
+      .catch(function(e){authError('Network error · '+e.message);authSubmitBtn.disabled=false;});
+  }
+  document.querySelectorAll('.auth-tab').forEach(function(b){b.addEventListener('click',function(){setAuthMode(b.dataset.mode);});});
+  if(authSubmitBtn)authSubmitBtn.addEventListener('click',doAuth);
+  // Enter submits from either field.
+  [authEmail,authPassword].forEach(function(inp){if(inp)inp.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();doAuth();}});});
+  setAuthMode('signup');
   syncLive();
+
+  // ===== SETTINGS · API keys (B1) + billing & usage (B4) =====================================
+  // Two live panels in the Settings view, both bearing the buyer key in localStorage (cx_key,
+  // the same key Launch uses). Live mode only: with no key they fall back to honest illustrative
+  // states. Every server string passes through esc(); failures surface (BLACKHOLE), never faked.
+  var apikeysEl=$('apikeys'), billingEl=$('billing');
+  // recordJob: remember a real job id this browser created (live pipelines store per-stage job_ids),
+  // so the billing surface can pull its per-job invoice from GET /v1/jobs/{id}/invoice. Honest:
+  // only ids this key actually produced; capped + de-duped; never invented.
+  function recordJob(id){
+    if(!id)return; var a=[]; try{a=JSON.parse(localStorage.getItem('cx_jobs')||'[]');}catch(e){a=[];}
+    if(!Array.isArray(a))a=[]; a=a.filter(function(x){return x!==id;}); a.unshift(id); a=a.slice(0,8);
+    try{localStorage.setItem('cx_jobs',JSON.stringify(a));}catch(e){}
+  }
+  function recordedJobs(){var a=[];try{a=JSON.parse(localStorage.getItem('cx_jobs')||'[]');}catch(e){a=[];}return Array.isArray(a)?a:[];}
+  function authHeaders(json){var h={'Authorization':'Bearer '+liveKey};if(json)h['Content-Type']='application/json';return h;}
+  function money(n){var v=Number(n)||0;return '$'+v.toFixed(2);}
+
+  // ---- B1: API-key management. GET/POST/DELETE /v1/keys, all authBuyer-gated. ----
+  function renderApiKeys(){
+    if(!apikeysEl)return;
+    if(!isLive()){
+      // No live key: keep the illustrative masked row + an honest note that management needs a key.
+      apikeysEl.innerHTML='<div class="keyrow"><div class="kr-l"><div class="kr-name num">cx_live_••••••••••••4f2a</div>'
+        +'<div class="kr-meta">illustrative · created Jun 12</div></div></div>'
+        +'<p class="set-note warn">Paste a live buyer key below to list, create, and revoke real API keys.</p>';
+      return;
+    }
+    apikeysEl.innerHTML='<p class="set-note">Loading keys…</p>';
+    fetch('/v1/keys',{headers:authHeaders(false)}).then(function(res){
+      return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});
+    }).then(function(r){
+      var j={};try{j=JSON.parse(r.t);}catch(e){}
+      if(!r.ok){apikeysEl.innerHTML='<p class="set-note warn">Could not load keys · '+esc(String((j&&j.error)||r.status))+'</p>'+createKeyHTML();return;}
+      var keys=(j&&j.keys)||[];
+      var rows=keys.length?keys.map(keyRowHTML).join(''):'<p class="set-note">No API keys yet.</p>';
+      apikeysEl.innerHTML=rows+createKeyHTML();
+    }).catch(function(e){apikeysEl.innerHTML='<p class="set-note warn">Network error loading keys · '+esc(e.message)+'</p>'+createKeyHTML();});
+  }
+  function keyRowHTML(k){
+    var created=k.created_at?String(k.created_at).slice(0,10):'';
+    if(k.revoked){
+      return '<div class="keyrow revoked"><div class="kr-l"><div class="kr-name">'+esc(k.name||'key')+'</div>'
+        +'<div class="kr-meta"><span class="kr-mask num">'+esc(k.masked||'')+'</span>'+(created?' · created '+esc(created):'')+'</div></div>'
+        +'<span class="kr-revoked-tag">revoked</span></div>';
+    }
+    return '<div class="keyrow"><div class="kr-l"><div class="kr-name">'+esc(k.name||'key')+'</div>'
+      +'<div class="kr-meta"><span class="kr-mask num">'+esc(k.masked||'')+'</span>'+(created?' · created '+esc(created):'')+'</div></div>'
+      +'<button class="kr-revoke" data-revoke="'+esc(k.id||'')+'" data-revoke-name="'+esc(k.name||'')+'">Revoke</button></div>';
+  }
+  function createKeyHTML(){return '<div style="margin-top:14px"><button class="pill solid" id="createKey">Create key</button></div><div id="keyReveal"></div>';}
+  // The raw secret is REVEALED ONCE. After this render the key is gone · the masked row is all
+  // that remains. A clear one-time warning + a copy control; no path re-displays it.
+  function revealKeyHTML(k){
+    return '<div class="reveal"><p class="reveal-h">New key · '+esc(k.name||'key')+'</p>'
+      +'<div class="reveal-key"><span class="reveal-secret num" id="revealSecret">'+esc(k.key||'')+'</span>'
+      +'<button class="mini" id="revealCopy" data-secret="'+esc(k.key||'')+'">Copy</button></div>'
+      +'<p class="reveal-warn">Copy it now · this is the only time the full key is shown. Store it somewhere safe; you will not see it again.</p></div>';
+  }
+  if(apikeysEl)apikeysEl.addEventListener('click',function(e){
+    var create=e.target.closest('#createKey');
+    if(create){
+      var name=(window.prompt('Name this key (e.g. production, ci, laptop)')||'').trim();
+      if(!name)return;
+      create.disabled=true;
+      fetch('/v1/keys',{method:'POST',headers:authHeaders(true),body:JSON.stringify({name:name})}).then(function(res){
+        return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});
+      }).then(function(r){
+        var j={};try{j=JSON.parse(r.t);}catch(e2){}
+        if(!r.ok){toast('Create failed · '+String((j&&j.error)||r.status));create.disabled=false;return;}
+        // Reveal the raw secret ONCE, then re-list (the new key shows only masked thereafter).
+        renderApiKeys();
+        var rv=$('keyReveal'); if(rv)rv.innerHTML=revealKeyHTML(j);
+        notify('API key created',esc(j.name||name));
+      }).catch(function(e2){toast('Create failed · '+e2.message);create.disabled=false;});
+      return;
+    }
+    var copy=e.target.closest('#revealCopy');
+    if(copy){var sec=copy.getAttribute('data-secret')||'';
+      var done=function(){toast('Key copied · store it now, it will not be shown again');};
+      if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(sec).then(done).catch(done);}else{done();}
+      return;}
+    var rev=e.target.closest('[data-revoke]');
+    if(rev){var id=rev.getAttribute('data-revoke'),nm=rev.getAttribute('data-revoke-name')||'this key';
+      if(!window.confirm('Revoke '+nm+'? Any client using it stops working immediately. This cannot be undone.'))return;
+      rev.disabled=true;
+      fetch('/v1/keys/'+encodeURIComponent(id),{method:'DELETE',headers:authHeaders(false)}).then(function(res){
+        if(res.status===204||res.ok){notify('API key revoked',nm);renderApiKeys();}
+        else{return res.text().then(function(t){var j={};try{j=JSON.parse(t);}catch(e3){}toast('Revoke failed · '+String((j&&j.error)||res.status));rev.disabled=false;});}
+      }).catch(function(e3){toast('Revoke failed · '+e3.message);rev.disabled=false;});
+      return;}
+  });
+
+  // ---- B4: billing status + usage surface. GET /v1/billing/status, POST /v1/billing/setup,
+  //          GET /v1/jobs/{id}/invoice for recent live runs. Stripe creds absent -> honest 503. ----
+  var spendFeed=null;
+  function renderBilling(){
+    if(!billingEl)return;
+    if(!isLive()){
+      billingEl.innerHTML='<div class="row"><span class="l"><span class="pip idle"></span>Payment method</span><span class="r-meta">paste a live key to manage billing</span></div>'
+        +'<div class="row"><span class="l"><span class="pip idle"></span>Payout</span><span class="r-meta">Stripe · supplier side</span></div>'
+        +'<p class="set-note warn">Billing status, usage, and the spend cap read from this server with your live key.</p>';
+      spendFeed=null; return;
+    }
+    billingEl.innerHTML='<p class="set-note">Loading billing…</p>';
+    fetch('/v1/billing/status',{headers:authHeaders(false)}).then(function(res){
+      return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});
+    }).then(function(r){
+      var j={};try{j=JSON.parse(r.t);}catch(e){}
+      billingEl.innerHTML=billingStatusHTML(r.ok?j:null,r.ok?null:String((j&&j.error)||r.status))+usageHTML()+capHTML();
+      wireSpendFeed();
+      loadInvoices();
+    }).catch(function(e){
+      billingEl.innerHTML='<p class="set-note warn">Network error loading billing · '+esc(e.message)+'</p>'+usageHTML()+capHTML();
+      wireSpendFeed();loadInvoices();
+    });
+  }
+  // Honest tri-state from {configured, connected, has_card}. No card is NEVER faked as saved.
+  function billingStatusHTML(s,errMsg){
+    if(errMsg)return '<div class="row"><span class="l"><span class="pip red"></span>Billing</span><span class="r-meta">'+esc(errMsg)+'</span></div>';
+    var configured=!!(s&&s.configured), connected=!!(s&&s.connected), hasCard=!!(s&&s.has_card);
+    var pmPip=hasCard?'pip':'pip idle';
+    var pmText=hasCard?'card on file · charges enabled':configured?'no card on file':'billing not configured on this server';
+    var cfgPip=configured?'pip':'pip idle';
+    var cfgText=configured?(connected?'configured · customer connected':'configured'):'unconfigured (no STRIPE_SECRET_KEY)';
+    var btn=hasCard
+      ? '<span class="r-meta">card on file</span>'
+      : '<button class="cx-key is-armed" id="addPaymentSet" aria-label="Add payment"><img class="cx-key-metal" src="assets/btn-add-payment-shell@3x.png" alt=""><span class="cx-key-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="5" width="19" height="14" rx="2.5"/><path d="M2.5 9.5h19"/></svg></span></button>';
+    return '<div class="row"><span class="l"><span class="'+pmPip+'"></span>Payment method</span>'+btn+'</div>'
+      +'<div class="row"><span class="l"><span class="'+cfgPip+'"></span>Stripe</span><span class="r-meta">'+esc(cfgText)+'</span></div>'
+      +(hasCard?'':'<p class="set-note" id="payNote">'+esc(pmText)+'</p>');
+  }
+  function usageHTML(){
+    return '<div class="usage card"><div class="usage-h"><span class="k">Spend · this month</span><span class="v num" id="mtd">$0.00</span></div>'
+      +'<svg id="spendFeed" viewBox="0 0 300 46" preserveAspectRatio="none" aria-hidden="true"></svg>'
+      +'<div class="usage-sub" id="usageSub">No billed runs yet on this key.</div></div>'
+      +'<div id="lineitems"></div>';
+  }
+  function capHTML(){
+    var cap='';try{cap=localStorage.getItem('cx_spend_cap')||'';}catch(e){}
+    var pk='';try{pk=localStorage.getItem('cx_pk')||'';}catch(e){}
+    return '<div class="capwrap"><span class="l"><span class="pip idle"></span>Hard spend cap</span>'
+      +'<span class="capfield"><span class="cur">$</span><input id="spendCap" class="capin" type="number" min="0" step="1" inputmode="decimal" placeholder="none" value="'+esc(cap)+'" aria-label="Hard spend cap in USD"></span></div>'
+      +'<p class="set-note">Sent as max_usd on each job you launch. Stored locally in this browser.</p>'
+      +'<div class="capwrap"><span class="l"><span class="'+(pk?'pip':'pip idle')+'"></span>Stripe publishable key</span>'
+      +'<span class="capfield"><input id="stripePk" class="pkin" type="text" autocapitalize="off" spellcheck="false" placeholder="pk_live_… or pk_test_…" value="'+esc(pk)+'" aria-label="Stripe publishable key"></span></div>'
+      +'<p class="set-note">The publishable (pk_) key only · safe to keep in this browser. Never paste a secret (sk_) key here. Needed to capture a card in this harness.</p>';
+  }
+  function wireSpendFeed(){
+    var svg=$('spendFeed'); if(!svg)return;
+    spendFeed=liveFeed(svg,{w:300,h:46,n:48});
+    var capEl=$('spendCap');
+    if(capEl)capEl.addEventListener('change',function(){
+      var v=(capEl.value||'').trim();
+      try{if(v)localStorage.setItem('cx_spend_cap',v);else localStorage.removeItem('cx_spend_cap');}catch(e){}
+      toast(v?'Spend cap set · $'+v+' max per job':'Spend cap cleared');
+    });
+    var pkEl=$('stripePk');
+    if(pkEl)pkEl.addEventListener('change',function(){
+      var v=(pkEl.value||'').trim();
+      try{if(v)localStorage.setItem('cx_pk',v);else localStorage.removeItem('cx_pk');}catch(e){}
+      var pip=pkEl.closest('.capwrap'); if(pip){var p=pip.querySelector('.pip');if(p)p.className=v?'pip':'pip idle';}
+      toast(v?'Stripe publishable key saved · safe in this browser':'Stripe publishable key cleared');
+    });
+    var add=$('addPaymentSet');
+    if(add)add.addEventListener('click',startBillingSetup);
+  }
+  function cxPk(){try{return (localStorage.getItem('cx_pk')||'').trim();}catch(e){return '';}}
+  // Real Stripe Elements card capture · closes the one gap (the SetupIntent was ready but no card
+  // was ever collected). Flow: require a publishable (pk_) key first; POST /v1/billing/setup for a
+  // SetupIntent client_secret (honest 503 when Stripe is unconfigured · never a faked card); mount a
+  // Stripe Elements card field in an on-doctrine cut channel; stripe.confirmCardSetup(client_secret).
+  // Success -> re-read GET /v1/billing/status (renderBilling) so has_card reflects truth. Errors via
+  // the inline error line (BLACKHOLE · stripe error.message surfaced, never swallowed).
+  var stripeJs=null, cardElement=null;
+  function cardError(msg){var e=$('cardErr');if(!e)return;e.textContent=msg||'';e.classList.toggle('show',!!msg);}
+  function startBillingSetup(){
+    var add=$('addPaymentSet'); if(!add)return;
+    if(!isLive()){toast('Paste a live buyer key first');return;}
+    var pk=cxPk();
+    if(!pk){
+      toast('Paste your Stripe publishable (pk_) key in Billing first');
+      var pkEl=$('stripePk'); if(pkEl)pkEl.focus();
+      return;
+    }
+    if(!window.Stripe){toast('Stripe.js is not loaded · check your connection and reload');return;}
+    add.disabled=true;
+    fetch('/v1/billing/setup',{method:'POST',headers:authHeaders(true),body:'{}'}).then(function(res){
+      return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});
+    }).then(function(r){
+      var j={};try{j=JSON.parse(r.t);}catch(e){}
+      if(r.status===503){toast('Stripe not configured on this server');add.disabled=false;return;}
+      if(!r.ok){toast('Card setup failed · '+String((j&&j.error)||r.status));add.disabled=false;return;}
+      if(!j||!j.client_secret){toast('Card setup returned no client_secret');add.disabled=false;return;}
+      mountCardCapture(pk,j.client_secret,add);
+    }).catch(function(e){toast('Card setup failed · '+e.message);add.disabled=false;});
+  }
+  // Mount an on-doctrine card panel where the Add-payment button was, create a Stripe Elements card
+  // field, and confirm the SetupIntent on submit. The pk_ key is a public client value.
+  function mountCardCapture(pk,clientSecret,add){
+    var panel=$('cardMount');
+    if(!panel){panel=el('<div class="cardmount" id="cardMount"></div>');add.parentNode.insertBefore(panel,add.nextSibling);}
+    panel.innerHTML='<p class="cardmount-h">Card details · Stripe</p>'
+      +'<div class="cardfield" id="cardField"></div>'
+      +'<p class="cardmount-err" id="cardErr" role="alert"></p>'
+      +'<div class="cardmount-cta"><button class="pill solid" id="cardSave">Save card</button>'
+      +'<button class="mini" id="cardCancel">Cancel</button>'
+      +'<span class="auth-hint">Entered straight into Stripe · we never see the number.</span></div>';
+    cardError('');
+    try{
+      if(!stripeJs)stripeJs=window.Stripe(pk);
+      var elements=stripeJs.elements();
+      // Style the Stripe iframe to match the concrete field · muted text, anodized red errors.
+      cardElement=elements.create('card',{style:{base:{color:'#e7e3dc',fontFamily:'"Geist Mono",ui-monospace,Menlo,monospace',fontSize:'13px','::placeholder':{color:'#83838b'}},invalid:{color:'#dc8079',iconColor:'#dc8079'}}});
+      cardElement.mount('#cardField');
+    }catch(e){cardError('Could not initialise Stripe · check the publishable key. '+(e&&e.message||''));if(add)add.disabled=false;return;}
+    cardElement.on('change',function(ev){cardError(ev&&ev.error?ev.error.message:'');});
+    var saveBtn=$('cardSave'), cancelBtn=$('cardCancel');
+    if(cancelBtn)cancelBtn.addEventListener('click',function(){teardownCard(panel);if(add)add.disabled=false;});
+    if(saveBtn)saveBtn.addEventListener('click',function(){
+      cardError('');saveBtn.disabled=true;
+      stripeJs.confirmCardSetup(clientSecret,{payment_method:{card:cardElement}}).then(function(result){
+        if(result.error){cardError(result.error.message||'Card could not be saved.');saveBtn.disabled=false;return;}
+        teardownCard(panel);
+        notify('Card saved','charges enabled on this server');
+        toast('Card saved');
+        renderBilling();   // re-read GET /v1/billing/status so has_card reflects truth
+      }).catch(function(e){cardError('Card could not be saved · '+(e&&e.message||''));saveBtn.disabled=false;});
+    });
+  }
+  function teardownCard(panel){
+    if(cardElement){try{cardElement.unmount();}catch(e){}cardElement=null;}
+    if(panel&&panel.parentNode)panel.parentNode.removeChild(panel);
+  }
+  // Pull per-job invoices for the live job ids this browser recorded, newest first. Each is a
+  // real GET /v1/jobs/{id}/invoice; misses are skipped (not faked). MTD = sum of charged_usd.
+  function loadInvoices(){
+    var ids=recordedJobs(), li=$('lineitems'), sub=$('usageSub'), mtdEl=$('mtd');
+    if(!ids.length){if(li)li.innerHTML='';return;}
+    Promise.all(ids.map(function(id){
+      return fetch('/v1/jobs/'+encodeURIComponent(id)+'/invoice',{headers:authHeaders(false)})
+        .then(function(res){return res.ok?res.json():null;}).catch(function(){return null;});
+    })).then(function(list){
+      var inv=list.filter(Boolean), total=0, h='', now=new Date(), mtdTotal=0;
+      inv.forEach(function(v){
+        var charged=Number(v.charged_usd)||0; total+=charged;
+        var d=v.created_at?new Date(v.created_at):null;
+        if(!d||(d.getMonth()===now.getMonth()&&d.getFullYear()===now.getFullYear()))mtdTotal+=charged;
+        var when=v.created_at?String(v.created_at).slice(0,10):'';
+        var drift='';
+        if(v.quoted_usd!=null){var q=Number(v.quoted_usd)||0,diff=charged-q;
+          drift='<span class="drift num">'+(diff>=0?'+':'')+money(diff).replace('$','$').slice(0)+' vs quote</span>';}
+        h+='<div class="lineitem"><span class="li-l"><span class="li-t num">'+esc((v.job_type||'job'))+(when?' · '+esc(when):'')+'</span></span>'
+          +'<span class="li-amt num">'+money(charged)+drift+'</span></div>';
+      });
+      if(li)li.innerHTML=h;
+      if(mtdEl)mtdEl.textContent=money(mtdTotal);
+      if(sub)sub.textContent=inv.length?(inv.length+' billed '+(inv.length===1?'run':'runs')+' · estimate, not a statement'):'No billed runs yet on this key.';
+      // Drive the spend trend from the real per-run charges (newest at the leading edge).
+      if(spendFeed&&inv.length){var mx=Math.max.apply(null,inv.map(function(v){return Number(v.charged_usd)||0;}))||1;
+        inv.slice().reverse().forEach(function(v){spendFeed.tick(0.1+0.8*((Number(v.charged_usd)||0)/mx));});}
+    });
+  }
+
+  // ---- SUPPLIER ONBOARDING (Settings · payout): capture tax_id + tax_country, POST them to
+  //      /v1/supplier/onboard for a Stripe Connect account-link (opened in a new tab), and read
+  //      GET /v1/supplier/status -> {connect_status, payouts_enabled, tax_on_file} as anodized
+  //      pips. STRIPE unset -> honest 503, surfaced plainly · a connection is never faked. ----
+  var supplierEl=$('supplier');
+  function renderSupplier(){
+    if(!supplierEl)return;
+    if(!isLive()){
+      supplierEl.innerHTML='<div class="row"><span class="l"><span class="pip idle"></span>Stripe Connect</span><span class="r-meta">paste a live key to onboard for payouts</span></div>'
+        +'<p class="set-note warn">Onboarding opens a Stripe Connect account-link · provide a tax ID and country, then finish in the new tab.</p>';
+      return;
+    }
+    var em=cxEmail();
+    if(!em){
+      supplierEl.innerHTML='<div class="row"><span class="l"><span class="pip idle"></span>Stripe Connect</span><span class="r-meta">sign in with your account email to onboard for payouts</span></div>';
+      return;
+    }
+    supplierEl.innerHTML='<p class="set-note">Loading payout status…</p>';
+    fetch('/v1/supplier/status?email='+encodeURIComponent(em),{headers:authHeaders(false)}).then(function(res){
+      return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});
+    }).then(function(r){
+      var j={};try{j=JSON.parse(r.t);}catch(e){}
+      supplierEl.innerHTML=supplierStatusHTML(r.ok?j:null,r.ok?null:String((j&&j.error)||r.status))+supplierFormHTML(r.ok?j:null);
+      wireSupplier();
+    }).catch(function(e){
+      supplierEl.innerHTML='<p class="set-note warn">Network error loading payout status · '+esc(e.message)+'</p>'+supplierFormHTML(null);
+      wireSupplier();
+    });
+  }
+  // Honest tri-state pips. connect_status drives the connect pip (green only when 'complete';
+  // 'pending'/'restricted' stay idle); payouts_enabled + tax_on_file each get their own line.
+  function supplierStatusHTML(s,errMsg){
+    if(errMsg)return '<div class="row"><span class="l"><span class="pip red"></span>Stripe Connect</span><span class="r-meta">'+esc(errMsg)+'</span></div>';
+    var cs=(s&&s.connect_status)||'not_started';
+    var csPip=cs==='complete'?'pip':cs==='restricted'||cs==='rejected'?'pip red':'pip idle';
+    var payouts=!!(s&&s.payouts_enabled), tax=!!(s&&s.tax_on_file);
+    return '<div class="row"><span class="l"><span class="'+csPip+'"></span>Stripe Connect</span><span class="r-meta num">'+esc(cs)+'</span></div>'
+      +'<div class="row"><span class="l"><span class="'+(payouts?'pip':'pip idle')+'"></span>Payouts</span><span class="r-meta">'+(payouts?'enabled':'not enabled yet')+'</span></div>'
+      +'<div class="row"><span class="l"><span class="'+(tax?'pip':'pip idle')+'"></span>Tax on file</span><span class="r-meta">'+(tax?'on file':'not provided')+'</span></div>';
+  }
+  function supplierFormHTML(s){
+    var done=!!(s&&s.connect_status==='complete');
+    var cta=done
+      ? '<button class="mini" id="supOnboard">Manage payout account</button>'
+      : '<button class="pill solid" id="supOnboard">Onboard for payouts</button>';
+    return '<div class="sup-field"><span class="sl">Tax ID</span><input id="supTaxId" class="sup-in" type="text" autocapitalize="off" spellcheck="false" placeholder="EIN / VAT / SSN" aria-label="Tax ID"></div>'
+      +'<div class="sup-field"><span class="sl">Tax country</span><input id="supTaxCountry" class="sup-in short" type="text" maxlength="2" autocapitalize="characters" spellcheck="false" placeholder="US" aria-label="Tax country (ISO 2-letter)"></div>'
+      +'<div style="margin-top:14px">'+cta+'</div>'
+      +'<p class="set-note">Opens a Stripe Connect account-link in a new tab. We never see your full tax ID · it goes straight to Stripe.</p>';
+  }
+  function wireSupplier(){
+    var btnEl=$('supOnboard'); if(!btnEl)return;
+    btnEl.addEventListener('click',function(){
+      var taxId=($('supTaxId')&&$('supTaxId').value||'').trim();
+      var taxCountry=($('supTaxCountry')&&$('supTaxCountry').value||'').trim().toUpperCase();
+      if(!taxId){toast('Enter your tax ID first');return;}
+      if(taxCountry.length!==2){toast('Tax country must be a 2-letter code, e.g. US');return;}
+      btnEl.disabled=true;
+      fetch('/v1/supplier/onboard',{method:'POST',headers:authHeaders(true),body:JSON.stringify({email:cxEmail(),tax_id:taxId,tax_country:taxCountry})}).then(function(res){
+        return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});
+      }).then(function(r){
+        var j={};try{j=JSON.parse(r.t);}catch(e){}
+        if(r.status===503){toast('Payout onboarding unavailable · Stripe is not configured on this server');btnEl.disabled=false;return;}
+        if(!r.ok){toast('Onboarding failed · '+String((j&&j.error)||r.status));btnEl.disabled=false;return;}
+        if(j&&j.onboarding_url){
+          window.open(j.onboarding_url,'_blank','noopener');
+          notify('Payout onboarding started','finish in the Stripe tab, then refresh');
+          toast('Opened Stripe Connect · finish onboarding in the new tab');
+        }else{toast('Onboarding returned no link');}
+        btnEl.disabled=false;
+      }).catch(function(e){toast('Onboarding failed · '+e.message);btnEl.disabled=false;});
+    });
+  }
+
+  // ---- LOGGED-IN IDENTITY (Settings user card). Live -> GET /v1/me {buyer_id,email,is_admin,
+  //      free_credit_remaining_usd}; render the real signed-in identity, replacing the mock. email
+  //      is "" for an api-key-only/seeded buyer -> show "api key session". Show remaining sandbox
+  //      credit only when > 0. Not live -> keep an illustrative placeholder. Server text via esc(). ----
+  var userAvatarEl=$('userAvatar'), userNameEl=$('userName'), userEmailEl=$('userEmail'), signOutBtn=$('signOut');
+  function initials(s){var p=String(s||'').replace(/@.*/,'').split(/[.\s_+-]+/).filter(Boolean);
+    return ((p[0]||'')[0]||'')+((p[1]||'')[0]||'')||(String(s||'?')[0]||'?');}
+  function renderUserCard(){
+    if(!userNameEl)return;
+    if(!isLive()){
+      // illustrative placeholder when there is no key
+      if(userAvatarEl)userAvatarEl.textContent='CX';
+      userNameEl.textContent='Not signed in';
+      userEmailEl.textContent='create an account or paste a key in Launch';
+      if(signOutBtn)signOutBtn.hidden=true;
+      return;
+    }
+    if(signOutBtn)signOutBtn.hidden=false;
+    userNameEl.textContent='Signed in';
+    userEmailEl.textContent='loading…';
+    fetch('/v1/me',{headers:authHeaders(false)}).then(function(res){
+      return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});
+    }).then(function(r){
+      var j={};try{j=JSON.parse(r.t);}catch(e){}
+      if(!r.ok){userNameEl.textContent='Signed in';userEmailEl.textContent='could not load account · '+esc(String((j&&j.error)||r.status));return;}
+      var email=(j&&j.email||'').trim();
+      var credit=Number(j&&j.free_credit_remaining_usd)||0;
+      if(userAvatarEl)userAvatarEl.textContent=(email?initials(email):'CX').toUpperCase();
+      userNameEl.textContent=email||'api key session';
+      userEmailEl.textContent=credit>0?('sandbox credit · '+money(credit)+' remaining'):(j&&j.is_admin?'admin':'live key session');
+    }).catch(function(e){userNameEl.textContent='Signed in';userEmailEl.textContent=esc('could not load account · '+e.message);});
+  }
+  // ---- SIGN OUT. POST /v1/logout with the cx_key bearer (best-effort revoke of the cx_sess_
+  //      session), then clear localStorage cx_key + cx_email regardless of the response, and return
+  //      the UI to the signup/login gate. ----
+  function doLogout(){
+    if(signOutBtn)signOutBtn.disabled=true;
+    var finish=function(){
+      liveKey='';
+      try{localStorage.removeItem('cx_key');localStorage.removeItem('cx_email');}catch(e){}
+      if(keyIn)keyIn.value='';
+      syncLive();renderSettingsPanels();renderAuth();
+      if(signOutBtn)signOutBtn.disabled=false;
+      toast('Signed out');
+    };
+    fetch('/v1/logout',{method:'POST',headers:authHeaders(false)}).then(finish).catch(finish);
+  }
+  if(signOutBtn)signOutBtn.addEventListener('click',doLogout);
+
+  function renderSettingsPanels(){renderUserCard();renderApiKeys();renderBilling();renderSupplier();}
+  renderSettingsPanels();
+
+  // ===== QUICKSTART empty-state: buyer activation. Three copy-paste snippets · curl, the
+  // Python SDK, the cx CLI · leading with the simplest path. The buyer's live key (cx_key in
+  // localStorage) is injected when present, else a cx_live_… placeholder. Shown automatically
+  // when the Runs list is empty; the Runs-header "Quickstart" affordance toggles it for review
+  // (the demo seeds 3 runs, so it is otherwise hidden). All key text passes through esc(). =====
+  var qsPanel=$('quickstart'), qsToggle=$('qsToggle'), qsForced=false, qsActiveTab='curl';
+  function qsKey(){return isLive()&&liveKey?liveKey:'cx_live_…';}
+  function quickstartHTML(){
+    var k=esc(qsKey());
+    var curl='<span class="cm"># embed three strings · same-origin /v1 API</span>\n'
+      +'curl https://compute.exchange/v1/embeddings \\\n'
+      +'  -H "Authorization: Bearer <span class="st">'+k+'</span>" \\\n'
+      +'  -H "Content-Type: application/json" \\\n'
+      +'  -d \'{"model":"all-minilm-l6-v2",\n'
+      +'       "input":["first row","second row","third row"]}\'';
+    var py='<span class="cm"># pip install computeexchange</span>\n'
+      +'from computeexchange import Client\n\n'
+      +'client = Client(api_key=<span class="st">"'+k+'"</span>)\n'
+      +'res = client.embeddings(\n'
+      +'    model="all-minilm-l6-v2",\n'
+      +'    input=["first row", "second row", "third row"],\n'
+      +')\n'
+      +'print(res.data[0].embedding[:5])';
+    var cli='<span class="cm"># brew install computexchange/tap/cx</span>\n'
+      +'export CX_API_KEY=<span class="st">'+k+'</span>\n'
+      +'cx embed --model all-minilm-l6-v2 rows.txt\n'
+      +'cx jobs watch   <span class="cm"># follow it to done</span>';
+    function pane(id,code){return '<div class="qs-pane'+(id===qsActiveTab?' on':'')+'" data-pane="'+id+'">'
+      +'<div class="qs-snip"><button class="qs-copy" data-copy="'+id+'">Copy</button><pre class="qs-code">'+code+'</pre></div></div>';}
+    function tab(id,label){return '<button class="qs-tab'+(id===qsActiveTab?' on':'')+'" data-tab="'+id+'">'+label+'</button>';}
+    return '<div class="quickstart">'
+      +'<p class="qs-lead">Run your first job from the terminal. Drop a file above for the autopilot, or call the API directly.</p>'
+      +'<div class="qs-tabs">'+tab('curl','curl')+tab('python','Python')+tab('cli','cx CLI')+'</div>'
+      +pane('curl',curl)+pane('python',py)+pane('cli',cli)
+      +'<div class="qs-cta"><button class="pill solid" id="qsCta">Copy & run</button>'
+      +'<span class="qs-hint">'+(isLive()?'live key loaded · runs against this server':'paste a buyer key in Settings to go live')+'</span></div>'
+      +'</div>';
+  }
+  // The empty-state shows when truly empty OR when forced via the header affordance.
+  function quickstartVisible(){return qsForced||!jobs.children.length;}
+  function renderQuickstart(){
+    var show=quickstartVisible();
+    qsPanel.hidden=!show;
+    if(qsToggle){qsToggle.classList.toggle('on',qsForced);qsToggle.setAttribute('aria-pressed',String(qsForced));}
+    if(!show){qsPanel.innerHTML='';return;}
+    qsPanel.innerHTML=quickstartHTML();
+  }
+  qsPanel.addEventListener('click',function(e){
+    var t=e.target.closest('[data-tab]');
+    if(t){qsActiveTab=t.getAttribute('data-tab');
+      qsPanel.querySelectorAll('.qs-tab').forEach(function(b){b.classList.toggle('on',b===t);});
+      qsPanel.querySelectorAll('.qs-pane').forEach(function(p){p.classList.toggle('on',p.getAttribute('data-pane')===qsActiveTab);});
+      return;}
+    var c=e.target.closest('[data-copy]'), cta=e.target.closest('#qsCta');
+    if(c||cta){var which=c?c.getAttribute('data-copy'):qsActiveTab;
+      var pre=qsPanel.querySelector('.qs-pane[data-pane="'+which+'"] .qs-code');
+      var text=pre?(pre.textContent||'').trim():'';
+      var done=function(){toast('Copied the '+which+' snippet');};
+      if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(done).catch(done);}else{done();}
+    }
+  });
+  if(qsToggle)qsToggle.addEventListener('click',function(){qsForced=!qsForced;renderQuickstart();});
+  renderQuickstart();   // initial: hidden because the demo seeds 3 runs; reachable via the affordance
   // Turn the dropped file into JSONL the embed runner accepts: jsonl as-is, json array
   // flattened, csv/txt one {"text": line} per non-empty line.
   function toJSONL(name,text){
@@ -550,7 +1328,7 @@
     var i=0;(function step(){
       if(i>=pl.stages.length){if(tv)clearInterval(tv);
         run.dataset.status='done';run.querySelector('.dot').className='dot done';st.className='st done';st.textContent='done';
-        run.querySelector('.detail').innerHTML=doneDetail();notify('Pipeline complete',name);resetIntake();return;}
+        run.querySelector('.detail').innerHTML=doneDetail(DEMO_VERIFY_FRESH);notify('Pipeline complete',name);resetIntake();return;}
       setPipeStage(i,'run');st.textContent='running · step '+(i+1)+'/'+pl.stages.length;
       setTimeout(function(){setPipeStage(i,'done');i++;step();},1150);
     })();
@@ -584,12 +1362,16 @@
         errs=0;return res.json();
       }).then(function(p){
         if(!p)return;var done=0,last='';
-        p.stages.forEach(function(s){var c=s.status==='complete'?'done':(s.status==='failed'||s.status==='cancelled')?'fail':(s.status==='running'||s.status==='queued'||s.status==='verifying')?'run':'pending';setPipeStage(s.index,c);if(s.status==='complete'){done++;last=s.job_id||last;}});
+        p.stages.forEach(function(s){var c=s.status==='complete'?'done':(s.status==='failed'||s.status==='cancelled')?'fail':(s.status==='running'||s.status==='queued'||s.status==='verifying')?'run':'pending';setPipeStage(s.index,c);if(s.status==='complete'){done++;last=s.job_id||last;recordJob(s.job_id);}});
         st.textContent='running · '+done+'/'+p.stages.length;
         if(p.status==='complete'||p.status==='failed'){clearInterval(iv);if(tv)clearInterval(tv);var ok=p.status==='complete';
           run.dataset.status=ok?'done':'failed';run.querySelector('.dot').className='dot '+(ok?'done':'fail');st.className='st '+(ok?'done':'fail');st.textContent=p.status;
-          if(ok)run.querySelector('.detail').innerHTML='<div class="preview">complete · '+p.stages.length+'-step pipeline</div><div class="actions"><button class="mini" data-results="'+esc(last)+'">Download</button></div>';
-          notify('Pipeline '+p.status,run.dataset.name);resetIntake();}
+          // verification + charge_status ride the job-status contract (control/types.go JobStatus);
+          // surface them as the receipt at the TOP of the detail, ok or not.
+          var rcpt=verificationReceipt(p.verification,p.charge_status);
+          if(ok)run.querySelector('.detail').innerHTML=rcpt+'<div class="preview">complete · '+p.stages.length+'-step pipeline</div><div class="actions"><button class="mini" data-results="'+esc(last)+'">Download</button></div>';
+          else run.querySelector('.detail').innerHTML=rcpt+'<div class="preview">failed · '+esc(p.status)+'</div>';
+          notify('Pipeline '+p.status,run.dataset.name);resetIntake();renderBilling();}
       }).catch(function(){if(++errs>=3){clearInterval(iv);fail('network error during poll');}});
     },2000);
   }

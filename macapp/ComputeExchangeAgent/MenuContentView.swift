@@ -7,11 +7,17 @@ import SwiftUI
 
 struct MenuContentView: View {
     @ObservedObject var controller: AgentController
+    @ObservedObject var updater: UpdaterController
+
+    /// Drives the first-run consent sheet. Opened automatically when consent is not
+    /// yet granted, and re-openable from the trust footer.
+    @State private var showingConsent = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
             Divider()
+            consentGateBanner
             statusGrid
             throttleBanner
             if let job = controller.status.currentJob {
@@ -30,12 +36,39 @@ struct MenuContentView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Divider()
+            TrustPanel(controller: controller, history: controller.earningsHistory)
+            Divider()
             controls
             Divider()
             actions
         }
         .padding(14)
         .frame(width: 320)
+        // Show onboarding before any work can begin. Presented automatically on
+        // first appearance when consent has not been granted.
+        .sheet(isPresented: $showingConsent) {
+            ConsentView(consent: controller.consent,
+                        onAccept: { showingConsent = false },
+                        onDecline: { showingConsent = false })
+        }
+        .onAppear {
+            if !controller.consent.granted { showingConsent = true }
+        }
+    }
+
+    /// A persistent banner while consent is outstanding, with a button to open the
+    /// sheet. The agent cannot earn until this is resolved (enforced in
+    /// AgentController.startAgent too).
+    @ViewBuilder private var consentGateBanner: some View {
+        if !controller.consent.granted {
+            Button { showingConsent = true } label: {
+                Label("Review terms before earning", systemImage: "hand.raised.fill")
+                    .font(.caption)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.bordered)
+            .tint(.orange)
+        }
     }
 
     // MARK: header
@@ -67,14 +100,14 @@ struct MenuContentView: View {
                 stat("Model cache", controller.status.modelCacheHuman)
             }
             GridRow {
-                stat("GPU temp", controller.status.gpuTempC.map { String(format: "%.0f°C", $0) } ?? "—")
+                stat("GPU temp", controller.status.gpuTempC.map { String(format: "%.0f°C", $0) } ?? " · ")
                 stat("CPU", String(format: "%.0f%%", controller.status.cpuPct))
             }
             GridRow {
                 stat("Effective mem", controller.status.effectiveMemoryGb > 0
-                    ? String(format: "%.0f GB", controller.status.effectiveMemoryGb) : "—")
+                    ? String(format: "%.0f GB", controller.status.effectiveMemoryGb) : " · ")
                 stat("Headroom", controller.status.reservedHeadroomGb > 0
-                    ? String(format: "%.0f GB", controller.status.reservedHeadroomGb) : "—")
+                    ? String(format: "%.0f GB", controller.status.reservedHeadroomGb) : " · ")
             }
         }
     }
@@ -84,7 +117,7 @@ struct MenuContentView: View {
     private var throttleBanner: some View {
         Group {
             if controller.status.throttled {
-                Label(controller.status.throttleReason ?? "Paused — memory pressure",
+                Label(controller.status.throttleReason ?? "Paused · memory pressure",
                       systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(Color.orange)
@@ -167,10 +200,34 @@ struct MenuContentView: View {
             Button { controller.openDataDir() } label: {
                 Label("Open data dir", systemImage: "folder").frame(maxWidth: .infinity)
             }
+            // Sparkle update check. Disabled while a check is in flight; when no
+            // feed URL is configured (dev build) we say so rather than offering a
+            // check that cannot work.
+            Button { updater.checkForUpdates() } label: {
+                Label(updater.feedConfigured ? "Check for updates" : "Updates not configured",
+                      systemImage: "arrow.triangle.2.circlepath")
+                    .frame(maxWidth: .infinity)
+            }
+            .disabled(!updater.canCheckForUpdates || !updater.feedConfigured)
             Button { NSApplication.shared.terminate(nil) } label: {
                 Label("Quit", systemImage: "power").frame(maxWidth: .infinity)
             }
+            consentFooter
         }
         .buttonStyle(.bordered)
+    }
+
+    /// A tiny footer recording when consent was accepted (audit-honest), with a way
+    /// to re-open the terms. Only shown once consent exists.
+    @ViewBuilder private var consentFooter: some View {
+        if let when = controller.consent.acceptedDateString {
+            Button { showingConsent = true } label: {
+                Text("Terms accepted \(when)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.plain)
+        }
     }
 }

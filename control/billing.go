@@ -244,10 +244,17 @@ func (s *Server) chargeForJob(ctx context.Context, jobID uuid.UUID) {
 	cust, pm, err := s.store.GetBillingCustomer(ctx, buyerID)
 	if err != nil || cust == "" || pm == "" {
 		_ = s.store.SetChargeStatus(ctx, jobID, "no_payment_method")
+		// Surface the silent debt on the buyer's timeline (best-effort): the work ran
+		// and is owed, but there was no saved card to charge off-session.
+		_ = s.store.InsertJobEvent(ctx, jobID, nil, "charge_failed",
+			"Job complete but no saved payment method · amount is owed and will be charged once a card is on file", nil)
 		return // no saved card → nothing to charge off-session (still owed in the ledger)
 	}
 	if _, err := chargeBuyer(ctx, s.store, buyerID, usd, "job-"+jobID.String()); err != nil {
 		_ = s.store.SetChargeStatus(ctx, jobID, "failed")
+		// Make the charge failure visible to the buyer (best-effort), not just a log line.
+		_ = s.store.InsertJobEvent(ctx, jobID, nil, "charge_failed",
+			"Charge for this job failed · amount is owed and will be reconciled", nil)
 		log.Printf("billing: charge for job %s failed (owed, will reconcile): %v", jobID, err)
 		return
 	}

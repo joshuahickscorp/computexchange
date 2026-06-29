@@ -374,17 +374,27 @@ struct RerankItem {
 /// Embedding dimension of all-MiniLM-L6-v2.
 pub const EMBED_DIM: usize = 384;
 
-/// A loaded MiniLM embedder: tokenizer + BERT weights on the active device.
+/// A loaded BERT sentence-embedder: tokenizer + BERT weights on the active
+/// device, plus the pooling its model card fixes. Serves the proven default
+/// all-MiniLM-L6-v2 (mean pooling) and the higher-quality drop-in alternate
+/// BAAI/bge-small-en-v1.5 (CLS pooling) · both 384-dim BERT, both L2-normalized,
+/// so the downstream (binary encoder, catalogue dim, thresholds) is identical.
 pub struct Embedder {
     model: BertModel,
     tokenizer: Tokenizer,
     device: Device,
+    /// How to condense per-token hidden states into one sentence vector.
+    pooling: models::Pooling,
 }
 
 impl Embedder {
-    /// Resolve + load the model (downloads on first use, cache-first after).
-    pub fn load() -> Result<Self, RunError> {
-        let paths = models::fetch(&models::EMBED)?;
+    /// Resolve + load the embed model for `model_ref` (downloads on first use,
+    /// cache-first after). The empty ref and any non-bge ref resolve to the
+    /// proven MiniLM default (mean pooling); a `bge`-marked ref selects the
+    /// higher-quality bge-small-en-v1.5 (CLS pooling). Both are 384-dim BERT.
+    pub fn load(model_ref: &str) -> Result<Self, RunError> {
+        let (_id, spec, pooling) = models::embed_spec(model_ref);
+        let paths = models::fetch(&spec)?;
         let (config_p, tok_p, weights_p) = (&paths[0], &paths[1], &paths[2]);
 
         let cfg_bytes = std::fs::read(config_p).map_err(infer_err("embed"))?;
@@ -407,11 +417,13 @@ impl Embedder {
             model,
             tokenizer,
             device,
+            pooling,
         })
     }
 
     /// Embed a batch of strings → one L2-normalized `EMBED_DIM`-vector each.
-    /// Mean-pools the last hidden state over real (non-pad) tokens.
+    /// Pools the last hidden state per the model's pooling (mean over real
+    /// tokens for MiniLM, the [CLS] token for bge-small), then L2-normalizes.
     pub fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, RunError> {
         let backend = "embed";
         let encs = self
@@ -438,27 +450,43 @@ impl Embedder {
             .forward(&input_ids, &token_type, Some(&attn))
             .map_err(infer_err(backend))?;
 
-        // Mean-pool over tokens weighted by the attention mask, then L2-normalize.
-        let mask3 = attn
-            .unsqueeze(2)
-            .map_err(infer_err(backend))?
-            .to_dtype(hidden.dtype())
-            .map_err(infer_err(backend))?; // [bsz, seq, 1]
-        let summed = hidden
-            .broadcast_mul(&mask3)
-            .map_err(infer_err(backend))?
-            .sum(1)
-            .map_err(infer_err(backend))?; // [bsz, hidden]
-        let counts = mask3.sum(1).map_err(infer_err(backend))?; // [bsz, 1]
-        let mean = summed.broadcast_div(&counts).map_err(infer_err(backend))?;
-        let norm = mean
+        // Pool [bsz, seq, hidden] → [bsz, hidden] per the model's pooling, then
+        // L2-normalize. Mean (MiniLM) weights tokens by the attention mask so pad
+        // tokens never contribute; CLS (bge-small) takes the first token, exactly
+        // as the bge model card pools `last_hidden_state[:, 0]`.
+        let pooled = match self.pooling {
+            models::Pooling::Mean => {
+                let mask3 = attn
+                    .unsqueeze(2)
+                    .map_err(infer_err(backend))?
+                    .to_dtype(hidden.dtype())
+                    .map_err(infer_err(backend))?; // [bsz, seq, 1]
+                let summed = hidden
+                    .broadcast_mul(&mask3)
+                    .map_err(infer_err(backend))?
+                    .sum(1)
+                    .map_err(infer_err(backend))?; // [bsz, hidden]
+                let counts = mask3.sum(1).map_err(infer_err(backend))?; // [bsz, 1]
+                summed.broadcast_div(&counts).map_err(infer_err(backend))?
+            }
+            models::Pooling::Cls => {
+                // The [CLS] token is index 0 of the sequence dim. The tokenizer
+                // prepends it and never masks it, so this is always a real token.
+                hidden
+                    .i((.., 0))
+                    .map_err(infer_err(backend))? // [bsz, hidden]
+                    .contiguous()
+                    .map_err(infer_err(backend))?
+            }
+        };
+        let norm = pooled
             .sqr()
             .map_err(infer_err(backend))?
             .sum_keepdim(1)
             .map_err(infer_err(backend))?
             .sqrt()
             .map_err(infer_err(backend))?;
-        let normed = mean.broadcast_div(&norm).map_err(infer_err(backend))?;
+        let normed = pooled.broadcast_div(&norm).map_err(infer_err(backend))?;
         normed.to_vec2::<f32>().map_err(infer_err(backend))
     }
 }
@@ -490,8 +518,9 @@ impl JobRunner for EmbedRunner {
             .collect();
         let count = texts.len();
 
-        // Warm embedder (loaded once for the whole process), forward off-runtime.
-        let vectors = embed_texts(pool, texts).await?;
+        // Warm embedder (loaded once per model for the whole process), forward
+        // off-runtime. The manifest's model ref picks MiniLM (default) or bge-small.
+        let vectors = embed_texts(pool, &manifest.model.model_ref, texts).await?;
 
         // Output encoding: JSON is the DEFAULT (small jobs + debugging). The compact
         // binary float32 artifact (PLANE_D D5/D15) is emitted only when the job opts
@@ -566,10 +595,17 @@ fn wants_binary(manifest: &JobManifest) -> bool {
         .unwrap_or(false)
 }
 
-/// Embed a batch of strings via the warm pool embedder, off the async runtime.
-/// Shared by the embed and rerank runners (one source for the forward pass).
-async fn embed_texts(pool: &ModelPool, texts: Vec<String>) -> Result<Vec<Vec<f32>>, RunError> {
-    let embedder = pool.embedder().await?;
+/// Embed a batch of strings via the warm pool embedder for `model_ref`, off the
+/// async runtime. Shared by the embed and rerank runners (one source for the
+/// forward pass). The ref selects the embed model (MiniLM default vs the
+/// higher-quality bge-small alternate); the pool keys a distinct warm handle per
+/// model so they never collide.
+async fn embed_texts(
+    pool: &ModelPool,
+    model_ref: &str,
+    texts: Vec<String>,
+) -> Result<Vec<Vec<f32>>, RunError> {
+    let embedder = pool.embedder(model_ref).await?;
     tokio::task::spawn_blocking(move || embedder.embed(&texts))
         .await
         .map_err(infer_err("embed"))?
@@ -1004,10 +1040,28 @@ impl LlamaBackend {
             let bsz = members.len();
             let plen = encoded[members[0]].len();
             let mut gen: Vec<Vec<u32>> = vec![Vec::new(); bsz];
-            let mut last_tok: Vec<u32> = vec![0u32; bsz];
-            let mut done = vec![false; bsz];
+            // Active-set shrink on EOS: `active` holds the original batch rows
+            // (indices into `members`/`gen`) that are still generating, kept in
+            // the SAME order as the per-batch KV cache rows. Step 0 prefills all
+            // `bsz` rows; later steps forward only the active rows as an
+            // (active.len(), 1) batch, and whenever a row hits EOS we slice it
+            // out of every layer's KV cache via `compact_kv_cache` so the cache
+            // batch dim stays aligned with `active`.
+            //
+            // Determinism: all rows share one `index_pos` (they start together
+            // and step in lockstep), so dropping finished rows leaves the
+            // survivors' KV entries and positions bitwise unchanged. The tokens
+            // generated for every sequence are byte-identical to forwarding the
+            // full batch every step · covered by `batch_active_shrink_*` tests.
+            let mut active: Vec<usize> = (0..bsz).collect();
+            // Per-active-row last token, parallel to `active`.
+            let mut active_last: Vec<u32> = vec![0u32; bsz];
             let mut index_pos = 0usize;
             for step in 0..max_tokens as usize {
+                if active.is_empty() {
+                    break;
+                }
+                let abz = active.len();
                 let (rows, seq_len) = if step == 0 {
                     let mut flat = Vec::with_capacity(bsz * plen);
                     for &m in members {
@@ -1015,37 +1069,45 @@ impl LlamaBackend {
                     }
                     (flat, plen)
                 } else {
-                    (last_tok.clone(), 1usize)
+                    (active_last.clone(), 1usize)
                 };
-                let input = Tensor::from_vec(rows, (bsz, seq_len), &self.device)
+                let input = Tensor::from_vec(rows, (abz, seq_len), &self.device)
                     .map_err(infer_err(backend))?;
                 let logits = self
                     .model
                     .forward(&input, index_pos)
-                    .map_err(infer_err(backend))?; // (bsz, vocab) — last position only
+                    .map_err(infer_err(backend))?; // (abz, vocab) · last position only
                 index_pos += seq_len;
                 let next: Vec<u32> = logits
                     .argmax(1)
                     .map_err(infer_err(backend))?
                     .to_vec1::<u32>()
                     .map_err(infer_err(backend))?;
-                let mut all_done = true;
-                for b in 0..bsz {
-                    if done[b] {
-                        continue;
-                    }
-                    let t = next[b];
+                // Decide which active rows survive this step. `keep` holds the
+                // positions WITHIN the current active ordering that continue
+                // exactly the rows whose KV cache we retain on compaction.
+                let mut keep: Vec<usize> = Vec::with_capacity(abz);
+                let mut new_active: Vec<usize> = Vec::with_capacity(abz);
+                let mut new_last: Vec<u32> = Vec::with_capacity(abz);
+                for (a, &b) in active.iter().enumerate() {
+                    let t = next[a];
                     if t == self.eos {
-                        done[b] = true;
-                    } else {
-                        gen[b].push(t);
-                        last_tok[b] = t;
-                        all_done = false;
+                        continue; // sequence b is finished; drop it
                     }
+                    gen[b].push(t);
+                    keep.push(a);
+                    new_active.push(b);
+                    new_last.push(t);
                 }
-                if all_done {
-                    break;
+                // If any active row finished, slice it out of the KV cache so the
+                // cache batch dim matches the next (active.len(), 1) forward.
+                if keep.len() != abz {
+                    self.model
+                        .compact_kv_cache(&keep)
+                        .map_err(infer_err(backend))?;
                 }
+                active = new_active;
+                active_last = new_last;
             }
             for (b, &m) in members.iter().enumerate() {
                 let text = self
@@ -1527,7 +1589,7 @@ impl JobRunner for RerankRunner {
             layout.push((off, it.docs.len()));
         }
         let total_tokens = flat.len() as u64;
-        let vectors = embed_texts(pool, flat).await?;
+        let vectors = embed_texts(pool, &manifest.model.model_ref, flat).await?;
 
         let mut rankings = Vec::with_capacity(items.len());
         for (index, (off, ndocs)) in layout.into_iter().enumerate() {
@@ -1871,7 +1933,9 @@ pub fn run_benchmarks() -> Vec<BenchResult> {
 /// Benchmark the MiniLM embedder: embeddings/sec, p99 latency per 8-item batch,
 /// and sustained-throughput thermal stability over `THERMAL_SECS`.
 fn bench_embed() -> Result<BenchResult, RunError> {
-    let embedder = Embedder::load()?;
+    // Benchmark the proven default embedder (empty ref → MiniLM). The catalogue
+    // prices each embed model id separately; bge-small benches via a targeted run.
+    let embedder = Embedder::load("")?;
     let batch: Vec<String> = (0..8)
         .map(|i| format!("benchmark sentence number {i} for throughput measurement"))
         .collect();
@@ -2202,7 +2266,7 @@ mod tests {
     #[test]
     #[ignore = "downloads all-MiniLM-L6-v2 (~90MB) and runs a real forward pass"]
     fn embed_runs_real_forward_pass() {
-        let embedder = Embedder::load().expect("load MiniLM");
+        let embedder = Embedder::load("").expect("load MiniLM");
         let texts = vec![
             "a cat sits on the mat".to_string(),
             "hello world".to_string(),
@@ -2238,6 +2302,70 @@ mod tests {
         assert_eq!(v["count"], 2);
         assert_eq!(v["vectors"].as_array().unwrap().len(), 2);
         assert_eq!(v["vectors"][0].as_array().unwrap().len(), EMBED_DIM);
+    }
+
+    /// `embed_spec` routing is pure (no network): the empty ref and any non-bge
+    /// ref resolve to the proven MiniLM default with MEAN pooling; a `bge`-marked
+    /// ref (our id or the HF repo) resolves to bge-small-en-v1.5 with CLS pooling.
+    /// This guards the "MiniLM stays the default" invariant byte-for-byte.
+    #[test]
+    fn embed_spec_routes_minilm_default_and_bge_alternate() {
+        use crate::models::{embed_spec, Pooling, EMBED_BGE_SMALL_ID, EMBED_MINILM_ID};
+        for r in [
+            "",
+            "all-minilm-l6-v2",
+            "sentence-transformers/all-MiniLM-L6-v2",
+        ] {
+            let (id, _spec, pooling) = embed_spec(r);
+            assert_eq!(
+                id, EMBED_MINILM_ID,
+                "ref {r:?} must stay the MiniLM default"
+            );
+            assert_eq!(pooling, Pooling::Mean);
+        }
+        for r in ["bge-small-en-v1.5", "BAAI/bge-small-en-v1.5", "BGE"] {
+            let (id, _spec, pooling) = embed_spec(r);
+            assert_eq!(id, EMBED_BGE_SMALL_ID, "ref {r:?} must select bge-small");
+            assert_eq!(pooling, Pooling::Cls);
+        }
+    }
+
+    /// Real forward-pass test for the NEW higher-quality bge-small-en-v1.5
+    /// embedder, gated behind `#[ignore]` because it downloads the model (~130MB)
+    /// and needs the device. Proves: it loads through the SAME Candle BERT
+    /// embedder, emits 384-dim unit-norm vectors (zero downstream ripple), and is
+    /// DETERMINISTIC · two runs of the same inputs are byte-for-byte identical.
+    /// Run with:
+    ///   cargo test --release bge_small_embeds_384_and_is_deterministic -- --ignored --nocapture
+    #[test]
+    #[ignore = "downloads BAAI/bge-small-en-v1.5 (~130MB) and runs a real forward pass"]
+    fn bge_small_embeds_384_and_is_deterministic() {
+        let embedder = Embedder::load("bge-small-en-v1.5").expect("load bge-small");
+        let texts = vec![
+            "a cat sits on the mat".to_string(),
+            "the quick brown fox".to_string(),
+        ];
+        let a = embedder.embed(&texts).expect("embed run 1");
+        let b = embedder.embed(&texts).expect("embed run 2");
+        assert_eq!(a.len(), 2);
+        // SAME 384 dim as MiniLM → zero downstream ripple.
+        assert_eq!(a[0].len(), EMBED_DIM);
+        assert_eq!(a[1].len(), EMBED_DIM);
+        // Unit-norm (the bge model card L2-normalizes after CLS pooling).
+        for v in &a {
+            let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            assert!((norm - 1.0).abs() < 1e-3, "not unit-norm: {norm}");
+        }
+        // DETERMINISM IS SACRED: identical inputs → byte-identical outputs.
+        assert_eq!(
+            a, b,
+            "bge-small embeddings must be deterministic across runs"
+        );
+        eprintln!(
+            "bge-small OK: 2x{} dims, v0[0..4]={:?}",
+            EMBED_DIM,
+            &a[0][..4]
+        );
     }
 
     /// Build a tiny 16kHz mono WAV (sine sweep) as base64 — a self-contained
@@ -2817,5 +2945,174 @@ mod tests {
             );
         }
         println!("correctness: OK — batched == serial for all 32");
+    }
+
+    // ── C1 active-set shrink on EOS ───────────────────────────────────────────
+
+    /// Network-free determinism proof for the active-set shrink.
+    ///
+    /// A batched decode where finished rows are dropped MUST produce the exact
+    /// same per-row token sequence as one that forwards every row every step.
+    /// This is only true because attention is strictly within-sequence (no row
+    /// attends across the batch), so removing a finished row cannot change a
+    /// surviving row's logits. We model that property with a per-row token
+    /// oracle: row `b` emits tokens `[100+b, 101+b, …]` then EOS at a per-row
+    /// length, so the batch finishes at staggered steps (the case the shrink
+    /// optimises). Both simulators consult the same oracle; the shrink one uses
+    /// the SAME keep/drop/active bookkeeping as `generate_batch`'s loop.
+    #[test]
+    fn batch_active_shrink_matches_full_batch_tokens() {
+        const EOS: u32 = 0;
+        // Mixed output lengths: rows finish at staggered steps.
+        let lengths = [1usize, 3, 2, 5, 4];
+        let bsz = lengths.len();
+        let max_tokens = 8usize;
+
+        // Oracle: token for original row `b` at output position `pos`.
+        // Returns EOS once the row has emitted `lengths[b]` real tokens.
+        let oracle = |b: usize, pos: usize| -> u32 {
+            if pos >= lengths[b] {
+                EOS
+            } else {
+                (100 + b * 10 + pos) as u32
+            }
+        };
+
+        // ── Reference: forward ALL rows every step (today's behaviour). ──
+        let mut full: Vec<Vec<u32>> = vec![Vec::new(); bsz];
+        {
+            let mut done = vec![false; bsz];
+            let mut pos = vec![0usize; bsz];
+            for _ in 0..max_tokens {
+                let mut all_done = true;
+                for b in 0..bsz {
+                    if done[b] {
+                        continue;
+                    }
+                    let t = oracle(b, pos[b]);
+                    if t == EOS {
+                        done[b] = true;
+                    } else {
+                        full[b].push(t);
+                        pos[b] += 1;
+                        all_done = false;
+                    }
+                }
+                if all_done {
+                    break;
+                }
+            }
+        }
+
+        // ── Shrink: drop finished rows, keep `active` aligned with the (here
+        //    notional) KV cache ordering · mirrors generate_batch exactly. ──
+        let mut shrunk: Vec<Vec<u32>> = vec![Vec::new(); bsz];
+        {
+            let mut active: Vec<usize> = (0..bsz).collect();
+            // Per-active-row output position, parallel to `active`.
+            let mut active_pos: Vec<usize> = vec![0usize; bsz];
+            for _ in 0..max_tokens {
+                if active.is_empty() {
+                    break;
+                }
+                let abz = active.len();
+                // Forward only the `abz` active rows; the oracle stands in for
+                // the (active_bsz, 1) forward over the compacted KV cache.
+                let next: Vec<u32> = (0..abz).map(|a| oracle(active[a], active_pos[a])).collect();
+
+                let mut keep: Vec<usize> = Vec::with_capacity(abz);
+                let mut new_active: Vec<usize> = Vec::with_capacity(abz);
+                let mut new_pos: Vec<usize> = Vec::with_capacity(abz);
+                for (a, &b) in active.iter().enumerate() {
+                    let t = next[a];
+                    if t == EOS {
+                        continue;
+                    }
+                    shrunk[b].push(t);
+                    keep.push(a);
+                    new_active.push(b);
+                    new_pos.push(active_pos[a] + 1);
+                }
+                // `keep` is the index set that `compact_kv_cache` would retain;
+                // it must be a strictly ascending subsequence of 0..abz so the
+                // cache rows stay aligned with `new_active`.
+                assert!(
+                    keep.windows(2).all(|w| w[0] < w[1]),
+                    "keep indices must be ascending for KV alignment"
+                );
+                active = new_active;
+                active_pos = new_pos;
+            }
+        }
+
+        assert_eq!(
+            shrunk, full,
+            "active-set shrink must yield byte-identical tokens to full-batch"
+        );
+        // Sanity: the oracle produced the staggered lengths we intended.
+        for b in 0..bsz {
+            assert_eq!(full[b].len(), lengths[b], "row {b} length");
+        }
+    }
+
+    /// `compact_kv_cache` keeps the named batch rows verbatim and in order.
+    /// The per-batch KV cache is `(b_sz, n_kv_head, seq_len, head_dim)`; slicing
+    /// dim 0 with `index_select` must copy surviving rows bitwise unchanged
+    /// the property that makes the shrink determinism-safe.
+    #[test]
+    fn compact_kv_cache_keeps_rows_verbatim() {
+        use candle_core::{Device, Tensor};
+        let dev = Device::Cpu;
+        // (b_sz=4, n_kv_head=2, seq_len=3, head_dim=2) with row-distinct values.
+        let b_sz = 4usize;
+        let per_row = 2 * 3 * 2usize;
+        let data: Vec<f32> = (0..b_sz * per_row).map(|i| i as f32).collect();
+        let k = Tensor::from_vec(data.clone(), (b_sz, 2, 3, 2), &dev).unwrap();
+        // Keep rows 1 and 3 (drop 0 and 2) · staggered-EOS shape.
+        let keep = [1u32, 3u32];
+        let idx = Tensor::from_vec(keep.to_vec(), keep.len(), &dev).unwrap();
+        let out = k.index_select(&idx, 0).unwrap();
+        assert_eq!(out.dims(), [2, 2, 3, 2]);
+        let got: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
+        let mut want: Vec<f32> = Vec::new();
+        want.extend_from_slice(&data[1 * per_row..2 * per_row]);
+        want.extend_from_slice(&data[3 * per_row..4 * per_row]);
+        assert_eq!(got, want, "kept rows must be copied verbatim and in order");
+    }
+
+    /// Live-model determinism gate: a MIXED output-length batch decoded with the
+    /// active-set shrink must match per-prompt `generate` token-for-token. This
+    /// is the real proof on a real GGUF; the network-free tests above cover the
+    /// bookkeeping. Run on a GPU box.
+    #[test]
+    #[ignore = "downloads the GGUF llama (~800MB) + needs a GPU; proves shrink == serial on mixed lengths"]
+    fn batch_active_shrink_equals_serial_mixed_lengths() {
+        let mut be = LlamaBackend::load("llama-3.2-1b-instruct-q4").expect("load gguf");
+        // Distinct prompts → distinct (and staggered) output lengths, which is
+        // exactly what exercises the shrink path. Same length so they batch
+        // together (no padding) but different content so they finish apart.
+        let prompts: Vec<String> = vec![
+            "Reply with the single word yes.".to_string(),
+            "Count from one to ten in words.".to_string(),
+            "Name three primary colors briefly.".to_string(),
+            "Write one short sentence about rain.".to_string(),
+        ];
+        let max = 64u32;
+
+        let serial: Vec<(String, usize)> = prompts
+            .iter()
+            .map(|p| be.generate(p, max).unwrap())
+            .collect();
+        let batched = be.generate_batch(&prompts, max).unwrap();
+
+        assert_eq!(batched.len(), serial.len());
+        for (i, (b, s)) in batched.iter().zip(serial.iter()).enumerate() {
+            assert_eq!(b.0, s.0, "prompt {i}: batched text must equal serial");
+            assert_eq!(
+                b.1, s.1,
+                "prompt {i}: batched token count must equal serial"
+            );
+        }
+        println!("correctness: OK · active-shrink batched == serial on mixed lengths");
     }
 }

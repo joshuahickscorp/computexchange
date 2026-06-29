@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -32,6 +33,16 @@ import (
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
 	log.SetPrefix("control: ")
+
+	// E1 · soft-memory valve. Give the GC a hard ceiling so the control plane GCs
+	// harder as it approaches the limit instead of growing until the container's
+	// cgroup OOM-kills it (a hard kill drops in-flight requests; a soft limit just
+	// makes the GC work harder). Honour an operator-set GOMEMLIMIT verbatim; only
+	// when unset do we apply a conservative ~300MiB default that sits below the
+	// docker-compose mem_limit so the runtime reacts before the cgroup does.
+	if os.Getenv("GOMEMLIMIT") == "" {
+		debug.SetMemoryLimit(300 << 20) // 300 MiB
+	}
 
 	// `control healthcheck`: in-container liveness probe against the running server's
 	// /healthz — the distroless image has no shell/curl for a Docker HEALTHCHECK. It
@@ -145,7 +156,17 @@ func main() {
 	workersCtx, stopWorkers := context.WithCancel(ctx)
 	defer stopWorkers()
 	workers := NewWorkers(store, storage, payout)
-	go workers.Run(workersCtx)
+	// In a multi-instance (HA) deployment exactly ONE instance may run the background
+	// loops: the payout/dispute/reconcile sweeps are NOT safe to run concurrently from
+	// two processes (the manual-export payout rail appends non-idempotently, and a
+	// lock-free sweep could double-pay). Set CX_RUN_WORKERS=false on the secondary
+	// instance(s); they then serve API only and register no tickers (so /readyz stays
+	// green there). Default (unset) runs the workers, so single-instance is unchanged.
+	if os.Getenv("CX_RUN_WORKERS") != "false" {
+		go workers.Run(workersCtx)
+	} else {
+		log.Print("CX_RUN_WORKERS=false · background workers disabled on this instance (API-only, for HA secondaries)")
+	}
 	go server.startRateLimitSweeper(workersCtx) // evict idle rate-limit buckets
 
 	srv := &http.Server{

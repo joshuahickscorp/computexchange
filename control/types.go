@@ -261,6 +261,50 @@ type JobStatus struct {
 	// signal that Computexchange STOPS before a cap (Plane C §12 / Plane D §14 D8).
 	MaxUSD      float64 `json:"max_usd"`
 	BudgetState string  `json:"budget_state"`
+	// ChargeStatus is the buyer-facing billing state for this job, mirroring the
+	// queryable jobs.charge_status column:
+	//   not_attempted | charged | failed | no_payment_method
+	// It makes a silent-debt charge failure VISIBLE in the status body (a "failed"
+	// or "no_payment_method" here pairs with a charge_failed job event), never hidden.
+	ChargeStatus string `json:"charge_status"`
+	// Verification is the honest, derived verification receipt for the job, assembled
+	// from the append-only verification_events log plus the latest dispute. Counts are
+	// real (only outcomes that actually occurred are logged); label is derived, never
+	// asserted beyond what the counts support.
+	Verification Verification `json:"verification"`
+}
+
+// Verification is the buyer-facing verification receipt block of JobStatus. Every
+// count is sourced from the append-only verification_events log (control/store.go
+// JobVerification), so it reflects what actually happened · a skipped/sampled-out
+// check is simply absent, never reported as a pass. dispute_status is the latest
+// dispute's status for the job (” when none). label is DERIVED from the counts:
+//   - "verified"         when a real cross-check settled it (redundancy_matched>0 OR tiebreaks>0)
+//   - "honeypot-checked"  when only known-answer probes ran (checked>0)
+//   - "unverified"        when nothing was checked
+type Verification struct {
+	Checked              int    `json:"checked"`
+	HoneypotsPassed      int    `json:"honeypots_passed"`
+	HoneypotsFailed      int    `json:"honeypots_failed"`
+	RedundancyMatched    int    `json:"redundancy_matched"`
+	RedundancyMismatched int    `json:"redundancy_mismatched"`
+	Tiebreaks            int    `json:"tiebreaks"`
+	DisputeStatus        string `json:"dispute_status"`
+	Label                string `json:"label"`
+}
+
+// deriveVerificationLabel returns the honest label for a verification aggregate,
+// applying the contract's rule. It is the single place the label is computed so the
+// store and any future caller agree.
+func deriveVerificationLabel(v Verification) string {
+	switch {
+	case v.RedundancyMatched > 0 || v.Tiebreaks > 0:
+		return "verified"
+	case v.Checked > 0:
+		return "honeypot-checked"
+	default:
+		return "unverified"
+	}
 }
 
 // JobResults is the GET /v1/jobs/{id}/results body. results_url is a real

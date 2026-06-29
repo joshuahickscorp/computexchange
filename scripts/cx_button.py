@@ -52,7 +52,7 @@ def render_button(slug, L, H, T, bez=1.15):
         sc.view_settings.look = 'AgX - High Contrast'   # match the knob's punchier tone
     except Exception:
         sc.view_settings.view_transform = 'Filmic'
-    sc.view_settings.exposure = -0.30   # darker graphite body; only the strip/rim highlights stay bright
+    sc.view_settings.exposure = -0.55   # dark graphite body; only the strip/rim highlights stay bright
     sc.render.image_settings.file_format = 'PNG'
     sc.render.image_settings.color_mode = 'RGBA'
     sc.render.resolution_x = 1600
@@ -113,9 +113,13 @@ def render_button(slug, L, H, T, bez=1.15):
     # body IS its reflections, so a dark base over a near-black world stays near-black except where
     # the strip/key lights streak bright across it -> that black-to-bright range is the sheen.
     # Rim is a touch brighter so the bevel pops as a bright machined edge.
-    face_mat  = mk("Face",  (0.10,0.11,0.13), 0.22, coat=0.6, coatr=0.10, aniso=0.9)   # smooth turned, no linear brush
-    rim_mat   = mk("Rim",   (0.18,0.19,0.22), 0.08, coat=0.6, coatr=0.06, aniso=0.9)
-    floor_mat = mk("Floor", (0.012,0.012,0.016), 0.92, metal=0.10, coat=0.0)
+    # Doctrine: brushed anodized STEEL, not wet glass. Matte satin face with a LINEAR brush running
+    # along the pill (brushed=True), tone cooled toward steel, clearcoat dropped so it reads as metal
+    # you could scratch. The rim keeps a little polish to catch one bright machined line; the channel
+    # floor stays dark + matte so the label rises out of it (light from within the channel).
+    face_mat  = mk("Face",  (0.095,0.105,0.13), 0.34, coat=0.08, coatr=0.30, aniso=0.7, brushed=True)  # dark satin brushed steel (knob family)
+    rim_mat   = mk("Rim",   (0.15,0.16,0.19), 0.14, coat=0.15, coatr=0.10, aniso=0.5)                  # darker rim -> catches one bright line
+    floor_mat = mk("Floor", (0.012,0.012,0.016), 0.92, metal=0.10, coat=0.0)                          # dark recessed channel
     pill.data.materials.append(face_mat)   # 0
     pill.data.materials.append(rim_mat)    # 1
     pill.data.materials.append(floor_mat)  # 2
@@ -150,10 +154,10 @@ def render_button(slug, L, H, T, bez=1.15):
     sp = max(2.0, L * 0.45)
     # knob lighting: no flat overhead flood (that washes the metal to flat gray). A directional key
     # softbox + a thin bright STRIP for the crisp product-render streak + a rim edge, near-black world.
-    for o in [area("Soft",  (0.4,  0.2, 4.0), max(5.0, L*1.4), 35, (0.85,0.9,1.0)),       # faint lift so the bezel isn't dead black
-              area("Key",   (-sp, -2.2, 3.2), 2.6, 140, (0.96,0.98,1.0)),                 # main softbox streak
-              area("Strip", (-sp*0.3, -1.0, 3.6), L*1.05, 450, (1.0,1.0,1.0), sx=0.08),   # crisp strip-light highlight (the soul)
-              area("Rim",   (0.5,  2.4, 2.4), 1.6, 150)]:                                 # bright machined edge
+    for o in [area("Soft",  (0.4,  0.2, 4.0), max(5.0, L*1.4), 10, (0.85,0.9,1.0)),       # very faint lift so the bezel isn't dead black
+              area("Key",   (-sp, -2.2, 3.2), 2.6, 48, (0.96,0.98,1.0)),                  # main softbox streak (raking, from one side -> tone varies across the length)
+              area("Strip", (-sp*0.3, -1.0, 3.6), L*1.05, 140, (1.0,1.0,1.0), sx=0.08),   # the one bright machined line (cut hard: a flat face mirrors this, so it sets the body brightness)
+              area("Rim",   (0.5,  2.4, 2.4), 1.6, 75)]:                                  # bright machined edge, tamed
         aim(o)
 
     # No shadow catcher: against the dark world the lit ground plane reads as a bright halo

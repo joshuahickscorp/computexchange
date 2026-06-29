@@ -19,11 +19,15 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -91,7 +95,7 @@ func reset(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
 	if _, err := itPool.Exec(ctx,
-		`TRUNCATE tasks, jobs, webhooks, ledger_entries, benchmark_results, disputes RESTART IDENTITY CASCADE`); err != nil {
+		`TRUNCATE tasks, jobs, webhooks, ledger_entries, benchmark_results, disputes, verification_events RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatalf("reset truncate: %v", err)
 	}
 	// Workers/worker_tokens are NOT truncated above (FK from worker_tokens). Drop
@@ -2616,5 +2620,535 @@ func TestDisputeResolverNoPeer(t *testing.T) {
 	}
 	if status != "no_peer" {
 		t.Fatalf("want 'no_peer' (no distinct same-class supplier to re-verify), got %q", status)
+	}
+}
+
+// TestVerificationReceiptSurfaced proves the verification RECEIPT path end to end: a real
+// verification outcome records an append-only verification_events row, and the buyer
+// job-status (GetJob) surfaces the aggregate counts + the honest derived label +
+// charge_status. This is the moat made visible — exercised against live Postgres.
+func TestVerificationReceiptSurfaced(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+	jobID, taskID := uuid.New(), uuid.New()
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO jobs (id, buyer_id, status, job_type, input_ref, task_count, tasks_done)
+		 VALUES ($1,$2,'complete','embed','jobs/x/input.jsonl',1,1)`, jobID, demoBuyerUUID); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+	// A redundancy MATCH (two agreeing results) records a redundancy_match event for the job.
+	info := &CommitTaskInfo{TaskID: taskID, JobID: jobID, WorkerID: demoWorkerUUID,
+		SupplierID: demoSupplierUUID, jobType: "embed", HWClass: "apple_silicon_max"}
+	if out, err := itServer.verifier.verifyTaskResult(ctx, info,
+		TaskCommit{TaskID: taskID}, embedResultJSON(1), embedResultJSON(1)); err != nil || out != OutcomePass {
+		t.Fatalf("verify match: out=%v err=%v", out, err)
+	}
+	var n int
+	if err := itPool.QueryRow(ctx,
+		`SELECT count(*) FROM verification_events WHERE job_id=$1 AND kind='redundancy_match'`, jobID).Scan(&n); err != nil || n < 1 {
+		t.Fatalf("want >=1 redundancy_match verification_event, got n=%d err=%v", n, err)
+	}
+	// The buyer job-status surfaces the receipt aggregate, the honest label, and charge_status.
+	jv, err := itStore.GetJob(ctx, jobID, demoBuyerUUID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if jv.Verification.RedundancyMatched < 1 || jv.Verification.Checked < 1 {
+		t.Fatalf("receipt aggregate missing: %+v", jv.Verification)
+	}
+	if jv.Verification.Label != "verified" {
+		t.Fatalf("want label 'verified' (redundancy matched), got %q", jv.Verification.Label)
+	}
+	if jv.ChargeStatus == "" {
+		t.Fatalf("charge_status should surface a default state, got empty")
+	}
+}
+
+// --- buyer API-key lifecycle: mint → authenticate → revoke → 401 ---
+
+// TestAPIKeyLifecycle proves the full /v1/keys contract end to end against live
+// Postgres: a buyer mints a key (raw secret revealed once), the masked list shows
+// it, the raw key authenticates a real buyer request, then revoking it makes that
+// same key 401 · no silent accept of a revoked credential (BLACKHOLE).
+func TestAPIKeyLifecycle(t *testing.T) {
+	reset(t)
+
+	// Mint a test key.
+	code, out := req(t, "POST", "/v1/keys", map[string]any{"name": "ci-key", "test": true}, buyerKey(), jsonCT())
+	if code != http.StatusCreated {
+		t.Fatalf("create key: want 201, got %d: %s", code, out)
+	}
+	var created struct {
+		ID, Name, Key, Prefix, Masked string
+	}
+	if err := json.Unmarshal(out, &created); err != nil {
+		t.Fatalf("create decode: %v (%s)", err, out)
+	}
+	if created.Key == "" || !strings.HasPrefix(created.Key, "cx_test_") {
+		t.Fatalf("expected raw cx_test_ key revealed once, got %q", created.Key)
+	}
+	if created.Prefix != "cx_test_" {
+		t.Fatalf("expected prefix cx_test_, got %q", created.Prefix)
+	}
+	if created.Name != "ci-key" || created.ID == "" {
+		t.Fatalf("create response missing name/id: %+v", created)
+	}
+
+	// List shows it masked · never the raw secret.
+	code, out = req(t, "GET", "/v1/keys", nil, buyerKey())
+	if code != http.StatusOK {
+		t.Fatalf("list keys: want 200, got %d: %s", code, out)
+	}
+	if strings.Contains(string(out), created.Key) {
+		t.Fatalf("list leaked the raw key: %s", out)
+	}
+	var list struct {
+		Keys []struct {
+			ID, Name, Masked string
+			Revoked          bool
+		}
+	}
+	if err := json.Unmarshal(out, &list); err != nil {
+		t.Fatalf("list decode: %v (%s)", err, out)
+	}
+	var found bool
+	for _, k := range list.Keys {
+		if k.ID == created.ID {
+			found = true
+			if k.Masked == "" || !strings.HasPrefix(k.Masked, "cx_test_") {
+				t.Fatalf("masked hint malformed: %q", k.Masked)
+			}
+			if k.Revoked {
+				t.Fatalf("freshly minted key should not be revoked")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("minted key %s not in list", created.ID)
+	}
+
+	// The raw key authenticates a real buyer request.
+	newKeyHdr := hdr{"Authorization", "Bearer " + created.Key}
+	if code, _ := req(t, "GET", "/v1/models", nil, newKeyHdr); code != http.StatusOK {
+		t.Fatalf("authenticate with new key: want 200, got %d", code)
+	}
+
+	// Revoke it (idempotent 204).
+	if code, _ := req(t, "DELETE", "/v1/keys/"+created.ID, nil, buyerKey()); code != http.StatusNoContent {
+		t.Fatalf("revoke: want 204, got %d", code)
+	}
+	if code, _ := req(t, "DELETE", "/v1/keys/"+created.ID, nil, buyerKey()); code != http.StatusNoContent {
+		t.Fatalf("revoke (idempotent replay): want 204, got %d", code)
+	}
+
+	// A revoked key no longer authenticates · 401, no silent bypass.
+	if code, _ := req(t, "GET", "/v1/models", nil, newKeyHdr); code != http.StatusUnauthorized {
+		t.Fatalf("revoked key must 401, got %d", code)
+	}
+}
+
+// --- OpenAI-Batch-compatible adapter: inline embeddings batch → status maps ---
+
+// TestOpenAIBatchInlineEmbeddings posts an OpenAI-Batch-shaped embeddings request
+// with INLINE input (no separate file upload), then confirms GET /v1/batches/{id}
+// returns an OpenAI-Batch-shaped object whose status maps from the underlying CX
+// job status and whose request_counts.total reflects the line count.
+func TestOpenAIBatchInlineEmbeddings(t *testing.T) {
+	reset(t)
+
+	// Two embeddings lines, inline as a JSONL string (the OpenAI batch line shape).
+	jsonl := `{"custom_id":"a","method":"POST","url":"/v1/embeddings","body":{"model":"text-embedding-3-small","input":"hello"}}` + "\n" +
+		`{"custom_id":"b","method":"POST","url":"/v1/embeddings","body":{"model":"text-embedding-3-small","input":"world"}}`
+
+	code, out := req(t, "POST", "/v1/batches", map[string]any{
+		"endpoint":          "/v1/embeddings",
+		"completion_window": "24h",
+		"input":             jsonl,
+	}, buyerKey(), jsonCT())
+	if code != http.StatusOK {
+		t.Fatalf("create batch: want 200, got %d: %s", code, out)
+	}
+	var batch struct {
+		ID            string `json:"id"`
+		Object        string `json:"object"`
+		Endpoint      string `json:"endpoint"`
+		Status        string `json:"status"`
+		InputFileID   string `json:"input_file_id"`
+		RequestCounts struct {
+			Total, Completed, Failed int
+		} `json:"request_counts"`
+	}
+	if err := json.Unmarshal(out, &batch); err != nil {
+		t.Fatalf("batch decode: %v (%s)", err, out)
+	}
+	if batch.Object != "batch" || !strings.HasPrefix(batch.ID, "batch-") {
+		t.Fatalf("not an OpenAI batch object: %+v", batch)
+	}
+	if batch.Endpoint != "/v1/embeddings" {
+		t.Fatalf("endpoint not echoed: %q", batch.Endpoint)
+	}
+	if batch.RequestCounts.Total != 2 {
+		t.Fatalf("request_counts.total: want 2, got %d", batch.RequestCounts.Total)
+	}
+	if batch.InputFileID == "" || !strings.HasPrefix(batch.InputFileID, "file-") {
+		t.Fatalf("inline input should have materialized an input file: %q", batch.InputFileID)
+	}
+	if batch.Status != "in_progress" {
+		t.Fatalf("fresh batch should be in_progress (job queued), got %q", batch.Status)
+	}
+
+	// Status GET maps the underlying CX job status into the OpenAI vocabulary.
+	code, out = req(t, "GET", "/v1/batches/"+batch.ID, nil, buyerKey())
+	if code != http.StatusOK {
+		t.Fatalf("get batch: want 200, got %d: %s", code, out)
+	}
+	var got struct {
+		ID, Status string
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("get batch decode: %v (%s)", err, out)
+	}
+	if got.ID != batch.ID {
+		t.Fatalf("batch id mismatch on GET: %q vs %q", got.ID, batch.ID)
+	}
+	switch got.Status {
+	case "in_progress", "finalizing", "completed":
+		// all valid mappings of queued/running/verifying/complete
+	default:
+		t.Fatalf("unexpected mapped batch status %q", got.Status)
+	}
+}
+
+// --- self-serve accounts + auth + sandbox (accounts.go) ---
+
+// uniqueEmail returns a per-run unique address so the UNIQUE(email) buyers table
+// stays idempotent across repeated test runs without truncating it in reset().
+func uniqueEmail(prefix string) string {
+	return fmt.Sprintf("%s+%s@example.com", prefix, uuid.NewString()[:8])
+}
+
+// TestSignupTokenAuthenticatesAndSandboxGate proves the whole self-serve lane:
+// signup returns a session token that authenticates a buyer route, the sandbox
+// free credit lets a cardless buyer submit a job while Stripe is configured, and
+// once the realized spend reaches the grant the 402 gate re-asserts honestly.
+func TestSignupTokenAuthenticatesAndSandboxGate(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+	// The sandbox free-credit lane is OFF by default (an unverified signup must not
+	// grant Sybil-farmable free compute); an operator opts in via this env. Enable it
+	// here to exercise the granted-then-exhausted path.
+	t.Setenv("CX_SANDBOX_CREDIT_USD", "5")
+
+	email := uniqueEmail("buyer")
+	code, out := req(t, "POST", "/v1/signup", map[string]any{"email": email, "password": "hunter2hunter2"}, jsonCT())
+	if code != http.StatusCreated {
+		t.Fatalf("signup: want 201, got %d: %s", code, out)
+	}
+	var su struct {
+		BuyerID       string  `json:"buyer_id"`
+		Token         string  `json:"token"`
+		Email         string  `json:"email"`
+		FreeCreditUSD float64 `json:"free_credit_usd"`
+		SandboxKey    string  `json:"sandbox_key"`
+	}
+	if err := json.Unmarshal(out, &su); err != nil {
+		t.Fatalf("signup decode: %v (%s)", err, out)
+	}
+	if su.Token == "" || !strings.HasPrefix(su.Token, "cx_sess_") {
+		t.Fatalf("signup must return a cx_sess_ token, got %q", su.Token)
+	}
+	if su.FreeCreditUSD <= 0 {
+		t.Fatalf("signup must grant sandbox free credit, got %v", su.FreeCreditUSD)
+	}
+	if !strings.HasPrefix(su.SandboxKey, "cx_test_") {
+		t.Fatalf("signup must mint a cx_test_ sandbox key, got %q", su.SandboxKey)
+	}
+	buyerID := uuid.MustParse(su.BuyerID)
+
+	// The session token authenticates a buyer route.
+	sessHdr := hdr{"Authorization", "Bearer " + su.Token}
+	if code, _ := req(t, "GET", "/v1/models", nil, sessHdr); code != http.StatusOK {
+		t.Fatalf("session token must authenticate /v1/models, got %d", code)
+	}
+
+	// Submit a job AS the new sandbox buyer with Stripe configured + NO card on
+	// file: the free-credit exemption must allow it. The submit gate reads only the
+	// DB (GetBillingCustomer + free credit), so a fake key triggers the gate without
+	// any Stripe network call.
+	t.Setenv("STRIPE_SECRET_KEY", "sk_test_fake_for_gate_only")
+	var sb strings.Builder
+	for i := 0; i < 4; i++ {
+		fmt.Fprintf(&sb, `{"id":"r%d","text":"record %d"}`+"\n", i, i)
+	}
+	jobBody := map[string]any{
+		"job_type":     map[string]any{"type": "embed"},
+		"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"params":       map[string]any{"split_size": 1000},
+		"verification": map[string]any{},
+		"tier":         "batch",
+		"input":        sb.String(),
+	}
+	code, out = req(t, "POST", "/v1/jobs", jobBody, sessHdr, jsonCT())
+	if code != http.StatusAccepted {
+		t.Fatalf("sandbox submit under free credit: want 202, got %d: %s", code, out)
+	}
+
+	// Exhaust the free credit by recording a buyer_charge debit >= the grant, then
+	// the SAME submit must 402 (no card, credit gone). This is the honest boundary.
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO ledger_entries (kind, buyer_id, amount_usd, payout_status)
+		 VALUES ('buyer_charge', $1, $2, 'released')`,
+		buyerID, -(su.FreeCreditUSD + 1.0)); err != nil {
+		t.Fatalf("seed buyer_charge: %v", err)
+	}
+	code, out = req(t, "POST", "/v1/jobs", jobBody, sessHdr, jsonCT())
+	if code != http.StatusPaymentRequired {
+		t.Fatalf("submit after credit exhausted: want 402, got %d: %s", code, out)
+	}
+}
+
+// TestMeReturnsAuthenticatedIdentity proves GET /v1/me, gated by the signup session
+// token, reports the buyer's own identity: email matches signup, buyer_id is set, and
+// is_admin is false for a self-serve account.
+func TestMeReturnsAuthenticatedIdentity(t *testing.T) {
+	reset(t)
+	email := uniqueEmail("me")
+	code, out := req(t, "POST", "/v1/signup", map[string]any{"email": email, "password": "hunter2hunter2"}, jsonCT())
+	if code != http.StatusCreated {
+		t.Fatalf("signup: want 201, got %d: %s", code, out)
+	}
+	var su struct {
+		BuyerID string `json:"buyer_id"`
+		Token   string `json:"token"`
+	}
+	if err := json.Unmarshal(out, &su); err != nil {
+		t.Fatalf("signup decode: %v (%s)", err, out)
+	}
+
+	code, out = req(t, "GET", "/v1/me", nil, hdr{"Authorization", "Bearer " + su.Token})
+	if code != http.StatusOK {
+		t.Fatalf("GET /v1/me: want 200, got %d: %s", code, out)
+	}
+	var me struct {
+		BuyerID                string  `json:"buyer_id"`
+		Email                  string  `json:"email"`
+		IsAdmin                bool    `json:"is_admin"`
+		FreeCreditRemainingUSD float64 `json:"free_credit_remaining_usd"`
+	}
+	if err := json.Unmarshal(out, &me); err != nil {
+		t.Fatalf("/v1/me decode: %v (%s)", err, out)
+	}
+	if me.Email != email {
+		t.Fatalf("/v1/me email: want %q, got %q", email, me.Email)
+	}
+	if me.BuyerID == "" || me.BuyerID != su.BuyerID {
+		t.Fatalf("/v1/me buyer_id: want %q, got %q", su.BuyerID, me.BuyerID)
+	}
+	if me.IsAdmin {
+		t.Fatalf("/v1/me is_admin: want false for a self-serve account, got true")
+	}
+}
+
+// TestSignupDuplicateEmailConflicts proves the UNIQUE email is enforced honestly.
+func TestSignupDuplicateEmailConflicts(t *testing.T) {
+	reset(t)
+	email := uniqueEmail("dup")
+	if code, out := req(t, "POST", "/v1/signup", map[string]any{"email": email, "password": "hunter2hunter2"}, jsonCT()); code != http.StatusCreated {
+		t.Fatalf("first signup: want 201, got %d: %s", code, out)
+	}
+	if code, out := req(t, "POST", "/v1/signup", map[string]any{"email": email, "password": "anotherpassword"}, jsonCT()); code != http.StatusConflict {
+		t.Fatalf("duplicate signup: want 409, got %d: %s", code, out)
+	}
+}
+
+// TestLoginGoodAndBadPassword proves login issues a token on the right password
+// and returns 401 (never a silent accept) on a wrong one or an unknown email.
+func TestLoginGoodAndBadPassword(t *testing.T) {
+	reset(t)
+	email := uniqueEmail("login")
+	const pw = "correct horse battery"
+	if code, out := req(t, "POST", "/v1/signup", map[string]any{"email": email, "password": pw}, jsonCT()); code != http.StatusCreated {
+		t.Fatalf("signup: want 201, got %d: %s", code, out)
+	}
+
+	// Good password → 200 + token that authenticates.
+	code, out := req(t, "POST", "/v1/login", map[string]any{"email": email, "password": pw}, jsonCT())
+	if code != http.StatusOK {
+		t.Fatalf("login good: want 200, got %d: %s", code, out)
+	}
+	var li struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(out, &li); err != nil || li.Token == "" {
+		t.Fatalf("login token missing: %v (%s)", err, out)
+	}
+	if code, _ := req(t, "GET", "/v1/models", nil, hdr{"Authorization", "Bearer " + li.Token}); code != http.StatusOK {
+		t.Fatalf("login token must authenticate, got %d", code)
+	}
+
+	// Wrong password → 401.
+	if code, _ := req(t, "POST", "/v1/login", map[string]any{"email": email, "password": "wrong"}, jsonCT()); code != http.StatusUnauthorized {
+		t.Fatalf("login bad password: want 401, got %d", code)
+	}
+	// Unknown email → same 401 (no user enumeration).
+	if code, _ := req(t, "POST", "/v1/login", map[string]any{"email": uniqueEmail("nope"), "password": pw}, jsonCT()); code != http.StatusUnauthorized {
+		t.Fatalf("login unknown email: want 401, got %d", code)
+	}
+}
+
+// --- supplier onboarding (suppliers.go) ---
+
+// TestSupplierOnboardUnconfigured proves tax info persists even when Stripe is
+// unset, and that the Connect path returns the HONEST 503 (never a faked account).
+func TestSupplierOnboardUnconfigured(t *testing.T) {
+	reset(t)
+	// Ensure Stripe is unconfigured for this test regardless of ambient env.
+	t.Setenv("STRIPE_SECRET_KEY", "")
+	ctx := context.Background()
+
+	email := uniqueEmail("supplier")
+	code, out := req(t, "POST", "/v1/supplier/onboard",
+		map[string]any{"email": email, "tax_id": "12-3456789", "tax_country": "US"}, jsonCT(), buyerKey())
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("onboard with no Stripe: want 503, got %d: %s", code, out)
+	}
+
+	// Despite the 503, the supplier + tax info must be on file (recorded before the
+	// Stripe call). Status must report tax_on_file=true, connect_status=none.
+	code, out = req(t, "GET", "/v1/supplier/status?email="+url.QueryEscape(email), nil, buyerKey())
+	if code != http.StatusOK {
+		t.Fatalf("supplier status: want 200, got %d: %s", code, out)
+	}
+	var st struct {
+		ConnectStatus  string `json:"connect_status"`
+		PayoutsEnabled bool   `json:"payouts_enabled"`
+		TaxOnFile      bool   `json:"tax_on_file"`
+	}
+	if err := json.Unmarshal(out, &st); err != nil {
+		t.Fatalf("status decode: %v (%s)", err, out)
+	}
+	if !st.TaxOnFile {
+		t.Fatalf("tax info must persist even when Stripe is unset: %+v", st)
+	}
+	if st.ConnectStatus != "none" || st.PayoutsEnabled {
+		t.Fatalf("no Connect account yet: want none/false, got %+v", st)
+	}
+
+	// Confirm the tax fields landed on the supplier row.
+	var taxID, taxCountry string
+	if err := itPool.QueryRow(ctx,
+		`SELECT COALESCE(tax_id,''), COALESCE(tax_country,'') FROM suppliers WHERE email=lower($1)`, email,
+	).Scan(&taxID, &taxCountry); err != nil {
+		t.Fatalf("read supplier tax: %v", err)
+	}
+	if taxID != "12-3456789" || taxCountry != "US" {
+		t.Fatalf("tax fields not persisted: id=%q country=%q", taxID, taxCountry)
+	}
+}
+
+// TestConnectWebhookFlipsPayoutsEnabled proves the account.updated webhook flips
+// the cached payouts_enabled flag for the right supplier (signature-verified).
+func TestConnectWebhookFlipsPayoutsEnabled(t *testing.T) {
+	reset(t)
+	t.Setenv("STRIPE_SECRET_KEY", "")
+	t.Setenv("CX_CONNECT_WEBHOOK_SECRET", "whsec_test_connect")
+	ctx := context.Background()
+
+	// Onboard records the supplier (503 on the Connect link is expected/ignored),
+	// then attach a known stripe_acct so the webhook has a target.
+	email := uniqueEmail("supplier")
+	_, _ = req(t, "POST", "/v1/supplier/onboard", map[string]any{"email": email}, jsonCT(), buyerKey())
+	const acct = "acct_TESTwebhook123"
+	if _, err := itPool.Exec(ctx, `UPDATE suppliers SET stripe_acct=$2 WHERE email=lower($1)`, email, acct); err != nil {
+		t.Fatalf("set stripe_acct: %v", err)
+	}
+
+	body := []byte(`{"type":"account.updated","data":{"object":{"id":"` + acct + `","payouts_enabled":true}}}`)
+	sig := stripeTestSig(body, "whsec_test_connect")
+	code, out := req(t, "POST", "/v1/stripe/connect-webhook", body, hdr{"Stripe-Signature", sig})
+	if code != http.StatusOK {
+		t.Fatalf("connect webhook: want 200, got %d: %s", code, out)
+	}
+
+	var pe bool
+	if err := itPool.QueryRow(ctx, `SELECT COALESCE(payouts_enabled,false) FROM suppliers WHERE email=lower($1)`, email).Scan(&pe); err != nil {
+		t.Fatalf("read payouts_enabled: %v", err)
+	}
+	if !pe {
+		t.Fatalf("account.updated must flip payouts_enabled true")
+	}
+
+	// A tampered signature is rejected (no silent accept).
+	if code, _ := req(t, "POST", "/v1/stripe/connect-webhook", body, hdr{"Stripe-Signature", "t=1,v1=deadbeef"}); code != http.StatusBadRequest {
+		t.Fatalf("bad signature: want 400, got %d", code)
+	}
+}
+
+// stripeTestSig builds a valid Stripe-Signature header for body under secret,
+// using the same t.payload HMAC-SHA256 scheme verifyStripeSig checks.
+func stripeTestSig(body []byte, secret string) string {
+	t := strconv.FormatInt(time.Now().Unix(), 10)
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(t + "." + string(body)))
+	return "t=" + t + ",v1=" + hex.EncodeToString(mac.Sum(nil))
+}
+
+// --- Phase 3.5 auth hardening ---
+
+// TestLogoutRevokesSession proves POST /v1/logout kills the presenting session token
+// immediately (it must not stay valid for the rest of its 30-day TTL).
+func TestLogoutRevokesSession(t *testing.T) {
+	reset(t)
+	email := uniqueEmail("logout")
+	code, out := req(t, "POST", "/v1/signup", map[string]any{"email": email, "password": "hunter2hunter2"}, jsonCT())
+	if code != http.StatusCreated {
+		t.Fatalf("signup: %d %s", code, out)
+	}
+	var su struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(out, &su); err != nil || su.Token == "" {
+		t.Fatalf("signup token: %v (%s)", err, out)
+	}
+	sess := hdr{"Authorization", "Bearer " + su.Token}
+	if c, _ := req(t, "GET", "/v1/models", nil, sess); c != http.StatusOK {
+		t.Fatalf("token must authenticate before logout, got %d", c)
+	}
+	if c, _ := req(t, "POST", "/v1/logout", nil, sess); c != http.StatusNoContent {
+		t.Fatalf("logout: want 204, got %d", c)
+	}
+	if c, _ := req(t, "GET", "/v1/models", nil, sess); c != http.StatusUnauthorized {
+		t.Fatalf("revoked session must 401, got %d", c)
+	}
+}
+
+// TestLoginThrottleLocksOut proves the per-account login throttle: maxLoginFails bad
+// passwords lock the email out (429), and even the correct password is refused during
+// the lockout window.
+func TestLoginThrottleLocksOut(t *testing.T) {
+	reset(t)
+	email := uniqueEmail("throttle")
+	if c, out := req(t, "POST", "/v1/signup", map[string]any{"email": email, "password": "correct-horse-battery"}, jsonCT()); c != http.StatusCreated {
+		t.Fatalf("signup: %d %s", c, out)
+	}
+	for i := 0; i < 5; i++ {
+		if c, _ := req(t, "POST", "/v1/login", map[string]any{"email": email, "password": "wrong-guess"}, jsonCT()); c != http.StatusUnauthorized {
+			t.Fatalf("bad login %d: want 401, got %d", i, c)
+		}
+	}
+	if c, _ := req(t, "POST", "/v1/login", map[string]any{"email": email, "password": "wrong-guess"}, jsonCT()); c != http.StatusTooManyRequests {
+		t.Fatalf("after 5 failures login must lock out (429), got %d", c)
+	}
+	if c, _ := req(t, "POST", "/v1/login", map[string]any{"email": email, "password": "correct-horse-battery"}, jsonCT()); c != http.StatusTooManyRequests {
+		t.Fatalf("correct password during lockout must still 429, got %d", c)
+	}
+}
+
+// TestSignupRejectsOversizePassword proves the bcrypt 72-byte guard (so two passwords
+// sharing a 72-byte prefix can never authenticate interchangeably).
+func TestSignupRejectsOversizePassword(t *testing.T) {
+	reset(t)
+	if c, _ := req(t, "POST", "/v1/signup", map[string]any{"email": uniqueEmail("long"), "password": strings.Repeat("a", 73)}, jsonCT()); c != http.StatusBadRequest {
+		t.Fatalf("password > 72 bytes must 400, got %d", c)
 	}
 }

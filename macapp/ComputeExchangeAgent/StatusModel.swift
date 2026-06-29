@@ -50,7 +50,7 @@ enum AgentState: String, Codable {
     var label: String {
         switch self {
         case .running: return "Running a job"
-        case .idle:    return "Idle — waiting for work"
+        case .idle:    return "Idle · waiting for work"
         case .paused:  return "Paused"
         case .offline: return "Offline"
         }
@@ -74,8 +74,8 @@ enum ThermalState: String, Codable {
         switch self {
         case .nominal:  return "Nominal"
         case .fair:     return "Fair"
-        case .serious:  return "Serious — throttling"
-        case .critical: return "Critical — backing off"
+        case .serious:  return "Serious · throttling"
+        case .critical: return "Critical · backing off"
         }
     }
 }
@@ -109,7 +109,7 @@ struct AgentStatus: Codable, Equatable {
     var modelCacheBytes: Int64 = 0
     var currentTaskId: String?
     // Dynamic provider-throttling surface (all defaulted, so an older agent that
-    // omits them still decodes — Swift's synthesized decoder uses the defaults).
+    // omits them still decodes · Swift's synthesized decoder uses the defaults).
     var totalMemoryGb: Double = 0
     var availableMemoryGb: Double = 0
     var reservedHeadroomGb: Double = 0
@@ -120,6 +120,29 @@ struct AgentStatus: Codable, Equatable {
     var eligibleNow: Bool = false
     var lastHeartbeat: TimeInterval = 0
     var lastError: String?
+
+    // --- Trust surface (all OPTIONAL on the wire) ------------------------------
+    // These are written by the agent only when it has real, control-plane-sourced
+    // data to back them. The app NEVER fabricates a payout date or a verification
+    // pass: when a field is absent the UI shows an explicit "not available" state
+    // rather than inventing one (BLACKHOLE).
+    //
+    // Payout readiness mirrors GET /v1/worker/connect/status
+    // (configured / connected / payouts_enabled). The agent holds the worker token
+    // and makes that call; the menu-bar app only reads the file.
+    var payoutsConfigured: Bool?      // Stripe key present on the control plane
+    var payoutsConnected: Bool?       // this supplier has linked a payout account
+    var payoutsEnabled: Bool?         // the account can actually receive payouts
+    var lastPayoutUsd: Double?        // amount of the most recent released payout
+    var lastPayoutAt: TimeInterval?   // unix secs of the most recent released payout
+    var nextPayoutAt: TimeInterval?   // unix secs of the next scheduled payout, if known
+
+    // Verification (honeypot) aggregate for THIS worker, sourced from the agent's
+    // own committed-task receipts. Counts are real (only checks that ran are
+    // counted); `verificationLabel` is derived, never asserted beyond the counts.
+    var honeypotsPassed: Int?
+    var honeypotsFailed: Int?
+    var verificationLabel: String?    // "verified" | "honeypot-checked" | "unverified"
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -145,6 +168,15 @@ struct AgentStatus: Codable, Equatable {
         case eligibleNow = "eligible_now"
         case lastHeartbeat = "last_heartbeat"
         case lastError = "last_error"
+        case payoutsConfigured = "payouts_configured"
+        case payoutsConnected = "payouts_connected"
+        case payoutsEnabled = "payouts_enabled"
+        case lastPayoutUsd = "last_payout_usd"
+        case lastPayoutAt = "last_payout_at"
+        case nextPayoutAt = "next_payout_at"
+        case honeypotsPassed = "honeypots_passed"
+        case honeypotsFailed = "honeypots_failed"
+        case verificationLabel = "verification_label"
     }
 
     /// Heartbeats older than this mean the agent is probably not running, even if

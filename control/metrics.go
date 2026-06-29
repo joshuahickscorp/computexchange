@@ -86,6 +86,17 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "cx_queue_depth{tier=%q,job_type=%q} %d\n", qd.Tier, qd.JobType, qd.Count)
 		}
 	}
+
+	// Background-ticker liveness: seconds since each ticker last succeeded (since the
+	// loop start when it has never run). A monotonically climbing value for a ticker
+	// is the signature of a wedged background loop · alert on it crossing a multiple of
+	// the ticker's interval. /readyz fails on the same staleness (see handleReadyz).
+	now := time.Now()
+	fmt.Fprintf(w, "# HELP cx_ticker_seconds_since_success Seconds since a background ticker last completed a successful run.\n")
+	fmt.Fprintf(w, "# TYPE cx_ticker_seconds_since_success gauge\n")
+	for name, secs := range liveness.snapshot(now, workersStartedAt) {
+		fmt.Fprintf(w, "cx_ticker_seconds_since_success{ticker=%q} %.3f\n", name, secs)
+	}
 }
 
 // writeCounter emits one counter metric in text exposition format.

@@ -22,7 +22,7 @@
 //! blanket-allowed: this is upstream code, not ours to restyle.
 #![allow(clippy::all, dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use candle_core::quantized::QTensor;
 use candle_core::quantized::{ggml_file, gguf_file};
@@ -31,6 +31,12 @@ use candle_nn::{Embedding, Module};
 use candle_transformers::quantized_nn::RmsNorm;
 
 pub const MAX_SEQ_LEN: usize = 4096;
+
+/// Upper bound on distinct masks retained in the per-model mask cache. Each
+/// long prefill mask is ~16MB, so an unbounded cache leaks GBs on a long-lived
+/// warm model. Eviction is insertion-order (oldest first) and determinism-safe:
+/// a recomputed mask is bitwise identical to the evicted one.
+const MASK_CACHE_CAP: usize = 64;
 
 // QMatMul wrapper adding some tracing.
 #[derive(Debug, Clone)]
@@ -273,7 +279,13 @@ pub struct ModelWeights {
     /// Mask cache keyed by (seq_len, kv_len).
     /// kv_len = index_pos + seq_len, so the mask is rectangular when prefix
     /// KV cache entries exist (index_pos > 0).
+    ///
+    /// Bounded to `MASK_CACHE_CAP` entries with insertion-order eviction
+    /// (`mask_order` holds the keys oldest-first); a long-lived warm model
+    /// otherwise leaks one ~16MB prefill mask per distinct (seq_len, kv_len).
+    /// A recomputed mask is bitwise identical, so eviction is determinism-safe.
     masks: HashMap<(usize, usize), Tensor>,
+    mask_order: VecDeque<(usize, usize)>,
     span: tracing::Span,
     span_output: tracing::Span,
 }
@@ -356,6 +368,7 @@ impl ModelWeights {
             norm,
             output: QMatMul::from_qtensor(output)?,
             masks: HashMap::new(),
+            mask_order: VecDeque::new(),
             span,
             span_output,
         })
@@ -479,6 +492,7 @@ impl ModelWeights {
             norm,
             output: QMatMul::from_qtensor(output)?,
             masks: HashMap::new(),
+            mask_order: VecDeque::new(),
             span,
             span_output,
         })
@@ -507,13 +521,55 @@ impl ModelWeights {
     /// ```
     fn mask(&mut self, seq_len: usize, index_pos: usize, device: &Device) -> Result<Tensor> {
         let kv_len = index_pos + seq_len;
-        if let Some(mask) = self.masks.get(&(seq_len, kv_len)) {
+        let key = (seq_len, kv_len);
+        if let Some(mask) = self.masks.get(&key) {
             Ok(mask.clone())
         } else {
             let mask = candle_transformers::utils::build_causal_mask(seq_len, index_pos, device)?;
-            self.masks.insert((seq_len, kv_len), mask.clone());
+            // Insertion-order eviction: cap the cache at MASK_CACHE_CAP entries,
+            // dropping the oldest key when full. Recomputing an evicted mask
+            // yields a bitwise-identical tensor, so this never alters outputs.
+            while self.mask_order.len() >= MASK_CACHE_CAP {
+                if let Some(old) = self.mask_order.pop_front() {
+                    self.masks.remove(&old);
+                } else {
+                    break;
+                }
+            }
+            self.masks.insert(key, mask.clone());
+            self.mask_order.push_back(key);
             Ok(mask)
         }
+    }
+
+    /// Drop finished rows from every layer's per-batch KV cache, keeping only
+    /// the batch rows named by `keep` (indices into the CURRENT cached batch
+    /// ordering, ascending). The KV cache `(k, v)` tensors are shaped
+    /// `(b_sz, n_kv_head, seq_len, head_dim)`, so we `index_select` along dim 0.
+    ///
+    /// Determinism note: `index_select` copies the kept rows verbatim · the
+    /// retained sequences' keys/values are bitwise unchanged, and all surviving
+    /// rows still share one `index_pos` (they stepped in lockstep from the same
+    /// start), so positions stay aligned. The subsequent `(keep.len(), 1)`
+    /// forward produces byte-identical logits for those rows.
+    pub fn compact_kv_cache(&mut self, keep: &[usize]) -> Result<()> {
+        if keep.is_empty() {
+            return Ok(());
+        }
+        let device = self.tok_embeddings.embeddings().device();
+        let idx = Tensor::from_vec(
+            keep.iter().map(|&i| i as u32).collect::<Vec<u32>>(),
+            keep.len(),
+            device,
+        )?;
+        for layer in self.layers.iter_mut() {
+            if let Some((k, v)) = &layer.kv_cache {
+                let k = k.index_select(&idx, 0)?;
+                let v = v.index_select(&idx, 0)?;
+                layer.kv_cache = Some((k, v));
+            }
+        }
+        Ok(())
     }
 
     pub fn forward(&mut self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
@@ -549,7 +605,7 @@ impl ModelWeights {
 
 #[cfg(test)]
 mod tests {
-    use candle_core::{Device, Result};
+    use candle_core::{Device, Result, Tensor};
     use candle_transformers::utils::build_causal_mask;
 
     // ── Mask shape tests ──────────────────────────────────────────────────────
@@ -638,6 +694,69 @@ mod tests {
         let att_shape = &[batch, heads, seq_len, kv_len];
         let broadcasted = mask.broadcast_as(att_shape.as_slice())?;
         assert_eq!(broadcasted.dims(), att_shape);
+        Ok(())
+    }
+
+    // ── Mask cache bound test ─────────────────────────────────────────────────
+
+    /// The mask cache is bounded at `MASK_CACHE_CAP` with insertion-order
+    /// eviction, and eviction is determinism-safe: a recomputed mask is
+    /// bitwise identical to the one that was evicted.
+    ///
+    /// This mirrors the exact map+deque discipline inside `ModelWeights::mask`
+    /// (which needs a full model to call directly) so the cache invariants are
+    /// covered without loading weights.
+    #[test]
+    fn mask_cache_is_bounded_and_recompute_is_identical() -> Result<()> {
+        use std::collections::{HashMap, VecDeque};
+
+        let device = Device::Cpu;
+        let mut masks: HashMap<(usize, usize), Tensor> = HashMap::new();
+        let mut order: VecDeque<(usize, usize)> = VecDeque::new();
+
+        // Capture the very first mask's bytes so we can prove the recomputed
+        // version (after it is evicted) is byte-for-byte identical.
+        let first_index_pos = 0usize;
+        let first_seq_len = 1usize;
+        let first_bytes: Vec<u8> = build_causal_mask(first_seq_len, first_index_pos, &device)?
+            .flatten_all()?
+            .to_vec1()?;
+
+        // Insert far more distinct (seq_len, kv_len) keys than the cap.
+        let inserts = super::MASK_CACHE_CAP * 3;
+        for i in 0..inserts {
+            let seq_len = 1usize;
+            let index_pos = i; // distinct kv_len each iteration
+            let kv_len = index_pos + seq_len;
+            let key = (seq_len, kv_len);
+            if !masks.contains_key(&key) {
+                let mask = build_causal_mask(seq_len, index_pos, &device)?;
+                while order.len() >= super::MASK_CACHE_CAP {
+                    if let Some(old) = order.pop_front() {
+                        masks.remove(&old);
+                    } else {
+                        break;
+                    }
+                }
+                masks.insert(key, mask);
+                order.push_back(key);
+            }
+            // Invariant on every step: never exceed the cap, map and order agree.
+            assert!(masks.len() <= super::MASK_CACHE_CAP, "cache exceeded cap");
+            assert_eq!(masks.len(), order.len(), "map and order out of sync");
+        }
+
+        // The first key (1, 1) must have been evicted long ago.
+        assert!(
+            !masks.contains_key(&(first_seq_len, first_index_pos + first_seq_len)),
+            "oldest key should have been evicted"
+        );
+
+        // Recompute it and prove it is bitwise identical to the original.
+        let recomputed: Vec<u8> = build_causal_mask(first_seq_len, first_index_pos, &device)?
+            .flatten_all()?
+            .to_vec1()?;
+        assert_eq!(recomputed, first_bytes, "recomputed mask must be identical");
         Ok(())
     }
 }

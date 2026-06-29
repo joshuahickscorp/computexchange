@@ -15,5 +15,22 @@
   <key>LSUIElement</key><true/>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHumanReadableCopyright</key><string>Computexchange</string>
+
+  <!-- Sparkle auto-update.
+       SUFeedURL    : the appcast the app polls for updates. Replace the host with
+                      your real release host before shipping. Must be HTTPS so the
+                      feed itself cannot be tampered with in transit.
+       SUPublicEDKey: the EdDSA (ed25519) PUBLIC key. OWNER STEP · generate the key
+                      pair once with Sparkle's `generate_keys` tool (it stores the
+                      PRIVATE key in your login keychain) and paste the printed
+                      public key here. Sparkle refuses to install any update whose
+                      appcast entry is not signed by the matching private key, so an
+                      empty/placeholder value here means NO update can install · an
+                      honest fail-closed default, never a silent unsigned install.
+       SUEnableAutomaticChecks: background update checks on by default. -->
+  <key>SUFeedURL</key><string>https://updates.computexchange.net/appcast.xml</string>
+  <key>SUPublicEDKey</key><string>REPLACE_WITH_YOUR_SPARKLE_ED25519_PUBLIC_KEY</string>
+  <key>SUEnableAutomaticChecks</key><true/>
+  <key>SUScheduledCheckInterval</key><integer>86400</integer>
 </dict>
 </plist>

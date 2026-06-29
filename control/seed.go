@@ -97,6 +97,9 @@ func seedDemo(ctx context.Context, pool *pgxpool.Pool) error {
 		  VALUES ('all-minilm-l6-v2','minilm',NULL,'embed',384,'embed',0.00100000,NULL,2,'sentence-transformers/all-MiniLM-L6-v2')
 		  ON CONFLICT (id) DO NOTHING`, nil},
 		{`INSERT INTO models (id, family, quant, kind, dim, job_type, price_per_1k, price_per_unit, min_memory_gb, hf_repo)
+		  VALUES ('bge-small-en-v1.5','bge',NULL,'embed',384,'embed',0.00100000,NULL,2,'BAAI/bge-small-en-v1.5')
+		  ON CONFLICT (id) DO NOTHING`, nil},
+		{`INSERT INTO models (id, family, quant, kind, dim, job_type, price_per_1k, price_per_unit, min_memory_gb, hf_repo)
 		  VALUES ('llama-3.2-1b-instruct-q4','llama','q4_k_m','gguf',NULL,'batch_infer',0.00200000,NULL,4,'unsloth/Llama-3.2-1B-Instruct-GGUF')
 		  ON CONFLICT (id) DO NOTHING`, nil},
 		{`INSERT INTO models (id, family, quant, kind, dim, job_type, price_per_1k, price_per_unit, min_memory_gb, hf_repo)

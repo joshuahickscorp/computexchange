@@ -1,0 +1,256 @@
+# Computexchange · Prometheus alerting rules.
+#
+# Every rule keys on a metric that is ACTUALLY exposed (control plane cx_*,
+# Caddy's caddy_http_*, blackbox probe_*, node/cadvisor). No rule depends on a
+# series that does not exist — a missing series surfaces as the data-absent
+# rules below (DeadMansSwitch / *NoData), never as a silently-never-firing
+# alert. BLACKHOLE: we would rather page on "I cannot see the metric" than
+# pretend green.
+#
+# Severities: `page` → wakes a human (Alertmanager routes to the paging
+# receiver); `ticket` → notification only.
+
+groups:
+  # ── Liveness / scrape health ───────────────────────────────────────────────
+  - name: liveness
+    rules:
+      - alert: InstanceDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "Scrape target {{ $labels.job }}/{{ $labels.instance }} is down"
+          description: >
+            Prometheus has been unable to scrape {{ $labels.instance }}
+            ({{ $labels.job }}) for 2 minutes. For the control job this means a
+            control-plane instance is unreachable; with two instances the other
+            still serves traffic behind Caddy, but capacity/redundancy is lost.
+
+      # A dead-man's switch: this rule is ALWAYS firing. Alertmanager is
+      # configured to alert if it ever STOPS arriving (the heartbeat receiver),
+      # which is how we detect Prometheus/Alertmanager itself being dead — the
+      # one failure the rest of the rules cannot catch.
+      - alert: DeadMansSwitch
+        expr: vector(1)
+        labels:
+          severity: heartbeat
+        annotations:
+          summary: "Monitoring heartbeat (always firing — alert if it STOPS)"
+          description: >
+            If this alert is NOT present in Alertmanager, the monitoring
+            pipeline itself is down. Wire the heartbeat receiver to a watchdog
+            (e.g. Dead Man's Snitch / healthchecks.io).
+
+  # ── WEDGED TICKER (the headline ops alert) ─────────────────────────────────
+  # Keyed on cx_ticker_seconds_since_success, the gauge the control agent adds:
+  # seconds since the background worker loop (payout release / stale-task
+  # requeue / webhook sweep) last completed a full successful cycle. If it grows
+  # without bound the ticker is wedged — payouts stop settling and stale tasks
+  # stop being requeued — even while /healthz and HTTP stay green. This is the
+  # single most important "looks alive but isn't" signal.
+  - name: wedged-ticker
+    rules:
+      - alert: WedgedTicker
+        # 300s == 5min. The fastest sweep (stale-requeue) runs well under a
+        # minute; payout/webhook on the order of a minute. 5min with no
+        # successful cycle anywhere is unambiguously wedged, not just slow.
+        expr: max by (instance) (cx_ticker_seconds_since_success) > 300
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "Control-plane ticker wedged on {{ $labels.instance }}"
+          description: >
+            cx_ticker_seconds_since_success on {{ $labels.instance }} is
+            {{ $value | humanizeDuration }} — the background worker loop has not
+            completed a successful cycle. Payouts are not settling and stale
+            tasks are not being requeued. Runbook: docs/RUNBOOKS.md §"Wedged
+            ticker". Likely a stuck DB query or a panicked goroutine; restart the
+            affected control instance to recover, then investigate logs.
+
+      # The metric vanishing entirely (control agent not emitting it, or scrape
+      # broken) is itself a wedge we must not miss.
+      - alert: WedgedTickerNoData
+        expr: absent(cx_ticker_seconds_since_success)
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "cx_ticker_seconds_since_success metric is absent"
+          description: >
+            No instance is exporting cx_ticker_seconds_since_success. Either both
+            control instances are down, the metric was removed, or scraping is
+            broken. Treat as a wedged ticker until proven otherwise.
+
+  # ── Payouts ────────────────────────────────────────────────────────────────
+  - name: payouts
+    rules:
+      # Credits are reaching 'ready' (owed) but the release rate is flat — money
+      # owed to suppliers is not moving. We compare the deferral signal (payouts
+      # that fell back to 'ready') against actual releases. A sustained gap with
+      # zero releases while work is completing means the Stripe rail is failing
+      # every cycle (BLACKHOLE: releasePayouts never fakes 'released').
+      - alert: PayoutsNotReleasing
+        expr: >
+          rate(cx_tasks_completed_total[1h]) > 0
+          and rate(cx_payouts_released_total[1h]) == 0
+        for: 2h
+        labels:
+          severity: page
+        annotations:
+          summary: "Work is completing but no payouts are releasing"
+          description: >
+            Tasks have been completing for 2h but cx_payouts_released_total has
+            not moved. Either no payout rail is configured (expected in alpha —
+            credits sit 'owed'), or the configured Stripe rail is rejecting every
+            transfer. Check `GET /admin/payouts` and control-plane logs for
+            "payout … deferred". Runbook: docs/RUNBOOKS.md §3.
+
+  # ── Database connection pool exhaustion ────────────────────────────────────
+  # The Go control plane does not export pool gauges directly, so we infer
+  # exhaustion two ways and fire on either. (1) cadvisor: the postgres container
+  # at its connection ceiling shows up as a flat-out CPU/mem container; (2) the
+  # primary signal — the ticker wedges (above) because every sweep query blocks
+  # waiting for a free connection. We ALSO surface a direct rule keyed on the
+  # postgres_exporter series if that exporter is added later; until then this is
+  # the honest proxy and is documented as such in RUNBOOKS.
+  - name: database
+    rules:
+      - alert: PostgresConnectionsNearLimit
+        # pg_settings_max_connections and pg_stat_activity_count come from
+        # postgres_exporter. If the exporter is not deployed these series are
+        # absent and PostgresExporterAbsent fires instead — never a false green.
+        expr: >
+          sum(pg_stat_activity_count) by (instance)
+          / on (instance) pg_settings_max_connections > 0.85
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Postgres connection pool >85% utilised"
+          description: >
+            {{ $value | humanizePercentage }} of max_connections are in use on
+            {{ $labels.instance }}. With two control instances each holding a
+            pool (DB_MAX_CONNS), pool exhaustion blocks every query and wedges
+            the ticker. Lower DB_MAX_CONNS per instance or raise Postgres
+            max_connections. Runbook: docs/RUNBOOKS.md §"DB pool exhaustion".
+
+      - alert: PostgresExporterAbsent
+        expr: absent(pg_settings_max_connections)
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "postgres_exporter metrics absent — DB pool blind spot"
+          description: >
+            pg_settings_max_connections is not being scraped, so the
+            PostgresConnectionsNearLimit rule cannot evaluate. Deploy
+            postgres_exporter (see monitoring/README) or accept that DB pool
+            exhaustion will only be caught indirectly via WedgedTicker.
+
+  # ── HTTP 5xx (observed at the Caddy edge) ──────────────────────────────────
+  - name: http
+    rules:
+      - alert: HighHTTP5xxRate
+        # caddy_http_requests_total is labelled by handler + code. We ratio 5xx
+        # against all responses over 5m. Fires above 5% sustained.
+        expr: >
+          sum(rate(caddy_http_requests_total{code=~"5.."}[5m]))
+          / sum(rate(caddy_http_requests_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Edge 5xx rate above 5%"
+          description: >
+            {{ $value | humanizePercentage }} of responses at the Caddy edge are
+            5xx over the last 5m. Check both control instances' /healthz and
+            logs; if one instance is bad, Caddy should already be routing around
+            it (health-checked upstream) — a sustained rate means both are
+            affected or the dependency (Postgres/MinIO) is down.
+
+      - alert: CaddyMetricsAbsent
+        expr: absent(caddy_http_requests_total)
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Caddy metrics absent — 5xx blind spot"
+          description: >
+            caddy_http_requests_total is not being scraped (is `metrics` enabled
+            in the Caddyfile global options and the admin endpoint reachable at
+            caddy:2019?). HighHTTP5xxRate cannot evaluate without it.
+
+  # ── TLS certificate expiry ─────────────────────────────────────────────────
+  - name: tls
+    rules:
+      - alert: TLSCertExpiringSoon
+        # blackbox tls_connect exposes probe_ssl_earliest_cert_expiry as a unix
+        # ts. Caddy auto-renews ~30d out; if we are inside 14d renewal has been
+        # failing and needs a human.
+        expr: probe_ssl_earliest_cert_expiry - time() < 14 * 24 * 3600
+        for: 1h
+        labels:
+          severity: page
+        annotations:
+          summary: "TLS cert for {{ $labels.instance }} expires in <14d"
+          description: >
+            The certificate served for {{ $labels.instance }} expires in
+            {{ $value | humanizeDuration }}. Caddy renews automatically at ~30d;
+            being inside 14d means ACME renewal is failing (rate limit, DNS, or
+            port 80/443 blocked). Runbook: docs/RUNBOOKS.md §"Cert renewal".
+
+      - alert: TLSProbeFailing
+        expr: probe_success{job="blackbox-tls"} == 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "TLS probe to {{ $labels.instance }} failing"
+          description: >
+            The blackbox TLS handshake to {{ $labels.instance }} is failing —
+            the public edge may be down or serving a broken cert.
+
+  # ── Host / container resource pressure ─────────────────────────────────────
+  - name: resources
+    rules:
+      - alert: HostDiskFillingUp
+        # WAL archiving + pgdata + miniodata live on the droplet disk; a full
+        # disk halts Postgres writes. Page at <10% free on the data filesystem.
+        expr: >
+          node_filesystem_avail_bytes{mountpoint="/",fstype!="tmpfs"}
+          / node_filesystem_size_bytes{mountpoint="/",fstype!="tmpfs"} < 0.10
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "Root filesystem <10% free on {{ $labels.instance }}"
+          description: >
+            {{ $value | humanizePercentage }} free on /. Postgres halts writes on
+            a full disk. Check WAL archive backlog (is offsite shipping working?)
+            and prune old local backups.
+
+      - alert: HostMemoryPressure
+        expr: >
+          node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.10
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Host memory <10% available on {{ $labels.instance }}"
+          description: >
+            The droplet is under memory pressure. The per-container mem_limit
+            caps protect against one service OOMing the box, but sustained
+            pressure risks OOM-kills. Consider a larger droplet.
+
+      - alert: ContainerRestartLoop
+        expr: rate(container_start_time_seconds[15m]) > 0 and increase(container_start_time_seconds[1h]) >= 3
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Container {{ $labels.name }} is restart-looping"
+          description: >
+            {{ $labels.name }} has restarted >=3 times in the last hour. Check
+            `docker compose logs {{ $labels.name }}`.
