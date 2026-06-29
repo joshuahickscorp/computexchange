@@ -70,11 +70,6 @@ req ACME_EMAIL            "Caddy refuses to start without an ACME account email"
 forbid_default POSTGRES_PASSWORD   "cx"
 forbid_default MINIO_ROOT_PASSWORD "minioadmin"
 
-if [ "$SKIP_BACKUP" -eq 0 ]; then
-  req CX_BACKUP_OFFSITE     "offsite backup destination (needed for the pre-deploy backup)"
-  req AWS_ACCESS_KEY_ID     "offsite bucket credentials"
-  req AWS_SECRET_ACCESS_KEY "offsite bucket credentials"
-fi
 [ "$MONITORING" -eq 1 ] && req GRAFANA_ADMIN_PASSWORD "Grafana refuses to start without an admin password"
 
 # Soft warnings · deploy proceeds, but say plainly what will be inert.
@@ -106,8 +101,18 @@ fi
 # ── 4. backup BEFORE migrating (recoverable rollout) ─────────────────────────
 if [ "$SKIP_BACKUP" -eq 0 ]; then
   if docker compose -f docker-compose.prod.yml ps -q postgres 2>/dev/null | grep -q .; then
-    log "pre-deploy offsite backup (scripts/backup.sh)"
-    bash scripts/backup.sh || die "pre-deploy backup FAILED · not deploying over un-backed-up data. Fix offsite creds and retry."
+    if [ -n "${CX_BACKUP_OFFSITE:-}" ]; then
+      log "pre-deploy OFFSITE backup (scripts/backup.sh)"
+      bash scripts/backup.sh || die "pre-deploy backup FAILED · not deploying over un-backed-up data. Fix offsite creds or use --skip-backup (not recommended)."
+    else
+      log "pre-deploy LOCAL backup (CX_BACKUP_OFFSITE unset · dumping the live DB to disk)"
+      mkdir -p .artifacts/backups
+      dump=".artifacts/backups/predeploy-$(date -u +%Y%m%dT%H%M%SZ).sql.gz"
+      docker compose -f docker-compose.prod.yml exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' | gzip > "$dump" \
+        || die "local pre-deploy pg_dump FAILED · not migrating over un-backed-up data."
+      [ -s "$dump" ] || die "local pre-deploy backup is empty · aborting."
+      warn "live DB backed up LOCALLY to $dump ($(du -h "$dump" | cut -f1)). Same-host only · set CX_BACKUP_OFFSITE for a real offsite copy."
+    fi
   else
     warn "no running postgres found · treating as a fresh box, skipping the pre-deploy backup."
   fi
