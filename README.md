@@ -68,8 +68,7 @@ available memory and pauses claiming work before it would breach the operator's
 reserved headroom or swap the box), a **scheduler safety contract** (the claim
 filter refuses to dispatch to a throttled worker or one whose *effective* memory
 is below the job's need), and a **minimal role-based app skeleton** (`/app`:
-Supplier / Buyer / Admin / Workflows). Frontend is **skeleton-only by decision** , 
-final design and the `Workflows`/IDE idea are deferred pending product input. See
+Supplier / Buyer / Admin / Workflows). Frontend is **skeleton-only by decision**; final design and the `Workflows`/IDE idea are deferred pending product input. See
 [docs/ALPHA_READINESS.md](docs/ALPHA_READINESS.md) (what's proven vs skeleton vs
 external) and [docs/PRODUCT_SHAPE.md](docs/PRODUCT_SHAPE.md) (app topology).
 Configure headroom with `memory_headroom_gb` / `max_memory_pct` in `agent.toml`.
@@ -173,3 +172,34 @@ make docker-build   # build the control-plane image standalone (cx-control)
 ```
 
 CI (`.github/workflows/ci.yml`) gates every push/PR: the **control** job builds, vets, gofmt-checks, and runs both the unit tests **and the full integration matrix** (`go test -tags integration`) against live Postgres + MinIO service containers; the **agent** job runs fmt/clippy/build/test on macOS (for Candle/Metal); the **schema** job applies `db/schema.sql` into Postgres 17 and asserts a clean, re-runnable load. The deeper `make prove-local` (live Metal inference) is the local release-candidate gate, it needs Apple Silicon + cached models, so it runs on a developer machine, not cheap CI.
+
+## Roadmap
+
+Computexchange is a task-priced, verified spot market for batch AI inference on
+idle Apple Silicon Macs. The core engine (queue, scheduling, on-device
+inference, verification, ledger) works end to end today. The work ahead is the
+buyer-facing product, real multi-machine supply, and the licensed payout rail.
+
+### Now (works today)
+- The full job lifecycle: submit, queue (Postgres FOR UPDATE SKIP LOCKED),
+  claim, run real on-device inference on Metal, verify, and settle the ledger.
+- Verification: honeypots, within-class redundancy, 3-way majority vote,
+  reputation, and payout holds.
+- An OpenAI-compatible Batch API, a CLI, a Python SDK, and a menu-bar agent.
+
+### Next
+- A real buyer console and the Compute Autopilot pipeline builder (the backend
+  seams exist; the visual product is a build).
+- A routing-intelligence dashboard that surfaces the per-job-type timing data
+  the control plane already collects.
+- Cross-machine validation on a real Mac Studio and a second physical Mac
+  (byte-identical output rates, sustained thermal load).
+
+### Later
+- The licensed payout transfer rail (Stripe Connect or Trolley). The ledger and
+  the hold-to-release lifecycle are real today; only the final transfer call is
+  stubbed.
+- A co-located Mac Studio cluster for large-model inference, offered as a
+  reserved tier.
+- The enterprise and privacy tier (private-pool routing already exists; the
+  compliance attestations are external work).
