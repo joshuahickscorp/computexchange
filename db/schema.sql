@@ -386,6 +386,24 @@ CREATE TABLE IF NOT EXISTS disputes (
     resolved_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS disputes_job_idx ON disputes (job_id, created_at);
+
+-- verification_events is the append-only RECEIPT log: the verification machinery
+-- (control/verification.go) already applies reputation deltas on every outcome, but
+-- the OUTCOMES themselves were not persisted, so a buyer could not see what was
+-- checked. Each row is one verification fact emitted co-located with its reputation
+-- dock (honeypot pass/fail, redundancy match/mismatch, tiebreak win/loss). Writes are
+-- best-effort and NEVER block the verify/money path; the aggregate is grouped by
+-- job_id for the buyer-facing job-status `verification` block. kind is the closed set
+-- {honeypot_pass|honeypot_fail|redundancy_match|redundancy_mismatch|tiebreak_win|tiebreak_loss}.
+CREATE TABLE IF NOT EXISTS verification_events (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    job_id      UUID NOT NULL REFERENCES jobs,
+    task_id     UUID,
+    supplier_id UUID,
+    kind        TEXT NOT NULL,  -- honeypot_pass|honeypot_fail|redundancy_match|redundancy_mismatch|tiebreak_win|tiebreak_loss
+    created_at  TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS verification_events_job_idx ON verification_events (job_id, created_at);
 -- reverify_task_id links a dispute to the independent re-run dispatched to resolve it
 -- (status flow: open|no_peer -> reverifying -> resolved|rejected|unresolvable).
 ALTER TABLE disputes ADD COLUMN IF NOT EXISTS reverify_task_id UUID;

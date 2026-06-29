@@ -304,6 +304,12 @@ class Client:
     def get_job(self, job_id):
         """``GET /v1/jobs/{id}`` — status + progress.
 
+        The returned dict carries the full job-status wire contract, including
+        ``charge_status`` (``not_attempted|charged|failed|no_payment_method``) and the
+        ``verification`` receipt block (``checked``, ``honeypots_passed/failed``,
+        ``redundancy_matched/mismatched``, ``tiebreaks``, ``dispute_status``, ``label``)
+        · both pass through unchanged from the control plane.
+
         Raises the typed :class:`BudgetStoppedError` when the Budget Governor has
         stopped the job (``budget_state`` is ``paused_for_budget``/``cancelled_by_budget``),
         and :class:`BadInputError` when a terminal failure was the buyer's fault

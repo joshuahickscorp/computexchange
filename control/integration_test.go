@@ -91,7 +91,7 @@ func reset(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
 	if _, err := itPool.Exec(ctx,
-		`TRUNCATE tasks, jobs, webhooks, ledger_entries, benchmark_results, disputes RESTART IDENTITY CASCADE`); err != nil {
+		`TRUNCATE tasks, jobs, webhooks, ledger_entries, benchmark_results, disputes, verification_events RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatalf("reset truncate: %v", err)
 	}
 	// Workers/worker_tokens are NOT truncated above (FK from worker_tokens). Drop
@@ -2616,5 +2616,46 @@ func TestDisputeResolverNoPeer(t *testing.T) {
 	}
 	if status != "no_peer" {
 		t.Fatalf("want 'no_peer' (no distinct same-class supplier to re-verify), got %q", status)
+	}
+}
+
+// TestVerificationReceiptSurfaced proves the verification RECEIPT path end to end: a real
+// verification outcome records an append-only verification_events row, and the buyer
+// job-status (GetJob) surfaces the aggregate counts + the honest derived label +
+// charge_status. This is the moat made visible — exercised against live Postgres.
+func TestVerificationReceiptSurfaced(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+	jobID, taskID := uuid.New(), uuid.New()
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO jobs (id, buyer_id, status, job_type, input_ref, task_count, tasks_done)
+		 VALUES ($1,$2,'complete','embed','jobs/x/input.jsonl',1,1)`, jobID, demoBuyerUUID); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+	// A redundancy MATCH (two agreeing results) records a redundancy_match event for the job.
+	info := &CommitTaskInfo{TaskID: taskID, JobID: jobID, WorkerID: demoWorkerUUID,
+		SupplierID: demoSupplierUUID, jobType: "embed", HWClass: "apple_silicon_max"}
+	if out, err := itServer.verifier.verifyTaskResult(ctx, info,
+		TaskCommit{TaskID: taskID}, embedResultJSON(1), embedResultJSON(1)); err != nil || out != OutcomePass {
+		t.Fatalf("verify match: out=%v err=%v", out, err)
+	}
+	var n int
+	if err := itPool.QueryRow(ctx,
+		`SELECT count(*) FROM verification_events WHERE job_id=$1 AND kind='redundancy_match'`, jobID).Scan(&n); err != nil || n < 1 {
+		t.Fatalf("want >=1 redundancy_match verification_event, got n=%d err=%v", n, err)
+	}
+	// The buyer job-status surfaces the receipt aggregate, the honest label, and charge_status.
+	jv, err := itStore.GetJob(ctx, jobID, demoBuyerUUID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if jv.Verification.RedundancyMatched < 1 || jv.Verification.Checked < 1 {
+		t.Fatalf("receipt aggregate missing: %+v", jv.Verification)
+	}
+	if jv.Verification.Label != "verified" {
+		t.Fatalf("want label 'verified' (redundancy matched), got %q", jv.Verification.Label)
+	}
+	if jv.ChargeStatus == "" {
+		t.Fatalf("charge_status should surface a default state, got empty")
 	}
 }

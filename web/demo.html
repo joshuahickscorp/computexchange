@@ -9,236 +9,315 @@
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
 <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
 <link rel="manifest" href="site.webmanifest">
-<meta name="theme-color" content="#0a0a0c">
+<meta name="theme-color" content="#060606">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
   :root{
-    --bg:#0a0a0c; --card:#101013; --raise:#16161a;
-    --line:#222226; --line-soft:#1a1a1e; --line-hi:#33333a;
-    --ash:#6c6c72; --mute:#8d8d94; --bone:#cbc8c1; --bone-hi:#ebe7e0; --signal:#ffffff;
-    --green:#37d27a; --red:#e5544a; --yellow:#f3bf1a;   /* status ONLY: knob light, run statuses (green/red), fixed markers (yellow) */
+    /* ===== the concrete field ===== */
+    --bg:#060606;                          /* board-formed concrete, never true black */
+
+    /* ===== material light: hairlines + reveals, never drawn boxes ===== */
+    --reveal:rgba(255,255,255,.05);        /* a lit top edge where a surface lifts */
+    --reveal-hi:rgba(255,255,255,.09);
+    --hair:rgba(255,255,255,.045);         /* a single low-opacity separating line */
+    --hair-soft:rgba(255,255,255,.03);
+    --seat:rgba(0,0,0,.45);                /* ambient darkening where a panel meets the field */
+
+    /* ===== text: one muted system of voices ===== */
+    --ash:#595960;                         /* faintest: hashes, idle glyphs */
+    --mute:#83838b;                        /* the single secondary voice */
+    --bone:#bfbcb5;                        /* read */
+    --bone-hi:#e7e3dc;                     /* announce */
+    --signal:#ffffff;                      /* light from within */
+
+    /* ===== status ONLY, anodized (deep + desaturated, not a bright LED): green done/live, red failed ===== */
+    --green:#4c9d6e; --green-core:#69c096;
+    --red:#c0554b;   --red-core:#dc8079;
+
+    /* ===== type: Geist Mono carries the whole UI; one Cormorant monument figure ===== */
+    --mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:var(--mono);                    /* every existing var(--sans) now resolves to Geist Mono */
     --serif:"Cormorant Garamond",serif;
-    --sans:-apple-system,BlinkMacSystemFont,"SF Pro Display","Inter",system-ui,sans-serif;
     --r:14px; --r-sm:10px; --r-pill:999px;
-    --dur:.16s; --dur-slow:.26s; --ease:cubic-bezier(.2,0,0,1);
-    --pad:18px; --gap:16px;
+    --dur:.18s; --dur-slow:.32s; --ease:cubic-bezier(.2,0,0,1);
+    --pad:20px; --gap:16px;
   }
   *{box-sizing:border-box}
   html,body{margin:0;height:100%}
   body{
-    background:radial-gradient(120% 100% at 50% 0%, #101014 0%, #0a0a0c 55%, #08080a 100%);
+    /* concrete: a near-black plane, a single low-contrast lift behind the hero, and the
+       barely-there ghost of Ando form-tie marks. Felt, not seen. */
+    background:
+      radial-gradient(78% 56% at 50% 2%, rgba(255,255,255,.024), rgba(255,255,255,0) 60%),
+      radial-gradient(rgba(255,255,255,.014) 1px, transparent 1.6px) 0 0/104px 104px,
+      var(--bg);
     background-attachment:fixed;
     color:var(--bone); -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
-    font:400 13px/1.6 var(--sans);
+    font:400 13px/1.6 var(--mono);
+    font-variant-numeric:tabular-nums;     /* every figure sits in aligned columns */
   }
   ::selection{background:var(--bone-hi);color:var(--bg)}
-  :focus-visible{outline:none;box-shadow:0 0 0 1px var(--line-hi);border-radius:var(--r-sm)}
+  :focus-visible{outline:none;box-shadow:0 0 0 1px var(--reveal-hi);border-radius:var(--r-sm)}
 
   .app{display:flex;min-height:100vh;max-width:700px;margin:0 auto}
-  /* rail */
-  .rail{width:60px;display:flex;flex-direction:column;align-items:center;gap:6px;padding:18px 0;border-right:1px solid var(--line-soft)}
-  /* brand mark: flat white Cx, no box, no chip (identity, not a control). The metal is spent
-     on the knob; the rail mark stays flat so the knob remains the single hero on screen. */
-  .brand{width:30px;height:30px;margin-bottom:10px;display:flex;align-items:center;justify-content:center}
+  /* rail: a darker reveal in the concrete, not a bordered column */
+  .rail{width:60px;display:flex;flex-direction:column;align-items:center;gap:8px;padding:22px 0;box-shadow:1px 0 0 var(--hair-soft)}
+  /* brand mark: flat white Cx (identity, not a control). Metal is spent only on the instrument. */
+  .brand{width:28px;height:28px;margin-bottom:14px;display:flex;align-items:center;justify-content:center;opacity:.92}
   .brand img{width:100%;height:100%;object-fit:contain;display:block}
-  .nav{width:42px;height:42px;border:none;background:none;color:var(--ash);border-radius:var(--r-sm);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:background var(--dur) var(--ease),color var(--dur) var(--ease)}
-  .nav svg{width:21px;height:21px}
-  .nav:hover{color:var(--bone);background:var(--raise)}
-  .nav.on{color:var(--bone-hi);background:var(--raise)}
+  .nav{width:42px;height:42px;border:none;background:none;color:var(--ash);border-radius:var(--r-sm);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:color var(--dur) var(--ease)}
+  .nav svg{width:20px;height:20px}
+  .nav:hover{color:var(--mute)}
+  .nav.on{color:var(--bone-hi)}            /* active lifted by light, not a filled box */
   .nav.acct{margin-top:auto}
 
   /* main + header */
   .main{flex:1;min-width:0;display:flex;flex-direction:column}
-  .top{display:flex;align-items:center;justify-content:space-between;padding:18px 22px}
-  .eyebrow{font-size:11px;font-weight:500;letter-spacing:.18em;text-transform:uppercase;color:var(--mute)}
-  .bell{position:relative;width:34px;height:34px;border:none;background:none;color:var(--ash);border-radius:var(--r-sm);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background var(--dur) var(--ease),color var(--dur) var(--ease)}
-  .bell:hover{background:var(--raise);color:var(--bone)} .bell svg{width:18px;height:18px}
-  .badge{position:absolute;top:7px;right:8px;width:7px;height:7px;border-radius:50%;background:var(--signal)}
+  .top{display:flex;align-items:center;justify-content:space-between;padding:22px 24px}
+  .eyebrow{font-size:10px;font-weight:500;letter-spacing:.26em;text-transform:uppercase;color:var(--mute)}
+  .bell{position:relative;width:34px;height:34px;border:none;background:none;color:var(--ash);border-radius:var(--r-sm);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:color var(--dur) var(--ease)}
+  .bell:hover{color:var(--mute)} .bell svg{width:18px;height:18px}
+  .badge{position:absolute;top:7px;right:8px;width:6px;height:6px;border-radius:50%;background:var(--signal)}
   .badge.hide{display:none}
-  .notif{position:absolute;top:52px;right:18px;width:268px;background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:6px;display:none;z-index:8;box-shadow:0 1px 0 rgba(255,255,255,.03) inset,0 8px 24px rgba(0,0,0,.4)}
+  .notif{position:absolute;top:54px;right:20px;width:270px;border-radius:var(--r);padding:6px;display:none;z-index:8;
+    background:linear-gradient(180deg,rgba(255,255,255,.022),rgba(0,0,0,.18));
+    box-shadow:inset 0 1px 0 var(--reveal),0 1px 0 var(--seat),0 24px 48px -28px rgba(0,0,0,.9)}
   .notif.open{display:block}
-  .notif-item{padding:10px 11px;font-size:13px;border-radius:var(--r-sm);color:var(--bone)} .notif-item:hover{background:var(--raise)}
-  .notif-item .t{color:var(--ash);font-size:11px;margin-top:2px}
+  .notif-item{padding:10px 11px;font-size:12px;border-radius:var(--r-sm);color:var(--bone)} .notif-item:hover{background:rgba(255,255,255,.03)}
+  .notif-item .t{color:var(--ash);font-size:10px;letter-spacing:.04em;margin-top:3px}
 
-  /* centered content column with room at the edges + a quiet radial lift behind the hero (Section C) */
-  .view{display:none;max-width:620px;width:100%;margin:0 auto;padding:44px 30px 72px;
-    background:radial-gradient(72% 50% at 50% 22%, rgba(255,255,255,.025), rgba(255,255,255,0) 70%)} .view.on{display:block}
-  .section-label{font-size:10px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--mute);margin:0 0 12px}
+  /* centered column in the void; the hero lift lives on the field behind it */
+  .view{display:none;max-width:600px;width:100%;margin:0 auto;padding:48px 32px 88px} .view.on{display:block}
+  /* the apothecary label, one consistent register everywhere */
+  .section-label{font-size:10px;font-weight:500;letter-spacing:.22em;text-transform:uppercase;color:var(--mute);margin:0 0 14px}
 
+  /* cast panel: a slab set into the wall. Two-layer surface, a lit top reveal, content recessed
+     so it sits down inside, ambient darkening where it meets the field. No drawn box, no float. */
   .card{
-    background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(0,0,0,.14));
-    border:1px solid var(--line-soft);border-radius:var(--r);
-    box-shadow:0 1px 0 rgba(255,255,255,.03) inset,0 1px 2px rgba(0,0,0,.3);
+    position:relative;border-radius:var(--r);
+    background:linear-gradient(180deg,rgba(255,255,255,.022),rgba(255,255,255,.006) 22%,rgba(0,0,0,.16));
+    box-shadow:inset 0 1px 0 var(--reveal),inset 0 -22px 30px -28px rgba(0,0,0,.8),0 1px 0 var(--seat);
   }
 
   /* numerals */
   .num{font-variant-numeric:tabular-nums}
 
   /* ===== EARN ===== */
-  .power-wrap{text-align:center;padding:24px 0 0}
-  .knob{position:relative;width:240px;height:240px;margin:0 auto;cursor:pointer;outline:none}
+  .power-wrap{text-align:center;padding:8px 0 0}    /* the instrument on its plinth, air around it */
+  .knob{position:relative;width:236px;height:236px;margin:0 auto;cursor:pointer;outline:none}
   .knob img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:block}
   .knob-base{z-index:1}
   .knob-red{z-index:2;opacity:0;transition:opacity var(--dur-slow) var(--ease)}   /* offline: red, steady */
   .knob-glow{z-index:3;opacity:0;transition:opacity var(--dur-slow) var(--ease)}  /* online: green, breathing */
   .knob-press{z-index:4;opacity:0;transition:opacity 90ms var(--ease)}
-  .knob-shadow{position:absolute;left:50%;bottom:8%;width:60%;height:10%;transform:translateX(-50%);
-    background:radial-gradient(ellipse,rgba(0,0,0,.7),transparent 70%);filter:blur(7px);z-index:0}
-  .knob.is-on .knob-glow{opacity:1;animation:knob-breathe 3.6s ease-in-out infinite}  /* online: green breathes */
-  .knob:not(.is-on) .knob-red{opacity:1}                                              /* offline: red, steady */
+  .knob-shadow{position:absolute;left:50%;bottom:8%;width:58%;height:9%;transform:translateX(-50%);
+    background:radial-gradient(ellipse,rgba(0,0,0,.72),transparent 70%);filter:blur(8px);z-index:0}
+  .knob.is-on .knob-glow{opacity:1;animation:knob-breathe 4s ease-in-out infinite}  /* online: green breathes */
+  .knob:not(.is-on) .knob-red{opacity:1}                                            /* offline: red, steady */
   .knob:active .knob-press{opacity:1}
-  .knob:focus-visible{box-shadow:0 0 0 1px var(--line-hi);border-radius:50%}
-  @keyframes knob-breathe{0%,100%{opacity:.6} 50%{opacity:1}}
+  .knob:focus-visible{box-shadow:0 0 0 1px var(--reveal-hi);border-radius:50%}
+  @keyframes knob-breathe{0%,100%{opacity:.62} 50%{opacity:1}}
 
-  .pstate{font-size:12px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--bone-hi);margin-top:22px}
+  .pstate{font-size:11px;font-weight:500;letter-spacing:.2em;text-transform:uppercase;color:var(--bone-hi);margin-top:30px}
   .pstate.off{color:var(--ash)}
-  /* tiny status dot echoing the knob light: green online, red offline (same two values) */
-  .sdot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--green);vertical-align:middle;margin:-2px 9px 0 0;transition:background var(--dur) var(--ease)}
-  .pstate.off .sdot{background:var(--red)}
-  /* secondary voice: one muted color + size, relaxed line-height (Section D) */
-  .phint{font-size:12px;line-height:1.6;color:var(--mute);margin-top:8px}
-  .prun{font-size:12px;line-height:1.6;color:var(--mute);margin-top:10px}
+  /* anodized status dot echoing the knob ring: light rising from within, not a flat circle */
+  .sdot{display:inline-block;width:7px;height:7px;border-radius:50%;vertical-align:middle;margin:-2px 10px 0 0;
+    background:radial-gradient(circle at 50% 40%,var(--green-core),var(--green) 72%);box-shadow:0 0 5px 0 rgba(76,157,110,.55);
+    transition:background var(--dur) var(--ease),box-shadow var(--dur) var(--ease)}
+  .pstate.off .sdot{background:radial-gradient(circle at 50% 40%,var(--red-core),var(--red) 72%);box-shadow:0 0 5px 0 rgba(192,85,75,.55)}
+  /* the single secondary voice: one muted colour + size, relaxed line-height */
+  .phint{font-size:12px;line-height:1.6;color:var(--mute);margin-top:10px}
+  .prun{font-size:12px;line-height:1.6;color:var(--mute);margin-top:12px}
 
-  .figures{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-top:56px;padding-bottom:40px;border-bottom:1px solid var(--line-soft)}
+  /* totals: the monument between two quiet weights, a hairline above + below, no box */
+  .figures{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-top:64px;padding:28px 0 36px;border-top:1px solid var(--hair-soft);border-bottom:1px solid var(--hair-soft)}
   .fig{flex:1} .fig.mid{flex:0 0 auto;text-align:center} .fig.end{text-align:right}
-  .fig .k{font-size:10px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--mute)}
-  .fig .v{font-size:16px;font-weight:500;color:var(--bone-hi);margin-top:6px}
+  .fig .k{font-size:10px;font-weight:500;letter-spacing:.2em;text-transform:uppercase;color:var(--mute)}
+  .fig .v{font-size:15px;font-weight:500;color:var(--bone-hi);margin-top:8px}
   .fig .v.live{color:var(--signal)}
-  .monument{font-family:var(--serif);font-weight:600;font-size:60px;line-height:.9;letter-spacing:-.01em;color:var(--bone-hi);margin-top:2px}
+  /* the one Cormorant monument: proportional display numerals (the single exception to tabular) */
+  .monument{font-family:var(--serif);font-weight:600;font-size:62px;line-height:.9;letter-spacing:-.02em;color:var(--bone-hi);margin-top:2px;font-variant-numeric:normal}
 
-  .monitor{margin-top:40px;padding:18px 18px}
+  .monitor{margin-top:48px;padding:20px 20px 16px}
   .monitor.hide{display:none}
-  .monitor-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
-  .monitor-h .k{font-size:10px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--mute)}
+  .monitor-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+  .monitor-h .k{font-size:10px;font-weight:500;letter-spacing:.2em;text-transform:uppercase;color:var(--mute)}
   .monitor-h .v{font-size:13px;font-weight:500;color:var(--bone-hi)}
-  .monitor svg{display:block;width:100%;height:46px}
+  .monitor svg{display:block;width:100%;height:48px}
 
-  .row{display:flex;align-items:center;justify-content:space-between;padding:18px 2px;border-top:1px solid var(--line-soft);font-size:13px}
+  .row{display:flex;align-items:center;justify-content:space-between;padding:18px 2px;border-top:1px solid var(--hair-soft);font-size:13px}
   .row:first-of-type{border-top:none}
-  .monitor + .row{margin-top:24px}   /* breathing room before the Machine/Payout rows */
-  .row .l{display:flex;align-items:center;gap:10px;min-width:0}
-  .row .k{font-size:10px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--mute)}
+  .monitor + .row{margin-top:32px}   /* breathing room before the Machine/Payout rows */
+  .row .l{display:flex;align-items:center;gap:12px;min-width:0;color:var(--bone)}
+  .row .k{font-size:10px;font-weight:500;letter-spacing:.2em;text-transform:uppercase;color:var(--mute)}
   .r-meta{color:var(--mute)}
-  /* machine + payout are fixed facts (your machine; payout is Stripe-only), not pass/fail. They get
-     the third light in the oracle series: a static YELLOW (green = done, red = failed, yellow = fixed).
-     Same turned-metal ring as the run lights, with a yellow neon core. */
-  .marker{position:relative;width:16px;height:16px;flex:none;background:url(assets/dot-ring@3x.png) center/contain no-repeat}
-  .marker::before{content:"";position:absolute;inset:22%;border-radius:50%;
-    background:radial-gradient(circle at 50% 42%,#ffeaa6,#f3bf1a 72%);box-shadow:0 0 7px 1px rgba(243,191,26,.85)}
+  /* Machine + Payout are fixed facts, not pass/fail: flat line-glyph ring tokens, quiet + subordinate.
+     No metal puck, no colour, no glow. The bottom of the procession. */
+  .marker{position:relative;width:12px;height:12px;flex:none;border-radius:50%;box-shadow:inset 0 0 0 1.5px rgba(255,255,255,.2)}
 
   /* ===== LAUNCH ===== */
-  .banner{display:flex;align-items:center;gap:16px;justify-content:space-between;padding:18px 20px;margin-bottom:40px;font-size:12px;line-height:1.6;color:var(--mute)}
-  .pill{height:32px;padding:0 16px;border-radius:var(--r-pill);border:1px solid var(--line);background:transparent;color:var(--bone);font:500 12px var(--sans);cursor:pointer;transition:border-color var(--dur) var(--ease),color var(--dur) var(--ease),background var(--dur) var(--ease)}
-  .pill:hover{border-color:var(--line-hi);color:var(--bone-hi)}
-  .pill.solid{background:var(--bone-hi);color:var(--bg);border-color:var(--bone-hi)}
-  .pill.solid:hover{background:var(--signal);border-color:var(--signal)}
+  .banner{display:flex;align-items:center;gap:16px;justify-content:space-between;padding:20px 22px;margin-bottom:48px;font-size:12px;line-height:1.6;color:var(--mute)}
+  /* secondary flat controls: separated by a hairline, never a drawn box */
+  .pill{height:34px;padding:0 16px;border-radius:var(--r-pill);background:transparent;color:var(--bone);font:500 11px var(--mono);letter-spacing:.04em;cursor:pointer;box-shadow:inset 0 0 0 1px var(--hair);transition:color var(--dur) var(--ease),box-shadow var(--dur) var(--ease),background var(--dur) var(--ease)}
+  .pill:hover{color:var(--bone-hi);box-shadow:inset 0 0 0 1px var(--reveal-hi)}
+  .pill.solid{background:var(--bone-hi);color:var(--bg);box-shadow:none}
+  .pill.solid:hover{background:var(--signal)}
 
-  .intake{border:1.5px dashed var(--line);border-radius:var(--r);padding:40px 16px;text-align:center;color:var(--mute);cursor:pointer;transition:border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
-  .intake svg{width:24px;height:24px;display:block;margin:0 auto 8px;stroke-width:1.5}
-  .intake:hover,.intake.drag{border-color:var(--line-hi);color:var(--bone)}
-  .intake.detected{border-style:solid;border-color:var(--line)}
+  /* drop zone: a slot cut into the concrete (a recessed reveal), never a dashed box */
+  .intake{border:none;border-radius:var(--r);padding:44px 16px;text-align:center;color:var(--mute);cursor:pointer;
+    background:linear-gradient(180deg,rgba(0,0,0,.24),rgba(0,0,0,.08));
+    box-shadow:inset 0 1px 0 var(--reveal),inset 0 3px 12px rgba(0,0,0,.55);
+    transition:color var(--dur) var(--ease),box-shadow var(--dur) var(--ease)}
+  .intake svg{width:22px;height:22px;display:block;margin:0 auto 10px;stroke-width:1.4;color:var(--ash)}
+  .intake:hover,.intake.drag{color:var(--bone);box-shadow:inset 0 1px 0 var(--reveal-hi),inset 0 3px 14px rgba(0,0,0,.72)}
   .intake.detected .intake-icon{display:none}
-  .d-name{display:block;color:var(--bone-hi);font-size:14px;font-weight:500}
-  .d-meta{display:block;color:var(--mute);font-size:12px;margin-top:5px}
+  .d-name{display:block;color:var(--bone-hi);font-size:13px;font-weight:500}
+  .d-meta{display:block;color:var(--mute);font-size:11px;margin-top:6px;letter-spacing:.02em}
 
-  /* the Launch button floats in open space, centered, with big air above and below */
-  .launch-row{display:flex;justify-content:center;margin:56px 0}
-  .runs{margin-top:56px}
-  .run{border-top:1px solid var(--line-soft)}
-  .run-main{display:flex;align-items:center;justify-content:space-between;padding:13px 2px;font-size:13px;cursor:pointer}
-  .run .l{display:flex;align-items:center;gap:10px;min-width:0}
-  .run .src{color:var(--ash);font-size:12px}
-  .run-right{display:flex;align-items:center;gap:8px}
-  .run .st{color:var(--mute)}
+  /* the Launch control floats on its plinth, big air above + below */
+  .launch-row{display:flex;justify-content:center;margin:64px 0}
+  .runs{margin-top:64px}
+  .run{border-top:1px solid var(--hair-soft)}
+  .run-main{display:flex;align-items:center;justify-content:space-between;padding:14px 2px;font-size:13px;cursor:pointer}
+  .run .l{display:flex;align-items:center;gap:12px;min-width:0;color:var(--bone)}
+  .run .src{color:var(--ash);font-size:11px}
+  .run-right{display:flex;align-items:center;gap:10px}
+  .run .st{color:var(--mute);font-size:12px}
   .run .st.done{color:var(--green)} .run .st.fail{color:var(--red)} .run .st.run{color:var(--green)}
-  /* run status oracle: a turned-metal ring (Blender) with a NEON core in CSS, so the core
-     stays a vivid, app-matched green/red. done = green, failed = red, running = green pulse. */
-  .run .dot{position:relative;width:20px;height:20px;flex:none;background:url(assets/dot-ring@3x.png) center/contain no-repeat}
-  .run .dot::before{content:"";position:absolute;inset:22%;border-radius:50%}
-  .run .dot.done::before,.run .dot.run::before{background:radial-gradient(circle at 50% 42%,#7df7b3,#37d27a 72%);box-shadow:0 0 7px 1px rgba(55,210,122,.85)}
-  .run .dot.fail::before{background:radial-gradient(circle at 50% 42%,#ff8278,#e5544a 72%);box-shadow:0 0 7px 1px rgba(229,84,74,.85)}
-  .run .dot.run::before{animation:run-pulse 1.6s ease-in-out infinite}
-  @keyframes run-pulse{0%,100%{opacity:1}50%{opacity:.5}}
+  /* run status: a machined ring with anodized light rising from within. done/live green, failed red. */
+  .run .dot{position:relative;width:18px;height:18px;flex:none;background:url(assets/dot-ring@3x.png) center/contain no-repeat}
+  .run .dot::before{content:"";position:absolute;inset:24%;border-radius:50%}
+  .run .dot.done::before,.run .dot.run::before{background:radial-gradient(circle at 50% 40%,var(--green-core),var(--green) 74%);box-shadow:0 0 5px 0 rgba(76,157,110,.5)}
+  .run .dot.fail::before{background:radial-gradient(circle at 50% 40%,var(--red-core),var(--red) 74%);box-shadow:0 0 5px 0 rgba(192,85,75,.5)}
+  .run .dot.run::before{animation:run-pulse 2s ease-in-out infinite}
+  @keyframes run-pulse{0%,100%{opacity:1}50%{opacity:.45}}
 
   /* ===== Autopilot pipeline preview: the read-only chain shown in Launch after we detect
      the data. Each step lights green as it runs + completes (the oracle marker). ===== */
-  .pipe{display:flex;flex-direction:column;margin:14px 0 18px}
-  .stage{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--line-soft);border-radius:var(--r);padding:12px 14px}
-  .stage .dot{position:relative;width:20px;height:20px;flex:none;background:url(assets/dot-ring@3x.png) center/contain no-repeat}
-  .stage .dot::before{content:"";position:absolute;inset:22%;border-radius:50%;background:#2b2b31}
-  .stage .dot.run::before,.stage .dot.done::before{background:radial-gradient(circle at 50% 42%,#7df7b3,#37d27a 72%);box-shadow:0 0 7px 1px rgba(55,210,122,.85)}
-  .stage .dot.run::before{animation:run-pulse 1.6s ease-in-out infinite}
-  .stage .dot.fail::before{background:radial-gradient(circle at 50% 42%,#ff8278,#e5544a 72%);box-shadow:0 0 7px 1px rgba(229,84,74,.85)}
+  .pipe{display:flex;flex-direction:column;margin:16px 0 20px}
+  .stage{display:flex;align-items:center;gap:14px;border-radius:var(--r);padding:14px 16px;
+    background:linear-gradient(180deg,rgba(255,255,255,.018),rgba(0,0,0,.14));
+    box-shadow:inset 0 1px 0 var(--reveal),0 1px 0 var(--seat)}
+  .stage .dot{position:relative;width:18px;height:18px;flex:none;background:url(assets/dot-ring@3x.png) center/contain no-repeat}
+  .stage .dot::before{content:"";position:absolute;inset:24%;border-radius:50%;background:#1a1a1e}
+  .stage .dot.run::before,.stage .dot.done::before{background:radial-gradient(circle at 50% 40%,var(--green-core),var(--green) 74%);box-shadow:0 0 5px 0 rgba(76,157,110,.5)}
+  .stage .dot.run::before{animation:run-pulse 2s ease-in-out infinite}
+  .stage .dot.fail::before{background:radial-gradient(circle at 50% 40%,var(--red-core),var(--red) 74%);box-shadow:0 0 5px 0 rgba(192,85,75,.5)}
   .stage-body{flex:1;min-width:0}
   .stage-lead{font-size:13px;color:var(--bone-hi);font-weight:500}
-  .stage-sub{font-size:11px;color:var(--ash);margin-top:3px}
-  .stage-conn{height:18px;width:1px;margin:0 auto;background:linear-gradient(var(--line-hi),var(--line));position:relative}
-  .stage-conn::after{content:"";position:absolute;left:50%;bottom:0;width:5px;height:5px;border-right:1px solid var(--line);border-bottom:1px solid var(--line);transform:translate(-50%,1px) rotate(45deg)}
-  .run .trace{width:54px;height:20px;display:none} .run[data-status="running"] .trace{display:block}
-  .icon{width:26px;height:26px;border:none;background:none;color:var(--ash);border-radius:var(--r-sm);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;transition:background var(--dur) var(--ease),color var(--dur) var(--ease)}
-  .icon:hover{background:var(--raise);color:var(--bone)} .icon svg{width:15px;height:15px;stroke-width:1.5}
-  .detail{display:none;padding:0 2px 14px} .detail.open{display:block}
-  .preview{font-size:12px;color:var(--mute);background:var(--card);border:1px solid var(--line-soft);border-radius:var(--r-sm);padding:10px 12px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
-  .actions{display:flex;align-items:center;gap:8px;margin-top:10px}
-  .mini{height:32px;padding:0 14px;border:1px solid var(--line);border-radius:var(--r-sm);background:transparent;color:var(--bone);font:500 13px var(--sans);cursor:pointer;transition:border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
-  .mini:hover{border-color:var(--line-hi);color:var(--bone-hi)}
+  .stage-sub{font-size:11px;color:var(--ash);margin-top:4px}
+  .stage-conn{height:18px;width:1px;margin:0 auto;background:linear-gradient(var(--reveal-hi),transparent);position:relative}
+  .stage-conn::after{content:"";position:absolute;left:50%;bottom:0;width:5px;height:5px;border-right:1px solid var(--hair);border-bottom:1px solid var(--hair);transform:translate(-50%,1px) rotate(45deg)}
+  .run .trace{width:52px;height:18px;display:none} .run[data-status="running"] .trace{display:block}
+  .icon{width:26px;height:26px;border:none;background:none;color:var(--ash);border-radius:var(--r-sm);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;transition:color var(--dur) var(--ease)}
+  .icon:hover{color:var(--mute)} .icon svg{width:15px;height:15px;stroke-width:1.5}
+  .detail{display:none;padding:0 2px 16px} .detail.open{display:block}
+  .preview{font-size:12px;color:var(--mute);border-radius:var(--r-sm);padding:11px 13px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;
+    background:linear-gradient(180deg,rgba(0,0,0,.22),rgba(0,0,0,.08));box-shadow:inset 0 1px 0 var(--reveal)}
+  .actions{display:flex;align-items:center;gap:10px;margin-top:12px}
+  .mini{height:32px;padding:0 14px;border-radius:var(--r-sm);background:transparent;color:var(--bone);font:500 12px var(--mono);letter-spacing:.02em;cursor:pointer;box-shadow:inset 0 0 0 1px var(--hair);transition:color var(--dur) var(--ease),box-shadow var(--dur) var(--ease)}
+  .mini:hover{color:var(--bone-hi);box-shadow:inset 0 0 0 1px var(--reveal-hi)}
+
+  /* ===== VERIFICATION RECEIPT: the moat made visible. The hero of a finished run.
+     Honest, derived from the job's verification object · never implies cryptographic proof.
+     Anodized check rows on hairlines, tabular counts, one quiet heading. ===== */
+  .verification{margin:0 0 16px;padding:14px 14px 4px;border-radius:var(--r);
+    background:linear-gradient(180deg,rgba(255,255,255,.018),rgba(0,0,0,.14));
+    box-shadow:inset 0 1px 0 var(--reveal),0 1px 0 var(--seat)}
+  .verification .vh{font-size:10px;font-weight:500;letter-spacing:.2em;text-transform:uppercase;color:var(--bone-hi);margin:0 0 4px;display:flex;align-items:center;gap:9px}
+  .verification .vh.unverified{color:var(--mute)}
+  .verification .vh .vlabel{color:var(--mute);letter-spacing:.04em;text-transform:none;font-size:11px}
+  /* the verification mark: an anodized check rising from within, echoing the run dot */
+  .vmark{display:inline-block;width:8px;height:8px;border-radius:50%;flex:none;
+    background:radial-gradient(circle at 50% 40%,var(--green-core),var(--green) 72%);box-shadow:0 0 5px 0 rgba(76,157,110,.5)}
+  .vmark.red{background:radial-gradient(circle at 50% 40%,var(--red-core),var(--red) 72%);box-shadow:0 0 5px 0 rgba(192,85,75,.5)}
+  .vmark.idle{background:none;box-shadow:inset 0 0 0 1.5px rgba(255,255,255,.2)}
+  .vrow{display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-top:1px solid var(--hair-soft);font-size:12px;color:var(--bone)}
+  .vrow:first-of-type{border-top:none}
+  .vrow .vl{display:flex;align-items:center;gap:9px;min-width:0}
+  .vrow .vc{color:var(--mute);font-variant-numeric:tabular-nums}
+  .vrow.bad .vl{color:var(--bone-hi)} .vrow.bad .vc{color:var(--red)}
+  .vrow.charge-bad .vl{color:var(--red)} .vrow.charge-bad .vc{color:var(--red)}
+
+  /* ===== QUICKSTART empty-state: buyer activation. Copy-paste the first job. Calm, on-doctrine. ===== */
+  .quickstart{margin-top:8px}
+  .qs-lead{font-size:13px;line-height:1.6;color:var(--mute);margin:0 0 22px}
+  .qs-tabs{display:flex;gap:8px;margin-bottom:14px}
+  .qs-tab{height:30px;padding:0 13px;border-radius:var(--r-pill);background:transparent;color:var(--mute);font:500 11px var(--mono);letter-spacing:.04em;cursor:pointer;box-shadow:inset 0 0 0 1px var(--hair);transition:color var(--dur) var(--ease),box-shadow var(--dur) var(--ease)}
+  .qs-tab:hover{color:var(--bone)}
+  .qs-tab.on{color:var(--bg);background:var(--bone-hi);box-shadow:none}
+  /* the snippet sits down in a cut channel, like the intake slot · recessed, never a drawn box */
+  .qs-snip{position:relative;border-radius:var(--r);padding:16px 16px;
+    background:linear-gradient(180deg,rgba(0,0,0,.24),rgba(0,0,0,.08));
+    box-shadow:inset 0 1px 0 var(--reveal),inset 0 3px 12px rgba(0,0,0,.5)}
+  .qs-pane{display:none} .qs-pane.on{display:block}
+  .qs-code{margin:0;font:400 12px/1.7 var(--mono);color:var(--bone);white-space:pre;overflow-x:auto;font-variant-numeric:tabular-nums}
+  .qs-code .cm{color:var(--ash)}        /* comment voice */
+  .qs-code .st{color:var(--bone-hi)}    /* the key / a literal that announces */
+  .qs-copy{position:absolute;top:11px;right:11px;height:28px;padding:0 11px;border-radius:var(--r-sm);background:transparent;color:var(--mute);font:500 11px var(--mono);letter-spacing:.04em;cursor:pointer;box-shadow:inset 0 0 0 1px var(--hair);transition:color var(--dur) var(--ease),box-shadow var(--dur) var(--ease)}
+  .qs-copy:hover{color:var(--bone-hi);box-shadow:inset 0 0 0 1px var(--reveal-hi)}
+  .qs-cta{margin-top:22px;display:flex;align-items:center;gap:14px}
+  .qs-cta .qs-hint{font-size:11px;color:var(--ash)}
+  /* the Quickstart affordance in the Runs header: a quiet text toggle, lifted by light when on */
+  .runs-h{display:flex;align-items:baseline;justify-content:space-between}
+  .qs-toggle{border:none;background:none;padding:0;margin:0 0 14px;font:500 10px var(--mono);letter-spacing:.22em;text-transform:uppercase;color:var(--ash);cursor:pointer;transition:color var(--dur) var(--ease)}
+  .qs-toggle:hover{color:var(--mute)} .qs-toggle.on{color:var(--bone-hi)}
 
   /* ===== SETTINGS ===== */
-  .avatar{width:42px;height:42px;border-radius:var(--r-pill);background:var(--raise);border:1px solid var(--line);color:var(--bone-hi);display:flex;align-items:center;justify-content:center;font-weight:600;font-size:14px;flex:none}
-  .switch{width:40px;height:24px;border-radius:var(--r-pill);border:1px solid var(--line);background:var(--card);cursor:pointer;position:relative;flex:none;transition:background var(--dur) var(--ease),border-color var(--dur) var(--ease)}
-  .switch::after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:var(--ash);transition:left var(--dur) var(--ease),background var(--dur) var(--ease)}
-  .switch.on{background:var(--bone-hi);border-color:var(--bone-hi)} .switch.on::after{left:18px;background:var(--bg)}
+  .avatar{width:42px;height:42px;border-radius:var(--r-pill);color:var(--bone-hi);display:flex;align-items:center;justify-content:center;font-weight:600;font-size:13px;flex:none;
+    background:linear-gradient(180deg,rgba(255,255,255,.04),rgba(0,0,0,.2));box-shadow:inset 0 1px 0 var(--reveal),inset 0 0 0 1px var(--hair)}
+  .switch{width:40px;height:24px;border-radius:var(--r-pill);background:rgba(0,0,0,.3);cursor:pointer;position:relative;flex:none;box-shadow:inset 0 0 0 1px var(--hair),inset 0 1px 3px rgba(0,0,0,.5);transition:background var(--dur) var(--ease)}
+  .switch::after{content:"";position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:var(--mute);transition:left var(--dur) var(--ease),background var(--dur) var(--ease)}
+  .switch.on{background:rgba(231,227,220,.9)} .switch.on::after{left:19px;background:var(--bg)}
 
-  .toasts{position:fixed;bottom:20px;right:20px;display:flex;flex-direction:column;gap:8px;z-index:20}
-  .toast{background:var(--raise);border:1px solid var(--line);color:var(--bone);padding:11px 15px;border-radius:var(--r-sm);font-size:13px;opacity:0;transform:translateY(8px);transition:opacity var(--dur-slow) var(--ease),transform var(--dur-slow) var(--ease);max-width:300px;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+  .toasts{position:fixed;bottom:22px;right:22px;display:flex;flex-direction:column;gap:8px;z-index:20}
+  .toast{color:var(--bone);padding:12px 15px;border-radius:var(--r-sm);font-size:12px;opacity:0;transform:translateY(8px);transition:opacity var(--dur-slow) var(--ease),transform var(--dur-slow) var(--ease);max-width:300px;
+    background:linear-gradient(180deg,rgba(255,255,255,.03),rgba(0,0,0,.2));box-shadow:inset 0 1px 0 var(--reveal),0 20px 44px -26px rgba(0,0,0,.9)}
   .toast.show{opacity:1;transform:none}
 
-  .keyin{height:32px;width:210px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--card);color:var(--bone-hi);padding:0 12px;font:400 13px var(--sans)}
-  .keyin:focus{outline:none;border-color:var(--line-hi)}
+  .keyin{height:32px;width:200px;border-radius:var(--r-sm);background:rgba(0,0,0,.28);color:var(--bone-hi);padding:0 12px;font:400 12px var(--mono);border:none;box-shadow:inset 0 0 0 1px var(--hair),inset 0 2px 6px rgba(0,0,0,.4)}
+  .keyin:focus{outline:none;box-shadow:inset 0 0 0 1px var(--reveal-hi),inset 0 2px 6px rgba(0,0,0,.4)}
   .live-badge{margin-left:10px;font-size:9px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--bg);background:var(--bone-hi);padding:3px 8px;border-radius:var(--r-pill)}
 
-  /* computexchange action capsule · brushed-steel shell image, live label in the dark channel */
+  /* computexchange action capsule · brushed-steel shell image, label rising from the dark channel */
   .cx-key{ position:relative; display:inline-flex; padding:0; border:0; background:none;
     height:44px; cursor:pointer; outline:none; transition:transform .08s ease; }
   .cx-key--lg{ height:44px; }   /* same height as base -> bevel matches Add payment exactly */
   .cx-key .cx-key-metal{ display:block; height:100%; width:auto; pointer-events:none;
-    filter:drop-shadow(0 2px 6px rgba(0,0,0,.55)); }
+    filter:drop-shadow(0 2px 6px rgba(0,0,0,.6)); }
   .cx-key .cx-key-label{ position:absolute; inset:0; display:grid; place-items:center;
-    font:600 14px/1 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;
-    letter-spacing:.02em; color:#f6f8ff;
-    text-shadow:0 1px 2px rgba(0,0,0,.7), 0 0 10px rgba(205,228,255,.45);
+    font:600 13px/1 var(--mono); letter-spacing:.04em; color:#f3f6ff;
+    text-shadow:0 1px 2px rgba(0,0,0,.7), 0 0 10px rgba(205,228,255,.4);
     pointer-events:none; user-select:none; -webkit-user-select:none; }
-  .cx-key--lg .cx-key-label{ font-size:14px; }
-  .cx-key.is-armed .cx-key-label{ animation:cx-key-breathe 3.6s ease-in-out infinite; }
+  .cx-key--lg .cx-key-label{ font-size:13px; }
+  .cx-key.is-armed .cx-key-label{ animation:cx-key-breathe 4s ease-in-out infinite; }
   @keyframes cx-key-breathe{
-    0%,100%{ text-shadow:0 1px 1.5px rgba(0,0,0,.55), 0 0 7px  rgba(205,228,255,.38); }
-    50%    { text-shadow:0 1px 1.5px rgba(0,0,0,.55), 0 0 12px rgba(205,228,255,.62); } }
+    0%,100%{ text-shadow:0 1px 1.5px rgba(0,0,0,.55), 0 0 7px  rgba(205,228,255,.34); }
+    50%    { text-shadow:0 1px 1.5px rgba(0,0,0,.55), 0 0 12px rgba(205,228,255,.58); } }
   .cx-key .cx-key-icon{ position:absolute; inset:0; display:grid; place-items:center; pointer-events:none; }
-  .cx-key .cx-key-icon svg{ width:26px; height:26px; color:#f6f8ff;
-    filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.6)) drop-shadow(0 0 7px rgba(205,228,255,.42)); }
-  .cx-key.is-armed .cx-key-icon svg{ animation:cx-key-iconglow 3.6s ease-in-out infinite; }
+  .cx-key .cx-key-icon svg{ width:24px; height:24px; color:#f3f6ff;
+    filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.6)) drop-shadow(0 0 7px rgba(205,228,255,.4)); }
+  .cx-key.is-armed .cx-key-icon svg{ animation:cx-key-iconglow 4s ease-in-out infinite; }
   @keyframes cx-key-iconglow{
-    0%,100%{ filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.6)) drop-shadow(0 0 5px  rgba(205,228,255,.30)); }
-    50%    { filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.6)) drop-shadow(0 0 11px rgba(205,228,255,.55)); } }
+    0%,100%{ filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.6)) drop-shadow(0 0 5px  rgba(205,228,255,.28)); }
+    50%    { filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.6)) drop-shadow(0 0 11px rgba(205,228,255,.52)); } }
   .cx-key:active{ transform:translateY(1px) scale(.997); }
   .cx-key[disabled]{ cursor:not-allowed; }
-  .cx-key[disabled] .cx-key-label{ color:#f6f8ff; opacity:.5; text-shadow:0 1px 1px rgba(0,0,0,.4); animation:none; }
+  .cx-key[disabled] .cx-key-label{ color:#f3f6ff; opacity:.45; text-shadow:0 1px 1px rgba(0,0,0,.4); animation:none; }
 
   @media (prefers-reduced-motion:reduce){
     *{transition:none !important;animation:none !important}
     .knob.is-on .knob-glow{opacity:1}
     .cx-key.is-armed .cx-key-label{ animation:none; }
   }
-  /* ===== SPLASH: a static flat white Cx on the dark ground (the rail mark, sized up), no
-     movement, then a fade to the app. The metal-forged variant stays in git history and in
-     web/assets/cx-metal* if we want it back. ===== */
+  /* ===== SPLASH: a static flat white Cx on the concrete field, a brief hold then a fade. ===== */
   .splash{position:fixed;inset:0;display:grid;place-items:center;z-index:60;
-    background:radial-gradient(120% 100% at 50% 0%,#101014,#0a0a0c 55%,#08080a);
+    background:radial-gradient(78% 56% at 50% 2%,rgba(255,255,255,.02),rgba(255,255,255,0) 60%),var(--bg);
     transition:opacity .5s var(--ease)}
   .splash.hide{opacity:0;pointer-events:none}
-  .splash .mark{width:118px;height:118px}
+  .splash .mark{width:104px;height:104px;opacity:.95}
   .splash .mark>img{width:100%;height:100%;object-fit:contain;display:block}
 </style>
 </head>
@@ -271,7 +350,7 @@
       <div class="launch-row">
         <button class="cx-key cx-key--lg" id="launch" disabled><img class="cx-key-metal" src="assets/btn-launch-shell@3x.png" alt=""><span class="cx-key-label">Launch</span></button>
       </div>
-      <div class="runs"><p class="section-label">Runs</p><div id="jobs"></div></div>
+      <div class="runs"><div class="runs-h"><p class="section-label">Runs</p><button class="qs-toggle" id="qsToggle" aria-pressed="false">Quickstart</button></div><div id="jobs"></div><div id="quickstart" hidden></div></div>
     </section>
 
 
@@ -470,8 +549,52 @@
   intake.addEventListener('dragleave',function(e){e.preventDefault();intake.classList.remove('drag');});
   intake.addEventListener('drop',function(e){e.preventDefault();intake.classList.remove('drag');var f=e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files[0];if(f)detectFile(f);});
 
-  function doneDetail(){return '<div class="preview num">[ 0.0131, -0.0412, 0.0098, 0.0457, 0.0203, … ]  · 384-dim × 2,100,000 rows</div><div class="actions"><button class="mini" data-dl>Download</button><button class="mini" data-pr>Open PR</button></div>';}
-  function failDetail(){return '<div class="preview">failed · malformed input at line 4002 (buyer input)</div><div class="actions"><span class="r-meta num">refunded $1.20</span><button class="mini" data-fix>Fix &amp; re-run</button></div>';}
+  // ===== VERIFICATION RECEIPT =====
+  // Render the buyer-facing verification object (control/types.go JobStatus.verification, the
+  // shared wire contract) + the job's charge_status as an honest receipt: anodized check rows,
+  // tabular counts, one derived heading. NEVER implies cryptographic proof · the heading text is
+  // exactly the label the server derived ("verified" | "honeypot-checked" | "unverified"). All
+  // dynamic text passes through esc(). chg is the charge_status string (optional).
+  function vrow(ok,label,count){
+    var cls=ok===false?'vmark red':ok==null?'vmark idle':'vmark';
+    var rc=ok===false?' bad':'';
+    return '<div class="vrow'+rc+'"><span class="vl"><span class="'+cls+'"></span>'+esc(label)+'</span>'
+      +(count==null?'':'<span class="vc">'+esc(String(count))+'</span>')+'</div>';
+  }
+  function verificationReceipt(v,chg){
+    if(!v)return '';
+    var label=v.label||'unverified';
+    var head=label==='verified'?'verified · multi-supplier cross-check'
+      :label==='honeypot-checked'?'honeypot-checked':'unverified';
+    var hcls=label==='unverified'?'vh unverified':'vh';
+    var mk=label==='unverified'?'vmark idle':'vmark';
+    var rows='';
+    if((v.honeypots_passed|0)>0) rows+=vrow(true,'Honeypots passed',v.honeypots_passed);
+    if((v.honeypots_failed|0)>0) rows+=vrow(false,'Honeypots failed',v.honeypots_failed);
+    if((v.redundancy_matched|0)>0) rows+=vrow(true,'Redundancy matched',v.redundancy_matched);
+    if((v.redundancy_mismatched|0)>0) rows+=vrow(false,'Redundancy mismatched',v.redundancy_mismatched);
+    if((v.tiebreaks|0)>0) rows+=vrow(true,'Tiebreaks held',v.tiebreaks);
+    if(v.dispute_status) rows+=vrow(v.dispute_status==='resolved'?true:v.dispute_status==='rejected'||v.dispute_status==='unresolvable'?false:null,'Dispute',v.dispute_status);
+    // a finished run that underwent some check but matched nothing positive still earns an honest line
+    if(!rows&&(v.checked|0)>0) rows+=vrow(null,'Checked',v.checked);
+    // charge_status: a quiet line, red when the charge failed or there was no method on file
+    if(chg==='failed') rows+='<div class="vrow charge-bad"><span class="vl"><span class="vmark red"></span>charge: failed</span></div>';
+    else if(chg==='no_payment_method') rows+='<div class="vrow charge-bad"><span class="vl"><span class="vmark red"></span>charge: no payment method</span></div>';
+    if(!rows)return '';
+    return '<div class="verification"><div class="'+hcls+'"><span class="'+mk+'"></span><span class="vlabel">'+esc(head)+'</span></div>'+rows+'</div>';
+  }
+  // Representative static receipts for the 3 SEEDED demo runs (no live data) · clearly a demo,
+  // each consistent with what the live contract would carry for that run.
+  var DEMO_VERIFY={
+    'support-pipeline':{checked:18,honeypots_passed:6,honeypots_failed:0,redundancy_matched:12,redundancy_mismatched:0,tiebreaks:1,dispute_status:'',label:'verified'},
+    'nightly-embeds':{checked:9,honeypots_passed:9,honeypots_failed:0,redundancy_matched:0,redundancy_mismatched:0,tiebreaks:0,dispute_status:'',label:'honeypot-checked'},
+    'ticket-classify':{checked:4,honeypots_passed:3,honeypots_failed:1,redundancy_matched:0,redundancy_mismatched:0,tiebreaks:0,dispute_status:'open',label:'honeypot-checked'}
+  };
+  // A fresh demo-simulated run (Launch / re-run with no live key) earns a representative receipt too.
+  var DEMO_VERIFY_FRESH={checked:8,honeypots_passed:3,honeypots_failed:0,redundancy_matched:5,redundancy_mismatched:0,tiebreaks:0,dispute_status:'',label:'verified'};
+  function doneDetail(v,chg){return verificationReceipt(v,chg)+'<div class="preview num">[ 0.0131, -0.0412, 0.0098, 0.0457, 0.0203, … ]  · 384-dim × 2,100,000 rows</div><div class="actions"><button class="mini" data-dl>Download</button><button class="mini" data-pr>Open PR</button></div>';}
+  // Seeded failure is a buyer-input fault (refunded), so charge_status is not_attempted · no charge line.
+  function failDetail(name){var v=name&&DEMO_VERIFY[name];return (v?verificationReceipt(v,'not_attempted'):'')+'<div class="preview">failed · malformed input at line 4002 (buyer input)</div><div class="actions"><span class="r-meta num">refunded $1.20</span><button class="mini" data-fix>Fix &amp; re-run</button></div>';}
 
   function runHTML(name,src,status){
     var sc=status==='running'?'run':status==='failed'?'fail':'done', mk='dot '+sc;
@@ -479,7 +602,7 @@
     return '<div class="run" data-status="'+status+'" data-name="'+esc(name)+'">'
       +'<div class="run-main"><span class="l"><span class="'+mk+'"></span>'+esc(name)+' <span class="src num">'+esc(src)+'</span></span>'
       +'<span class="run-right"><svg class="trace" viewBox="0 0 54 20" preserveAspectRatio="none"></svg><span class="st '+sc+'">'+st+'</span><button class="icon rerun" aria-label="Re-run" title="Re-run">'+RERUN+'</button></span></div>'
-      +'<div class="detail">'+(status==='failed'?failDetail():status==='done'?doneDetail():'')+'</div></div>';
+      +'<div class="detail">'+(status==='failed'?failDetail(name):status==='done'?doneDetail(DEMO_VERIFY[name]):'')+'</div></div>';
   }
   function attach(run){
     run.querySelector('.run-main').addEventListener('click',function(e){
@@ -499,7 +622,7 @@
       t++; st.textContent='running · '+t+'/8';
       if(t>=8){clearInterval(iv);if(tv)clearInterval(tv);
         run.dataset.status='done';run.querySelector('.dot').className='dot done';st.className='st done';st.textContent='done';
-        run.querySelector('.detail').innerHTML=doneDetail();
+        run.querySelector('.detail').innerHTML=doneDetail(DEMO_VERIFY_FRESH);
         notify('Job complete',name);
       }
     },360);
@@ -530,8 +653,72 @@
   try{liveKey=localStorage.getItem('cx_key')||'';}catch(e){}
   function isLive(){return !!liveKey;}
   function syncLive(){if(liveBadge)liveBadge.hidden=!isLive();if(keyIn&&!keyIn.value&&liveKey)keyIn.value=liveKey;}
-  if(keyIn)keyIn.addEventListener('change',function(){liveKey=(keyIn.value||'').trim();try{localStorage.setItem('cx_key',liveKey);}catch(e){}syncLive();toast(isLive()?'Live mode on · Launch runs real jobs on this server':'Live mode off');});
+  if(keyIn)keyIn.addEventListener('change',function(){liveKey=(keyIn.value||'').trim();try{localStorage.setItem('cx_key',liveKey);}catch(e){}syncLive();renderQuickstart();toast(isLive()?'Live mode on · Launch runs real jobs on this server':'Live mode off');});
   syncLive();
+
+  // ===== QUICKSTART empty-state: buyer activation. Three copy-paste snippets · curl, the
+  // Python SDK, the cx CLI · leading with the simplest path. The buyer's live key (cx_key in
+  // localStorage) is injected when present, else a cx_live_… placeholder. Shown automatically
+  // when the Runs list is empty; the Runs-header "Quickstart" affordance toggles it for review
+  // (the demo seeds 3 runs, so it is otherwise hidden). All key text passes through esc(). =====
+  var qsPanel=$('quickstart'), qsToggle=$('qsToggle'), qsForced=false, qsActiveTab='curl';
+  function qsKey(){return isLive()&&liveKey?liveKey:'cx_live_…';}
+  function quickstartHTML(){
+    var k=esc(qsKey());
+    var curl='<span class="cm"># embed three strings · same-origin /v1 API</span>\n'
+      +'curl https://compute.exchange/v1/embeddings \\\n'
+      +'  -H "Authorization: Bearer <span class="st">'+k+'</span>" \\\n'
+      +'  -H "Content-Type: application/json" \\\n'
+      +'  -d \'{"model":"all-minilm-l6-v2",\n'
+      +'       "input":["first row","second row","third row"]}\'';
+    var py='<span class="cm"># pip install computeexchange</span>\n'
+      +'from computeexchange import Client\n\n'
+      +'client = Client(api_key=<span class="st">"'+k+'"</span>)\n'
+      +'res = client.embeddings(\n'
+      +'    model="all-minilm-l6-v2",\n'
+      +'    input=["first row", "second row", "third row"],\n'
+      +')\n'
+      +'print(res.data[0].embedding[:5])';
+    var cli='<span class="cm"># brew install computexchange/tap/cx</span>\n'
+      +'export CX_API_KEY=<span class="st">'+k+'</span>\n'
+      +'cx embed --model all-minilm-l6-v2 rows.txt\n'
+      +'cx jobs watch   <span class="cm"># follow it to done</span>';
+    function pane(id,code){return '<div class="qs-pane'+(id===qsActiveTab?' on':'')+'" data-pane="'+id+'">'
+      +'<div class="qs-snip"><button class="qs-copy" data-copy="'+id+'">Copy</button><pre class="qs-code">'+code+'</pre></div></div>';}
+    function tab(id,label){return '<button class="qs-tab'+(id===qsActiveTab?' on':'')+'" data-tab="'+id+'">'+label+'</button>';}
+    return '<div class="quickstart">'
+      +'<p class="qs-lead">Run your first job from the terminal. Drop a file above for the autopilot, or call the API directly.</p>'
+      +'<div class="qs-tabs">'+tab('curl','curl')+tab('python','Python')+tab('cli','cx CLI')+'</div>'
+      +pane('curl',curl)+pane('python',py)+pane('cli',cli)
+      +'<div class="qs-cta"><button class="pill solid" id="qsCta">Copy & run</button>'
+      +'<span class="qs-hint">'+(isLive()?'live key loaded · runs against this server':'paste a buyer key in Settings to go live')+'</span></div>'
+      +'</div>';
+  }
+  // The empty-state shows when truly empty OR when forced via the header affordance.
+  function quickstartVisible(){return qsForced||!jobs.children.length;}
+  function renderQuickstart(){
+    var show=quickstartVisible();
+    qsPanel.hidden=!show;
+    if(qsToggle){qsToggle.classList.toggle('on',qsForced);qsToggle.setAttribute('aria-pressed',String(qsForced));}
+    if(!show){qsPanel.innerHTML='';return;}
+    qsPanel.innerHTML=quickstartHTML();
+  }
+  qsPanel.addEventListener('click',function(e){
+    var t=e.target.closest('[data-tab]');
+    if(t){qsActiveTab=t.getAttribute('data-tab');
+      qsPanel.querySelectorAll('.qs-tab').forEach(function(b){b.classList.toggle('on',b===t);});
+      qsPanel.querySelectorAll('.qs-pane').forEach(function(p){p.classList.toggle('on',p.getAttribute('data-pane')===qsActiveTab);});
+      return;}
+    var c=e.target.closest('[data-copy]'), cta=e.target.closest('#qsCta');
+    if(c||cta){var which=c?c.getAttribute('data-copy'):qsActiveTab;
+      var pre=qsPanel.querySelector('.qs-pane[data-pane="'+which+'"] .qs-code');
+      var text=pre?(pre.textContent||'').trim():'';
+      var done=function(){toast('Copied the '+which+' snippet');};
+      if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(done).catch(done);}else{done();}
+    }
+  });
+  if(qsToggle)qsToggle.addEventListener('click',function(){qsForced=!qsForced;renderQuickstart();});
+  renderQuickstart();   // initial: hidden because the demo seeds 3 runs; reachable via the affordance
   // Turn the dropped file into JSONL the embed runner accepts: jsonl as-is, json array
   // flattened, csv/txt one {"text": line} per non-empty line.
   function toJSONL(name,text){
@@ -550,7 +737,7 @@
     var i=0;(function step(){
       if(i>=pl.stages.length){if(tv)clearInterval(tv);
         run.dataset.status='done';run.querySelector('.dot').className='dot done';st.className='st done';st.textContent='done';
-        run.querySelector('.detail').innerHTML=doneDetail();notify('Pipeline complete',name);resetIntake();return;}
+        run.querySelector('.detail').innerHTML=doneDetail(DEMO_VERIFY_FRESH);notify('Pipeline complete',name);resetIntake();return;}
       setPipeStage(i,'run');st.textContent='running · step '+(i+1)+'/'+pl.stages.length;
       setTimeout(function(){setPipeStage(i,'done');i++;step();},1150);
     })();
@@ -588,7 +775,11 @@
         st.textContent='running · '+done+'/'+p.stages.length;
         if(p.status==='complete'||p.status==='failed'){clearInterval(iv);if(tv)clearInterval(tv);var ok=p.status==='complete';
           run.dataset.status=ok?'done':'failed';run.querySelector('.dot').className='dot '+(ok?'done':'fail');st.className='st '+(ok?'done':'fail');st.textContent=p.status;
-          if(ok)run.querySelector('.detail').innerHTML='<div class="preview">complete · '+p.stages.length+'-step pipeline</div><div class="actions"><button class="mini" data-results="'+esc(last)+'">Download</button></div>';
+          // verification + charge_status ride the job-status contract (control/types.go JobStatus);
+          // surface them as the receipt at the TOP of the detail, ok or not.
+          var rcpt=verificationReceipt(p.verification,p.charge_status);
+          if(ok)run.querySelector('.detail').innerHTML=rcpt+'<div class="preview">complete · '+p.stages.length+'-step pipeline</div><div class="actions"><button class="mini" data-results="'+esc(last)+'">Download</button></div>';
+          else run.querySelector('.detail').innerHTML=rcpt+'<div class="preview">failed · '+esc(p.status)+'</div>';
           notify('Pipeline '+p.status,run.dataset.name);resetIntake();}
       }).catch(function(){if(++errs>=3){clearInterval(iv);fail('network error during poll');}});
     },2000);

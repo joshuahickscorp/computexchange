@@ -316,7 +316,39 @@ func waitForJob(c *client, id string, poll, timeout time.Duration) {
 
 func cmdStatus(args []string) {
 	id := oneArg("status", args)
-	printJSON(newClient().do("GET", "/v1/jobs/"+id, nil))
+	out := newClient().do("GET", "/v1/jobs/"+id, nil)
+	// Summarize the billing + verification receipt to stderr (the full JSON stays on
+	// stdout for machine use). Decoded leniently: any shape drift just skips the
+	// summary, never the JSON.
+	var js statusResp
+	if json.Unmarshal(out, &js) == nil {
+		if js.ChargeStatus != "" {
+			fmt.Fprintf(os.Stderr, "charge_status=%s\n", js.ChargeStatus)
+		}
+		v := js.Verification
+		fmt.Fprintf(os.Stderr,
+			"verification=%s checked=%d honeypots=%d/%d redundancy=%d/%d tiebreaks=%d dispute=%q\n",
+			v.Label, v.Checked, v.HoneypotsPassed, v.HoneypotsFailed,
+			v.RedundancyMatched, v.RedundancyMismatched, v.Tiebreaks, v.DisputeStatus)
+	}
+	printJSON(out)
+}
+
+// statusResp is the lenient decode of GET /v1/jobs/{id} the status summary reads
+// (charge_status + the verification receipt block). Only the fields the summary
+// prints are listed; the full body is still emitted verbatim by printJSON.
+type statusResp struct {
+	ChargeStatus string `json:"charge_status"`
+	Verification struct {
+		Checked              int    `json:"checked"`
+		HoneypotsPassed      int    `json:"honeypots_passed"`
+		HoneypotsFailed      int    `json:"honeypots_failed"`
+		RedundancyMatched    int    `json:"redundancy_matched"`
+		RedundancyMismatched int    `json:"redundancy_mismatched"`
+		Tiebreaks            int    `json:"tiebreaks"`
+		DisputeStatus        string `json:"dispute_status"`
+		Label                string `json:"label"`
+	} `json:"verification"`
 }
 
 // cmdCancel cancels a job (DELETE /v1/jobs/{id}); queued tasks stop being

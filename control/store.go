@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -1065,6 +1066,8 @@ type JobView struct {
 	CreatedAt    time.Time
 	MaxUSD       float64
 	BudgetState  string
+	ChargeStatus string
+	Verification Verification
 }
 
 // GetJob loads a job scoped to a buyer (buyers see only their own jobs).
@@ -1075,18 +1078,28 @@ func (s *Store) GetJob(ctx context.Context, jobID, buyerID uuid.UUID) (*JobView,
 		        COALESCE(task_count,0), COALESCE(tasks_done,0),
 		        COALESCE(estimated_usd,0), COALESCE(actual_usd,0),
 		        COALESCE(eta_secs,0), created_at,
-		        COALESCE(max_usd,0), COALESCE(budget_state,'tracking')
+		        COALESCE(max_usd,0), COALESCE(budget_state,'tracking'),
+		        COALESCE(charge_status,'not_attempted')
 		 FROM jobs WHERE id = $1 AND buyer_id = $2`,
 		jobID, buyerID,
 	).Scan(&j.ID, &j.BuyerID, &j.Status, &j.JobType, &j.Tier, &j.OutputRef,
 		&j.TaskCount, &j.TasksDone, &j.EstimatedUSD, &j.ActualUSD, &j.ETASecs, &j.CreatedAt,
-		&j.MaxUSD, &j.BudgetState)
+		&j.MaxUSD, &j.BudgetState, &j.ChargeStatus)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
+	// Assemble the verification receipt (counts from the append-only log + latest
+	// dispute). A read failure here must not hide the job: log and leave the
+	// zero-value aggregate (label "unverified"), never fabricate counts.
+	vr, verr := s.JobVerification(ctx, j.ID)
+	if verr != nil {
+		log.Printf("job verification aggregate (job %s): %v", j.ID, verr)
+		vr.Label = deriveVerificationLabel(vr)
+	}
+	j.Verification = vr
 	return &j, nil
 }
 
@@ -1957,6 +1970,73 @@ func (s *Store) DuePayouts(ctx context.Context, limit int) ([]DueHeldEntry, erro
 func (s *Store) SetChargeStatus(ctx context.Context, jobID uuid.UUID, status string) error {
 	_, err := s.pool.Exec(ctx, `UPDATE jobs SET charge_status = $2 WHERE id = $1`, jobID, status)
 	return err
+}
+
+// RecordVerificationEvent appends one row to the append-only verification_events
+// receipt log. It is BEST-EFFORT and must NEVER block the verify/money path: a write
+// failure is logged and swallowed (return nil) so a flaky receipt insert can never
+// fail a reputation dock or a payout. kind is one of the closed set
+// {honeypot_pass|honeypot_fail|redundancy_match|redundancy_mismatch|tiebreak_win|
+// tiebreak_loss}; taskID/supplierID may be uuid.Nil when not known, stored as NULL.
+func (s *Store) RecordVerificationEvent(ctx context.Context, jobID, taskID, supplierID uuid.UUID, kind string) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO verification_events (job_id, task_id, supplier_id, kind) VALUES ($1,$2,$3,$4)`,
+		jobID, nullUUID(taskID), nullUUID(supplierID), kind)
+	if err != nil {
+		log.Printf("verification event (job %s kind %s): %v", jobID, kind, err)
+	}
+	return nil
+}
+
+// JobVerification aggregates a job's verification_events log into the buyer-facing
+// receipt block, plus the latest dispute's status (disputes table; ” when none).
+// Counts come from a single grouped query; only outcomes that actually occurred are
+// present, so the aggregate never overstates what was checked. `checked` is every
+// task that underwent ANY verification (the sum of all event kinds). The honest label
+// is derived from the counts by deriveVerificationLabel.
+func (s *Store) JobVerification(ctx context.Context, jobID uuid.UUID) (Verification, error) {
+	var v Verification
+	rows, err := s.pool.Query(ctx,
+		`SELECT kind, count(*) FROM verification_events WHERE job_id = $1 GROUP BY kind`, jobID)
+	if err != nil {
+		return v, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var kind string
+		var n int
+		if err := rows.Scan(&kind, &n); err != nil {
+			return v, err
+		}
+		v.Checked += n
+		switch kind {
+		case "honeypot_pass":
+			v.HoneypotsPassed += n
+		case "honeypot_fail":
+			v.HoneypotsFailed += n
+		case "redundancy_match":
+			v.RedundancyMatched += n
+		case "redundancy_mismatch":
+			v.RedundancyMismatched += n
+		case "tiebreak_win", "tiebreak_loss":
+			v.Tiebreaks += n
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return v, err
+	}
+	// Latest dispute for the job ('' when none). A no-row scan is the normal "no
+	// dispute" case, not an error.
+	var disputeStatus string
+	err = s.pool.QueryRow(ctx,
+		`SELECT status FROM disputes WHERE job_id = $1 ORDER BY created_at DESC LIMIT 1`, jobID,
+	).Scan(&disputeStatus)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return v, err
+	}
+	v.DisputeStatus = disputeStatus
+	v.Label = deriveVerificationLabel(v)
+	return v, nil
 }
 
 // RecordDispute records a buyer's dispute against a job's result, atomically verifying

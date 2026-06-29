@@ -637,6 +637,8 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:    j.CreatedAt.UTC().Format(time.RFC3339),
 		MaxUSD:       j.MaxUSD,
 		BudgetState:  j.BudgetState,
+		ChargeStatus: j.ChargeStatus,
+		Verification: j.Verification,
 	})
 }
 

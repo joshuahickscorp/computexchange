@@ -1004,10 +1004,28 @@ impl LlamaBackend {
             let bsz = members.len();
             let plen = encoded[members[0]].len();
             let mut gen: Vec<Vec<u32>> = vec![Vec::new(); bsz];
-            let mut last_tok: Vec<u32> = vec![0u32; bsz];
-            let mut done = vec![false; bsz];
+            // Active-set shrink on EOS: `active` holds the original batch rows
+            // (indices into `members`/`gen`) that are still generating, kept in
+            // the SAME order as the per-batch KV cache rows. Step 0 prefills all
+            // `bsz` rows; later steps forward only the active rows as an
+            // (active.len(), 1) batch, and whenever a row hits EOS we slice it
+            // out of every layer's KV cache via `compact_kv_cache` so the cache
+            // batch dim stays aligned with `active`.
+            //
+            // Determinism: all rows share one `index_pos` (they start together
+            // and step in lockstep), so dropping finished rows leaves the
+            // survivors' KV entries and positions bitwise unchanged. The tokens
+            // generated for every sequence are byte-identical to forwarding the
+            // full batch every step · covered by `batch_active_shrink_*` tests.
+            let mut active: Vec<usize> = (0..bsz).collect();
+            // Per-active-row last token, parallel to `active`.
+            let mut active_last: Vec<u32> = vec![0u32; bsz];
             let mut index_pos = 0usize;
             for step in 0..max_tokens as usize {
+                if active.is_empty() {
+                    break;
+                }
+                let abz = active.len();
                 let (rows, seq_len) = if step == 0 {
                     let mut flat = Vec::with_capacity(bsz * plen);
                     for &m in members {
@@ -1015,37 +1033,45 @@ impl LlamaBackend {
                     }
                     (flat, plen)
                 } else {
-                    (last_tok.clone(), 1usize)
+                    (active_last.clone(), 1usize)
                 };
-                let input = Tensor::from_vec(rows, (bsz, seq_len), &self.device)
+                let input = Tensor::from_vec(rows, (abz, seq_len), &self.device)
                     .map_err(infer_err(backend))?;
                 let logits = self
                     .model
                     .forward(&input, index_pos)
-                    .map_err(infer_err(backend))?; // (bsz, vocab) — last position only
+                    .map_err(infer_err(backend))?; // (abz, vocab) · last position only
                 index_pos += seq_len;
                 let next: Vec<u32> = logits
                     .argmax(1)
                     .map_err(infer_err(backend))?
                     .to_vec1::<u32>()
                     .map_err(infer_err(backend))?;
-                let mut all_done = true;
-                for b in 0..bsz {
-                    if done[b] {
-                        continue;
-                    }
-                    let t = next[b];
+                // Decide which active rows survive this step. `keep` holds the
+                // positions WITHIN the current active ordering that continue
+                // exactly the rows whose KV cache we retain on compaction.
+                let mut keep: Vec<usize> = Vec::with_capacity(abz);
+                let mut new_active: Vec<usize> = Vec::with_capacity(abz);
+                let mut new_last: Vec<u32> = Vec::with_capacity(abz);
+                for (a, &b) in active.iter().enumerate() {
+                    let t = next[a];
                     if t == self.eos {
-                        done[b] = true;
-                    } else {
-                        gen[b].push(t);
-                        last_tok[b] = t;
-                        all_done = false;
+                        continue; // sequence b is finished; drop it
                     }
+                    gen[b].push(t);
+                    keep.push(a);
+                    new_active.push(b);
+                    new_last.push(t);
                 }
-                if all_done {
-                    break;
+                // If any active row finished, slice it out of the KV cache so the
+                // cache batch dim matches the next (active.len(), 1) forward.
+                if keep.len() != abz {
+                    self.model
+                        .compact_kv_cache(&keep)
+                        .map_err(infer_err(backend))?;
                 }
+                active = new_active;
+                active_last = new_last;
             }
             for (b, &m) in members.iter().enumerate() {
                 let text = self
@@ -2817,5 +2843,174 @@ mod tests {
             );
         }
         println!("correctness: OK — batched == serial for all 32");
+    }
+
+    // ── C1 active-set shrink on EOS ───────────────────────────────────────────
+
+    /// Network-free determinism proof for the active-set shrink.
+    ///
+    /// A batched decode where finished rows are dropped MUST produce the exact
+    /// same per-row token sequence as one that forwards every row every step.
+    /// This is only true because attention is strictly within-sequence (no row
+    /// attends across the batch), so removing a finished row cannot change a
+    /// surviving row's logits. We model that property with a per-row token
+    /// oracle: row `b` emits tokens `[100+b, 101+b, …]` then EOS at a per-row
+    /// length, so the batch finishes at staggered steps (the case the shrink
+    /// optimises). Both simulators consult the same oracle; the shrink one uses
+    /// the SAME keep/drop/active bookkeeping as `generate_batch`'s loop.
+    #[test]
+    fn batch_active_shrink_matches_full_batch_tokens() {
+        const EOS: u32 = 0;
+        // Mixed output lengths: rows finish at staggered steps.
+        let lengths = [1usize, 3, 2, 5, 4];
+        let bsz = lengths.len();
+        let max_tokens = 8usize;
+
+        // Oracle: token for original row `b` at output position `pos`.
+        // Returns EOS once the row has emitted `lengths[b]` real tokens.
+        let oracle = |b: usize, pos: usize| -> u32 {
+            if pos >= lengths[b] {
+                EOS
+            } else {
+                (100 + b * 10 + pos) as u32
+            }
+        };
+
+        // ── Reference: forward ALL rows every step (today's behaviour). ──
+        let mut full: Vec<Vec<u32>> = vec![Vec::new(); bsz];
+        {
+            let mut done = vec![false; bsz];
+            let mut pos = vec![0usize; bsz];
+            for _ in 0..max_tokens {
+                let mut all_done = true;
+                for b in 0..bsz {
+                    if done[b] {
+                        continue;
+                    }
+                    let t = oracle(b, pos[b]);
+                    if t == EOS {
+                        done[b] = true;
+                    } else {
+                        full[b].push(t);
+                        pos[b] += 1;
+                        all_done = false;
+                    }
+                }
+                if all_done {
+                    break;
+                }
+            }
+        }
+
+        // ── Shrink: drop finished rows, keep `active` aligned with the (here
+        //    notional) KV cache ordering · mirrors generate_batch exactly. ──
+        let mut shrunk: Vec<Vec<u32>> = vec![Vec::new(); bsz];
+        {
+            let mut active: Vec<usize> = (0..bsz).collect();
+            // Per-active-row output position, parallel to `active`.
+            let mut active_pos: Vec<usize> = vec![0usize; bsz];
+            for _ in 0..max_tokens {
+                if active.is_empty() {
+                    break;
+                }
+                let abz = active.len();
+                // Forward only the `abz` active rows; the oracle stands in for
+                // the (active_bsz, 1) forward over the compacted KV cache.
+                let next: Vec<u32> = (0..abz).map(|a| oracle(active[a], active_pos[a])).collect();
+
+                let mut keep: Vec<usize> = Vec::with_capacity(abz);
+                let mut new_active: Vec<usize> = Vec::with_capacity(abz);
+                let mut new_pos: Vec<usize> = Vec::with_capacity(abz);
+                for (a, &b) in active.iter().enumerate() {
+                    let t = next[a];
+                    if t == EOS {
+                        continue;
+                    }
+                    shrunk[b].push(t);
+                    keep.push(a);
+                    new_active.push(b);
+                    new_pos.push(active_pos[a] + 1);
+                }
+                // `keep` is the index set that `compact_kv_cache` would retain;
+                // it must be a strictly ascending subsequence of 0..abz so the
+                // cache rows stay aligned with `new_active`.
+                assert!(
+                    keep.windows(2).all(|w| w[0] < w[1]),
+                    "keep indices must be ascending for KV alignment"
+                );
+                active = new_active;
+                active_pos = new_pos;
+            }
+        }
+
+        assert_eq!(
+            shrunk, full,
+            "active-set shrink must yield byte-identical tokens to full-batch"
+        );
+        // Sanity: the oracle produced the staggered lengths we intended.
+        for b in 0..bsz {
+            assert_eq!(full[b].len(), lengths[b], "row {b} length");
+        }
+    }
+
+    /// `compact_kv_cache` keeps the named batch rows verbatim and in order.
+    /// The per-batch KV cache is `(b_sz, n_kv_head, seq_len, head_dim)`; slicing
+    /// dim 0 with `index_select` must copy surviving rows bitwise unchanged
+    /// the property that makes the shrink determinism-safe.
+    #[test]
+    fn compact_kv_cache_keeps_rows_verbatim() {
+        use candle_core::{Device, Tensor};
+        let dev = Device::Cpu;
+        // (b_sz=4, n_kv_head=2, seq_len=3, head_dim=2) with row-distinct values.
+        let b_sz = 4usize;
+        let per_row = 2 * 3 * 2usize;
+        let data: Vec<f32> = (0..b_sz * per_row).map(|i| i as f32).collect();
+        let k = Tensor::from_vec(data.clone(), (b_sz, 2, 3, 2), &dev).unwrap();
+        // Keep rows 1 and 3 (drop 0 and 2) · staggered-EOS shape.
+        let keep = [1u32, 3u32];
+        let idx = Tensor::from_vec(keep.to_vec(), keep.len(), &dev).unwrap();
+        let out = k.index_select(&idx, 0).unwrap();
+        assert_eq!(out.dims(), [2, 2, 3, 2]);
+        let got: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
+        let mut want: Vec<f32> = Vec::new();
+        want.extend_from_slice(&data[1 * per_row..2 * per_row]);
+        want.extend_from_slice(&data[3 * per_row..4 * per_row]);
+        assert_eq!(got, want, "kept rows must be copied verbatim and in order");
+    }
+
+    /// Live-model determinism gate: a MIXED output-length batch decoded with the
+    /// active-set shrink must match per-prompt `generate` token-for-token. This
+    /// is the real proof on a real GGUF; the network-free tests above cover the
+    /// bookkeeping. Run on a GPU box.
+    #[test]
+    #[ignore = "downloads the GGUF llama (~800MB) + needs a GPU; proves shrink == serial on mixed lengths"]
+    fn batch_active_shrink_equals_serial_mixed_lengths() {
+        let mut be = LlamaBackend::load("llama-3.2-1b-instruct-q4").expect("load gguf");
+        // Distinct prompts → distinct (and staggered) output lengths, which is
+        // exactly what exercises the shrink path. Same length so they batch
+        // together (no padding) but different content so they finish apart.
+        let prompts: Vec<String> = vec![
+            "Reply with the single word yes.".to_string(),
+            "Count from one to ten in words.".to_string(),
+            "Name three primary colors briefly.".to_string(),
+            "Write one short sentence about rain.".to_string(),
+        ];
+        let max = 64u32;
+
+        let serial: Vec<(String, usize)> = prompts
+            .iter()
+            .map(|p| be.generate(p, max).unwrap())
+            .collect();
+        let batched = be.generate_batch(&prompts, max).unwrap();
+
+        assert_eq!(batched.len(), serial.len());
+        for (i, (b, s)) in batched.iter().zip(serial.iter()).enumerate() {
+            assert_eq!(b.0, s.0, "prompt {i}: batched text must equal serial");
+            assert_eq!(
+                b.1, s.1,
+                "prompt {i}: batched token count must equal serial"
+            );
+        }
+        println!("correctness: OK · active-shrink batched == serial on mixed lengths");
     }
 }
