@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net/http"
@@ -109,6 +110,11 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /v1/files/{id}/content", s.authBuyer(http.HandlerFunc(s.handleGetFileContent)))
 	mux.Handle("POST /v1/batches", s.authBuyer(http.HandlerFunc(s.handleCreateBatch)))
 	mux.Handle("GET /v1/batches/{id}", s.authBuyer(http.HandlerFunc(s.handleGetBatch)))
+
+	// Buyer API-key lifecycle: mint (raw secret revealed once), list (masked), revoke.
+	mux.Handle("POST /v1/keys", s.authBuyer(http.HandlerFunc(s.handleCreateKey)))
+	mux.Handle("GET /v1/keys", s.authBuyer(http.HandlerFunc(s.handleListKeys)))
+	mux.Handle("DELETE /v1/keys/{id}", s.authBuyer(http.HandlerFunc(s.handleRevokeKey)))
 
 	// Worker protocol (X-Worker-Token).
 	mux.Handle("POST /v1/worker/register", s.authWorker(http.HandlerFunc(s.handleWorkerRegister)))
@@ -1981,6 +1987,71 @@ func pathUUID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
 }
 
 // writeJSON serializes v as a JSON response with the given status.
+// --- buyer API-key lifecycle handlers (POST/GET/DELETE /v1/keys) ---
+
+// handleCreateKey mints a new buyer API key and reveals the raw secret EXACTLY
+// once (it is never stored · only its hash + a masked hint are). Body:
+// {"name": string, "test": bool?}. The returned `key` is the only chance to copy
+// the secret; subsequent GETs show only the masked form.
+func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
+	auth := r.Context().Value(ctxBuyer).(*AuthResult)
+	var body struct {
+		Name string `json:"name"`
+		Test bool   `json:"test"`
+	}
+	// An empty/absent body is allowed (unnamed live key); only reject malformed JSON.
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
+			writeErr(w, http.StatusBadRequest, "invalid request json: "+err.Error())
+			return
+		}
+	}
+	id, raw, masked, err := s.store.CreateAPIKey(r.Context(), auth.BuyerID, body.Name, body.Test)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "minting api key: "+err.Error())
+		return
+	}
+	prefix := "cx_live_"
+	if body.Test {
+		prefix = "cx_test_"
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"id":         id,
+		"name":       body.Name,
+		"key":        raw, // revealed ONCE · never returned again
+		"prefix":     prefix,
+		"masked":     masked,
+		"created_at": time.Now().UTC(),
+	})
+}
+
+// handleListKeys returns the caller's keys as masked rows (never the raw secret).
+func (s *Server) handleListKeys(w http.ResponseWriter, r *http.Request) {
+	auth := r.Context().Value(ctxBuyer).(*AuthResult)
+	keys, err := s.store.ListAPIKeys(r.Context(), auth.BuyerID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "listing api keys: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"keys": keys})
+}
+
+// handleRevokeKey revokes one of the caller's keys. Idempotent: returns 204
+// whether or not the key existed for this buyer (revoking twice is a no-op),
+// matching the DELETE contract. Scoped to the buyer so one cannot revoke another's.
+func (s *Server) handleRevokeKey(w http.ResponseWriter, r *http.Request) {
+	auth := r.Context().Value(ctxBuyer).(*AuthResult)
+	id, ok := pathUUID(w, r)
+	if !ok {
+		return
+	}
+	if _, err := s.store.RevokeAPIKey(r.Context(), auth.BuyerID, id); err != nil {
+		writeErr(w, http.StatusInternalServerError, "revoking api key: "+err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

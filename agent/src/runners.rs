@@ -374,17 +374,27 @@ struct RerankItem {
 /// Embedding dimension of all-MiniLM-L6-v2.
 pub const EMBED_DIM: usize = 384;
 
-/// A loaded MiniLM embedder: tokenizer + BERT weights on the active device.
+/// A loaded BERT sentence-embedder: tokenizer + BERT weights on the active
+/// device, plus the pooling its model card fixes. Serves the proven default
+/// all-MiniLM-L6-v2 (mean pooling) and the higher-quality drop-in alternate
+/// BAAI/bge-small-en-v1.5 (CLS pooling) · both 384-dim BERT, both L2-normalized,
+/// so the downstream (binary encoder, catalogue dim, thresholds) is identical.
 pub struct Embedder {
     model: BertModel,
     tokenizer: Tokenizer,
     device: Device,
+    /// How to condense per-token hidden states into one sentence vector.
+    pooling: models::Pooling,
 }
 
 impl Embedder {
-    /// Resolve + load the model (downloads on first use, cache-first after).
-    pub fn load() -> Result<Self, RunError> {
-        let paths = models::fetch(&models::EMBED)?;
+    /// Resolve + load the embed model for `model_ref` (downloads on first use,
+    /// cache-first after). The empty ref and any non-bge ref resolve to the
+    /// proven MiniLM default (mean pooling); a `bge`-marked ref selects the
+    /// higher-quality bge-small-en-v1.5 (CLS pooling). Both are 384-dim BERT.
+    pub fn load(model_ref: &str) -> Result<Self, RunError> {
+        let (_id, spec, pooling) = models::embed_spec(model_ref);
+        let paths = models::fetch(&spec)?;
         let (config_p, tok_p, weights_p) = (&paths[0], &paths[1], &paths[2]);
 
         let cfg_bytes = std::fs::read(config_p).map_err(infer_err("embed"))?;
@@ -407,11 +417,13 @@ impl Embedder {
             model,
             tokenizer,
             device,
+            pooling,
         })
     }
 
     /// Embed a batch of strings → one L2-normalized `EMBED_DIM`-vector each.
-    /// Mean-pools the last hidden state over real (non-pad) tokens.
+    /// Pools the last hidden state per the model's pooling (mean over real
+    /// tokens for MiniLM, the [CLS] token for bge-small), then L2-normalizes.
     pub fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, RunError> {
         let backend = "embed";
         let encs = self
@@ -438,27 +450,43 @@ impl Embedder {
             .forward(&input_ids, &token_type, Some(&attn))
             .map_err(infer_err(backend))?;
 
-        // Mean-pool over tokens weighted by the attention mask, then L2-normalize.
-        let mask3 = attn
-            .unsqueeze(2)
-            .map_err(infer_err(backend))?
-            .to_dtype(hidden.dtype())
-            .map_err(infer_err(backend))?; // [bsz, seq, 1]
-        let summed = hidden
-            .broadcast_mul(&mask3)
-            .map_err(infer_err(backend))?
-            .sum(1)
-            .map_err(infer_err(backend))?; // [bsz, hidden]
-        let counts = mask3.sum(1).map_err(infer_err(backend))?; // [bsz, 1]
-        let mean = summed.broadcast_div(&counts).map_err(infer_err(backend))?;
-        let norm = mean
+        // Pool [bsz, seq, hidden] → [bsz, hidden] per the model's pooling, then
+        // L2-normalize. Mean (MiniLM) weights tokens by the attention mask so pad
+        // tokens never contribute; CLS (bge-small) takes the first token, exactly
+        // as the bge model card pools `last_hidden_state[:, 0]`.
+        let pooled = match self.pooling {
+            models::Pooling::Mean => {
+                let mask3 = attn
+                    .unsqueeze(2)
+                    .map_err(infer_err(backend))?
+                    .to_dtype(hidden.dtype())
+                    .map_err(infer_err(backend))?; // [bsz, seq, 1]
+                let summed = hidden
+                    .broadcast_mul(&mask3)
+                    .map_err(infer_err(backend))?
+                    .sum(1)
+                    .map_err(infer_err(backend))?; // [bsz, hidden]
+                let counts = mask3.sum(1).map_err(infer_err(backend))?; // [bsz, 1]
+                summed.broadcast_div(&counts).map_err(infer_err(backend))?
+            }
+            models::Pooling::Cls => {
+                // The [CLS] token is index 0 of the sequence dim. The tokenizer
+                // prepends it and never masks it, so this is always a real token.
+                hidden
+                    .i((.., 0))
+                    .map_err(infer_err(backend))? // [bsz, hidden]
+                    .contiguous()
+                    .map_err(infer_err(backend))?
+            }
+        };
+        let norm = pooled
             .sqr()
             .map_err(infer_err(backend))?
             .sum_keepdim(1)
             .map_err(infer_err(backend))?
             .sqrt()
             .map_err(infer_err(backend))?;
-        let normed = mean.broadcast_div(&norm).map_err(infer_err(backend))?;
+        let normed = pooled.broadcast_div(&norm).map_err(infer_err(backend))?;
         normed.to_vec2::<f32>().map_err(infer_err(backend))
     }
 }
@@ -490,8 +518,9 @@ impl JobRunner for EmbedRunner {
             .collect();
         let count = texts.len();
 
-        // Warm embedder (loaded once for the whole process), forward off-runtime.
-        let vectors = embed_texts(pool, texts).await?;
+        // Warm embedder (loaded once per model for the whole process), forward
+        // off-runtime. The manifest's model ref picks MiniLM (default) or bge-small.
+        let vectors = embed_texts(pool, &manifest.model.model_ref, texts).await?;
 
         // Output encoding: JSON is the DEFAULT (small jobs + debugging). The compact
         // binary float32 artifact (PLANE_D D5/D15) is emitted only when the job opts
@@ -566,10 +595,17 @@ fn wants_binary(manifest: &JobManifest) -> bool {
         .unwrap_or(false)
 }
 
-/// Embed a batch of strings via the warm pool embedder, off the async runtime.
-/// Shared by the embed and rerank runners (one source for the forward pass).
-async fn embed_texts(pool: &ModelPool, texts: Vec<String>) -> Result<Vec<Vec<f32>>, RunError> {
-    let embedder = pool.embedder().await?;
+/// Embed a batch of strings via the warm pool embedder for `model_ref`, off the
+/// async runtime. Shared by the embed and rerank runners (one source for the
+/// forward pass). The ref selects the embed model (MiniLM default vs the
+/// higher-quality bge-small alternate); the pool keys a distinct warm handle per
+/// model so they never collide.
+async fn embed_texts(
+    pool: &ModelPool,
+    model_ref: &str,
+    texts: Vec<String>,
+) -> Result<Vec<Vec<f32>>, RunError> {
+    let embedder = pool.embedder(model_ref).await?;
     tokio::task::spawn_blocking(move || embedder.embed(&texts))
         .await
         .map_err(infer_err("embed"))?
@@ -1553,7 +1589,7 @@ impl JobRunner for RerankRunner {
             layout.push((off, it.docs.len()));
         }
         let total_tokens = flat.len() as u64;
-        let vectors = embed_texts(pool, flat).await?;
+        let vectors = embed_texts(pool, &manifest.model.model_ref, flat).await?;
 
         let mut rankings = Vec::with_capacity(items.len());
         for (index, (off, ndocs)) in layout.into_iter().enumerate() {
@@ -1897,7 +1933,9 @@ pub fn run_benchmarks() -> Vec<BenchResult> {
 /// Benchmark the MiniLM embedder: embeddings/sec, p99 latency per 8-item batch,
 /// and sustained-throughput thermal stability over `THERMAL_SECS`.
 fn bench_embed() -> Result<BenchResult, RunError> {
-    let embedder = Embedder::load()?;
+    // Benchmark the proven default embedder (empty ref → MiniLM). The catalogue
+    // prices each embed model id separately; bge-small benches via a targeted run.
+    let embedder = Embedder::load("")?;
     let batch: Vec<String> = (0..8)
         .map(|i| format!("benchmark sentence number {i} for throughput measurement"))
         .collect();
@@ -2228,7 +2266,7 @@ mod tests {
     #[test]
     #[ignore = "downloads all-MiniLM-L6-v2 (~90MB) and runs a real forward pass"]
     fn embed_runs_real_forward_pass() {
-        let embedder = Embedder::load().expect("load MiniLM");
+        let embedder = Embedder::load("").expect("load MiniLM");
         let texts = vec![
             "a cat sits on the mat".to_string(),
             "hello world".to_string(),
@@ -2264,6 +2302,70 @@ mod tests {
         assert_eq!(v["count"], 2);
         assert_eq!(v["vectors"].as_array().unwrap().len(), 2);
         assert_eq!(v["vectors"][0].as_array().unwrap().len(), EMBED_DIM);
+    }
+
+    /// `embed_spec` routing is pure (no network): the empty ref and any non-bge
+    /// ref resolve to the proven MiniLM default with MEAN pooling; a `bge`-marked
+    /// ref (our id or the HF repo) resolves to bge-small-en-v1.5 with CLS pooling.
+    /// This guards the "MiniLM stays the default" invariant byte-for-byte.
+    #[test]
+    fn embed_spec_routes_minilm_default_and_bge_alternate() {
+        use crate::models::{embed_spec, Pooling, EMBED_BGE_SMALL_ID, EMBED_MINILM_ID};
+        for r in [
+            "",
+            "all-minilm-l6-v2",
+            "sentence-transformers/all-MiniLM-L6-v2",
+        ] {
+            let (id, _spec, pooling) = embed_spec(r);
+            assert_eq!(
+                id, EMBED_MINILM_ID,
+                "ref {r:?} must stay the MiniLM default"
+            );
+            assert_eq!(pooling, Pooling::Mean);
+        }
+        for r in ["bge-small-en-v1.5", "BAAI/bge-small-en-v1.5", "BGE"] {
+            let (id, _spec, pooling) = embed_spec(r);
+            assert_eq!(id, EMBED_BGE_SMALL_ID, "ref {r:?} must select bge-small");
+            assert_eq!(pooling, Pooling::Cls);
+        }
+    }
+
+    /// Real forward-pass test for the NEW higher-quality bge-small-en-v1.5
+    /// embedder, gated behind `#[ignore]` because it downloads the model (~130MB)
+    /// and needs the device. Proves: it loads through the SAME Candle BERT
+    /// embedder, emits 384-dim unit-norm vectors (zero downstream ripple), and is
+    /// DETERMINISTIC · two runs of the same inputs are byte-for-byte identical.
+    /// Run with:
+    ///   cargo test --release bge_small_embeds_384_and_is_deterministic -- --ignored --nocapture
+    #[test]
+    #[ignore = "downloads BAAI/bge-small-en-v1.5 (~130MB) and runs a real forward pass"]
+    fn bge_small_embeds_384_and_is_deterministic() {
+        let embedder = Embedder::load("bge-small-en-v1.5").expect("load bge-small");
+        let texts = vec![
+            "a cat sits on the mat".to_string(),
+            "the quick brown fox".to_string(),
+        ];
+        let a = embedder.embed(&texts).expect("embed run 1");
+        let b = embedder.embed(&texts).expect("embed run 2");
+        assert_eq!(a.len(), 2);
+        // SAME 384 dim as MiniLM → zero downstream ripple.
+        assert_eq!(a[0].len(), EMBED_DIM);
+        assert_eq!(a[1].len(), EMBED_DIM);
+        // Unit-norm (the bge model card L2-normalizes after CLS pooling).
+        for v in &a {
+            let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            assert!((norm - 1.0).abs() < 1e-3, "not unit-norm: {norm}");
+        }
+        // DETERMINISM IS SACRED: identical inputs → byte-identical outputs.
+        assert_eq!(
+            a, b,
+            "bge-small embeddings must be deterministic across runs"
+        );
+        eprintln!(
+            "bge-small OK: 2x{} dims, v0[0..4]={:?}",
+            EMBED_DIM,
+            &a[0][..4]
+        );
     }
 
     /// Build a tiny 16kHz mono WAV (sine sweep) as base64 — a self-contained

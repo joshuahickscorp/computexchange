@@ -32,6 +32,11 @@ services:
       timeout: 3s
       retries: 10
     restart: unless-stopped
+    # E1 · per-service resource caps (single-host compose, non-swarm: mem_limit/cpus
+    # are the v2 keys that apply without `docker stack`). Postgres is the data plane
+    # and gets the largest share; the buffer cache lives here.
+    mem_limit: 1g
+    cpus: 1.5
 
   minio:
     image: minio/minio
@@ -49,6 +54,8 @@ services:
       timeout: 3s
       retries: 10
     restart: unless-stopped
+    mem_limit: 768m
+    cpus: 1.0
 
   # One-shot: create the jobs bucket with the rotated creds.
   createbuckets:
@@ -105,6 +112,10 @@ services:
     environment:
       DATABASE_URL: postgres://cx:${POSTGRES_PASSWORD}@postgres:5432/cx?sslmode=disable
       LISTEN_ADDR: ":8080"
+      # E1 · GC soft ceiling, set ~85% of the mem_limit below so the Go runtime GCs
+      # harder before the cgroup OOM-kills the container. main.go applies a 300MiB
+      # default only when this is unset; we set it explicitly here to match the cap.
+      GOMEMLIMIT: "384MiB"
       S3_ENDPOINT: http://minio:9000
       S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-https://storage.computexchange.net}
       S3_REGION: us-east-1
@@ -120,6 +131,10 @@ services:
       retries: 5
       start_period: 15s
     restart: unless-stopped
+    # E1 · the control plane is a lean Go binary; cap it at 450MiB (above GOMEMLIMIT
+    # so the GC valve engages before the cgroup kill) and one core.
+    mem_limit: 450m
+    cpus: 1.0
 
 volumes:
   pgdata:

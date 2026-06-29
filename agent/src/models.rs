@@ -82,11 +82,53 @@ pub struct ModelSpec {
     pub files: &'static [&'static str],
 }
 
-/// Our embedding model: 384-dim MiniLM sentence-transformer (BERT weights).
+/// How an embedding model condenses the per-token BERT hidden states into one
+/// sentence vector. Each sentence-transformer model card fixes this; choosing
+/// the wrong one silently degrades quality, so it is part of the model's spec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pooling {
+    /// Mean over real (attention-masked) tokens. all-MiniLM-L6-v2.
+    Mean,
+    /// The first ([CLS]) token's hidden state. BAAI/bge-small-en-v1.5 · its
+    /// model card pools `last_hidden_state[:, 0]` then L2-normalizes.
+    Cls,
+}
+
+/// Our DEFAULT embedding model: 384-dim MiniLM sentence-transformer (BERT
+/// weights), mean-pooled. Kept as the proven default; `embed_spec` resolves it
+/// for any ref that is not explicitly a higher-quality alternate.
 pub const EMBED: ModelSpec = ModelSpec {
     repo: "sentence-transformers/all-MiniLM-L6-v2",
     files: &["config.json", "tokenizer.json", "model.safetensors"],
 };
+
+/// Higher-quality 384-dim BERT embedder: BAAI/bge-small-en-v1.5. Same BERT
+/// architecture and SAME 384 output dim as MiniLM, so it drops into the exact
+/// same Candle embedder with ZERO downstream ripple (binary encoder, catalogue
+/// dim, verification thresholds all unchanged). It is a big MTEB jump over
+/// MiniLM-L6. Pooling is CLS (not mean) per its model card; both normalize.
+pub const EMBED_BGE_SMALL: ModelSpec = ModelSpec {
+    repo: "BAAI/bge-small-en-v1.5",
+    files: &["config.json", "tokenizer.json", "model.safetensors"],
+};
+
+/// Canonical id of the default MiniLM embedder (matches the catalogue id).
+pub const EMBED_MINILM_ID: &str = "all-minilm-l6-v2";
+/// Canonical id of the bge-small-en-v1.5 embedder (the NEW alternate).
+pub const EMBED_BGE_SMALL_ID: &str = "bge-small-en-v1.5";
+
+/// Resolve an embed `model_ref` to (canonical id, spec, pooling). The MiniLM
+/// default is returned for the empty ref and for any ref that does NOT name the
+/// bge alternate, so existing embed/rerank jobs are byte-for-byte unchanged.
+/// A ref naming `bge-small` (our id, the HF repo, or a bare `bge` marker)
+/// selects the higher-quality model. Matched case-insensitively.
+pub fn embed_spec(model_ref: &str) -> (&'static str, ModelSpec, Pooling) {
+    if model_ref.to_ascii_lowercase().contains("bge") {
+        (EMBED_BGE_SMALL_ID, EMBED_BGE_SMALL, Pooling::Cls)
+    } else {
+        (EMBED_MINILM_ID, EMBED, Pooling::Mean)
+    }
+}
 
 /// Our speech model: whisper-tiny (smallest; 80 mel bins, multilingual).
 /// `whisper-base` resolves here too — both are honored by `resolve_embed`'s

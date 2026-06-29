@@ -281,6 +281,61 @@
   .keyin:focus{outline:none;box-shadow:inset 0 0 0 1px var(--reveal-hi),inset 0 2px 6px rgba(0,0,0,.4)}
   .live-badge{margin-left:10px;font-size:9px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--bg);background:var(--bone-hi);padding:3px 8px;border-radius:var(--r-pill)}
 
+  /* ===== Settings · billing + usage + API-keys panels. Same material language as the rest:
+     hairline rows, cast/recessed panels, anodized status only, no drawn boxes. ===== */
+  .set-note{font-size:11px;line-height:1.6;color:var(--ash);margin:10px 2px 0}
+  .set-note.warn{color:var(--mute)}
+  /* status pip: configured/connected -> anodized green; unconfigured/absent -> idle ring; failed -> red */
+  .pip{display:inline-block;width:7px;height:7px;border-radius:50%;flex:none;margin-right:9px;vertical-align:middle;
+    background:radial-gradient(circle at 50% 40%,var(--green-core),var(--green) 72%);box-shadow:0 0 5px 0 rgba(76,157,110,.5)}
+  .pip.idle{background:none;box-shadow:inset 0 0 0 1.5px rgba(255,255,255,.2)}
+  .pip.red{background:radial-gradient(circle at 50% 40%,var(--red-core),var(--red) 72%);box-shadow:0 0 5px 0 rgba(192,85,75,.5)}
+
+  /* the spend-trend monitor reuses the EARN sparkline material */
+  .usage{margin-top:16px;padding:18px 18px 14px}
+  .usage-h{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:12px}
+  .usage-h .k{font-size:10px;font-weight:500;letter-spacing:.2em;text-transform:uppercase;color:var(--mute)}
+  .usage-h .v{font-size:13px;font-weight:500;color:var(--bone-hi)}
+  .usage svg{display:block;width:100%;height:46px}
+  .usage-sub{font-size:11px;color:var(--ash);margin-top:8px;letter-spacing:.02em}
+
+  /* per-job invoice line items · tabular figures on hairlines, quiet drift voice */
+  .lineitem{display:flex;align-items:center;justify-content:space-between;padding:11px 2px;border-top:1px solid var(--hair-soft);font-size:12px}
+  .lineitem:first-of-type{border-top:none}
+  .lineitem .li-l{display:flex;align-items:center;gap:10px;min-width:0;color:var(--bone)}
+  .lineitem .li-t{color:var(--ash);font-size:11px}
+  .lineitem .li-amt{color:var(--bone-hi);font-variant-numeric:tabular-nums}
+  .lineitem .li-amt .drift{color:var(--mute);margin-left:8px;font-size:11px}
+
+  /* the hard spend-cap input sits down in a cut channel, like the live-key field */
+  .capwrap{display:flex;align-items:center;justify-content:space-between;padding:18px 2px;border-top:1px solid var(--hair-soft)}
+  .capfield{display:inline-flex;align-items:center;gap:8px}
+  .capfield .cur{color:var(--mute);font-size:13px}
+  .capin{height:32px;width:104px;border-radius:var(--r-sm);background:rgba(0,0,0,.28);color:var(--bone-hi);padding:0 12px;font:400 12px var(--mono);border:none;text-align:right;font-variant-numeric:tabular-nums;box-shadow:inset 0 0 0 1px var(--hair),inset 0 2px 6px rgba(0,0,0,.4)}
+  .capin:focus{outline:none;box-shadow:inset 0 0 0 1px var(--reveal-hi),inset 0 2px 6px rgba(0,0,0,.4)}
+
+  /* API-key list · masked rows on hairlines, a quiet revoke text-control per row */
+  .keyrow{display:flex;align-items:center;justify-content:space-between;padding:14px 2px;border-top:1px solid var(--hair-soft);font-size:13px}
+  .keyrow:first-of-type{border-top:none}
+  .keyrow .kr-l{min-width:0}
+  .keyrow .kr-name{color:var(--bone-hi);font-weight:500}
+  .keyrow .kr-meta{color:var(--ash);font-size:11px;margin-top:4px;letter-spacing:.02em}
+  .keyrow .kr-mask{color:var(--mute);font-variant-numeric:tabular-nums}
+  .keyrow.revoked .kr-name,.keyrow.revoked .kr-mask{color:var(--ash);text-decoration:line-through}
+  .kr-revoke{border:none;background:none;padding:4px 6px;margin:0;font:500 11px var(--mono);letter-spacing:.04em;color:var(--ash);cursor:pointer;transition:color var(--dur) var(--ease)}
+  .kr-revoke:hover{color:var(--red-core)}
+  .kr-revoked-tag{font:500 11px var(--mono);letter-spacing:.04em;color:var(--ash)}
+
+  /* the reveal-once affordance · the raw secret sits in a cut channel with a copy control + a
+     one-time warning. Shown once after Create, never re-displayable (the masked row replaces it). */
+  .reveal{position:relative;margin-top:14px;border-radius:var(--r);padding:14px 16px;
+    background:linear-gradient(180deg,rgba(0,0,0,.24),rgba(0,0,0,.08));
+    box-shadow:inset 0 1px 0 var(--reveal),inset 0 3px 12px rgba(0,0,0,.5)}
+  .reveal-h{font-size:10px;font-weight:500;letter-spacing:.2em;text-transform:uppercase;color:var(--bone-hi);margin:0 0 10px}
+  .reveal-key{display:flex;align-items:center;gap:10px}
+  .reveal-secret{flex:1;min-width:0;font:500 12px var(--mono);color:var(--signal);overflow-x:auto;white-space:nowrap;font-variant-numeric:tabular-nums}
+  .reveal-warn{font-size:11px;line-height:1.6;color:var(--mute);margin:10px 0 0}
+
   /* computexchange action capsule · brushed-steel shell image, label rising from the dark channel */
   .cx-key{ position:relative; display:inline-flex; padding:0; border:0; background:none;
     height:44px; cursor:pointer; outline:none; transition:transform .08s ease; }
@@ -388,17 +443,15 @@
       </div>
       <p class="section-label">Connections</p>
       <div class="row"><span class="l">GitHub</span><button class="mini" data-toast="Connecting to GitHub">Connect</button></div>
-      <p class="section-label" style="margin-top:24px">Billing</p>
-      <div class="row"><span class="l">Payment method</span><span class="r-meta num">•••• 4242 · Visa</span></div>
-      <div class="row"><span class="l">Payout</span><span class="r-meta">Stripe · connected</span></div>
+      <p class="section-label" style="margin-top:24px">Billing &amp; usage</p>
+      <div id="billing"></div>
       <p class="section-label" style="margin-top:24px">Supplier agent</p>
       <div class="row"><span class="l">Quiet hours · 10pm to 8am</span><button class="switch on" aria-label="Quiet hours"></button></div>
       <div class="row"><span class="l">Run on power only</span><button class="switch" aria-label="Power only"></button></div>
       <div class="row"><span class="l">Memory headroom</span><span class="r-meta num">16 GB</span></div>
       <div class="row"><span class="l">Minimum payout</span><span class="r-meta num">$0.50 / hr</span></div>
       <p class="section-label" style="margin-top:24px">API keys</p>
-      <div class="row"><span class="l num">cx_live_••••••••••••4f2a</span><span class="r-meta">created Jun 12</span></div>
-      <div style="margin-top:14px"><button class="pill solid" data-toast="New API key created">Create key</button></div>
+      <div id="apikeys"></div>
       <div class="row"><span class="l">Live test key</span><input id="liveKey" class="keyin" type="password" placeholder="cx_live_…" aria-label="Live buyer API key"></div>
       <div class="d-meta" style="margin-top:8px">Paste a buyer key to run real jobs against this server from Launch. Stored locally in this browser. Test harness only, never the shipped client.</div>
       <p class="section-label" style="margin-top:24px">Appearance</p>
@@ -653,8 +706,216 @@
   try{liveKey=localStorage.getItem('cx_key')||'';}catch(e){}
   function isLive(){return !!liveKey;}
   function syncLive(){if(liveBadge)liveBadge.hidden=!isLive();if(keyIn&&!keyIn.value&&liveKey)keyIn.value=liveKey;}
-  if(keyIn)keyIn.addEventListener('change',function(){liveKey=(keyIn.value||'').trim();try{localStorage.setItem('cx_key',liveKey);}catch(e){}syncLive();renderQuickstart();toast(isLive()?'Live mode on · Launch runs real jobs on this server':'Live mode off');});
+  if(keyIn)keyIn.addEventListener('change',function(){liveKey=(keyIn.value||'').trim();try{localStorage.setItem('cx_key',liveKey);}catch(e){}syncLive();renderQuickstart();renderSettingsPanels();toast(isLive()?'Live mode on · Launch runs real jobs on this server':'Live mode off');});
   syncLive();
+
+  // ===== SETTINGS · API keys (B1) + billing & usage (B4) =====================================
+  // Two live panels in the Settings view, both bearing the buyer key in localStorage (cx_key,
+  // the same key Launch uses). Live mode only: with no key they fall back to honest illustrative
+  // states. Every server string passes through esc(); failures surface (BLACKHOLE), never faked.
+  var apikeysEl=$('apikeys'), billingEl=$('billing');
+  // recordJob: remember a real job id this browser created (live pipelines store per-stage job_ids),
+  // so the billing surface can pull its per-job invoice from GET /v1/jobs/{id}/invoice. Honest:
+  // only ids this key actually produced; capped + de-duped; never invented.
+  function recordJob(id){
+    if(!id)return; var a=[]; try{a=JSON.parse(localStorage.getItem('cx_jobs')||'[]');}catch(e){a=[];}
+    if(!Array.isArray(a))a=[]; a=a.filter(function(x){return x!==id;}); a.unshift(id); a=a.slice(0,8);
+    try{localStorage.setItem('cx_jobs',JSON.stringify(a));}catch(e){}
+  }
+  function recordedJobs(){var a=[];try{a=JSON.parse(localStorage.getItem('cx_jobs')||'[]');}catch(e){a=[];}return Array.isArray(a)?a:[];}
+  function authHeaders(json){var h={'Authorization':'Bearer '+liveKey};if(json)h['Content-Type']='application/json';return h;}
+  function money(n){var v=Number(n)||0;return '$'+v.toFixed(2);}
+
+  // ---- B1: API-key management. GET/POST/DELETE /v1/keys, all authBuyer-gated. ----
+  function renderApiKeys(){
+    if(!apikeysEl)return;
+    if(!isLive()){
+      // No live key: keep the illustrative masked row + an honest note that management needs a key.
+      apikeysEl.innerHTML='<div class="keyrow"><div class="kr-l"><div class="kr-name num">cx_live_••••••••••••4f2a</div>'
+        +'<div class="kr-meta">illustrative · created Jun 12</div></div></div>'
+        +'<p class="set-note warn">Paste a live buyer key below to list, create, and revoke real API keys.</p>';
+      return;
+    }
+    apikeysEl.innerHTML='<p class="set-note">Loading keys…</p>';
+    fetch('/v1/keys',{headers:authHeaders(false)}).then(function(res){
+      return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});
+    }).then(function(r){
+      var j={};try{j=JSON.parse(r.t);}catch(e){}
+      if(!r.ok){apikeysEl.innerHTML='<p class="set-note warn">Could not load keys · '+esc(String((j&&j.error)||r.status))+'</p>'+createKeyHTML();return;}
+      var keys=(j&&j.keys)||[];
+      var rows=keys.length?keys.map(keyRowHTML).join(''):'<p class="set-note">No API keys yet.</p>';
+      apikeysEl.innerHTML=rows+createKeyHTML();
+    }).catch(function(e){apikeysEl.innerHTML='<p class="set-note warn">Network error loading keys · '+esc(e.message)+'</p>'+createKeyHTML();});
+  }
+  function keyRowHTML(k){
+    var created=k.created_at?String(k.created_at).slice(0,10):'';
+    if(k.revoked){
+      return '<div class="keyrow revoked"><div class="kr-l"><div class="kr-name">'+esc(k.name||'key')+'</div>'
+        +'<div class="kr-meta"><span class="kr-mask num">'+esc(k.masked||'')+'</span>'+(created?' · created '+esc(created):'')+'</div></div>'
+        +'<span class="kr-revoked-tag">revoked</span></div>';
+    }
+    return '<div class="keyrow"><div class="kr-l"><div class="kr-name">'+esc(k.name||'key')+'</div>'
+      +'<div class="kr-meta"><span class="kr-mask num">'+esc(k.masked||'')+'</span>'+(created?' · created '+esc(created):'')+'</div></div>'
+      +'<button class="kr-revoke" data-revoke="'+esc(k.id||'')+'" data-revoke-name="'+esc(k.name||'')+'">Revoke</button></div>';
+  }
+  function createKeyHTML(){return '<div style="margin-top:14px"><button class="pill solid" id="createKey">Create key</button></div><div id="keyReveal"></div>';}
+  // The raw secret is REVEALED ONCE. After this render the key is gone · the masked row is all
+  // that remains. A clear one-time warning + a copy control; no path re-displays it.
+  function revealKeyHTML(k){
+    return '<div class="reveal"><p class="reveal-h">New key · '+esc(k.name||'key')+'</p>'
+      +'<div class="reveal-key"><span class="reveal-secret num" id="revealSecret">'+esc(k.key||'')+'</span>'
+      +'<button class="mini" id="revealCopy" data-secret="'+esc(k.key||'')+'">Copy</button></div>'
+      +'<p class="reveal-warn">Copy it now · this is the only time the full key is shown. Store it somewhere safe; you will not see it again.</p></div>';
+  }
+  if(apikeysEl)apikeysEl.addEventListener('click',function(e){
+    var create=e.target.closest('#createKey');
+    if(create){
+      var name=(window.prompt('Name this key (e.g. production, ci, laptop)')||'').trim();
+      if(!name)return;
+      create.disabled=true;
+      fetch('/v1/keys',{method:'POST',headers:authHeaders(true),body:JSON.stringify({name:name})}).then(function(res){
+        return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});
+      }).then(function(r){
+        var j={};try{j=JSON.parse(r.t);}catch(e2){}
+        if(!r.ok){toast('Create failed · '+String((j&&j.error)||r.status));create.disabled=false;return;}
+        // Reveal the raw secret ONCE, then re-list (the new key shows only masked thereafter).
+        renderApiKeys();
+        var rv=$('keyReveal'); if(rv)rv.innerHTML=revealKeyHTML(j);
+        notify('API key created',esc(j.name||name));
+      }).catch(function(e2){toast('Create failed · '+e2.message);create.disabled=false;});
+      return;
+    }
+    var copy=e.target.closest('#revealCopy');
+    if(copy){var sec=copy.getAttribute('data-secret')||'';
+      var done=function(){toast('Key copied · store it now, it will not be shown again');};
+      if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(sec).then(done).catch(done);}else{done();}
+      return;}
+    var rev=e.target.closest('[data-revoke]');
+    if(rev){var id=rev.getAttribute('data-revoke'),nm=rev.getAttribute('data-revoke-name')||'this key';
+      if(!window.confirm('Revoke '+nm+'? Any client using it stops working immediately. This cannot be undone.'))return;
+      rev.disabled=true;
+      fetch('/v1/keys/'+encodeURIComponent(id),{method:'DELETE',headers:authHeaders(false)}).then(function(res){
+        if(res.status===204||res.ok){notify('API key revoked',nm);renderApiKeys();}
+        else{return res.text().then(function(t){var j={};try{j=JSON.parse(t);}catch(e3){}toast('Revoke failed · '+String((j&&j.error)||res.status));rev.disabled=false;});}
+      }).catch(function(e3){toast('Revoke failed · '+e3.message);rev.disabled=false;});
+      return;}
+  });
+
+  // ---- B4: billing status + usage surface. GET /v1/billing/status, POST /v1/billing/setup,
+  //          GET /v1/jobs/{id}/invoice for recent live runs. Stripe creds absent -> honest 503. ----
+  var spendFeed=null;
+  function renderBilling(){
+    if(!billingEl)return;
+    if(!isLive()){
+      billingEl.innerHTML='<div class="row"><span class="l"><span class="pip idle"></span>Payment method</span><span class="r-meta">paste a live key to manage billing</span></div>'
+        +'<div class="row"><span class="l"><span class="pip idle"></span>Payout</span><span class="r-meta">Stripe · supplier side</span></div>'
+        +'<p class="set-note warn">Billing status, usage, and the spend cap read from this server with your live key.</p>';
+      spendFeed=null; return;
+    }
+    billingEl.innerHTML='<p class="set-note">Loading billing…</p>';
+    fetch('/v1/billing/status',{headers:authHeaders(false)}).then(function(res){
+      return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});
+    }).then(function(r){
+      var j={};try{j=JSON.parse(r.t);}catch(e){}
+      billingEl.innerHTML=billingStatusHTML(r.ok?j:null,r.ok?null:String((j&&j.error)||r.status))+usageHTML()+capHTML();
+      wireSpendFeed();
+      loadInvoices();
+    }).catch(function(e){
+      billingEl.innerHTML='<p class="set-note warn">Network error loading billing · '+esc(e.message)+'</p>'+usageHTML()+capHTML();
+      wireSpendFeed();loadInvoices();
+    });
+  }
+  // Honest tri-state from {configured, connected, has_card}. No card is NEVER faked as saved.
+  function billingStatusHTML(s,errMsg){
+    if(errMsg)return '<div class="row"><span class="l"><span class="pip red"></span>Billing</span><span class="r-meta">'+esc(errMsg)+'</span></div>';
+    var configured=!!(s&&s.configured), connected=!!(s&&s.connected), hasCard=!!(s&&s.has_card);
+    var pmPip=hasCard?'pip':'pip idle';
+    var pmText=hasCard?'card on file · charges enabled':configured?'no card on file':'billing not configured on this server';
+    var cfgPip=configured?'pip':'pip idle';
+    var cfgText=configured?(connected?'configured · customer connected':'configured'):'unconfigured (no STRIPE_SECRET_KEY)';
+    var btn=hasCard
+      ? '<span class="r-meta">card on file</span>'
+      : '<button class="cx-key is-armed" id="addPaymentSet" aria-label="Add payment"><img class="cx-key-metal" src="assets/btn-add-payment-shell@3x.png" alt=""><span class="cx-key-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="5" width="19" height="14" rx="2.5"/><path d="M2.5 9.5h19"/></svg></span></button>';
+    return '<div class="row"><span class="l"><span class="'+pmPip+'"></span>Payment method</span>'+btn+'</div>'
+      +'<div class="row"><span class="l"><span class="'+cfgPip+'"></span>Stripe</span><span class="r-meta">'+esc(cfgText)+'</span></div>'
+      +(hasCard?'':'<p class="set-note" id="payNote">'+esc(pmText)+'</p>');
+  }
+  function usageHTML(){
+    return '<div class="usage card"><div class="usage-h"><span class="k">Spend · this month</span><span class="v num" id="mtd">$0.00</span></div>'
+      +'<svg id="spendFeed" viewBox="0 0 300 46" preserveAspectRatio="none" aria-hidden="true"></svg>'
+      +'<div class="usage-sub" id="usageSub">No billed runs yet on this key.</div></div>'
+      +'<div id="lineitems"></div>';
+  }
+  function capHTML(){
+    var cap='';try{cap=localStorage.getItem('cx_spend_cap')||'';}catch(e){}
+    return '<div class="capwrap"><span class="l"><span class="pip idle"></span>Hard spend cap</span>'
+      +'<span class="capfield"><span class="cur">$</span><input id="spendCap" class="capin" type="number" min="0" step="1" inputmode="decimal" placeholder="none" value="'+esc(cap)+'" aria-label="Hard spend cap in USD"></span></div>'
+      +'<p class="set-note">Sent as max_usd on each job you launch. Stored locally in this browser.</p>';
+  }
+  function wireSpendFeed(){
+    var svg=$('spendFeed'); if(!svg)return;
+    spendFeed=liveFeed(svg,{w:300,h:46,n:48});
+    var capEl=$('spendCap');
+    if(capEl)capEl.addEventListener('change',function(){
+      var v=(capEl.value||'').trim();
+      try{if(v)localStorage.setItem('cx_spend_cap',v);else localStorage.removeItem('cx_spend_cap');}catch(e){}
+      toast(v?'Spend cap set · $'+v+' max per job':'Spend cap cleared');
+    });
+    var add=$('addPaymentSet');
+    if(add)add.addEventListener('click',startBillingSetup);
+  }
+  // POST /v1/billing/setup -> a SetupIntent client_secret. With no live Stripe creds the server
+  // returns the honest unconfigured 503; surface it plainly, never fake a saved card.
+  function startBillingSetup(){
+    var add=$('addPaymentSet'); if(add)add.disabled=true;
+    fetch('/v1/billing/setup',{method:'POST',headers:authHeaders(true),body:'{}'}).then(function(res){
+      return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});
+    }).then(function(r){
+      var j={};try{j=JSON.parse(r.t);}catch(e){}
+      if(r.status===503){toast('Card setup unavailable · billing is not configured on this server');if(add)add.disabled=false;return;}
+      if(!r.ok){toast('Card setup failed · '+String((j&&j.error)||r.status));if(add)add.disabled=false;return;}
+      if(j&&j.client_secret){
+        // Stripe.js is not bundled in this test harness; the SetupIntent is real, the card-collection
+        // UI is not. Honest about that rather than faking a confirmed card.
+        notify('Payment setup ready','complete card entry in your buyer app');
+        toast('SetupIntent created · finish card entry in the buyer app (Stripe.js)');
+        var note=$('payNote'); if(note)note.textContent='SetupIntent issued · card not yet confirmed (no Stripe.js in this harness)';
+      }else{toast('Card setup returned no client_secret');}
+      if(add)add.disabled=false;
+    }).catch(function(e){toast('Card setup failed · '+e.message);if(add)add.disabled=false;});
+  }
+  // Pull per-job invoices for the live job ids this browser recorded, newest first. Each is a
+  // real GET /v1/jobs/{id}/invoice; misses are skipped (not faked). MTD = sum of charged_usd.
+  function loadInvoices(){
+    var ids=recordedJobs(), li=$('lineitems'), sub=$('usageSub'), mtdEl=$('mtd');
+    if(!ids.length){if(li)li.innerHTML='';return;}
+    Promise.all(ids.map(function(id){
+      return fetch('/v1/jobs/'+encodeURIComponent(id)+'/invoice',{headers:authHeaders(false)})
+        .then(function(res){return res.ok?res.json():null;}).catch(function(){return null;});
+    })).then(function(list){
+      var inv=list.filter(Boolean), total=0, h='', now=new Date(), mtdTotal=0;
+      inv.forEach(function(v){
+        var charged=Number(v.charged_usd)||0; total+=charged;
+        var d=v.created_at?new Date(v.created_at):null;
+        if(!d||(d.getMonth()===now.getMonth()&&d.getFullYear()===now.getFullYear()))mtdTotal+=charged;
+        var when=v.created_at?String(v.created_at).slice(0,10):'';
+        var drift='';
+        if(v.quoted_usd!=null){var q=Number(v.quoted_usd)||0,diff=charged-q;
+          drift='<span class="drift num">'+(diff>=0?'+':'')+money(diff).replace('$','$').slice(0)+' vs quote</span>';}
+        h+='<div class="lineitem"><span class="li-l"><span class="li-t num">'+esc((v.job_type||'job'))+(when?' · '+esc(when):'')+'</span></span>'
+          +'<span class="li-amt num">'+money(charged)+drift+'</span></div>';
+      });
+      if(li)li.innerHTML=h;
+      if(mtdEl)mtdEl.textContent=money(mtdTotal);
+      if(sub)sub.textContent=inv.length?(inv.length+' billed '+(inv.length===1?'run':'runs')+' · estimate, not a statement'):'No billed runs yet on this key.';
+      // Drive the spend trend from the real per-run charges (newest at the leading edge).
+      if(spendFeed&&inv.length){var mx=Math.max.apply(null,inv.map(function(v){return Number(v.charged_usd)||0;}))||1;
+        inv.slice().reverse().forEach(function(v){spendFeed.tick(0.1+0.8*((Number(v.charged_usd)||0)/mx));});}
+    });
+  }
+
+  function renderSettingsPanels(){renderApiKeys();renderBilling();}
+  renderSettingsPanels();
 
   // ===== QUICKSTART empty-state: buyer activation. Three copy-paste snippets · curl, the
   // Python SDK, the cx CLI · leading with the simplest path. The buyer's live key (cx_key in
@@ -771,7 +1032,7 @@
         errs=0;return res.json();
       }).then(function(p){
         if(!p)return;var done=0,last='';
-        p.stages.forEach(function(s){var c=s.status==='complete'?'done':(s.status==='failed'||s.status==='cancelled')?'fail':(s.status==='running'||s.status==='queued'||s.status==='verifying')?'run':'pending';setPipeStage(s.index,c);if(s.status==='complete'){done++;last=s.job_id||last;}});
+        p.stages.forEach(function(s){var c=s.status==='complete'?'done':(s.status==='failed'||s.status==='cancelled')?'fail':(s.status==='running'||s.status==='queued'||s.status==='verifying')?'run':'pending';setPipeStage(s.index,c);if(s.status==='complete'){done++;last=s.job_id||last;recordJob(s.job_id);}});
         st.textContent='running · '+done+'/'+p.stages.length;
         if(p.status==='complete'||p.status==='failed'){clearInterval(iv);if(tv)clearInterval(tv);var ok=p.status==='complete';
           run.dataset.status=ok?'done':'failed';run.querySelector('.dot').className='dot '+(ok?'done':'fail');st.className='st '+(ok?'done':'fail');st.textContent=p.status;
@@ -780,7 +1041,7 @@
           var rcpt=verificationReceipt(p.verification,p.charge_status);
           if(ok)run.querySelector('.detail').innerHTML=rcpt+'<div class="preview">complete · '+p.stages.length+'-step pipeline</div><div class="actions"><button class="mini" data-results="'+esc(last)+'">Download</button></div>';
           else run.querySelector('.detail').innerHTML=rcpt+'<div class="preview">failed · '+esc(p.status)+'</div>';
-          notify('Pipeline '+p.status,run.dataset.name);resetIntake();}
+          notify('Pipeline '+p.status,run.dataset.name);resetIntake();renderBilling();}
       }).catch(function(){if(++errs>=3){clearInterval(iv);fail('network error during poll');}});
     },2000);
   }

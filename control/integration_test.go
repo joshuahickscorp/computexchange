@@ -2659,3 +2659,158 @@ func TestVerificationReceiptSurfaced(t *testing.T) {
 		t.Fatalf("charge_status should surface a default state, got empty")
 	}
 }
+
+// --- buyer API-key lifecycle: mint → authenticate → revoke → 401 ---
+
+// TestAPIKeyLifecycle proves the full /v1/keys contract end to end against live
+// Postgres: a buyer mints a key (raw secret revealed once), the masked list shows
+// it, the raw key authenticates a real buyer request, then revoking it makes that
+// same key 401 · no silent accept of a revoked credential (BLACKHOLE).
+func TestAPIKeyLifecycle(t *testing.T) {
+	reset(t)
+
+	// Mint a test key.
+	code, out := req(t, "POST", "/v1/keys", map[string]any{"name": "ci-key", "test": true}, buyerKey(), jsonCT())
+	if code != http.StatusCreated {
+		t.Fatalf("create key: want 201, got %d: %s", code, out)
+	}
+	var created struct {
+		ID, Name, Key, Prefix, Masked string
+	}
+	if err := json.Unmarshal(out, &created); err != nil {
+		t.Fatalf("create decode: %v (%s)", err, out)
+	}
+	if created.Key == "" || !strings.HasPrefix(created.Key, "cx_test_") {
+		t.Fatalf("expected raw cx_test_ key revealed once, got %q", created.Key)
+	}
+	if created.Prefix != "cx_test_" {
+		t.Fatalf("expected prefix cx_test_, got %q", created.Prefix)
+	}
+	if created.Name != "ci-key" || created.ID == "" {
+		t.Fatalf("create response missing name/id: %+v", created)
+	}
+
+	// List shows it masked · never the raw secret.
+	code, out = req(t, "GET", "/v1/keys", nil, buyerKey())
+	if code != http.StatusOK {
+		t.Fatalf("list keys: want 200, got %d: %s", code, out)
+	}
+	if strings.Contains(string(out), created.Key) {
+		t.Fatalf("list leaked the raw key: %s", out)
+	}
+	var list struct {
+		Keys []struct {
+			ID, Name, Masked string
+			Revoked          bool
+		}
+	}
+	if err := json.Unmarshal(out, &list); err != nil {
+		t.Fatalf("list decode: %v (%s)", err, out)
+	}
+	var found bool
+	for _, k := range list.Keys {
+		if k.ID == created.ID {
+			found = true
+			if k.Masked == "" || !strings.HasPrefix(k.Masked, "cx_test_") {
+				t.Fatalf("masked hint malformed: %q", k.Masked)
+			}
+			if k.Revoked {
+				t.Fatalf("freshly minted key should not be revoked")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("minted key %s not in list", created.ID)
+	}
+
+	// The raw key authenticates a real buyer request.
+	newKeyHdr := hdr{"Authorization", "Bearer " + created.Key}
+	if code, _ := req(t, "GET", "/v1/models", nil, newKeyHdr); code != http.StatusOK {
+		t.Fatalf("authenticate with new key: want 200, got %d", code)
+	}
+
+	// Revoke it (idempotent 204).
+	if code, _ := req(t, "DELETE", "/v1/keys/"+created.ID, nil, buyerKey()); code != http.StatusNoContent {
+		t.Fatalf("revoke: want 204, got %d", code)
+	}
+	if code, _ := req(t, "DELETE", "/v1/keys/"+created.ID, nil, buyerKey()); code != http.StatusNoContent {
+		t.Fatalf("revoke (idempotent replay): want 204, got %d", code)
+	}
+
+	// A revoked key no longer authenticates · 401, no silent bypass.
+	if code, _ := req(t, "GET", "/v1/models", nil, newKeyHdr); code != http.StatusUnauthorized {
+		t.Fatalf("revoked key must 401, got %d", code)
+	}
+}
+
+// --- OpenAI-Batch-compatible adapter: inline embeddings batch → status maps ---
+
+// TestOpenAIBatchInlineEmbeddings posts an OpenAI-Batch-shaped embeddings request
+// with INLINE input (no separate file upload), then confirms GET /v1/batches/{id}
+// returns an OpenAI-Batch-shaped object whose status maps from the underlying CX
+// job status and whose request_counts.total reflects the line count.
+func TestOpenAIBatchInlineEmbeddings(t *testing.T) {
+	reset(t)
+
+	// Two embeddings lines, inline as a JSONL string (the OpenAI batch line shape).
+	jsonl := `{"custom_id":"a","method":"POST","url":"/v1/embeddings","body":{"model":"text-embedding-3-small","input":"hello"}}` + "\n" +
+		`{"custom_id":"b","method":"POST","url":"/v1/embeddings","body":{"model":"text-embedding-3-small","input":"world"}}`
+
+	code, out := req(t, "POST", "/v1/batches", map[string]any{
+		"endpoint":          "/v1/embeddings",
+		"completion_window": "24h",
+		"input":             jsonl,
+	}, buyerKey(), jsonCT())
+	if code != http.StatusOK {
+		t.Fatalf("create batch: want 200, got %d: %s", code, out)
+	}
+	var batch struct {
+		ID            string `json:"id"`
+		Object        string `json:"object"`
+		Endpoint      string `json:"endpoint"`
+		Status        string `json:"status"`
+		InputFileID   string `json:"input_file_id"`
+		RequestCounts struct {
+			Total, Completed, Failed int
+		} `json:"request_counts"`
+	}
+	if err := json.Unmarshal(out, &batch); err != nil {
+		t.Fatalf("batch decode: %v (%s)", err, out)
+	}
+	if batch.Object != "batch" || !strings.HasPrefix(batch.ID, "batch-") {
+		t.Fatalf("not an OpenAI batch object: %+v", batch)
+	}
+	if batch.Endpoint != "/v1/embeddings" {
+		t.Fatalf("endpoint not echoed: %q", batch.Endpoint)
+	}
+	if batch.RequestCounts.Total != 2 {
+		t.Fatalf("request_counts.total: want 2, got %d", batch.RequestCounts.Total)
+	}
+	if batch.InputFileID == "" || !strings.HasPrefix(batch.InputFileID, "file-") {
+		t.Fatalf("inline input should have materialized an input file: %q", batch.InputFileID)
+	}
+	if batch.Status != "in_progress" {
+		t.Fatalf("fresh batch should be in_progress (job queued), got %q", batch.Status)
+	}
+
+	// Status GET maps the underlying CX job status into the OpenAI vocabulary.
+	code, out = req(t, "GET", "/v1/batches/"+batch.ID, nil, buyerKey())
+	if code != http.StatusOK {
+		t.Fatalf("get batch: want 200, got %d: %s", code, out)
+	}
+	var got struct {
+		ID, Status string
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("get batch decode: %v (%s)", err, out)
+	}
+	if got.ID != batch.ID {
+		t.Fatalf("batch id mismatch on GET: %q vs %q", got.ID, batch.ID)
+	}
+	switch got.Status {
+	case "in_progress", "finalizing", "completed":
+		// all valid mappings of queued/running/verifying/complete
+	default:
+		t.Fatalf("unexpected mapped batch status %q", got.Status)
+	}
+}

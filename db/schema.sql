@@ -90,6 +90,22 @@ CREATE TABLE IF NOT EXISTS tasks (
 -- inputs without a second table.
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS input_ref TEXT;
 
+-- E3 · autovacuum tuning for the hottest table. `tasks` churns constantly: every
+-- claim/start/commit/fail/requeue is an UPDATE, so dead tuples (and the visibility
+-- bloat that slows the FOR UPDATE SKIP LOCKED claim scan) accumulate fast. The DB
+-- defaults (scale_factor 0.2 = vacuum/analyze only after 20% of the table turns
+-- over) are tuned for cold tables and let bloat ride on a queue. Drop to small
+-- scale factors with flat thresholds so autovacuum fires on absolute churn, and
+-- raise the cost limit so a vacuum keeps pace instead of falling behind under load.
+-- Idempotent (ALTER ... SET is a no-op replay) and table-scoped · no global GUC change.
+ALTER TABLE tasks SET (
+    autovacuum_vacuum_scale_factor  = 0.02,
+    autovacuum_vacuum_threshold     = 50,
+    autovacuum_analyze_scale_factor = 0.02,
+    autovacuum_analyze_threshold    = 50,
+    autovacuum_vacuum_cost_limit    = 1000
+);
+
 CREATE TABLE IF NOT EXISTS ledger_entries (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     created_at    TIMESTAMPTZ DEFAULT now(),
@@ -132,6 +148,13 @@ CREATE TABLE IF NOT EXISTS api_keys (
     created_at TIMESTAMPTZ DEFAULT now(),
     revoked    BOOLEAN DEFAULT false
 );
+-- Buyer-managed key lifecycle (POST/GET/DELETE /v1/keys). `name` is a human label;
+-- `masked` is a NON-secret display hint captured at mint (prefix + last4) so the list
+-- view can show which key is which WITHOUT ever reconstructing the raw secret (only
+-- key_hash is stored · the raw value is revealed once and is unrecoverable). Idempotent
+-- ALTERs so older DBs created before the lifecycle columns upgrade cleanly.
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS name   TEXT;
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS masked TEXT;
 
 CREATE TABLE IF NOT EXISTS worker_tokens (
     token_hash  TEXT PRIMARY KEY,         -- SHA-256 hash of the raw token; raw is shown once at mint, never stored
@@ -203,6 +226,7 @@ CREATE TABLE IF NOT EXISTS models (
 -- whisper-tiny|base. Keep these in lockstep with the agent's resolver.
 INSERT INTO models (id, family, quant, kind, dim, job_type, price_per_1k, price_per_unit, min_memory_gb, hf_repo) VALUES
     ('all-minilm-l6-v2', 'minilm', NULL,   'embed',   384,  'embed',            0.00100000, NULL,        2, 'sentence-transformers/all-MiniLM-L6-v2'),
+    ('bge-small-en-v1.5', 'bge',   NULL,   'embed',   384,  'embed',            0.00100000, NULL,        2, 'BAAI/bge-small-en-v1.5'),
     ('llama-3.2-1b-instruct-q4', 'llama', 'q4_k_m', 'gguf', NULL, 'batch_infer', 0.00200000, NULL,        4, 'unsloth/Llama-3.2-1B-Instruct-GGUF'),
     ('qwen2.5-7b-instruct-q4', 'qwen', 'q4_k_m', 'gguf', NULL, 'batch_infer',    0.00800000, NULL,       40, 'Qwen/Qwen2.5-7B-Instruct-GGUF'),
     ('whisper-tiny',     'whisper', NULL,  'whisper', NULL,  'audio_transcribe', NULL,       0.00400000,  1, 'openai/whisper-tiny'),

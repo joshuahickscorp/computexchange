@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -627,6 +628,112 @@ func (s *Store) CreateWorkerToken(ctx context.Context, workerID, supplierID uuid
 		return "", err
 	}
 	return raw, nil
+}
+
+// --- buyer API-key lifecycle (POST/GET/DELETE /v1/keys) ---
+
+// APIKeyRow is one masked api_key as shown in the list view. `Masked` is the
+// non-secret display hint (prefix + last4) captured at mint; the raw secret is
+// NEVER reconstructable (only key_hash is stored).
+type APIKeyRow struct {
+	ID        uuid.UUID `json:"id"`
+	Name      string    `json:"name"`
+	Masked    string    `json:"masked"`
+	CreatedAt time.Time `json:"created_at"`
+	Revoked   bool      `json:"revoked"`
+}
+
+// CreateAPIKey mints a buyer API key the same way CreateWorkerToken mints a worker
+// token: it generates a random raw secret, stores ONLY its SHA-256 hash plus a
+// non-secret display hint (prefix + last4), and returns the raw secret ONCE. The
+// raw value is unrecoverable afterwards (it is never stored). `test` selects the
+// cx_test_ prefix (vs. cx_live_) so callers can tell environments apart; it does
+// not change auth · both authenticate identically (no scopes/spend here by design).
+// is_admin is left at its default (false): minting a key never grants admin.
+func (s *Store) CreateAPIKey(ctx context.Context, buyerID uuid.UUID, name string, test bool) (id uuid.UUID, raw, masked string, err error) {
+	prefix := "cx_live_"
+	if test {
+		prefix = "cx_test_"
+	}
+	raw = newSecret(prefix)
+	if raw == "" {
+		return uuid.Nil, "", "", errors.New("api key: entropy failure")
+	}
+	masked = maskKey(raw)
+	err = s.pool.QueryRow(ctx,
+		`INSERT INTO api_keys (buyer_id, key_hash, name, masked, is_admin, revoked)
+		 VALUES ($1, $2, $3, $4, false, false)
+		 RETURNING id`,
+		buyerID, hashKey(raw), name, masked,
+	).Scan(&id)
+	if err != nil {
+		return uuid.Nil, "", "", err
+	}
+	return id, raw, masked, nil
+}
+
+// ListAPIKeys returns the caller's keys as masked rows (never the raw secret ·
+// only key_hash is stored, so there is nothing to leak even on a full DB read).
+// Scoped to buyerID; revoked keys are included so the UI can show their state.
+func (s *Store) ListAPIKeys(ctx context.Context, buyerID uuid.UUID) ([]APIKeyRow, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, COALESCE(name,''), COALESCE(masked,''), created_at, revoked
+		   FROM api_keys
+		  WHERE buyer_id = $1
+		  ORDER BY created_at DESC`,
+		buyerID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []APIKeyRow{}
+	for rows.Next() {
+		var r APIKeyRow
+		if err := rows.Scan(&r.ID, &r.Name, &r.Masked, &r.CreatedAt, &r.Revoked); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// RevokeAPIKey revokes one key, scoped to the owning buyer so a caller can never
+// revoke another buyer's key. Idempotent: revoking an already-revoked (or
+// never-existed-for-this-buyer) key is a no-op success · the endpoint is 204
+// either way, matching the DELETE contract. Returns whether a row was found so
+// the handler can distinguish "revoked" from "not yours / not found" if needed.
+func (s *Store) RevokeAPIKey(ctx context.Context, buyerID, id uuid.UUID) (bool, error) {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE api_keys SET revoked = true
+		  WHERE id = $1 AND buyer_id = $2`,
+		id, buyerID,
+	)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// maskKey builds the non-secret display hint for an api_key: the cx_live_/cx_test_
+// prefix plus the last 4 chars of the secret, joined by an ellipsis. It is derived
+// from the raw secret ONLY at mint time and persisted; it is never enough to
+// reconstruct the key (4 trailing chars of 32 bytes of entropy).
+func maskKey(raw string) string {
+	// CX key tags are "cx_live_" / "cx_test_" (two underscores); the random tail is
+	// base64url and may itself contain "_", so take up to the SECOND underscore. Never
+	// LastIndex · that would leak almost the whole secret into the masked hint.
+	prefix := raw
+	if i1 := strings.IndexByte(raw, '_'); i1 >= 0 {
+		if i2 := strings.IndexByte(raw[i1+1:], '_'); i2 >= 0 {
+			prefix = raw[:i1+1+i2+1]
+		}
+	}
+	last4 := raw
+	if len(raw) >= 4 {
+		last4 = raw[len(raw)-4:]
+	}
+	return prefix + "..." + last4
 }
 
 // --- workers + benchmarks ---

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -32,6 +33,16 @@ import (
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
 	log.SetPrefix("control: ")
+
+	// E1 · soft-memory valve. Give the GC a hard ceiling so the control plane GCs
+	// harder as it approaches the limit instead of growing until the container's
+	// cgroup OOM-kills it (a hard kill drops in-flight requests; a soft limit just
+	// makes the GC work harder). Honour an operator-set GOMEMLIMIT verbatim; only
+	// when unset do we apply a conservative ~300MiB default that sits below the
+	// docker-compose mem_limit so the runtime reacts before the cgroup does.
+	if os.Getenv("GOMEMLIMIT") == "" {
+		debug.SetMemoryLimit(300 << 20) // 300 MiB
+	}
 
 	// `control healthcheck`: in-container liveness probe against the running server's
 	// /healthz — the distroless image has no shell/curl for a Docker HEALTHCHECK. It

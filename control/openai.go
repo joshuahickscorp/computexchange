@@ -141,9 +141,10 @@ func (s *Server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	var req struct {
-		InputFileID      string `json:"input_file_id"`
-		Endpoint         string `json:"endpoint"`
-		CompletionWindow string `json:"completion_window"`
+		InputFileID      string          `json:"input_file_id"`
+		Endpoint         string          `json:"endpoint"`
+		CompletionWindow string          `json:"completion_window"`
+		Input            json.RawMessage `json:"input"` // inline alternative to input_file_id
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid batch request json: "+err.Error())
@@ -154,12 +155,47 @@ func (s *Server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "unsupported endpoint "+req.Endpoint+" (use /v1/embeddings or /v1/chat/completions)")
 		return
 	}
-	fm, herr := s.getFileMeta(ctx, req.InputFileID, auth.BuyerID)
-	if herr != nil {
-		writeErr(w, herr.status, herr.msg)
+
+	// Two honest ways to supply the request lines: a previously-uploaded file
+	// (`input_file_id`), OR an inline `input` for callers who skip the upload step.
+	// Inline is the raw JSONL (a JSON string) or a JSON array of OpenAI batch line
+	// objects; either way it is materialized into the SAME buyer-owned input file the
+	// file path produces, so the rest of the flow (parse, submit, output) is identical.
+	var inputFileID string
+	switch {
+	case req.InputFileID != "":
+		fm, herr := s.getFileMeta(ctx, req.InputFileID, auth.BuyerID)
+		if herr != nil {
+			writeErr(w, herr.status, herr.msg)
+			return
+		}
+		inputFileID = fm.ID
+	case len(req.Input) > 0:
+		jsonl, ierr := inlineBatchJSONL(req.Input)
+		if ierr != nil {
+			writeErr(w, http.StatusBadRequest, "invalid inline batch input: "+ierr.Error())
+			return
+		}
+		id := "file-" + uuid.NewString()
+		if err := s.storage.PutObject(ctx, fileContentKey(id), jsonl, "application/x-ndjson"); err != nil {
+			writeErr(w, http.StatusInternalServerError, "storing inline input: "+err.Error())
+			return
+		}
+		fm := fileMeta{
+			ID: id, BuyerID: auth.BuyerID.String(), Purpose: "batch",
+			Filename: "inline.jsonl", Bytes: int64(len(jsonl)), CreatedAt: time.Now().Unix(),
+		}
+		if err := s.putMeta(ctx, fileMetaKey(id), fm); err != nil {
+			writeErr(w, http.StatusInternalServerError, "storing inline input meta: "+err.Error())
+			return
+		}
+		inputFileID = id
+	default:
+		writeErr(w, http.StatusBadRequest, "batch requires input_file_id or inline input")
 		return
 	}
-	raw, err := s.storage.GetObject(ctx, fileContentKey(fm.ID))
+
+	raw, err := s.storage.GetObject(ctx, fileContentKey(inputFileID))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "reading input file: "+err.Error())
 		return
@@ -187,7 +223,7 @@ func (s *Server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 	id := "batch-" + uuid.NewString()
 	meta := batchMeta{
 		ID: id, BuyerID: auth.BuyerID.String(), JobID: resp.JobID.String(),
-		Endpoint: req.Endpoint, Model: model, InputFileID: fm.ID,
+		Endpoint: req.Endpoint, Model: model, InputFileID: inputFileID,
 		Total: len(customIDs), CreatedAt: time.Now().Unix(),
 	}
 	if err := s.putMeta(ctx, batchMetaKey(id), meta); err != nil {
@@ -309,6 +345,33 @@ type batchInputLine struct {
 			Content string `json:"content"`
 		} `json:"messages"` // chat
 	} `json:"body"`
+}
+
+// inlineBatchJSONL normalizes an inline batch `input` into OpenAI batch JSONL bytes
+// (the same shape an uploaded file holds), so the inline and file paths converge.
+// Accepts either a JSON string (already-formed JSONL) or a JSON array of line
+// objects (each marshaled to its own line). Anything else is an honest error.
+func inlineBatchJSONL(input json.RawMessage) ([]byte, error) {
+	var asString string
+	if json.Unmarshal(input, &asString) == nil {
+		if strings.TrimSpace(asString) == "" {
+			return nil, fmt.Errorf("inline input string is empty")
+		}
+		return []byte(asString), nil
+	}
+	var asArray []json.RawMessage
+	if json.Unmarshal(input, &asArray) == nil {
+		if len(asArray) == 0 {
+			return nil, fmt.Errorf("inline input array is empty")
+		}
+		var buf bytes.Buffer
+		for _, line := range asArray {
+			buf.Write(bytes.TrimSpace(line))
+			buf.WriteByte('\n')
+		}
+		return buf.Bytes(), nil
+	}
+	return nil, fmt.Errorf("input must be a JSONL string or an array of request objects")
 }
 
 // parseBatchInput reads OpenAI batch JSONL into ordered custom_ids and a native

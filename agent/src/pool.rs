@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 use tokio::sync::{Mutex, OnceCell};
 
+use crate::models;
 use crate::runners::{Embedder, LlamaBackend, RunError, WhisperBackend};
 
 /// Process-wide count of real backend loads. Incremented once per model actually
@@ -46,13 +47,19 @@ pub(crate) fn note_load() {
 /// A lazily-initialized, mutex-guarded warm backend.
 type Warm<T> = Arc<OnceCell<Arc<Mutex<T>>>>;
 
+/// A lazily-initialized warm embedder cell. No inner `Mutex` (unlike `Warm<T>`):
+/// `Embedder::embed` is `&self`, so the warm handle is shared directly.
+type WarmEmbedder = Arc<OnceCell<Arc<Embedder>>>;
+
 /// The warm model pool. Cloneable (cheap `Arc` bumps) so every spawned task gets
 /// its own handle to the same shared backends.
 #[derive(Clone, Default)]
 pub struct ModelPool {
-    /// The single embedder (one embed model in the catalogue). `&self` use → no
-    /// mutex; shared directly.
-    embedder: Arc<OnceCell<Arc<Embedder>>>,
+    /// Embedders keyed by canonical id (`all-minilm-l6-v2` | `bge-small-en-v1.5`).
+    /// `Embedder::embed` is `&self` → each is shared as a bare `Arc<Embedder>`
+    /// (no mutex). Keyed so the proven MiniLM default and the higher-quality
+    /// bge-small alternate each get their own warm handle and never collide.
+    embedders: Arc<Mutex<HashMap<String, WarmEmbedder>>>,
     /// Llama backends keyed by canonical id (`llama-3.2-1b-instruct-q4`, or a
     /// `qwen` family id). `&mut self` decode → mutex-guarded.
     llama: Arc<Mutex<HashMap<String, Warm<LlamaBackend>>>>,
@@ -65,21 +72,31 @@ impl ModelPool {
         Self::default()
     }
 
-    /// Get (loading once) the shared embedder. Concurrent first calls race into
-    /// one load via the `OnceCell`; all later calls reuse the warm handle.
-    pub async fn embedder(&self) -> Result<Arc<Embedder>, RunError> {
-        self.embedder
-            .get_or_try_init(|| async {
-                let e = tokio::task::spawn_blocking(|| {
-                    note_load();
-                    Embedder::load()
-                })
-                .await
-                .map_err(join_err("embed"))??;
-                Ok::<_, RunError>(Arc::new(e))
+    /// Get (loading once) the shared embedder for `model_ref`, keyed by its
+    /// canonical id so the empty ref, our id, and the HF repo all share one model.
+    /// Concurrent first calls for the same id race into one load via the
+    /// per-id `OnceCell`; all later calls reuse the warm handle. Distinct embed
+    /// models (MiniLM vs bge-small) load into separate slots in parallel.
+    pub async fn embedder(&self, model_ref: &str) -> Result<Arc<Embedder>, RunError> {
+        let key = canonical_embed_id(model_ref);
+        let cell = {
+            let mut g = self.embedders.lock().await;
+            g.entry(key)
+                .or_insert_with(|| Arc::new(OnceCell::new()))
+                .clone()
+        };
+        let model_ref = model_ref.to_string();
+        cell.get_or_try_init(|| async {
+            let e = tokio::task::spawn_blocking(move || {
+                note_load();
+                Embedder::load(&model_ref)
             })
             .await
-            .cloned()
+            .map_err(join_err("embed"))??;
+            Ok::<_, RunError>(Arc::new(e))
+        })
+        .await
+        .cloned()
     }
 
     /// Get (loading once) the warm Llama backend for `model_ref`, keyed by its
@@ -142,8 +159,13 @@ impl ModelPool {
     /// worker_model_state row per id so the scheduler can prefer a warm worker.
     pub async fn loaded_model_ids(&self) -> Vec<String> {
         let mut ids = Vec::new();
-        if self.embedder.get().is_some() {
-            ids.push(EMBEDDER_ID.to_string());
+        // Embedders use a bare `Arc<OnceCell<Arc<Embedder>>>` (no inner mutex, since
+        // `embed` is `&self`), so the warm gate is the same `cell.get().is_some()`
+        // as the llama/whisper maps but inlined for that value type.
+        for (id, cell) in self.embedders.lock().await.iter() {
+            if cell.get().is_some() {
+                ids.push(id.clone());
+            }
         }
         collect_warm_ids(&*self.llama.lock().await, &mut ids);
         collect_warm_ids(&*self.whisper.lock().await, &mut ids);
@@ -152,10 +174,13 @@ impl ModelPool {
     }
 }
 
-/// Canonical id of the single embedder model (matches `models::EMBED_SPEC` and the
-/// `all-minilm-l6-v2` catalogue id). Reported by `loaded_model_ids` when the
-/// embedder is warm.
-const EMBEDDER_ID: &str = "all-minilm-l6-v2";
+/// Canonical embed-model id for pool keying. The empty ref, our id, and the HF
+/// repo for the default all resolve to `all-minilm-l6-v2`; a `bge`-marked ref
+/// resolves to `bge-small-en-v1.5`. Delegates to `models::embed_spec` so the pool
+/// key and the loader's model choice can never disagree.
+fn canonical_embed_id(model_ref: &str) -> String {
+    models::embed_spec(model_ref).0.to_string()
+}
 
 /// Push the ids of every FULLY-INITIALIZED slot in a per-model warm map into `ids`.
 /// The warm gate is `cell.get().is_some()`: a slot whose `OnceCell` has not yet
@@ -234,6 +259,17 @@ mod tests {
         assert_eq!(canonical_whisper_id("whisper-tiny"), "whisper-tiny");
         assert_eq!(canonical_whisper_id("openai/whisper-base"), "whisper-base");
         assert_eq!(canonical_whisper_id(""), "whisper-tiny");
+        // Embed keying: empty ref + the HF repo stay the MiniLM default; a
+        // `bge`-marked ref gets its own slot (the higher-quality alternate).
+        assert_eq!(canonical_embed_id(""), "all-minilm-l6-v2");
+        assert_eq!(
+            canonical_embed_id("sentence-transformers/all-MiniLM-L6-v2"),
+            "all-minilm-l6-v2"
+        );
+        assert_eq!(
+            canonical_embed_id("BAAI/bge-small-en-v1.5"),
+            "bge-small-en-v1.5"
+        );
     }
 
     /// THE WARM-POOL PROOF (non-network). This exercises the exact load-once
@@ -339,7 +375,7 @@ mod tests {
         for i in 0..N {
             let pool = pool.clone();
             handles.push(tokio::spawn(async move {
-                let e = pool.embedder().await.expect("warm embedder");
+                let e = pool.embedder("").await.expect("warm embedder");
                 let v = e.embed(&[format!("warm pool run {i}")]).expect("embed");
                 assert_eq!(v.len(), 1);
             }));
