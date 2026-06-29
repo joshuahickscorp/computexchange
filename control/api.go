@@ -76,6 +76,7 @@ func (s *Server) Routes() http.Handler {
 	// Self-serve accounts (accounts.go) · unauthed: these MINT the credential.
 	mux.HandleFunc("POST /v1/signup", s.handleSignup)
 	mux.HandleFunc("POST /v1/login", s.handleLogin)
+	mux.Handle("POST /v1/logout", s.authBuyer(http.HandlerFunc(s.handleLogout))) // revoke the presenting session
 
 	// Self-serve supplier onboarding (suppliers.go) · unauthed: a prospective
 	// supplier has no credential yet. Captures tax info + returns a Connect link.

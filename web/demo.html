@@ -787,6 +787,9 @@
     if(keyIn)keyIn.value=liveKey;             // mirror into the Settings live-key field
     syncLive();renderQuickstart();renderSettingsPanels();
   }
+  // The account email, captured at signup/login, is what the supplier endpoints key on
+  // (a pasted api key carries no email, so supplier onboarding needs a signed-in account).
+  function cxEmail(){try{return localStorage.getItem('cx_email')||'';}catch(e){return '';}}
   function doAuth(){
     if(!authSubmitBtn)return;
     var email=(authEmail&&authEmail.value||'').trim(), password=(authPassword&&authPassword.value||'');
@@ -809,6 +812,7 @@
         }
         if(!j||!j.token){authError('No token returned · cannot enter live mode.');authSubmitBtn.disabled=false;return;}
         adoptToken(j.token);
+        try{localStorage.setItem('cx_email',(j.email||email||'').trim());}catch(e){}
         notify(authMode==='login'?'Signed in':'Account created',esc(j.email||email));
         toast(authMode==='login'?'Signed in · live mode on':'Welcome · sandbox key loaded, run a job now');
         authSubmitBtn.disabled=false;
@@ -1039,8 +1043,13 @@
         +'<p class="set-note warn">Onboarding opens a Stripe Connect account-link · provide a tax ID and country, then finish in the new tab.</p>';
       return;
     }
+    var em=cxEmail();
+    if(!em){
+      supplierEl.innerHTML='<div class="row"><span class="l"><span class="pip idle"></span>Stripe Connect</span><span class="r-meta">sign in with your account email to onboard for payouts</span></div>';
+      return;
+    }
     supplierEl.innerHTML='<p class="set-note">Loading payout status…</p>';
-    fetch('/v1/supplier/status',{headers:authHeaders(false)}).then(function(res){
+    fetch('/v1/supplier/status?email='+encodeURIComponent(em),{headers:authHeaders(false)}).then(function(res){
       return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});
     }).then(function(r){
       var j={};try{j=JSON.parse(r.t);}catch(e){}
@@ -1080,7 +1089,7 @@
       if(!taxId){toast('Enter your tax ID first');return;}
       if(taxCountry.length!==2){toast('Tax country must be a 2-letter code, e.g. US');return;}
       btnEl.disabled=true;
-      fetch('/v1/supplier/onboard',{method:'POST',headers:authHeaders(true),body:JSON.stringify({email:'',tax_id:taxId,tax_country:taxCountry})}).then(function(res){
+      fetch('/v1/supplier/onboard',{method:'POST',headers:authHeaders(true),body:JSON.stringify({email:cxEmail(),tax_id:taxId,tax_country:taxCountry})}).then(function(res){
         return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});
       }).then(function(r){
         var j={};try{j=JSON.parse(r.t);}catch(e){}

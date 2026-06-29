@@ -3050,3 +3050,63 @@ func stripeTestSig(body []byte, secret string) string {
 	mac.Write([]byte(t + "." + string(body)))
 	return "t=" + t + ",v1=" + hex.EncodeToString(mac.Sum(nil))
 }
+
+// --- Phase 3.5 auth hardening ---
+
+// TestLogoutRevokesSession proves POST /v1/logout kills the presenting session token
+// immediately (it must not stay valid for the rest of its 30-day TTL).
+func TestLogoutRevokesSession(t *testing.T) {
+	reset(t)
+	email := uniqueEmail("logout")
+	code, out := req(t, "POST", "/v1/signup", map[string]any{"email": email, "password": "hunter2hunter2"}, jsonCT())
+	if code != http.StatusCreated {
+		t.Fatalf("signup: %d %s", code, out)
+	}
+	var su struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(out, &su); err != nil || su.Token == "" {
+		t.Fatalf("signup token: %v (%s)", err, out)
+	}
+	sess := hdr{"Authorization", "Bearer " + su.Token}
+	if c, _ := req(t, "GET", "/v1/models", nil, sess); c != http.StatusOK {
+		t.Fatalf("token must authenticate before logout, got %d", c)
+	}
+	if c, _ := req(t, "POST", "/v1/logout", nil, sess); c != http.StatusNoContent {
+		t.Fatalf("logout: want 204, got %d", c)
+	}
+	if c, _ := req(t, "GET", "/v1/models", nil, sess); c != http.StatusUnauthorized {
+		t.Fatalf("revoked session must 401, got %d", c)
+	}
+}
+
+// TestLoginThrottleLocksOut proves the per-account login throttle: maxLoginFails bad
+// passwords lock the email out (429), and even the correct password is refused during
+// the lockout window.
+func TestLoginThrottleLocksOut(t *testing.T) {
+	reset(t)
+	email := uniqueEmail("throttle")
+	if c, out := req(t, "POST", "/v1/signup", map[string]any{"email": email, "password": "correct-horse-battery"}, jsonCT()); c != http.StatusCreated {
+		t.Fatalf("signup: %d %s", c, out)
+	}
+	for i := 0; i < 5; i++ {
+		if c, _ := req(t, "POST", "/v1/login", map[string]any{"email": email, "password": "wrong-guess"}, jsonCT()); c != http.StatusUnauthorized {
+			t.Fatalf("bad login %d: want 401, got %d", i, c)
+		}
+	}
+	if c, _ := req(t, "POST", "/v1/login", map[string]any{"email": email, "password": "wrong-guess"}, jsonCT()); c != http.StatusTooManyRequests {
+		t.Fatalf("after 5 failures login must lock out (429), got %d", c)
+	}
+	if c, _ := req(t, "POST", "/v1/login", map[string]any{"email": email, "password": "correct-horse-battery"}, jsonCT()); c != http.StatusTooManyRequests {
+		t.Fatalf("correct password during lockout must still 429, got %d", c)
+	}
+}
+
+// TestSignupRejectsOversizePassword proves the bcrypt 72-byte guard (so two passwords
+// sharing a 72-byte prefix can never authenticate interchangeably).
+func TestSignupRejectsOversizePassword(t *testing.T) {
+	reset(t)
+	if c, _ := req(t, "POST", "/v1/signup", map[string]any{"email": uniqueEmail("long"), "password": strings.Repeat("a", 73)}, jsonCT()); c != http.StatusBadRequest {
+		t.Fatalf("password > 72 bytes must 400, got %d", c)
+	}
+}

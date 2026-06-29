@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -57,6 +58,79 @@ const sandboxFreeCreditUSD = 0.0
 // one expires on its own. 30 days balances "do not re-login constantly" against a
 // bounded blast radius for a leaked token (revocation is also available).
 const sessionTTL = 30 * 24 * time.Hour
+
+// --- per-account login throttle ---
+//
+// The per-IP limiter blunts volumetric abuse, but online password guessing against a
+// known email needs a per-ACCOUNT brake. loginGuard counts consecutive failures per
+// normalized email and locks the email out for an exponentially-growing window after
+// maxLoginFails, capped at loginLockoutMax. A success clears it. In-memory + mutex
+// (mirrors the liveness/metrics package globals); a multi-instance deployment would
+// back this with shared state, but per-instance lockout already makes online guessing
+// impractical. Entries are evicted opportunistically so a sprayer cannot grow the map
+// without bound.
+const (
+	maxLoginFails   = 5
+	loginLockout    = 30 * time.Second
+	loginLockoutMax = 15 * time.Minute
+	loginGuardCap   = 8192
+)
+
+type loginAttempt struct {
+	fails       int
+	lockedUntil time.Time
+}
+
+type loginGuardT struct {
+	mu sync.Mutex
+	m  map[string]*loginAttempt
+}
+
+var loginGuard = &loginGuardT{m: map[string]*loginAttempt{}}
+
+// allow reports whether email may attempt a login now; retryAfter > 0 when locked.
+func (g *loginGuardT) allow(email string, now time.Time) (bool, time.Duration) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if a := g.m[email]; a != nil && now.Before(a.lockedUntil) {
+		return false, a.lockedUntil.Sub(now)
+	}
+	return true, 0
+}
+
+// fail records a failed attempt and locks the email out (exponential backoff) once it
+// crosses maxLoginFails. Evicts expired entries opportunistically when the map is large.
+func (g *loginGuardT) fail(email string, now time.Time) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.m) > loginGuardCap {
+		for k, a := range g.m {
+			if now.After(a.lockedUntil) {
+				delete(g.m, k)
+			}
+		}
+	}
+	a := g.m[email]
+	if a == nil {
+		a = &loginAttempt{}
+		g.m[email] = a
+	}
+	a.fails++
+	if a.fails >= maxLoginFails {
+		d := loginLockout << (a.fails - maxLoginFails)
+		if d <= 0 || d > loginLockoutMax {
+			d = loginLockoutMax
+		}
+		a.lockedUntil = now.Add(d)
+	}
+}
+
+// success clears any failure state for the email.
+func (g *loginGuardT) success(email string) {
+	g.mu.Lock()
+	delete(g.m, email)
+	g.mu.Unlock()
+}
 
 // --- store layer: accounts + sessions ---
 
@@ -110,6 +184,9 @@ func (s *Store) VerifyBuyerPassword(ctx context.Context, email, password string)
 	}
 	if hash == nil {
 		// Account exists but has no password (seed / API-key-only): cannot log in.
+		// Run the same dummy compare as the missing-email path so this branch does not
+		// return faster, closing the account-state timing oracle.
+		_ = bcrypt.CompareHashAndPassword([]byte("$2a$12$"+strings.Repeat("x", 53)), []byte(password))
 		return uuid.Nil, errNotFound
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(*hash), []byte(password)); err != nil {
@@ -152,6 +229,15 @@ func (s *Store) LookupSession(ctx context.Context, rawToken string) (AuthResult,
 		return r, errNotFound
 	}
 	return r, err
+}
+
+// RevokeSession revokes the session identified by a raw bearer token (idempotent: a
+// no-op when the token is unknown or already revoked). Backs POST /v1/logout so a
+// leaked or stale session can be killed before its TTL expires.
+func (s *Store) RevokeSession(ctx context.Context, rawToken string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE sessions SET revoked = true WHERE token_hash = $1`, hashKey(rawToken))
+	return err
 }
 
 // BuyerFreeCreditRemaining returns how much of a buyer's sandbox grant is still
@@ -227,6 +313,12 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "password must be at least 8 characters")
 		return
 	}
+	if len(req.Password) > 72 {
+		// bcrypt ignores bytes past 72; reject so two passwords sharing a 72-byte
+		// prefix can never authenticate interchangeably (and signup never 500s on it).
+		writeErr(w, http.StatusBadRequest, "password must be at most 72 bytes")
+		return
+	}
 
 	grant := sandboxFreeCreditUSD
 	if v := envFloat("CX_SANDBOX_CREDIT_USD", grant); v >= 0 {
@@ -277,8 +369,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	email := normalizeEmail(req.Email)
+	now := time.Now()
+	if ok, retry := loginGuard.allow(email, now); !ok {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+		writeErr(w, http.StatusTooManyRequests, "too many failed login attempts · try again later")
+		return
+	}
 	buyerID, err := s.store.VerifyBuyerPassword(r.Context(), email, req.Password)
 	if errors.Is(err, errNotFound) {
+		loginGuard.fail(email, now)
 		writeErr(w, http.StatusUnauthorized, "invalid email or password")
 		return
 	}
@@ -286,12 +385,27 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "verifying credentials: "+err.Error())
 		return
 	}
+	loginGuard.success(email)
 	token, err := s.store.CreateSession(r.Context(), buyerID, sessionTTL)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "issuing session: "+err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"buyer_id": buyerID, "token": token})
+}
+
+// handleLogout revokes the session token in the Authorization header so it cannot be
+// reused for the rest of its TTL. authBuyer-gated. A no-op 204 when the bearer is an
+// api key (those are managed via /v1/keys), so logout is always safe to call.
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	raw := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if strings.HasPrefix(raw, "cx_sess_") {
+		if err := s.store.RevokeSession(r.Context(), raw); err != nil {
+			writeErr(w, http.StatusInternalServerError, "logout: "+err.Error())
+			return
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // --- small helpers ---
