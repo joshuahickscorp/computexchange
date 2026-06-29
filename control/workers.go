@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
@@ -81,22 +82,134 @@ const (
 	hedgeBatch       = 20               // max new hedges per tick
 )
 
-// Run launches the three tickers and blocks until ctx is cancelled. Each tick
+// --- ticker liveness guard ---
+//
+// A background ticker that silently dies (a panic-free goroutine wedge, a
+// deadlocked dependency) is invisible: the process stays "up" while payouts stop
+// releasing, stale tasks never requeue, and webhooks never deliver. The liveness
+// guard makes that failure observable. Each registered ticker records the wall
+// time of its last SUCCESSFUL run (fn returned nil); the readiness probe and a
+// hand-rolled metric expose how stale each one is, and /readyz fails when any
+// ticker has not succeeded within a safe multiple of its own interval. This is
+// the BLACKHOLE rule applied to the background loops: a wedged ticker surfaces
+// loudly instead of rotting silently.
+
+// staleMultiple is how many intervals a ticker may miss before it is judged
+// stale. A ticker that runs every interval should succeed roughly every interval;
+// 3× absorbs a slow DB / a transient error cycle or two without false alarms,
+// while still catching a genuinely wedged loop within a few minutes.
+const staleMultiple = 3
+
+// tickerLiveness records, per ticker, its configured interval and the time of its
+// last successful run. It is the shared source of truth for the readiness probe
+// and the cx_ticker_seconds_since_success metric. Concurrency-safe: tick goroutines
+// write last-success while the probe/metric read all entries.
+type tickerLiveness struct {
+	mu      sync.RWMutex
+	entries map[string]*tickerStat
+}
+
+type tickerStat struct {
+	interval    time.Duration
+	lastSuccess time.Time // zero until the first successful run
+}
+
+// liveness is the package-global ticker registry. One value because the tickers
+// are process-wide, mirroring how metrics is a package-global counter set.
+var liveness = &tickerLiveness{entries: map[string]*tickerStat{}}
+
+// register declares a ticker (name + interval) with no success yet. Called before
+// the loop starts so the probe/metric can see a ticker that has never run as
+// "never succeeded" rather than "absent". A duplicate name reuses its entry.
+func (l *tickerLiveness) register(name string, interval time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if _, ok := l.entries[name]; !ok {
+		l.entries[name] = &tickerStat{interval: interval}
+	}
+}
+
+// markSuccess records that name's fn just returned nil at t.
+func (l *tickerLiveness) markSuccess(name string, t time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if e, ok := l.entries[name]; ok {
+		e.lastSuccess = t
+	}
+}
+
+// stale reports the names of every ticker that has not succeeded within
+// staleMultiple × its interval as of now. A ticker that has NEVER succeeded is
+// stale once staleMultiple × interval has elapsed since `since` (the process /
+// loop start), so a just-started process is not instantly unready but a loop
+// that never runs is caught. Returned names are the offenders, for the probe body.
+func (l *tickerLiveness) stale(now, since time.Time) []string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	var bad []string
+	for name, e := range l.entries {
+		budget := time.Duration(staleMultiple) * e.interval
+		ref := e.lastSuccess
+		if ref.IsZero() {
+			ref = since // never succeeded → measure staleness from the loop start
+		}
+		if now.Sub(ref) > budget {
+			bad = append(bad, name)
+		}
+	}
+	return bad
+}
+
+// snapshot returns, per ticker, seconds since its last successful run as of now
+// (seconds since `since` when it has never succeeded). Backs the metric.
+func (l *tickerLiveness) snapshot(now, since time.Time) map[string]float64 {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	out := make(map[string]float64, len(l.entries))
+	for name, e := range l.entries {
+		ref := e.lastSuccess
+		if ref.IsZero() {
+			ref = since
+		}
+		out[name] = now.Sub(ref).Seconds()
+	}
+	return out
+}
+
+// workersStartedAt is the loop start time the never-succeeded staleness budget is
+// measured from. Set once when Run launches; the readiness probe reads it so a
+// freshly-booted process is not judged stale before a ticker has had a chance to run.
+var workersStartedAt = time.Now()
+
+// Run launches the background tickers and blocks until ctx is cancelled. Each tick
 // runs in the foreground of its own goroutine (ticks never overlap themselves),
-// and ctx cancellation stops all three promptly.
+// and ctx cancellation stops all promptly. Every ticker is registered with the
+// liveness guard up front so a never-ran loop is observable, not merely absent.
 func (wk *Workers) Run(ctx context.Context) {
-	go wk.tick(ctx, payoutInterval, "payout-release", wk.releasePayouts)
-	go wk.tick(ctx, staleInterval, "stale-requeue", wk.requeueStaleTasks)
-	go wk.tick(ctx, webhookInterval, "webhook-sweep", wk.sweepAndDeliver)
-	go wk.tick(ctx, hedgeInterval, "straggler-hedge", wk.hedgeStragglers)
-	go wk.tick(ctx, reconcileInterval, "ledger-reconcile", wk.reconcileLedger)
-	go wk.tick(ctx, disputeInterval, "dispute-resolve", wk.resolveDisputes)
+	workersStartedAt = time.Now()
+	tickers := []struct {
+		interval time.Duration
+		name     string
+		fn       func(context.Context) error
+	}{
+		{payoutInterval, "payout-release", wk.releasePayouts},
+		{staleInterval, "stale-requeue", wk.requeueStaleTasks},
+		{webhookInterval, "webhook-sweep", wk.sweepAndDeliver},
+		{hedgeInterval, "straggler-hedge", wk.hedgeStragglers},
+		{reconcileInterval, "ledger-reconcile", wk.reconcileLedger},
+		{disputeInterval, "dispute-resolve", wk.resolveDisputes},
+	}
+	for _, t := range tickers {
+		liveness.register(t.name, t.interval)
+		go wk.tick(ctx, t.interval, t.name, t.fn)
+	}
 	<-ctx.Done()
 	log.Print("workers: shutting down")
 }
 
 // tick runs fn every d until ctx is done. A fn error is logged, never fatal —
-// one bad cycle must not kill the loop.
+// one bad cycle must not kill the loop. A successful run (fn returned nil) records
+// the ticker's last-success time so the liveness guard can detect a wedged loop.
 func (wk *Workers) tick(ctx context.Context, d time.Duration, name string, fn func(context.Context) error) {
 	t := time.NewTicker(d)
 	defer t.Stop()
@@ -107,7 +220,9 @@ func (wk *Workers) tick(ctx context.Context, d time.Duration, name string, fn fu
 		case <-t.C:
 			if err := fn(ctx); err != nil {
 				log.Printf("workers: %s: %v", name, err)
+				continue
 			}
+			liveness.markSuccess(name, time.Now())
 		}
 	}
 }

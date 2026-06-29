@@ -36,7 +36,7 @@ enum AgentPaths {
 @MainActor
 final class AgentController: ObservableObject {
     @Published private(set) var status = AgentStatus()
-    /// Set when the status file is absent / unreadable / stale — shown in the UI.
+    /// Set when the status file is absent / unreadable / stale · shown in the UI.
     @Published private(set) var statusMessage: String? = "Waiting for the agent…"
     @Published var prefs = OperatorPrefs() {
         didSet { persistPrefs() }
@@ -48,7 +48,19 @@ final class AgentController: ObservableObject {
     private var timer: Timer?
     private var process: Process?
 
-    init() {
+    /// Consent gate: the agent may not launch (and so may not earn) until the
+    /// operator has accepted the first-run terms. Injected so the same store backs
+    /// both the onboarding sheet and this gate.
+    let consent: ConsentStore
+    /// Rolling, locally-observed earnings series for the trust sparkline.
+    let earningsHistory: EarningsHistory
+
+    init(consent: ConsentStore? = nil, earningsHistory: EarningsHistory? = nil) {
+        // Build the stores inside the (main-actor) init body. They are @MainActor
+        // types, so their initializers can only run here, not as default arguments
+        // (which Swift evaluates in a nonisolated context).
+        self.consent = consent ?? ConsentStore()
+        self.earningsHistory = earningsHistory ?? EarningsHistory()
         loadPrefs()
         refresh()
         // Poll the status file. A file-presence/heartbeat check every 3s is cheap
@@ -62,7 +74,7 @@ final class AgentController: ObservableObject {
     // MARK: status
 
     /// Re-read status.json. On any failure the published state becomes offline
-    /// with a human message — we never keep showing stale "running".
+    /// with a human message · we never keep showing stale "running".
     func refresh() {
         guard FileManager.default.fileExists(atPath: AgentPaths.statusFile.path) else {
             status = AgentStatus()
@@ -74,11 +86,16 @@ final class AgentController: ObservableObject {
             var decoded = try JSONDecoder().decode(AgentStatus.self, from: data)
             if decoded.isStale {
                 decoded.state = .offline
-                statusMessage = "Agent heartbeat is stale — it may have stopped."
+                statusMessage = "Agent heartbeat is stale · it may have stopped."
             } else {
                 statusMessage = decoded.lastError   // nil unless the agent reported one
             }
             status = decoded
+            // Record the observed lifetime total for the sparkline. This is the
+            // app's own honest record of what it read · never synthesized.
+            if !decoded.isStale && decoded.lifetimeUsd > 0 {
+                earningsHistory.record(lifetimeUsd: decoded.lifetimeUsd)
+            }
         } catch {
             status = AgentStatus()
             statusMessage = "Could not read status.json: \(error.localizedDescription)"
@@ -91,6 +108,13 @@ final class AgentController: ObservableObject {
     /// `lastLaunchError` (and does NOT pretend to run) on any failure.
     func startAgent() {
         lastLaunchError = nil
+        // Hard consent gate (BLACKHOLE): never start earning before the operator
+        // has accepted the first-run terms. The UI also shows the onboarding sheet,
+        // but we refuse here too so no code path can launch around it.
+        guard consent.granted else {
+            lastLaunchError = "Consent required: review and accept the terms before the agent can start."
+            return
+        }
         guard let bin = AgentPaths.bundledBinary else {
             lastLaunchError = "cx-agent binary not found in the app bundle. In dev, run the Rust agent directly (cargo run -p cx-agent)."
             return
@@ -123,8 +147,8 @@ final class AgentController: ObservableObject {
         }
     }
 
-    /// Stop an agent we launched. (An agent started elsewhere — e.g. a LaunchAgent
-    /// — is not ours to kill; we only manage our own child.)
+    /// Stop an agent we launched. (An agent started elsewhere · e.g. a LaunchAgent
+    /// · is not ours to kill; we only manage our own child.)
     func stopAgent() {
         process?.terminate()
         process = nil
@@ -161,7 +185,7 @@ final class AgentController: ObservableObject {
         // preserve unrelated keys (control_url, worker_token, supplier_id). Here we
         // only demonstrate the mapping from prefs -> the agent's config fields.
         var lines: [String] = []
-        lines.append("# Written by ComputeExchangeAgent.app — operator prefs.")
+        lines.append("# Written by ComputeExchangeAgent.app · operator prefs.")
         lines.append("max_concurrent_tasks = 0   # 0 / omit => agent derives from cores+RAM")
         lines.append("power_only = \(prefs.powerOnly)")
         lines.append("min_payout_usd_per_hr = \(prefs.minPayoutUsdPerHr)")

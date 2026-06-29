@@ -104,6 +104,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 		`ALTER TABLE workers ADD COLUMN IF NOT EXISTS thermal_ok BOOLEAN DEFAULT true`,
 		`ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS data_country TEXT`,
 		`ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS quarantined_at TIMESTAMPTZ`,
+		// Stripe Connect payout readiness (suppliers.go): flipped by the account.updated
+		// webhook once Stripe says the connected account can receive transfers.
+		`ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS payouts_enabled BOOLEAN DEFAULT false`,
 		`CREATE INDEX IF NOT EXISTS tasks_job_chunk_idx ON tasks (job_id, chunk_index)`,
 		`CREATE INDEX IF NOT EXISTS workers_supplier_idx ON workers (supplier_id)`,
 		// Quote-to-actual drift feedback (Plane D D6 / errata C-Errata-6). MIRRORS
@@ -178,6 +181,26 @@ func (s *Store) Migrate(ctx context.Context) error {
 		   stage_index INT
 		 )`,
 		`CREATE INDEX IF NOT EXISTS pipeline_jobs_pipeline_idx ON pipeline_jobs (pipeline_id)`,
+		// Self-serve buyer accounts (accounts.go) + opaque session tokens. MIRRORS
+		// db/schema.sql so a control plane that only ran Migrate self-migrates. buyers
+		// is the account of record: UNIQUE email + bcrypt password_hash + a sandbox
+		// free_credit_usd grant. sessions are hashed-at-rest opaque tokens (like
+		// api_keys/worker_tokens) the login flow issues and authBuyer accepts.
+		`CREATE TABLE IF NOT EXISTS buyers (
+		   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		   email           TEXT UNIQUE NOT NULL,
+		   password_hash   TEXT,
+		   free_credit_usd NUMERIC(12,6) NOT NULL DEFAULT 0,
+		   created_at      TIMESTAMPTZ DEFAULT now()
+		 )`,
+		`CREATE TABLE IF NOT EXISTS sessions (
+		   token_hash TEXT PRIMARY KEY,
+		   buyer_id   UUID NOT NULL,
+		   created_at TIMESTAMPTZ DEFAULT now(),
+		   expires_at TIMESTAMPTZ NOT NULL,
+		   revoked    BOOLEAN DEFAULT false
+		 )`,
+		`CREATE INDEX IF NOT EXISTS sessions_buyer_idx ON sessions (buyer_id)`,
 	}
 	for _, q := range stmts {
 		if _, err := s.pool.Exec(ctx, q); err != nil {

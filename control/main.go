@@ -156,7 +156,17 @@ func main() {
 	workersCtx, stopWorkers := context.WithCancel(ctx)
 	defer stopWorkers()
 	workers := NewWorkers(store, storage, payout)
-	go workers.Run(workersCtx)
+	// In a multi-instance (HA) deployment exactly ONE instance may run the background
+	// loops: the payout/dispute/reconcile sweeps are NOT safe to run concurrently from
+	// two processes (the manual-export payout rail appends non-idempotently, and a
+	// lock-free sweep could double-pay). Set CX_RUN_WORKERS=false on the secondary
+	// instance(s); they then serve API only and register no tickers (so /readyz stays
+	// green there). Default (unset) runs the workers, so single-instance is unchanged.
+	if os.Getenv("CX_RUN_WORKERS") != "false" {
+		go workers.Run(workersCtx)
+	} else {
+		log.Print("CX_RUN_WORKERS=false · background workers disabled on this instance (API-only, for HA secondaries)")
+	}
 	go server.startRateLimitSweeper(workersCtx) // evict idle rate-limit buckets
 
 	srv := &http.Server{

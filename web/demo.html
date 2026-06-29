@@ -336,6 +336,39 @@
   .reveal-secret{flex:1;min-width:0;font:500 12px var(--mono);color:var(--signal);overflow-x:auto;white-space:nowrap;font-variant-numeric:tabular-nums}
   .reveal-warn{font-size:11px;line-height:1.6;color:var(--mute);margin:10px 0 0}
 
+  /* ===== SELF-SERVE ENTRY: first-run signup/login for a buyer with no key yet. A cast panel
+     at the top of Launch · a quiet two-tab toggle (create / sign in), instrument-like fields in
+     cut channels, one solid submit, an honest inline error line, and a note about the sandbox
+     lane (run jobs on a test key first, add a card later). Hidden the moment a key exists. ===== */
+  .auth{margin:0 0 48px;padding:24px 22px 22px}
+  .auth-lead{font-size:13px;line-height:1.6;color:var(--mute);margin:0 0 18px}
+  .auth-tabs{display:flex;gap:8px;margin-bottom:18px}
+  .auth-tab{height:30px;padding:0 14px;border-radius:var(--r-pill);background:transparent;color:var(--mute);font:500 11px var(--mono);letter-spacing:.04em;cursor:pointer;box-shadow:inset 0 0 0 1px var(--hair);transition:color var(--dur) var(--ease),box-shadow var(--dur) var(--ease)}
+  .auth-tab:hover{color:var(--bone)}
+  .auth-tab.on{color:var(--bg);background:var(--bone-hi);box-shadow:none}
+  .auth-field{display:block;margin-bottom:12px}
+  .auth-field .al{display:block;font-size:10px;font-weight:500;letter-spacing:.2em;text-transform:uppercase;color:var(--mute);margin:0 0 7px}
+  /* the field sits down in a cut channel, like the live-key + spend-cap inputs */
+  .auth-in{height:36px;width:100%;border-radius:var(--r-sm);background:rgba(0,0,0,.28);color:var(--bone-hi);padding:0 13px;font:400 13px var(--mono);border:none;box-shadow:inset 0 0 0 1px var(--hair),inset 0 2px 6px rgba(0,0,0,.4)}
+  .auth-in:focus{outline:none;box-shadow:inset 0 0 0 1px var(--reveal-hi),inset 0 2px 6px rgba(0,0,0,.4)}
+  .auth-cta{display:flex;align-items:center;gap:14px;margin-top:18px}
+  .auth-hint{font-size:11px;line-height:1.6;color:var(--ash)}
+  /* honest inline error · the single anodized red voice, no box, surfaced never swallowed */
+  .auth-err{font-size:12px;line-height:1.6;color:var(--red-core);margin:14px 0 0;display:none}
+  .auth-err.show{display:block}
+  .auth-note{font-size:11px;line-height:1.6;color:var(--ash);margin:16px 0 0;display:flex;align-items:flex-start;gap:9px}
+  .auth-note .pip{margin-top:4px}
+
+  /* ===== SUPPLIER ONBOARDING (Settings · payout): capture tax_id + tax_country, open the
+     Stripe Connect account-link in a new tab, and render connect_status / payouts_enabled /
+     tax_on_file with anodized pips. Honest 503 when STRIPE is unset · never a faked connection. */
+  .sup-field{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 2px;border-top:1px solid var(--hair-soft)}
+  .sup-field:first-of-type{border-top:none}
+  .sup-field .sl{color:var(--bone);font-size:13px}
+  .sup-in{height:32px;width:200px;border-radius:var(--r-sm);background:rgba(0,0,0,.28);color:var(--bone-hi);padding:0 12px;font:400 12px var(--mono);border:none;box-shadow:inset 0 0 0 1px var(--hair),inset 0 2px 6px rgba(0,0,0,.4)}
+  .sup-in:focus{outline:none;box-shadow:inset 0 0 0 1px var(--reveal-hi),inset 0 2px 6px rgba(0,0,0,.4)}
+  .sup-in.short{width:104px;text-transform:uppercase}
+
   /* computexchange action capsule · brushed-steel shell image, label rising from the dark channel */
   .cx-key{ position:relative; display:inline-flex; padding:0; border:0; background:none;
     height:44px; cursor:pointer; outline:none; transition:transform .08s ease; }
@@ -395,6 +428,18 @@
     <div class="notif" id="notif"></div>
 
     <section class="view on" id="v-launch">
+      <div class="auth card" id="auth" hidden>
+        <p class="auth-lead">Create an account to run your first job. You get a sandbox key right away · run jobs on free credit, add a card later.</p>
+        <div class="auth-tabs">
+          <button class="auth-tab on" id="authTabSignup" data-mode="signup">Create account</button>
+          <button class="auth-tab" id="authTabLogin" data-mode="login">Sign in</button>
+        </div>
+        <label class="auth-field"><span class="al">Email</span><input class="auth-in" id="authEmail" type="email" autocomplete="email" autocapitalize="off" spellcheck="false" placeholder="you@company.com" aria-label="Email"></label>
+        <label class="auth-field"><span class="al">Password</span><input class="auth-in" id="authPassword" type="password" autocomplete="current-password" placeholder="at least 8 characters" aria-label="Password"></label>
+        <p class="auth-err" id="authErr" role="alert"></p>
+        <div class="auth-cta"><button class="pill solid" id="authSubmit">Create account</button><span class="auth-hint" id="authHint">Sandbox lane · a cx_test_ key plus free credit, instantly.</span></div>
+        <p class="auth-note"><span class="pip idle"></span><span>No card required to start. The free credit covers your first runs on the sandbox key; adding a card is required only once you exceed it.</span></p>
+      </div>
       <div class="banner card" id="setup"><span>Add a payment method to run your first job.</span><button class="cx-key is-armed" id="add-payment" aria-label="Add payment"><img class="cx-key-metal" src="assets/btn-add-payment-shell@3x.png" alt=""><span class="cx-key-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="5" width="19" height="14" rx="2.5"/><path d="M2.5 9.5h19"/></svg></span></button></div>
       <div class="intake" id="intake">
         <input type="file" id="file" hidden>
@@ -450,6 +495,8 @@
       <div class="row"><span class="l">Run on power only</span><button class="switch" aria-label="Power only"></button></div>
       <div class="row"><span class="l">Memory headroom</span><span class="r-meta num">16 GB</span></div>
       <div class="row"><span class="l">Minimum payout</span><span class="r-meta num">$0.50 / hr</span></div>
+      <p class="section-label" style="margin-top:24px">Payout onboarding</p>
+      <div id="supplier"></div>
       <p class="section-label" style="margin-top:24px">API keys</p>
       <div id="apikeys"></div>
       <div class="row"><span class="l">Live test key</span><input id="liveKey" class="keyin" type="password" placeholder="cx_live_…" aria-label="Live buyer API key"></div>
@@ -705,8 +752,74 @@
   var liveBadge=$('liveBadge'), keyIn=$('liveKey'), liveKey='';
   try{liveKey=localStorage.getItem('cx_key')||'';}catch(e){}
   function isLive(){return !!liveKey;}
-  function syncLive(){if(liveBadge)liveBadge.hidden=!isLive();if(keyIn&&!keyIn.value&&liveKey)keyIn.value=liveKey;}
+  function syncLive(){if(liveBadge)liveBadge.hidden=!isLive();if(keyIn&&!keyIn.value&&liveKey)keyIn.value=liveKey;renderAuth();}
   if(keyIn)keyIn.addEventListener('change',function(){liveKey=(keyIn.value||'').trim();try{localStorage.setItem('cx_key',liveKey);}catch(e){}syncLive();renderQuickstart();renderSettingsPanels();toast(isLive()?'Live mode on · Launch runs real jobs on this server':'Live mode off');});
+
+  // ===== SELF-SERVE ENTRY (signup / login) =====================================================
+  // A first-run gate at the top of Launch for a buyer with no key yet. Create-account hits
+  // POST /v1/signup {email,password} -> 201 {buyer_id,token,email}; sign-in hits POST /v1/login
+  // {email,password} -> 200 {buyer_id,token} or an honest 401. On success the returned opaque
+  // token is stored as localStorage cx_key (the same credential authBuyer + Launch already use),
+  // entering live mode, and the quickstart is shown. Errors surface inline (BLACKHOLE · never a
+  // silent accept). The gate hides itself the instant a key exists. All server text via esc().
+  var authEl=$('auth'),authEmail=$('authEmail'),authPassword=$('authPassword'),
+      authErrEl=$('authErr'),authSubmitBtn=$('authSubmit'),authHint=$('authHint'),authMode='signup';
+  function authError(msg){if(!authErrEl)return;authErrEl.textContent=msg||'';authErrEl.classList.toggle('show',!!msg);}
+  function setAuthMode(mode){
+    authMode=mode==='login'?'login':'signup';
+    document.querySelectorAll('.auth-tab').forEach(function(b){b.classList.toggle('on',b.dataset.mode===authMode);});
+    if(authSubmitBtn)authSubmitBtn.textContent=authMode==='login'?'Sign in':'Create account';
+    if(authHint)authHint.textContent=authMode==='login'
+      ? 'Welcome back · your key loads into this browser.'
+      : 'Sandbox lane · a cx_test_ key plus free credit, instantly.';
+    if(authPassword)authPassword.setAttribute('autocomplete',authMode==='login'?'current-password':'new-password');
+    authError('');
+  }
+  // Show the gate only when there is no key yet; hide (and clear the password) once live.
+  function renderAuth(){
+    if(!authEl)return;
+    authEl.hidden=isLive();
+    if(isLive()&&authPassword)authPassword.value='';
+  }
+  function adoptToken(token){
+    liveKey=(token||'').trim();
+    try{localStorage.setItem('cx_key',liveKey);}catch(e){}
+    if(keyIn)keyIn.value=liveKey;             // mirror into the Settings live-key field
+    syncLive();renderQuickstart();renderSettingsPanels();
+  }
+  function doAuth(){
+    if(!authSubmitBtn)return;
+    var email=(authEmail&&authEmail.value||'').trim(), password=(authPassword&&authPassword.value||'');
+    if(!email||email.indexOf('@')<0){authError('Enter a valid email address.');return;}
+    if(!password||password.length<8){authError('Password must be at least 8 characters.');return;}
+    authError('');authSubmitBtn.disabled=true;
+    var path=authMode==='login'?'/v1/login':'/v1/signup';
+    fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email,password:password})})
+      .then(function(res){return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});})
+      .then(function(r){
+        var j={};try{j=JSON.parse(r.t);}catch(e){}
+        if(!r.ok){
+          // Honest inline errors · 401 bad creds, 409 already-registered, 503 unconfigured, else the server string.
+          var msg=(j&&j.error)?String(j.error)
+            :r.status===401?'Email or password is incorrect.'
+            :r.status===409?'That email is already registered · sign in instead.'
+            :r.status===503?'Sign-up is not available on this server yet.'
+            :'Request failed · '+r.status;
+          authError(msg);authSubmitBtn.disabled=false;return;
+        }
+        if(!j||!j.token){authError('No token returned · cannot enter live mode.');authSubmitBtn.disabled=false;return;}
+        adoptToken(j.token);
+        notify(authMode==='login'?'Signed in':'Account created',esc(j.email||email));
+        toast(authMode==='login'?'Signed in · live mode on':'Welcome · sandbox key loaded, run a job now');
+        authSubmitBtn.disabled=false;
+      })
+      .catch(function(e){authError('Network error · '+e.message);authSubmitBtn.disabled=false;});
+  }
+  document.querySelectorAll('.auth-tab').forEach(function(b){b.addEventListener('click',function(){setAuthMode(b.dataset.mode);});});
+  if(authSubmitBtn)authSubmitBtn.addEventListener('click',doAuth);
+  // Enter submits from either field.
+  [authEmail,authPassword].forEach(function(inp){if(inp)inp.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();doAuth();}});});
+  setAuthMode('signup');
   syncLive();
 
   // ===== SETTINGS · API keys (B1) + billing & usage (B4) =====================================
@@ -914,7 +1027,76 @@
     });
   }
 
-  function renderSettingsPanels(){renderApiKeys();renderBilling();}
+  // ---- SUPPLIER ONBOARDING (Settings · payout): capture tax_id + tax_country, POST them to
+  //      /v1/supplier/onboard for a Stripe Connect account-link (opened in a new tab), and read
+  //      GET /v1/supplier/status -> {connect_status, payouts_enabled, tax_on_file} as anodized
+  //      pips. STRIPE unset -> honest 503, surfaced plainly · a connection is never faked. ----
+  var supplierEl=$('supplier');
+  function renderSupplier(){
+    if(!supplierEl)return;
+    if(!isLive()){
+      supplierEl.innerHTML='<div class="row"><span class="l"><span class="pip idle"></span>Stripe Connect</span><span class="r-meta">paste a live key to onboard for payouts</span></div>'
+        +'<p class="set-note warn">Onboarding opens a Stripe Connect account-link · provide a tax ID and country, then finish in the new tab.</p>';
+      return;
+    }
+    supplierEl.innerHTML='<p class="set-note">Loading payout status…</p>';
+    fetch('/v1/supplier/status',{headers:authHeaders(false)}).then(function(res){
+      return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});
+    }).then(function(r){
+      var j={};try{j=JSON.parse(r.t);}catch(e){}
+      supplierEl.innerHTML=supplierStatusHTML(r.ok?j:null,r.ok?null:String((j&&j.error)||r.status))+supplierFormHTML(r.ok?j:null);
+      wireSupplier();
+    }).catch(function(e){
+      supplierEl.innerHTML='<p class="set-note warn">Network error loading payout status · '+esc(e.message)+'</p>'+supplierFormHTML(null);
+      wireSupplier();
+    });
+  }
+  // Honest tri-state pips. connect_status drives the connect pip (green only when 'complete';
+  // 'pending'/'restricted' stay idle); payouts_enabled + tax_on_file each get their own line.
+  function supplierStatusHTML(s,errMsg){
+    if(errMsg)return '<div class="row"><span class="l"><span class="pip red"></span>Stripe Connect</span><span class="r-meta">'+esc(errMsg)+'</span></div>';
+    var cs=(s&&s.connect_status)||'not_started';
+    var csPip=cs==='complete'?'pip':cs==='restricted'||cs==='rejected'?'pip red':'pip idle';
+    var payouts=!!(s&&s.payouts_enabled), tax=!!(s&&s.tax_on_file);
+    return '<div class="row"><span class="l"><span class="'+csPip+'"></span>Stripe Connect</span><span class="r-meta num">'+esc(cs)+'</span></div>'
+      +'<div class="row"><span class="l"><span class="'+(payouts?'pip':'pip idle')+'"></span>Payouts</span><span class="r-meta">'+(payouts?'enabled':'not enabled yet')+'</span></div>'
+      +'<div class="row"><span class="l"><span class="'+(tax?'pip':'pip idle')+'"></span>Tax on file</span><span class="r-meta">'+(tax?'on file':'not provided')+'</span></div>';
+  }
+  function supplierFormHTML(s){
+    var done=!!(s&&s.connect_status==='complete');
+    var cta=done
+      ? '<button class="mini" id="supOnboard">Manage payout account</button>'
+      : '<button class="pill solid" id="supOnboard">Onboard for payouts</button>';
+    return '<div class="sup-field"><span class="sl">Tax ID</span><input id="supTaxId" class="sup-in" type="text" autocapitalize="off" spellcheck="false" placeholder="EIN / VAT / SSN" aria-label="Tax ID"></div>'
+      +'<div class="sup-field"><span class="sl">Tax country</span><input id="supTaxCountry" class="sup-in short" type="text" maxlength="2" autocapitalize="characters" spellcheck="false" placeholder="US" aria-label="Tax country (ISO 2-letter)"></div>'
+      +'<div style="margin-top:14px">'+cta+'</div>'
+      +'<p class="set-note">Opens a Stripe Connect account-link in a new tab. We never see your full tax ID · it goes straight to Stripe.</p>';
+  }
+  function wireSupplier(){
+    var btnEl=$('supOnboard'); if(!btnEl)return;
+    btnEl.addEventListener('click',function(){
+      var taxId=($('supTaxId')&&$('supTaxId').value||'').trim();
+      var taxCountry=($('supTaxCountry')&&$('supTaxCountry').value||'').trim().toUpperCase();
+      if(!taxId){toast('Enter your tax ID first');return;}
+      if(taxCountry.length!==2){toast('Tax country must be a 2-letter code, e.g. US');return;}
+      btnEl.disabled=true;
+      fetch('/v1/supplier/onboard',{method:'POST',headers:authHeaders(true),body:JSON.stringify({email:'',tax_id:taxId,tax_country:taxCountry})}).then(function(res){
+        return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});
+      }).then(function(r){
+        var j={};try{j=JSON.parse(r.t);}catch(e){}
+        if(r.status===503){toast('Payout onboarding unavailable · Stripe is not configured on this server');btnEl.disabled=false;return;}
+        if(!r.ok){toast('Onboarding failed · '+String((j&&j.error)||r.status));btnEl.disabled=false;return;}
+        if(j&&j.onboarding_url){
+          window.open(j.onboarding_url,'_blank','noopener');
+          notify('Payout onboarding started','finish in the Stripe tab, then refresh');
+          toast('Opened Stripe Connect · finish onboarding in the new tab');
+        }else{toast('Onboarding returned no link');}
+        btnEl.disabled=false;
+      }).catch(function(e){toast('Onboarding failed · '+e.message);btnEl.disabled=false;});
+    });
+  }
+
+  function renderSettingsPanels(){renderApiKeys();renderBilling();renderSupplier();}
   renderSettingsPanels();
 
   // ===== QUICKSTART empty-state: buyer activation. Three copy-paste snippets · curl, the

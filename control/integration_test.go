@@ -19,11 +19,15 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -2813,4 +2817,236 @@ func TestOpenAIBatchInlineEmbeddings(t *testing.T) {
 	default:
 		t.Fatalf("unexpected mapped batch status %q", got.Status)
 	}
+}
+
+// --- self-serve accounts + auth + sandbox (accounts.go) ---
+
+// uniqueEmail returns a per-run unique address so the UNIQUE(email) buyers table
+// stays idempotent across repeated test runs without truncating it in reset().
+func uniqueEmail(prefix string) string {
+	return fmt.Sprintf("%s+%s@example.com", prefix, uuid.NewString()[:8])
+}
+
+// TestSignupTokenAuthenticatesAndSandboxGate proves the whole self-serve lane:
+// signup returns a session token that authenticates a buyer route, the sandbox
+// free credit lets a cardless buyer submit a job while Stripe is configured, and
+// once the realized spend reaches the grant the 402 gate re-asserts honestly.
+func TestSignupTokenAuthenticatesAndSandboxGate(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+	// The sandbox free-credit lane is OFF by default (an unverified signup must not
+	// grant Sybil-farmable free compute); an operator opts in via this env. Enable it
+	// here to exercise the granted-then-exhausted path.
+	t.Setenv("CX_SANDBOX_CREDIT_USD", "5")
+
+	email := uniqueEmail("buyer")
+	code, out := req(t, "POST", "/v1/signup", map[string]any{"email": email, "password": "hunter2hunter2"}, jsonCT())
+	if code != http.StatusCreated {
+		t.Fatalf("signup: want 201, got %d: %s", code, out)
+	}
+	var su struct {
+		BuyerID       string  `json:"buyer_id"`
+		Token         string  `json:"token"`
+		Email         string  `json:"email"`
+		FreeCreditUSD float64 `json:"free_credit_usd"`
+		SandboxKey    string  `json:"sandbox_key"`
+	}
+	if err := json.Unmarshal(out, &su); err != nil {
+		t.Fatalf("signup decode: %v (%s)", err, out)
+	}
+	if su.Token == "" || !strings.HasPrefix(su.Token, "cx_sess_") {
+		t.Fatalf("signup must return a cx_sess_ token, got %q", su.Token)
+	}
+	if su.FreeCreditUSD <= 0 {
+		t.Fatalf("signup must grant sandbox free credit, got %v", su.FreeCreditUSD)
+	}
+	if !strings.HasPrefix(su.SandboxKey, "cx_test_") {
+		t.Fatalf("signup must mint a cx_test_ sandbox key, got %q", su.SandboxKey)
+	}
+	buyerID := uuid.MustParse(su.BuyerID)
+
+	// The session token authenticates a buyer route.
+	sessHdr := hdr{"Authorization", "Bearer " + su.Token}
+	if code, _ := req(t, "GET", "/v1/models", nil, sessHdr); code != http.StatusOK {
+		t.Fatalf("session token must authenticate /v1/models, got %d", code)
+	}
+
+	// Submit a job AS the new sandbox buyer with Stripe configured + NO card on
+	// file: the free-credit exemption must allow it. The submit gate reads only the
+	// DB (GetBillingCustomer + free credit), so a fake key triggers the gate without
+	// any Stripe network call.
+	t.Setenv("STRIPE_SECRET_KEY", "sk_test_fake_for_gate_only")
+	var sb strings.Builder
+	for i := 0; i < 4; i++ {
+		fmt.Fprintf(&sb, `{"id":"r%d","text":"record %d"}`+"\n", i, i)
+	}
+	jobBody := map[string]any{
+		"job_type":     map[string]any{"type": "embed"},
+		"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"params":       map[string]any{"split_size": 1000},
+		"verification": map[string]any{},
+		"tier":         "batch",
+		"input":        sb.String(),
+	}
+	code, out = req(t, "POST", "/v1/jobs", jobBody, sessHdr, jsonCT())
+	if code != http.StatusAccepted {
+		t.Fatalf("sandbox submit under free credit: want 202, got %d: %s", code, out)
+	}
+
+	// Exhaust the free credit by recording a buyer_charge debit >= the grant, then
+	// the SAME submit must 402 (no card, credit gone). This is the honest boundary.
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO ledger_entries (kind, buyer_id, amount_usd, payout_status)
+		 VALUES ('buyer_charge', $1, $2, 'released')`,
+		buyerID, -(su.FreeCreditUSD + 1.0)); err != nil {
+		t.Fatalf("seed buyer_charge: %v", err)
+	}
+	code, out = req(t, "POST", "/v1/jobs", jobBody, sessHdr, jsonCT())
+	if code != http.StatusPaymentRequired {
+		t.Fatalf("submit after credit exhausted: want 402, got %d: %s", code, out)
+	}
+}
+
+// TestSignupDuplicateEmailConflicts proves the UNIQUE email is enforced honestly.
+func TestSignupDuplicateEmailConflicts(t *testing.T) {
+	reset(t)
+	email := uniqueEmail("dup")
+	if code, out := req(t, "POST", "/v1/signup", map[string]any{"email": email, "password": "hunter2hunter2"}, jsonCT()); code != http.StatusCreated {
+		t.Fatalf("first signup: want 201, got %d: %s", code, out)
+	}
+	if code, out := req(t, "POST", "/v1/signup", map[string]any{"email": email, "password": "anotherpassword"}, jsonCT()); code != http.StatusConflict {
+		t.Fatalf("duplicate signup: want 409, got %d: %s", code, out)
+	}
+}
+
+// TestLoginGoodAndBadPassword proves login issues a token on the right password
+// and returns 401 (never a silent accept) on a wrong one or an unknown email.
+func TestLoginGoodAndBadPassword(t *testing.T) {
+	reset(t)
+	email := uniqueEmail("login")
+	const pw = "correct horse battery"
+	if code, out := req(t, "POST", "/v1/signup", map[string]any{"email": email, "password": pw}, jsonCT()); code != http.StatusCreated {
+		t.Fatalf("signup: want 201, got %d: %s", code, out)
+	}
+
+	// Good password → 200 + token that authenticates.
+	code, out := req(t, "POST", "/v1/login", map[string]any{"email": email, "password": pw}, jsonCT())
+	if code != http.StatusOK {
+		t.Fatalf("login good: want 200, got %d: %s", code, out)
+	}
+	var li struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(out, &li); err != nil || li.Token == "" {
+		t.Fatalf("login token missing: %v (%s)", err, out)
+	}
+	if code, _ := req(t, "GET", "/v1/models", nil, hdr{"Authorization", "Bearer " + li.Token}); code != http.StatusOK {
+		t.Fatalf("login token must authenticate, got %d", code)
+	}
+
+	// Wrong password → 401.
+	if code, _ := req(t, "POST", "/v1/login", map[string]any{"email": email, "password": "wrong"}, jsonCT()); code != http.StatusUnauthorized {
+		t.Fatalf("login bad password: want 401, got %d", code)
+	}
+	// Unknown email → same 401 (no user enumeration).
+	if code, _ := req(t, "POST", "/v1/login", map[string]any{"email": uniqueEmail("nope"), "password": pw}, jsonCT()); code != http.StatusUnauthorized {
+		t.Fatalf("login unknown email: want 401, got %d", code)
+	}
+}
+
+// --- supplier onboarding (suppliers.go) ---
+
+// TestSupplierOnboardUnconfigured proves tax info persists even when Stripe is
+// unset, and that the Connect path returns the HONEST 503 (never a faked account).
+func TestSupplierOnboardUnconfigured(t *testing.T) {
+	reset(t)
+	// Ensure Stripe is unconfigured for this test regardless of ambient env.
+	t.Setenv("STRIPE_SECRET_KEY", "")
+	ctx := context.Background()
+
+	email := uniqueEmail("supplier")
+	code, out := req(t, "POST", "/v1/supplier/onboard",
+		map[string]any{"email": email, "tax_id": "12-3456789", "tax_country": "US"}, jsonCT(), buyerKey())
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("onboard with no Stripe: want 503, got %d: %s", code, out)
+	}
+
+	// Despite the 503, the supplier + tax info must be on file (recorded before the
+	// Stripe call). Status must report tax_on_file=true, connect_status=none.
+	code, out = req(t, "GET", "/v1/supplier/status?email="+url.QueryEscape(email), nil, buyerKey())
+	if code != http.StatusOK {
+		t.Fatalf("supplier status: want 200, got %d: %s", code, out)
+	}
+	var st struct {
+		ConnectStatus  string `json:"connect_status"`
+		PayoutsEnabled bool   `json:"payouts_enabled"`
+		TaxOnFile      bool   `json:"tax_on_file"`
+	}
+	if err := json.Unmarshal(out, &st); err != nil {
+		t.Fatalf("status decode: %v (%s)", err, out)
+	}
+	if !st.TaxOnFile {
+		t.Fatalf("tax info must persist even when Stripe is unset: %+v", st)
+	}
+	if st.ConnectStatus != "none" || st.PayoutsEnabled {
+		t.Fatalf("no Connect account yet: want none/false, got %+v", st)
+	}
+
+	// Confirm the tax fields landed on the supplier row.
+	var taxID, taxCountry string
+	if err := itPool.QueryRow(ctx,
+		`SELECT COALESCE(tax_id,''), COALESCE(tax_country,'') FROM suppliers WHERE email=lower($1)`, email,
+	).Scan(&taxID, &taxCountry); err != nil {
+		t.Fatalf("read supplier tax: %v", err)
+	}
+	if taxID != "12-3456789" || taxCountry != "US" {
+		t.Fatalf("tax fields not persisted: id=%q country=%q", taxID, taxCountry)
+	}
+}
+
+// TestConnectWebhookFlipsPayoutsEnabled proves the account.updated webhook flips
+// the cached payouts_enabled flag for the right supplier (signature-verified).
+func TestConnectWebhookFlipsPayoutsEnabled(t *testing.T) {
+	reset(t)
+	t.Setenv("STRIPE_SECRET_KEY", "")
+	t.Setenv("CX_CONNECT_WEBHOOK_SECRET", "whsec_test_connect")
+	ctx := context.Background()
+
+	// Onboard records the supplier (503 on the Connect link is expected/ignored),
+	// then attach a known stripe_acct so the webhook has a target.
+	email := uniqueEmail("supplier")
+	_, _ = req(t, "POST", "/v1/supplier/onboard", map[string]any{"email": email}, jsonCT(), buyerKey())
+	const acct = "acct_TESTwebhook123"
+	if _, err := itPool.Exec(ctx, `UPDATE suppliers SET stripe_acct=$2 WHERE email=lower($1)`, email, acct); err != nil {
+		t.Fatalf("set stripe_acct: %v", err)
+	}
+
+	body := []byte(`{"type":"account.updated","data":{"object":{"id":"` + acct + `","payouts_enabled":true}}}`)
+	sig := stripeTestSig(body, "whsec_test_connect")
+	code, out := req(t, "POST", "/v1/stripe/connect-webhook", body, hdr{"Stripe-Signature", sig})
+	if code != http.StatusOK {
+		t.Fatalf("connect webhook: want 200, got %d: %s", code, out)
+	}
+
+	var pe bool
+	if err := itPool.QueryRow(ctx, `SELECT COALESCE(payouts_enabled,false) FROM suppliers WHERE email=lower($1)`, email).Scan(&pe); err != nil {
+		t.Fatalf("read payouts_enabled: %v", err)
+	}
+	if !pe {
+		t.Fatalf("account.updated must flip payouts_enabled true")
+	}
+
+	// A tampered signature is rejected (no silent accept).
+	if code, _ := req(t, "POST", "/v1/stripe/connect-webhook", body, hdr{"Stripe-Signature", "t=1,v1=deadbeef"}); code != http.StatusBadRequest {
+		t.Fatalf("bad signature: want 400, got %d", code)
+	}
+}
+
+// stripeTestSig builds a valid Stripe-Signature header for body under secret,
+// using the same t.payload HMAC-SHA256 scheme verifyStripeSig checks.
+func stripeTestSig(body []byte, secret string) string {
+	t := strconv.FormatInt(time.Now().Unix(), 10)
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(t + "." + string(body)))
+	return "t=" + t + ",v1=" + hex.EncodeToString(mac.Sum(nil))
 }

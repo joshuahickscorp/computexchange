@@ -140,6 +140,36 @@ CREATE UNIQUE INDEX IF NOT EXISTS ledger_task_kind_uniq ON ledger_entries (task_
 -- in api_keys/worker_tokens MUST be seeded for any request to authenticate).
 -- ─────────────────────────────────────────────────────────────────────────────
 
+-- Self-serve buyer accounts. Until now a buyer_id was a free-floating UUID minted
+-- by the seed / referenced by api_keys; there was no way to sign UP. This is the
+-- account of record: a UNIQUE email + a bcrypt password_hash (cost >= 12, set in
+-- control/accounts.go · NEVER a plaintext or a fast hash). free_credit_usd is the
+-- sandbox grant a new buyer gets so they can run jobs before adding a card; the 402
+-- submit gate exempts spend up to this, then requires a card honestly. The id is the
+-- buyer_id every existing buyer-scoped table already keys on, so accounts slot in
+-- without a data migration. password_hash is nullable so a seeded / API-key-only
+-- buyer (no password) is representable; login requires a non-null hash.
+CREATE TABLE IF NOT EXISTS buyers (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email           TEXT UNIQUE NOT NULL,
+    password_hash   TEXT,                      -- bcrypt; NULL = no password set (seed / API-key-only)
+    free_credit_usd NUMERIC(12,6) NOT NULL DEFAULT 0,  -- sandbox grant; 402 gate exempts spend up to this
+    created_at      TIMESTAMPTZ DEFAULT now()
+);
+
+-- Opaque session tokens for the web/app login flow, hashed at rest exactly like
+-- api_keys/worker_tokens (only the SHA-256 hash is stored; the raw token is shown
+-- once at login and never recoverable). authBuyer accepts a cx_sess_ bearer as well
+-- as an api key. expires_at bounds the session; revoked supports explicit logout.
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,               -- SHA-256 of the raw cx_sess_ token
+    buyer_id   UUID NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    revoked    BOOLEAN DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS sessions_buyer_idx ON sessions (buyer_id);
+
 CREATE TABLE IF NOT EXISTS api_keys (
     id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     buyer_id   UUID,
@@ -298,6 +328,12 @@ ALTER TABLE workers ADD COLUMN IF NOT EXISTS throttled          BOOLEAN DEFAULT 
 -- Supplier jurisdiction (data-residency match) + quarantine timestamp.
 ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS data_country   TEXT;            -- ISO country the supplier operates in
 ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS quarantined_at TIMESTAMPTZ;     -- set by auto-quarantine (Verification V2)
+
+-- Stripe Connect payout readiness, flipped by the account.updated webhook
+-- (control/suppliers.go). A supplier can only be PAID once Stripe says its
+-- connected account can receive transfers; this column is the cached view the
+-- status endpoint reads without a live Stripe call. Default false (not yet able).
+ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS payouts_enabled BOOLEAN DEFAULT false;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Plane C / Compute Autopilot (docs/PLANE_C.md) — quote intelligence.

@@ -67,12 +67,25 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("GET /{$}", s.handleDashboard) // operator dashboard at root (same-origin, no CORS)
 	mux.HandleFunc("GET /app", s.handleApp)       // role-based app skeleton (Supplier/Buyer/Admin/Workflows)
 	mux.HandleFunc("GET /demo", s.handleDemo)     // Launch/Earn product demo (monochrome, same-origin)
 
-	// Buyer API (Bearer api_key).
+	// Self-serve accounts (accounts.go) · unauthed: these MINT the credential.
+	mux.HandleFunc("POST /v1/signup", s.handleSignup)
+	mux.HandleFunc("POST /v1/login", s.handleLogin)
+
+	// Self-serve supplier onboarding (suppliers.go) · unauthed: a prospective
+	// supplier has no credential yet. Captures tax info + returns a Connect link.
+	// authBuyer-gated: a valid account is required to onboard a supplier or read
+	// supplier status, so these are not public endpoints that anyone could use to seed
+	// arbitrary tax rows or enumerate a supplier's payout state by email.
+	mux.Handle("POST /v1/supplier/onboard", s.authBuyer(http.HandlerFunc(s.handleSupplierOnboard)))
+	mux.Handle("GET /v1/supplier/status", s.authBuyer(http.HandlerFunc(s.handleSupplierStatus)))
+
+	// Buyer API (Bearer api_key OR session token).
 	mux.Handle("POST /v1/jobs", s.authBuyer(http.HandlerFunc(s.handleCreateJob)))
 	mux.Handle("GET /v1/jobs/{id}", s.authBuyer(http.HandlerFunc(s.handleGetJob)))
 	mux.Handle("GET /v1/jobs/{id}/results", s.authBuyer(http.HandlerFunc(s.handleJobResults)))
@@ -101,7 +114,8 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /v1/pipelines", s.authBuyer(http.HandlerFunc(s.handleCreatePipeline)))
 	mux.Handle("GET /v1/pipelines/{id}", s.authBuyer(http.HandlerFunc(s.handleGetPipeline)))
 	mux.Handle("POST /v1/deliver", s.authBuyer(http.HandlerFunc(s.handleDeliver)))
-	mux.HandleFunc("POST /v1/stripe/webhook", s.handleStripeWebhook) // unauthed; verified by signature
+	mux.HandleFunc("POST /v1/stripe/webhook", s.handleStripeWebhook)          // unauthed; verified by signature
+	mux.HandleFunc("POST /v1/stripe/connect-webhook", s.handleConnectWebhook) // Connect account.updated; verified by signature
 
 	// OpenAI-compatible Batch API (openai.go): upload a JSONL of requests, create a
 	// batch over it, poll, and download the output — all mapped onto the native job
@@ -174,7 +188,12 @@ func observe(next http.Handler) http.Handler {
 	})
 }
 
-// authBuyer authenticates a Bearer api_key and stashes the AuthResult.
+// authBuyer authenticates a Bearer credential · either an api_key (cx_live_/cx_test_)
+// or a self-serve session token (cx_sess_) · and stashes the AuthResult. The token's
+// prefix selects the lookup: a cx_sess_ bearer goes through the sessions table (hashed
+// at rest, expiry- and revocation-checked), everything else through api_keys. Both
+// resolve to the same buyer scope, so every buyer route works with either credential;
+// a session is never admin (admin is api-key-only). Honest 401 on any miss.
 func (s *Server) authBuyer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key, ok := bearer(r)
@@ -182,9 +201,17 @@ func (s *Server) authBuyer(next http.Handler) http.Handler {
 			writeErr(w, http.StatusUnauthorized, "missing or malformed Authorization bearer token")
 			return
 		}
-		auth, err := s.store.LookupAPIKey(r.Context(), key)
+		var (
+			auth AuthResult
+			err  error
+		)
+		if strings.HasPrefix(key, "cx_sess_") {
+			auth, err = s.store.LookupSession(r.Context(), key)
+		} else {
+			auth, err = s.store.LookupAPIKey(r.Context(), key)
+		}
 		if err != nil {
-			writeErr(w, http.StatusUnauthorized, "invalid api key")
+			writeErr(w, http.StatusUnauthorized, "invalid credential")
 			return
 		}
 		if isRemote(r) && !s.buyerLimiter.allow(auth.BuyerID.String()) {
@@ -248,6 +275,25 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleReadyz is the readiness probe: liveness (DB reachable) PLUS the background
+// tickers actually running. A process whose DB is up but whose payout-release /
+// stale-requeue / webhook-sweep loops have silently wedged is NOT ready to serve ·
+// money would stop moving while /healthz stayed green. We fail (503) listing every
+// stale ticker (none succeeded within staleMultiple × its interval) so the failure
+// is observable and actionable, never swallowed (BLACKHOLE). A load balancer can
+// route on /readyz to drain a node whose background work has stalled.
+func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.Ping(r.Context()); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not_ready", "reason": "database unreachable"})
+		return
+	}
+	if stale := liveness.stale(time.Now(), workersStartedAt); len(stale) > 0 {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not_ready", "stale_tickers": stale})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
 // --- buyer handlers ---
@@ -350,17 +396,40 @@ func (s *Server) createJob(ctx context.Context, buyerID uuid.UUID, sub jobSubmit
 	}
 
 	// Require a saved payment method before accepting billable work WHEN billing is
-	// configured. Without this gate a cardless buyer's completed job is owed forever
-	// (the ledger records it but chargeForJob can never collect off-session). We
-	// surface it at submit (402) rather than silently accruing uncollectable debt.
-	// With no Stripe key (local/dev/test) the gate is skipped — behavior unchanged.
+	// configured · UNLESS the buyer still has sandbox free credit. Without this gate a
+	// cardless buyer's completed job is owed forever (the ledger records it but
+	// chargeForJob can never collect off-session). We surface it at submit (402) rather
+	// than silently accruing uncollectable debt. With no Stripe key (local/dev/test) the
+	// gate is skipped · behavior unchanged.
+	//
+	// SANDBOX EXEMPTION: a new buyer is granted a small free credit (buyers.free_credit_usd)
+	// so they can run jobs before adding a card. While unspent credit remains, a cardless
+	// submit is allowed; once the realized spend (buyer_charge debits) reaches the grant,
+	// the gate requires a card honestly. This is an HONEST boundary · the credit is real
+	// ledger spend, not a faked bypass · and the gate re-asserts the instant it is exhausted.
 	if stripeKey() != "" {
 		_, pm, berr := s.store.GetBillingCustomer(ctx, buyerID)
 		switch {
-		case errors.Is(berr, errNotFound), berr == nil && pm == "":
-			return JobSubmitResponse{}, &httpError{http.StatusPaymentRequired, "no payment method on file — save a card via POST /v1/billing/setup before submitting a job"}
-		case berr != nil:
+		case berr != nil && !errors.Is(berr, errNotFound):
 			return JobSubmitResponse{}, &httpError{http.StatusServiceUnavailable, "billing lookup failed: " + berr.Error()}
+		case errors.Is(berr, errNotFound), pm == "":
+			// No card on file: allow only while sandbox free credit remains.
+			free, ferr := s.store.BuyerFreeCreditRemaining(ctx, buyerID)
+			if ferr != nil {
+				return JobSubmitResponse{}, &httpError{http.StatusServiceUnavailable, "free-credit lookup failed: " + ferr.Error()}
+			}
+			if free <= 0 {
+				return JobSubmitResponse{}, &httpError{http.StatusPaymentRequired, "no payment method on file and sandbox free credit is exhausted · save a card via POST /v1/billing/setup before submitting a job"}
+			}
+			// Hard-bound this cardless sandbox job's spend to the remaining grant: the
+			// budget governor enforces MaxUSD during task claims, so a single job cannot
+			// exceed the free credit. With the in-flight reservation in
+			// BuyerFreeCreditRemaining, the per-buyer free pool cannot be overspent across
+			// concurrent submits. Without this, free<=0 was a pure boolean and one job
+			// could run unbounded supplier-paid compute on a tiny grant.
+			if sub.MaxUSD <= 0 || sub.MaxUSD > free {
+				sub.MaxUSD = free
+			}
 		}
 	}
 
