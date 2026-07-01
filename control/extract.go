@@ -125,3 +125,37 @@ func extractDocuments(files []namedContent) ([]byte, int) {
 	}
 	return out.Bytes(), n
 }
+
+// codeChunkLines is the deterministic chunk size for code-repo embedding (item 21):
+// each source file is split into fixed-size line windows so a repo maps to a stable,
+// reproducible set of embed records. Same input bytes -> same chunks -> same embeddings,
+// which the redundancy verifier requires (identical chunking across workers).
+const codeChunkLines = 50
+
+// extractCode turns fetched source files into a CHUNKED embed JSONL: each file is split
+// into windows of `linesPerChunk` lines, one {"text":...} record per non-empty chunk.
+// PURE and deterministic — stable file order (from the caller), a fixed window, and
+// preserved line order — so the same repo always yields the same embed inputs (item 21).
+func extractCode(files []namedContent, linesPerChunk int) ([]byte, int) {
+	if linesPerChunk < 1 {
+		linesPerChunk = 1
+	}
+	var out bytes.Buffer
+	n := 0
+	for _, f := range files {
+		lines := strings.Split(string(f.Content), "\n")
+		for i := 0; i < len(lines); i += linesPerChunk {
+			end := i + linesPerChunk
+			if end > len(lines) {
+				end = len(lines)
+			}
+			chunk := strings.TrimSpace(strings.Join(lines[i:end], "\n"))
+			if chunk == "" {
+				continue
+			}
+			out.Write(jsonlLine(chunk))
+			n++
+		}
+	}
+	return out.Bytes(), n
+}

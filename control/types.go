@@ -39,6 +39,40 @@ var validHWClasses = map[string]bool{
 // validTiers is the closed set of service tiers.
 var validTiers = map[string]bool{"batch": true, "priority": true, "trusted": true}
 
+// validEngines is the closed set of on-device inference ENGINES a worker may
+// advertise (WorkerCapability.Engine). The engine is the SECOND axis of the
+// verification class alongside hw_class: byte-exact redundancy peers and
+// honeypots are drawn from the same (hw_class, engine), because two engines'
+// floating-point kernels differ even on identical hardware, so a future
+// mlx/vllm/hawking worker must never be byte-compared against a Candle one.
+//   - candle  — the wired default every existing worker advertises (Metal+CUDA)
+//   - mlx     — the Apple MLX serving-lane seam (agent/src/runners.rs MlxRunner)
+//   - vllm    — the NVIDIA/CUDA vLLM serving lane (audit Wave 2)
+//   - hawking — the founder's Apple-Silicon continuous-batch engine (audit Wave 2)
+//
+// An empty/absent engine normalizes to "candle" at registration, so an older
+// agent that does not send the field is unchanged.
+var validEngines = map[string]bool{
+	"candle": true, "mlx": true, "vllm": true, "hawking": true,
+}
+
+// defaultEngine is the engine an absent/blank advertisement normalizes to: the
+// wired Candle path every existing worker runs. Keeping a single-engine Candle
+// fleet on this default means the (hw_class, engine) class collapses back to
+// hw_class alone — exactly today's behavior.
+const defaultEngine = "candle"
+
+// normalizeEngine maps a blank/absent advertised engine to defaultEngine (the wired
+// Candle path every older agent runs), leaving any non-blank value untouched for the
+// caller's validEngines check. Centralizing the "blank → candle" rule keeps the
+// (hw_class, engine) class collapse to today's behavior in exactly one place.
+func normalizeEngine(engine string) string {
+	if engine == "" {
+		return defaultEngine
+	}
+	return engine
+}
+
 // validJobTypes is the closed set of job-type tags. The three Turbo workloads
 // (batch_classification | json_extraction | rerank) join the original set; each
 // has a real result verifier (see verification.go resultsAgree). `custom` is the
@@ -160,9 +194,25 @@ type BenchResult struct {
 // job whose offered_rate_usd_hr is below it, so a worker never runs work that
 // pays under its floor (mirrors the Rust agent's matching side).
 type WorkerCapability struct {
-	WorkerID        uuid.UUID     `json:"worker_id"`
-	SupplierID      uuid.UUID     `json:"supplier_id"`
-	HWClass         string        `json:"hw_class"`
+	WorkerID   uuid.UUID `json:"worker_id"`
+	SupplierID uuid.UUID `json:"supplier_id"`
+	HWClass    string    `json:"hw_class"`
+	// Engine is the on-device inference engine this worker runs (validEngines).
+	// It is the SECOND axis of the verification class: the redundancy matcher and
+	// honeypot seeding pin byte-exact peers to the same (hw_class, engine). The
+	// agent sends "candle" by default; an absent value (an older agent) normalizes
+	// to defaultEngine at registration, so a single-engine fleet is unchanged.
+	Engine string `json:"engine,omitempty"`
+	// BuildHash is the FINER axis of the verification class BELOW (hw_class, engine):
+	// a stable hash of the byte-output-determining build inputs (engine + agent build +
+	// device backend + catalogue quant — agent hardware::engine_build_hash). Byte-exact
+	// redundancy peers and honeypots are pinned to the same (hw_class, engine,
+	// build_hash), because a kernel/codegen change between agent builds can shift bytes
+	// even on identical hardware running the same engine. An absent/blank value (an
+	// older agent) is "unknown build" — never drawn as a byte-exact peer and never
+	// auto-docked on a pure byte mismatch (provisional trust), so a single-build fleet
+	// reporting the same hash collapses the class to today's behavior.
+	BuildHash       string        `json:"build_hash,omitempty"`
 	MemoryGB        float32       `json:"memory_gb"`
 	MemoryBwGbps    float32       `json:"memory_bw_gbps"`
 	SupportedJobs   []string      `json:"supported_jobs"`
@@ -283,14 +333,20 @@ type JobStatus struct {
 //   - "honeypot-checked"  when only known-answer probes ran (checked>0)
 //   - "unverified"        when nothing was checked
 type Verification struct {
-	Checked              int    `json:"checked"`
-	HoneypotsPassed      int    `json:"honeypots_passed"`
-	HoneypotsFailed      int    `json:"honeypots_failed"`
-	RedundancyMatched    int    `json:"redundancy_matched"`
-	RedundancyMismatched int    `json:"redundancy_mismatched"`
-	Tiebreaks            int    `json:"tiebreaks"`
-	DisputeStatus        string `json:"dispute_status"`
-	Label                string `json:"label"`
+	Checked              int `json:"checked"`
+	HoneypotsPassed      int `json:"honeypots_passed"`
+	HoneypotsFailed      int `json:"honeypots_failed"`
+	RedundancyMatched    int `json:"redundancy_matched"`
+	RedundancyMismatched int `json:"redundancy_mismatched"`
+	Tiebreaks            int `json:"tiebreaks"`
+	// SameSupplier counts chunks whose only agreeing peer shared the committing
+	// supplier, so the match was NOT counted as independent verification (items 7, 9).
+	SameSupplier int `json:"same_supplier_matches"`
+	// CrossClassSkipped counts chunks whose peer was in a DIFFERENT verification class,
+	// so a byte-exact comparison could not run (a coverage gap, not a defect) (item 9).
+	CrossClassSkipped int    `json:"cross_class_skipped"`
+	DisputeStatus     string `json:"dispute_status"`
+	Label             string `json:"label"`
 }
 
 // deriveVerificationLabel returns the honest label for a verification aggregate,
@@ -299,9 +355,21 @@ type Verification struct {
 func deriveVerificationLabel(v Verification) string {
 	switch {
 	case v.RedundancyMatched > 0 || v.Tiebreaks > 0:
+		// A real INDEPENDENT cross-check settled at least one chunk (a different
+		// supplier's matching result, or a tiebreak vote).
 		return "verified"
 	case v.Checked > 0:
+		// Known-answer (honeypot) probes ran, or a mismatch was detected, but no
+		// independent redundancy match — honest middle state.
 		return "honeypot-checked"
+	case v.SameSupplier > 0:
+		// A peer ran but shared the committing supplier, so it was NOT independent
+		// (items 7, 9). The work is provisionally accepted, not independently verified.
+		return "no-independent-peer"
+	case v.CrossClassSkipped > 0:
+		// A peer existed but in a different verification class, so a byte-exact
+		// comparison could not run (coverage gap, surfaced honestly, never inflated).
+		return "cross-class-skip"
 	default:
 		return "unverified"
 	}

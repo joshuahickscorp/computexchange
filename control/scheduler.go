@@ -26,6 +26,19 @@ type MatchTask struct {
 	MinMemoryGB float32
 	HWClasses   []string // nil/empty = any
 	Tier        string   // batch | priority | trusted
+	// PinEngine / PinBuildHash optionally restrict candidates to the SAME finer
+	// verification class as a redundancy anchor. They are set ONLY on the
+	// redundancy-peer path (SelectRedundancyPeerExcluding) so a peer drawn to
+	// byte-compare a result shares (hw_class, engine, build_hash) with the primary.
+	// The general claim path leaves them empty (no extra filter, scheduling
+	// unchanged). An empty PinBuildHash means "do not pin on build" (so a fleet that
+	// does not yet advertise build hashes still matches within hw_class+engine); an
+	// empty PinEngine likewise does not pin on engine. When set, a candidate must
+	// match EXACTLY — an unknown-build ("") candidate is NOT pinned-equal to a known
+	// build, so it is excluded from a same-build peer search (it instead falls to
+	// provisional trust at verify time, never a cross-class byte-dock).
+	PinEngine    string
+	PinBuildHash string
 }
 
 // MatchWorker is the matching view of a candidate worker. MemoryGB is the
@@ -36,8 +49,19 @@ type MatchTask struct {
 // a small re-rank bonus so an otherwise-equal warm worker is preferred (avoiding a
 // cold model load), but it is NEVER a filter — a cold worker is still fully eligible.
 type MatchWorker struct {
-	ID         uuid.UUID
+	ID uuid.UUID
+	// SupplierID is the operator behind this worker. The redundancy-peer path
+	// excludes candidates from the ANCHOR's supplier: a same-supplier "peer" is
+	// not an independent cross-check (a multi-worker supplier could verify its own
+	// forged result), so it can never be a valid redundancy/tiebreak peer.
+	SupplierID uuid.UUID
 	HWClass    string
+	// Engine + BuildHash are the finer verification-class axes carried alongside
+	// HWClass so a redundancy peer can be pinned to the SAME (hw_class, engine,
+	// build_hash) — byte-exact verification only ever compares peers in one class
+	// (two engines / two builds can emit different bytes on identical hardware).
+	Engine     string
+	BuildHash  string
 	MemoryGB   float32
 	Reputation float32
 	TPS        map[string]float32 // job_type -> tokens/sec
@@ -65,6 +89,15 @@ func Match(t MatchTask, workers []MatchWorker) ([]MatchWorker, error) {
 			continue
 		}
 		if len(t.HWClasses) > 0 && !containsStr(t.HWClasses, w.HWClass) {
+			continue
+		}
+		// Finer verification-class pins (redundancy-peer path only): when set, a
+		// peer must share the anchor's engine AND build hash so any byte-exact
+		// comparison stays WITHIN one class. Empty pin = do not filter on that axis.
+		if t.PinEngine != "" && w.Engine != t.PinEngine {
+			continue
+		}
+		if t.PinBuildHash != "" && w.BuildHash != t.PinBuildHash {
 			continue
 		}
 		if t.Tier == "trusted" && w.Tier < 2 {
@@ -188,7 +221,7 @@ func hwClassCostRankSQL(col string) string {
 // the class peers must match, and it is itself excluded). modelRef lets the ranker
 // prefer a peer that already has the model warm (warm-routing, D3); "" = no model.
 func (s *Store) SelectRedundancyPeer(ctx context.Context, jobType, modelRef string, minMemGB float32, primaryWorker uuid.UUID) (uuid.UUID, error) {
-	return s.SelectRedundancyPeerExcluding(ctx, jobType, modelRef, minMemGB, primaryWorker, nil)
+	return s.SelectRedundancyPeerExcluding(ctx, jobType, modelRef, minMemGB, primaryWorker, nil, nil)
 }
 
 // SelectRedundancyPeerExcluding picks the best live same-hardware-class worker to
@@ -201,7 +234,7 @@ func (s *Store) SelectRedundancyPeer(ctx context.Context, jobType, modelRef stri
 // same-class peer is online — used by the verification coordinator to assign a
 // tiebreak third opinion that is genuinely a different worker from the two that
 // already disagreed.
-func (s *Store) SelectRedundancyPeerExcluding(ctx context.Context, jobType, modelRef string, minMemGB float32, anchor uuid.UUID, also []uuid.UUID) (uuid.UUID, error) {
+func (s *Store) SelectRedundancyPeerExcluding(ctx context.Context, jobType, modelRef string, minMemGB float32, anchor uuid.UUID, also, alsoSuppliers []uuid.UUID) (uuid.UUID, error) {
 	// The anchor's hardware class anchors the search: peers must match it.
 	primary, err := s.GetWorkerProfile(ctx, anchor)
 	if err != nil {
@@ -212,28 +245,67 @@ func (s *Store) SelectRedundancyPeerExcluding(ctx context.Context, jobType, mode
 	if err != nil {
 		return uuid.Nil, err
 	}
-	excluded := map[uuid.UUID]bool{anchor: true}
-	for _, id := range also {
-		excluded[id] = true
-	}
-	// Drop every excluded worker — a peer must be a genuinely different worker.
-	pruned := candidates[:0]
-	for _, c := range candidates {
-		if !excluded[c.ID] {
-			pruned = append(pruned, c)
-		}
-	}
+	// A redundancy peer must be INDEPENDENT: a different worker AND a different
+	// supplier from the anchor (backlog P0 item 6). prunePeers enforces both, so a
+	// multi-worker supplier can never be drawn as its own cross-check peer.
+	pruned := prunePeers(candidates, anchor, primary.SupplierID, also, alsoSuppliers)
 
 	ranked, err := Match(MatchTask{
 		JobType:     jobType,
 		MinMemoryGB: minMemGB,
-		HWClasses:   []string{primary.HWClass}, // same class only
-		Tier:        "batch",
+		HWClasses:   []string{primary.HWClass}, // same hw class only
+		// Pin the FINER verification class too: a redundancy peer must share the
+		// anchor's engine AND build hash, so any byte-exact comparison stays within
+		// one (hw_class, engine, build_hash) class. An anchor with an unknown
+		// ("") build hash does NOT pin on build (PinBuildHash stays empty), so the
+		// search degrades to hw_class+engine rather than excluding every peer — the
+		// missing finer axis is then handled at verify time (provisional trust on a
+		// cross-class byte mismatch), never a fabricated same-class pass.
+		PinEngine:    primary.Engine,
+		PinBuildHash: primary.BuildHash,
+		Tier:         "batch",
 	}, pruned)
 	if err != nil {
 		return uuid.Nil, err // ErrNoSupply when no same-class peer is free
 	}
 	return ranked[0].ID, nil
+}
+
+// prunePeers drops every candidate that cannot serve as an INDEPENDENT redundancy
+// peer for an anchor: the anchor worker itself, every id in `also`, and any worker
+// from the anchor's OWN supplier (`anchorSupplier`). A same-supplier peer is not an
+// independent cross-check — a multi-worker supplier could verify its own forged
+// result — so it is never eligible (backlog P0 item 6). Pure, so the
+// supplier-distinctness guarantee is unit-tested without a database. An unknown
+// (`uuid.Nil`) anchor supplier disables only the supplier gate, never the worker gate.
+func prunePeers(candidates []MatchWorker, anchor, anchorSupplier uuid.UUID, also, alsoSuppliers []uuid.UUID) []MatchWorker {
+	excluded := map[uuid.UUID]bool{anchor: true}
+	for _, id := range also {
+		excluded[id] = true
+	}
+	// Suppliers that cannot supply an independent peer: the anchor's own supplier,
+	// plus any in `alsoSuppliers` (e.g. the OTHER disputants in a tiebreak, so the
+	// third opinion is independent of BOTH sides, not just the committing side).
+	excludedSup := map[uuid.UUID]bool{}
+	if anchorSupplier != uuid.Nil {
+		excludedSup[anchorSupplier] = true
+	}
+	for _, id := range alsoSuppliers {
+		if id != uuid.Nil {
+			excludedSup[id] = true
+		}
+	}
+	out := make([]MatchWorker, 0, len(candidates))
+	for _, c := range candidates {
+		if excluded[c.ID] {
+			continue
+		}
+		if excludedSup[c.SupplierID] {
+			continue // anchor's (or another disputant's) supplier — not independent
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 // ClaimedTask is what a worker receives from a successful poll claim.
@@ -261,7 +333,10 @@ type ClaimedTask struct {
 //     HARD-FILTERED to be able to run (see the WHERE clause), ordered priority-tier
 //     first, THEN the hardware-matched routing preference (defer tasks a strictly
 //     CHEAPER eligible class is online for, so an expensive worker does not tie
-//     itself up on work a cheaper idle class could take), then oldest,
+//     itself up on work a cheaper idle class could take), THEN the throughput
+//     tiebreak (this worker's measured tps for the task's job type, then its
+//     bw_gbps — selection only, so a faster worker drains its quickest work first),
+//     then oldest,
 //  3. SKIP LOCKED so parallel pollers each grab a different row,
 //  4. stamp claimed_by / claimed_at / worker_id and return the dispatch.
 //
@@ -290,12 +365,15 @@ func (s *Store) ClaimTask(ctx context.Context, w WorkerAuth) (*ClaimedTask, erro
 	defer tx.Rollback(ctx)
 
 	// Reject unregistered workers loudly rather than silently claiming nothing.
-	// We also read the worker's hw_class here (same row, no extra round-trip) to
-	// compute its cost rank for the hardware-matched routing preference below.
+	// We also read the worker's hw_class + measured bandwidth here (same row, no
+	// extra round-trip): hw_class feeds its cost rank for the hardware-matched
+	// routing preference below, and bw_gbps is the job-type-agnostic throughput
+	// fallback the claim's tiebreak uses when this worker has no per-type benchmark.
 	var hwClass string
+	var bwGbps float32
 	if err := tx.QueryRow(ctx,
-		`SELECT COALESCE(hw_class,'') FROM workers WHERE id = $1`, w.WorkerID,
-	).Scan(&hwClass); errors.Is(err, pgx.ErrNoRows) {
+		`SELECT COALESCE(hw_class,''), COALESCE(bw_gbps,0) FROM workers WHERE id = $1`, w.WorkerID,
+	).Scan(&hwClass, &bwGbps); errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound
 	} else if err != nil {
 		return nil, err
@@ -359,7 +437,20 @@ func (s *Store) ClaimTask(ctx context.Context, w WorkerAuth) (*ClaimedTask, erro
 		         AND (j.hw_classes IS NULL OR w2.hw_class = ANY(j.hw_classes))
 		         AND COALESCE(w2.supported_jobs,'{}') @> ARRAY[j.job_type]
 		         AND (COALESCE(j.model_ref,'') = '' OR COALESCE(w2.supported_models,'{}') @> ARRAY[j.model_ref])
-		     ) AS cheaper_class_online
+		     ) AS cheaper_class_online,
+		     -- Throughput tiebreak (selection only, determinism-SAFE): THIS worker's most
+		     -- recent measured tokens/sec FOR THIS task's job type, from the benchmark the
+		     -- agent reports. It is the LOWEST-priority ORDER BY term (below pin + priority +
+		     -- cheaper-class), so when a worker can take two otherwise-equal tasks of
+		     -- DIFFERENT job types it claims the one it runs fastest first; with no per-type
+		     -- benchmark it is 0 and the claim falls through to bw_gbps ($4) then oldest. It
+		     -- never filters and never alters any task's bytes — it only re-orders tasks the
+		     -- worker already passes, so a faster idle worker drains its quickest work first.
+		     COALESCE((
+		       SELECT br.tps FROM benchmark_results br
+		         WHERE br.worker_id = w.id AND br.job_type = j.job_type
+		         ORDER BY br.measured_at DESC LIMIT 1
+		     ), 0) AS worker_tps
 		   FROM tasks t
 		     JOIN jobs j ON j.id = t.job_id
 		     JOIN workers w ON w.id = $1
@@ -417,12 +508,16 @@ func (s *Store) ClaimTask(ctx context.Context, w WorkerAuth) (*ClaimedTask, erro
 		   -- hardware-matched routing preference: within a tier, prefer tasks NO cheaper
 		   -- eligible class is online for (cheaper_class_online = false sorts first), so
 		   -- an expensive worker defers work a cheaper idle class could take instead of
-		   -- tying itself up on it; finally oldest-first. The cost preference sits BELOW
-		   -- pin + priority on purpose — a hedge/tiebreak pinned here, and a priority job,
-		   -- are still served promptly even by an expensive worker. It only re-orders
-		   -- already-eligible tasks; the hard filter above and SKIP LOCKED are unchanged.
+		   -- tying itself up on it; THEN the throughput tiebreak (this worker's measured
+		   -- tokens/sec for the task's job type, then its bw_gbps $4 — both DESC so its
+		   -- fastest work drains first); finally oldest-first. The cost preference and the
+		   -- throughput tiebreak both sit BELOW pin + priority on purpose — a hedge/tiebreak
+		   -- pinned here, and a priority job, are still served promptly even by an expensive
+		   -- or slower worker. The throughput term is selection only (no output change): it
+		   -- only re-orders tasks the worker already passes; the hard filter above and SKIP
+		   -- LOCKED are unchanged.
 		   ORDER BY (t.claimed_by = $1) DESC, (j.tier = 'priority') DESC,
-		            cheaper_class_online ASC, t.created_at ASC
+		            cheaper_class_online ASC, worker_tps DESC, $4::real DESC, t.created_at ASC
 		   FOR UPDATE OF t SKIP LOCKED
 		   LIMIT 1
 		 )
@@ -438,7 +533,7 @@ func (s *Store) ClaimTask(ctx context.Context, w WorkerAuth) (*ClaimedTask, erro
 		           COALESCE(j.job_type_spec,'null'::jsonb),
 		           COALESCE(j.offered_rate_usd_hr,0), COALESCE(tasks.chunk_index,0),
 		           tasks.is_honeypot`,
-		w.WorkerID, int(tier), selfCostRank,
+		w.WorkerID, int(tier), selfCostRank, bwGbps,
 	).Scan(&c.TaskID, &c.JobID, &c.JobType, &c.ModelRef, &c.InputRef, &c.ResultKey,
 		&c.OutputRef, &c.Tier, &c.VerifPolicy, &c.JobTypeSpec, &c.OfferedRateUsdHr,
 		&c.ChunkIndex, &c.IsHoneypot)

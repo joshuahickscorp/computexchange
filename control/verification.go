@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 
 	"github.com/google/uuid"
@@ -95,11 +96,23 @@ func (v *Verifier) verifyTaskResult(ctx context.Context, info *CommitTaskInfo, c
 	// only skip checks for suppliers already above the trusted floor, and even they
 	// keep a verifyCheckProbFloor chance of being checked every task.
 	if info.IsHoneypot && v.checkSampled(info.TaskID, checkProb()) {
-		known, err := v.store.GetHoneypotAnswer(ctx, jobTypeOf(info), info.InputRef)
+		known, answerClass, err := v.store.GetHoneypotAnswer(ctx, jobTypeOf(info), info.InputRef)
 		if err != nil && !errors.Is(err, errNotFound) {
 			return OutcomeFail, err
 		}
-		if known != nil {
+		// Class gate for BYTE-EXACT job types: a byte honeypot is only valid evidence
+		// of a bad worker when the known answer was produced in the SAME verification
+		// class as the committing worker. Across the class boundary (e.g. a
+		// Candle-seeded answer vs a correct vLLM/Hawking result) bytes legitimately
+		// differ, so a mismatch is NOT fraud and must not auto-quarantine an honest
+		// worker (the audit's hw_class-blind-honeypot hazard). Tolerant job types
+		// compare SEMANTICS (label/JSON/cosine/order), are robust to cross-kernel FP
+		// jitter, and so always check. When a byte-exact answer is class-blind ("") or
+		// cross-class we SKIP the byte probe and fall through to the redundancy/normal
+		// path — exactly as a sampled-out check would: reduced coverage, never a
+		// fabricated pass and never a wrongful quarantine.
+		byteExactComparable := byteHoneypotComparable(info.jobType, answerClass, info.engine, info.buildHash)
+		if known != nil && byteExactComparable {
 			if !resultsAgree(info.jobType, commitBytes, known) {
 				// Confirmed bad result on a known-answer task: dock reputation, claw
 				// back any credit already written for this task, AUTO-QUARANTINE the
@@ -126,8 +139,9 @@ func (v *Verifier) verifyTaskResult(ctx context.Context, info *CommitTaskInfo, c
 			_ = v.store.RecordVerificationEvent(ctx, info.JobID, info.TaskID, info.SupplierID, "honeypot_pass")
 			return OutcomePass, nil
 		}
-		// honeypot flagged but no known answer on file: fall through to normal
-		// path rather than fake a pass.
+		// No known answer on file, OR a byte-exact answer that is class-blind/
+		// cross-class (not comparable): fall through to the normal redundancy path
+		// rather than fake a pass or a wrongful fail.
 	}
 
 	// Step 2: redundancy comparison + 3-way tiebreak, within the same hardware
@@ -142,15 +156,19 @@ func (v *Verifier) verifyTaskResult(ctx context.Context, info *CommitTaskInfo, c
 		}
 		// Fallback when the store path yields nothing (no object store / unknown
 		// chunk identity in a unit context): vote over exactly the two blobs the
-		// caller fetched, preserving the original 2-result behavior.
+		// caller fetched, preserving the original 2-result behavior. The committing
+		// vote carries its real class; the peer's class comes from the commit handler
+		// when known, else "" (unknown) — which makes a byte-exact pair non-comparable
+		// and so provisionally trusted rather than wrongly docked.
 		if len(all) == 0 {
-			peerSup := info.peerSupplierID // the real redundancy peer when the commit handler knew it
-			if peerSup == uuid.Nil {
-				peerSup = info.SupplierID // truly unknown (e.g. unit context) — preserve prior behavior
-			}
+			// The peer's supplier when the commit handler knew it; uuid.Nil when
+			// unknown (e.g. a unit context with no object store). We keep it Nil rather
+			// than defaulting to the committing supplier, so the supplier-distinctness
+			// gate below treats an UNKNOWN peer as "not provably same-supplier" (still a
+			// match) instead of misreading it as a same-supplier collusion.
 			all = []chunkVote{
-				{supplierID: info.SupplierID, taskID: info.TaskID, bytes: commitBytes},
-				{supplierID: peerSup, bytes: redundancyBytes},
+				{supplierID: info.SupplierID, taskID: info.TaskID, bytes: commitBytes, engine: info.engine, buildHash: info.buildHash},
+				{supplierID: info.peerSupplierID, bytes: redundancyBytes, engine: info.peerEngine, buildHash: info.peerBuildHash},
 			}
 		}
 		switch {
@@ -161,6 +179,25 @@ func (v *Verifier) verifyTaskResult(ctx context.Context, info *CommitTaskInfo, c
 			// are fine — they are tiny deltas applied once per commit.
 			return v.resolveTiebreak(ctx, info, all)
 		case len(all) == 2 && !resultsAgree(info.jobType, all[0].bytes, all[1].bytes):
+			// Two results disagree. For a BYTE-EXACT job type this only counts as a
+			// real mismatch when the two results are in the SAME verification class
+			// (engine + build_hash) — across the class boundary the bytes legitimately
+			// differ (different kernels), so a pure byte mismatch is NOT a defect and
+			// we provisionally trust the primary (no credit, no dock), mirroring the
+			// missing-third-worker pattern. Tolerant job types compare semantics and
+			// are always a real disagreement. The redundancy matcher already pins the
+			// peer to the primary's class, so same-class is the common path; this gate
+			// is the safety net for a cross-class pairing (e.g. a peer that registered
+			// before advertising a build hash, or the no-store fallback).
+			if byteExactJobType(info.jobType) &&
+				!sameVerificationClass(all[0].engine, all[0].buildHash, all[1].engine, all[1].buildHash) {
+				// Cross-class byte difference — not comparable. Surface the
+				// uncheckable coverage as pass_with_penalty (BLACKHOLE: never a
+				// fabricated clean pass) but do NOT dock and do NOT re-dispatch a
+				// tiebreak that would also be cross-class.
+				_ = v.store.RecordVerificationEvent(ctx, info.JobID, info.TaskID, info.SupplierID, "redundancy_cross_class")
+				return OutcomePassWithPenalty, nil
+			}
 			// Two same-class results disagree — a real, DETECTED mismatch
 			// (pass_with_penalty regardless of what follows; the caller bumps the
 			// mismatch metric). Breaking the tie costs a third worker re-running the
@@ -178,12 +215,21 @@ func (v *Verifier) verifyTaskResult(ctx context.Context, info *CommitTaskInfo, c
 			}
 			return OutcomePassWithPenalty, nil
 		default:
-			// Two results that agree (or a single result): a clean within-class
-			// match — credit the committing worker's redundancy match.
-			if err := v.store.DockReputation(ctx, info.SupplierID, EventRedundancyMatch); err != nil {
-				return OutcomePass, err
+			// Two results that agree (or a single result). A clean within-class match
+			// normally credits an independent redundancy match — BUT a 2-result agreement
+			// from the SAME supplier is NOT an independent check (a multi-worker supplier
+			// could submit two matching forged results), so it must never be marked
+			// verified (do-not-mark-same-supplier-peers-independent, backlog P0 item 7).
+			// In that case record the gap and fall through to task success WITHOUT an
+			// independent redundancy-match credit.
+			if independentRedundancyMatch(all) {
+				if err := v.store.DockReputation(ctx, info.SupplierID, EventRedundancyMatch); err != nil {
+					return OutcomePass, err
+				}
+				_ = v.store.RecordVerificationEvent(ctx, info.JobID, info.TaskID, info.SupplierID, "redundancy_match")
+			} else {
+				_ = v.store.RecordVerificationEvent(ctx, info.JobID, info.TaskID, info.SupplierID, "redundancy_same_supplier")
 			}
-			_ = v.store.RecordVerificationEvent(ctx, info.JobID, info.TaskID, info.SupplierID, "redundancy_match")
 		}
 	} else if info.IsRedundancy {
 		// Redundancy-coverage gap, made EXPLICIT (V2): this task was injected
@@ -208,6 +254,19 @@ func (v *Verifier) verifyTaskResult(ctx context.Context, info *CommitTaskInfo, c
 		return OutcomePass, err
 	}
 	return OutcomePass, nil
+}
+
+// independentRedundancyMatch reports whether a within-class AGREEMENT among `all`
+// qualifies as an INDEPENDENT redundancy match. A 2-result agreement from the SAME
+// known supplier does NOT — a multi-worker supplier could submit two matching forged
+// results — so it must never be credited or marked verified (backlog P0 item 7). A
+// single result, or an agreement across DIFFERENT (or unknown/uuid.Nil) suppliers,
+// qualifies. Pure, so the supplier-distinctness guarantee is unit-tested.
+func independentRedundancyMatch(all []chunkVote) bool {
+	if len(all) == 2 && all[0].supplierID == all[1].supplierID && all[0].supplierID != uuid.Nil {
+		return false
+	}
+	return true
 }
 
 // Reputation-weighted verification tuning (V2).
@@ -299,11 +358,86 @@ func taskSample(taskID uuid.UUID) float64 {
 // chunkVote is one committed result for a chunk plus the bytes the vote compares.
 // taskID identifies the committed task behind the result so the tiebreak receipt
 // (verification_events) references the right task; it is uuid.Nil in the no-object-
-// store fallback where only the two blobs the caller fetched are known.
+// store fallback where only the two blobs the caller fetched are known. engine +
+// buildHash carry the worker's finer verification class so a byte-exact vote can
+// tell whether two results are even comparable before docking on a mismatch.
 type chunkVote struct {
 	supplierID uuid.UUID
 	taskID     uuid.UUID
 	bytes      []byte
+	engine     string
+	buildHash  string
+}
+
+// verificationClass is the byte-equality comparability key for a result's worker:
+// (hw_class is already guaranteed equal by the same-class matcher, so the finer key
+// here is engine + build_hash). Two results are BYTE-comparable only when their
+// classes match. An UNKNOWN build ("") is treated as its own non-matching class: a
+// worker that does not advertise a build hash is never byte-docked against a known
+// build, because we cannot prove they share kernels. Mirrors Hawking's profile
+// identity (device + shader_hash + tensor_layout_hash); see docs/DETERMINISM_CLASS.md.
+func sameVerificationClass(aEngine, aBuild, bEngine, bBuild string) bool {
+	// An empty build hash on either side is "unknown" — not provably the same
+	// kernels, so not the same class (never an auto-dock across that boundary).
+	if aBuild == "" || bBuild == "" {
+		return false
+	}
+	return aEngine == bEngine && aBuild == bBuild
+}
+
+// classKey formats a worker's finer verification class as "engine|build_hash", the
+// string an hw_class-aware honeypot records in answer_class. A blank build hash yields
+// a blank key (unknown class), which never matches a known class — the safe default.
+func classKey(engine, buildHash string) string {
+	if buildHash == "" {
+		return ""
+	}
+	return engine + "|" + buildHash
+}
+
+// byteExactJobType reports whether a job type's redundancy/honeypot comparison is
+// BYTE-EXACT (bytes.Equal in resultsAgree). The tolerant job types — embed (cosine),
+// batch_classification (top-1 label), json_extraction (canonical JSON), rerank (exact
+// order array) — compare SEMANTIC content that is robust to cross-kernel FP jitter, so
+// they are safe to compare across classes and are unaffected by the class gate. Only
+// the byte-exact types (batch_infer, audio_transcribe, custom, …) need the class
+// boundary, because their bytes legitimately differ across engines/builds.
+func byteExactJobType(jobType string) bool {
+	switch jobType {
+	case "embed", "batch_classification", "json_extraction", "rerank":
+		return false
+	default:
+		return true
+	}
+}
+
+// byteHoneypotComparable reports whether a honeypot's KNOWN ANSWER may be byte-compared
+// against the committing worker's result. Tolerant job types compare semantics and are
+// always comparable. A byte-exact job type is comparable ONLY when the known answer was
+// recorded in a non-blank verification class that MATCHES the worker's (engine|build_hash);
+// a blank or cross-class byte answer is skipped (never a wrongful quarantine). This is the
+// gate that ACTIVATES class-aware generation honeypots (item 10).
+func byteHoneypotComparable(jobType, answerClass, engine, buildHash string) bool {
+	if !byteExactJobType(jobType) {
+		return true
+	}
+	return answerClass != "" && answerClass == classKey(engine, buildHash)
+}
+
+// errHoneypotBlankClass is returned when a byte-exact honeypot is seeded without an
+// answer_class. Such a honeypot can never fire (it is never class-comparable) — dead
+// coverage — and a hand-written answer paired with a class would wrongly quarantine real
+// workers. Byte-exact honeypots MUST carry the class of the worker that produced their
+// known answer (item 11).
+var errHoneypotBlankClass = fmt.Errorf("byte-exact honeypot requires a non-blank answer_class")
+
+// validateHoneypotSeed refuses a blank-class byte-exact honeypot write (item 11). Tolerant
+// job types may be class-blind (their comparison is semantic). Pure — unit-tested.
+func validateHoneypotSeed(jobType, answerClass string) error {
+	if byteExactJobType(jobType) && answerClass == "" {
+		return fmt.Errorf("%w: job_type=%s", errHoneypotBlankClass, jobType)
+	}
+	return nil
 }
 
 // gatherChunkResults loads every committed result for the committing task's chunk
@@ -336,7 +470,13 @@ func (v *Verifier) gatherChunkResults(ctx context.Context, info *CommitTaskInfo,
 			}
 			b = fetched
 		}
-		out = append(out, chunkVote{supplierID: cr.SupplierID, taskID: cr.TaskID, bytes: b})
+		out = append(out, chunkVote{
+			supplierID: cr.SupplierID,
+			taskID:     cr.TaskID,
+			bytes:      b,
+			engine:     cr.Engine,
+			buildHash:  cr.BuildHash,
+		})
 	}
 	return out, nil
 }
@@ -364,14 +504,37 @@ func (v *Verifier) resolveTiebreak(ctx context.Context, info *CommitTaskInfo, al
 		// accepted. (majorityVote returned the first result as a fallback.)
 		return OutcomePassWithPenalty, nil
 	}
-	mismatch := false
+	// Reference class for the winning bytes (byte-exact gate): the class of a vote on
+	// the winning side. A loser is only DOCKED for a byte-exact job when it shares this
+	// class — a cross-class loser's bytes differ legitimately (different kernels), so
+	// it is credited a match (provisionally trusted) instead of docked. byteExact is
+	// false for tolerant job types, which compare semantics and dock every loser.
+	byteExact := byteExactJobType(info.jobType)
+	var winEngine, winBuild string
 	for _, c := range all {
 		if resultsAgree(info.jobType, c.bytes, winner) {
+			winEngine, winBuild = c.engine, c.buildHash
+			break
+		}
+	}
+	mismatch := false
+	for _, c := range all {
+		switch {
+		case resultsAgree(info.jobType, c.bytes, winner):
 			if err := v.store.DockReputation(ctx, c.supplierID, EventRedundancyMatch); err != nil {
 				return OutcomeFail, err
 			}
 			_ = v.store.RecordVerificationEvent(ctx, info.JobID, c.taskID, c.supplierID, "tiebreak_win")
-		} else {
+		case byteExact && !sameVerificationClass(winEngine, winBuild, c.engine, c.buildHash):
+			// Byte-exact loser in a DIFFERENT class than the winner: not a defect —
+			// the bytes legitimately differ across the class boundary. Do not dock;
+			// credit a (provisional) match and record the cross-class skip so the gap
+			// is visible rather than silently a clean win.
+			if err := v.store.DockReputation(ctx, c.supplierID, EventRedundancyMatch); err != nil {
+				return OutcomeFail, err
+			}
+			_ = v.store.RecordVerificationEvent(ctx, info.JobID, c.taskID, c.supplierID, "tiebreak_cross_class")
+		default:
 			mismatch = true
 			if err := v.store.DockReputation(ctx, c.supplierID, EventMismatch); err != nil {
 				return OutcomeFail, err
@@ -406,12 +569,17 @@ func (v *Verifier) dispatchTiebreak(ctx context.Context, info *CommitTaskInfo, a
 		return err
 	}
 	var also []uuid.UUID
+	var alsoSuppliers []uuid.UUID
 	for _, cr := range chunk {
 		if cr.WorkerID != info.WorkerID {
 			also = append(also, cr.WorkerID)
+			alsoSuppliers = append(alsoSuppliers, cr.SupplierID)
 		}
 	}
-	peer, err := v.store.SelectRedundancyPeerExcluding(ctx, info.jobType, info.ModelRef, info.MinMemoryGB, info.WorkerID, also)
+	// The third opinion must be independent of BOTH disputants — exclude the other
+	// disputants' SUPPLIERS too, not just their worker ids, so one operator can never
+	// hold two of the three votes (backlog P0 item 8).
+	peer, err := v.store.SelectRedundancyPeerExcluding(ctx, info.jobType, info.ModelRef, info.MinMemoryGB, info.WorkerID, also, alsoSuppliers)
 	if errors.Is(err, ErrNoSupply) {
 		return nil // no third same-class worker online — provisional trust, logged upstream
 	}

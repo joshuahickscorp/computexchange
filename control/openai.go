@@ -209,6 +209,12 @@ func (s *Server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 	// Reuse the native submission pipeline verbatim (one source of truth): a JSON
 	// string IS the inline JSONL that resolveInput expects.
 	inputField, _ := json.Marshal(string(nativeJSONL))
+	// LaunchContract (items 1-5): the OpenAI Batch wire format carries NO CX contract
+	// fields (max_usd / private_pool / min_reputation / verification), so a batch job
+	// cannot express a per-job contract — a NAMED external-format dependency, not a drop
+	// we can fix here. It still runs under createJob's account-level guards (the
+	// free-credit spend cap applies). A future CX extension could read a cap from the
+	// batch `metadata`; until then this path is intentionally contract-less.
 	resp, herr := s.createJob(ctx, auth.BuyerID, jobSubmit{
 		JobType: JobType{Type: jobType},
 		Model:   ModelRef{Kind: "gguf", Ref: model},

@@ -15,7 +15,20 @@ func TestDetectPipeline(t *testing.T) {
 	}{
 		{"audio", []RepoFile{{Path: "calls/a.wav"}, {Path: "calls/b.mp3"}}, "audio-transcribe", true, 1},
 		{"tabular", []RepoFile{{Path: "data/tickets.csv"}, {Path: "README.md"}}, "tabular-text", true, 2},
-		{"documents", []RepoFile{{Path: "a.md"}, {Path: "b.txt"}, {Path: "c.pdf"}}, "document-set", true, 1},
+		// Item 19: detect + extract agree on documentSetExts (.md/.txt/.html). PDF is
+		// NOT extractable yet, so it never counts toward the document-set threshold and
+		// a PDF-only repo is honestly unsupported (no more "supported then 0 records").
+		{"documents", []RepoFile{{Path: "a.md"}, {Path: "b.txt"}, {Path: "c.html"}}, "document-set", true, 1},
+		{"pdf-only unsupported", []RepoFile{{Path: "a.pdf"}, {Path: "b.pdf"}, {Path: "c.pdf"}}, "unknown", false, 0},
+		// Item 21: a source-code corpus (>=2 source files) maps to a chunked embed index.
+		{"code repo", []RepoFile{{Path: "main.go"}, {Path: "lib.rs"}, {Path: "app.ts"}}, "code-repo", true, 1},
+		// Item 24 regression fixtures, documenting current pattern PRIORITY (audio >
+		// tabular > document-set > code-repo, first match wins). A stray .csv in a code
+		// repo currently matches tabular (a known limitation, recorded honestly); a mixed
+		// docs+code repo matches document-set before code-repo.
+		{"csv stray in code repo (tabular wins by order)", []RepoFile{{Path: "notes.csv"}, {Path: "main.go"}, {Path: "lib.go"}}, "tabular-text", true, 2},
+		{"mixed docs+code (document-set wins by order)", []RepoFile{{Path: "a.md"}, {Path: "b.md"}, {Path: "c.md"}, {Path: "x.go"}, {Path: "y.go"}}, "document-set", true, 1},
+		// A single source file (below the threshold) is still unknown, not a code corpus.
 		{"unknown", []RepoFile{{Path: "main.go"}, {Path: "Dockerfile"}}, "unknown", false, 0},
 		{"audio beats text", []RepoFile{{Path: "a.wav"}, {Path: "x.csv"}}, "audio-transcribe", true, 1},
 	}

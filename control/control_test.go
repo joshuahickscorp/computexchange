@@ -687,6 +687,111 @@ func TestMatchSameClassOnly(t *testing.T) {
 	}
 }
 
+// The FINER verification-class pin (engine + build_hash): when a redundancy-peer
+// search sets PinEngine/PinBuildHash, Match must keep only candidates that share the
+// anchor's full (hw_class, engine, build_hash) class, so a byte-exact comparison never
+// crosses the class boundary. The general claim path (no pins) is unaffected.
+func TestMatchPinsVerificationClass(t *testing.T) {
+	now := time.Now()
+	// Three same-hw-class workers: one shares engine+build, one differs on engine,
+	// one differs on build. Only the exact-class match survives a pinned search.
+	anchorClass := func(w *MatchWorker, eng, build string) { w.Engine = eng; w.BuildHash = build }
+
+	same := mw(uuid.New(), "apple_silicon_max", 64, 0.9, 100, 2, now)
+	anchorClass(&same, "candle", "abc123")
+	otherEngine := mw(uuid.New(), "apple_silicon_max", 64, 0.99, 200, 2, now)
+	anchorClass(&otherEngine, "vllm", "abc123")
+	otherBuild := mw(uuid.New(), "apple_silicon_max", 64, 0.99, 200, 2, now)
+	anchorClass(&otherBuild, "candle", "def456")
+
+	got, err := Match(MatchTask{
+		JobType: "batch_infer", MinMemoryGB: 8, Tier: "batch",
+		HWClasses: []string{"apple_silicon_max"},
+		PinEngine: "candle", PinBuildHash: "abc123",
+	}, []MatchWorker{otherEngine, otherBuild, same})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != same.ID {
+		t.Fatalf("pinned search must keep only the exact (engine,build) match; got %d", len(got))
+	}
+
+	// No pins (the general claim path) → the engine/build axes do not filter: all
+	// three same-hw-class workers remain eligible (scheduling unchanged).
+	got2, err := Match(MatchTask{
+		JobType: "batch_infer", MinMemoryGB: 8, Tier: "batch",
+		HWClasses: []string{"apple_silicon_max"},
+	}, []MatchWorker{otherEngine, otherBuild, same})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got2) != 3 {
+		t.Fatalf("unpinned search must not filter on engine/build; got %d want 3", len(got2))
+	}
+}
+
+// sameVerificationClass is the byte-equality comparability gate. It treats an unknown
+// ("") build hash as its own non-matching class (never provably the same kernels), so a
+// worker that does not advertise a build is never byte-docked against a known build.
+func TestSameVerificationClass(t *testing.T) {
+	if !sameVerificationClass("candle", "abc", "candle", "abc") {
+		t.Fatal("identical (engine,build) must be the same class")
+	}
+	if sameVerificationClass("candle", "abc", "vllm", "abc") {
+		t.Fatal("different engine must NOT be the same class")
+	}
+	if sameVerificationClass("candle", "abc", "candle", "def") {
+		t.Fatal("different build must NOT be the same class")
+	}
+	// Unknown build on either side → never the same class (provisional trust).
+	if sameVerificationClass("candle", "", "candle", "abc") {
+		t.Fatal("unknown build (a) must NOT match a known build")
+	}
+	if sameVerificationClass("candle", "abc", "candle", "") {
+		t.Fatal("unknown build (b) must NOT match a known build")
+	}
+	if sameVerificationClass("candle", "", "candle", "") {
+		t.Fatal("two unknown builds must NOT be treated as the same class")
+	}
+}
+
+// byteExactJobType marks which job types compare BYTE-EXACT (and so need the class
+// boundary). The tolerant types compare semantics and are class-agnostic.
+func TestByteExactJobType(t *testing.T) {
+	for _, jt := range []string{"batch_infer", "audio_transcribe", "custom", "image_gen"} {
+		if !byteExactJobType(jt) {
+			t.Fatalf("%q must be byte-exact", jt)
+		}
+	}
+	for _, jt := range []string{"embed", "batch_classification", "json_extraction", "rerank"} {
+		if byteExactJobType(jt) {
+			t.Fatalf("%q must be tolerant (not byte-exact)", jt)
+		}
+	}
+}
+
+// classKey formats "engine|build_hash" for honeypot answer_class matching, and an
+// unknown build collapses to "" (which never matches a recorded class).
+func TestClassKey(t *testing.T) {
+	if got := classKey("candle", "abc"); got != "candle|abc" {
+		t.Fatalf("classKey = %q, want candle|abc", got)
+	}
+	if got := classKey("candle", ""); got != "" {
+		t.Fatalf("unknown build must yield empty class key, got %q", got)
+	}
+}
+
+// normalizeEngine maps a blank engine to the Candle default and leaves any non-blank
+// value for the closed-set validation to judge.
+func TestNormalizeEngine(t *testing.T) {
+	if normalizeEngine("") != "candle" {
+		t.Fatal("blank engine must normalize to candle")
+	}
+	if normalizeEngine("vllm") != "vllm" {
+		t.Fatal("a non-blank engine must pass through unchanged")
+	}
+}
+
 // Warm-routing (docs/PLANE_D.md §9 D3): among otherwise-EQUAL same-class workers,
 // the one that already has the job's model warm must rank first (it skips a cold
 // model load). The bonus is a re-rank NUDGE only: it never excludes the cold worker

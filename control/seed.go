@@ -110,10 +110,12 @@ func seedDemo(ctx context.Context, pool *pgxpool.Pool) error {
 		  SELECT 'embed', $1, $2
 		  WHERE NOT EXISTS (SELECT 1 FROM honeypots WHERE job_type='embed' AND input_ref=$1)`,
 			[]any{demoHoneypotEmbedRef, []byte(`{"vectors":[[1,0,0]]}`)}},
-		{`INSERT INTO honeypots (job_type, input_ref, known_answer)
-		  SELECT 'batch_infer', $1, $2
-		  WHERE NOT EXISTS (SELECT 1 FROM honeypots WHERE job_type='batch_infer' AND input_ref=$1)`,
-			[]any{demoHoneypotInferRef, []byte(`{"text":"42"}`)}},
+		// NOTE: no batch_infer (byte-exact) demo honeypot is seeded (item 11). A byte-exact
+		// honeypot MUST carry the answer_class of the worker that produced its known answer
+		// (Store.InsertHoneypot / validateHoneypotSeed); a blank-class placeholder can never
+		// fire (byteHoneypotComparable) and a fake answer would wrongly quarantine. Seed real
+		// batch_infer honeypots operationally with a real class output (docs/BUILD_STATUS.md).
+		// The embed honeypot above is tolerant (semantic comparison), so class-blind is safe.
 	}
 	for _, st := range stmts {
 		if _, err := pool.Exec(ctx, st.sql, st.args...); err != nil {

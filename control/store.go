@@ -777,13 +777,19 @@ func (s *Store) UpsertWorker(ctx context.Context, cap WorkerCapability) error {
 		thermalOK = thermalOK && b.ThermalOK
 	}
 
+	// engine + build_hash are the verification-class axes (handler-normalized:
+	// engine is blank→candle + validated, build_hash is the opaque agent build tag).
+	// They are persisted alongside hw_class so the redundancy matcher and the verifier
+	// can pin byte-exact peers/honeypots to the same (hw_class, engine, build_hash).
 	_, err = tx.Exec(ctx,
 		`INSERT INTO workers
-		   (id, supplier_id, hw_class, memory_gb, bw_gbps, last_seen_at, version,
+		   (id, supplier_id, hw_class, engine, build_hash, memory_gb, bw_gbps, last_seen_at, version,
 		    supported_jobs, supported_models, min_payout_usd_hr, thermal_ok)
-		 VALUES ($1,$2,$3,$4,$5, now(), $6,$7,$8,$9,$10)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7, now(), $8,$9,$10,$11,$12)
 		 ON CONFLICT (id) DO UPDATE SET
 		   hw_class = EXCLUDED.hw_class,
+		   engine = EXCLUDED.engine,
+		   build_hash = EXCLUDED.build_hash,
 		   memory_gb = EXCLUDED.memory_gb,
 		   bw_gbps = EXCLUDED.bw_gbps,
 		   last_seen_at = now(),
@@ -792,7 +798,7 @@ func (s *Store) UpsertWorker(ctx context.Context, cap WorkerCapability) error {
 		   supported_models = EXCLUDED.supported_models,
 		   min_payout_usd_hr = EXCLUDED.min_payout_usd_hr,
 		   thermal_ok = EXCLUDED.thermal_ok`,
-		cap.WorkerID, cap.SupplierID, cap.HWClass, cap.MemoryGB, cap.MemoryBwGbps, cap.AgentVersion,
+		cap.WorkerID, cap.SupplierID, cap.HWClass, cap.Engine, cap.BuildHash, cap.MemoryGB, cap.MemoryBwGbps, cap.AgentVersion,
 		cap.SupportedJobs, cap.SupportedModels, cap.MinPayoutUsdHr, thermalOK,
 	)
 	if err != nil {
@@ -1325,16 +1331,31 @@ type CommitTaskInfo struct {
 	IsHoneypot   bool
 	IsRedundancy bool
 	HWClass      string
-	jobType      string // parent job's job_type, for honeypot answer lookup
-	InputRef     string // this task's input chunk key (honeypot answer lookup)
-	ResultKey    string // canonical server-side result key (verification fetch)
-	ModelRef     string // parent job's model_ref (tiebreak peer selection)
-	MinMemoryGB  float32
-	ChunkIndex   int // this task's chunk position (tiebreak pairing + N-way vote)
+	// engine + buildHash are the finer verification-class axes of the COMMITTING
+	// worker (alongside HWClass). The verifier uses the full (hw_class, engine,
+	// build_hash) class to decide whether a byte-exact redundancy/honeypot
+	// comparison is even meaningful: a pure byte mismatch ACROSS the class boundary
+	// is not an auto-dock (two engines / two builds legitimately differ in bytes on
+	// identical hardware) — it falls back to provisional trust, mirroring the
+	// missing-third-worker pattern. Unexported: internal to verification.
+	engine      string
+	buildHash   string
+	jobType     string // parent job's job_type, for honeypot answer lookup
+	InputRef    string // this task's input chunk key (honeypot answer lookup)
+	ResultKey   string // canonical server-side result key (verification fetch)
+	ModelRef    string // parent job's model_ref (tiebreak peer selection)
+	MinMemoryGB float32
+	ChunkIndex  int // this task's chunk position (tiebreak pairing + N-way vote)
 	// peerSupplierID is the redundancy peer's supplier, set by the commit handler
 	// when a sibling result exists. Used only by the no-object-store verification
 	// fallback so a 2-blob disagreement docks the RIGHT supplier (uuid.Nil = unknown).
 	peerSupplierID uuid.UUID
+	// peerEngine + peerBuildHash are the redundancy peer's finer verification class,
+	// also set by the commit handler, so the no-object-store fallback can tell a
+	// same-class byte mismatch (a real defect) from a cross-class one (provisional
+	// trust). Blank = unknown peer class → a byte-exact pair is non-comparable.
+	peerEngine    string
+	peerBuildHash string
 }
 
 // CommitTask stores the result ref and flips the task to complete. Returns the
@@ -1372,7 +1393,8 @@ func (s *Store) CommitTask(ctx context.Context, taskID, workerID uuid.UUID, c Ta
 		`SELECT t.job_id, t.is_honeypot, t.is_redundancy,
 		        COALESCE(t.input_ref,''),
 		        COALESCE(NULLIF(t.result_key,''), $3),
-		        w.supplier_id, COALESCE(w.hw_class,''), j.job_type,
+		        w.supplier_id, COALESCE(w.hw_class,''),
+		        COALESCE(w.engine,''), COALESCE(w.build_hash,''), j.job_type,
 		        COALESCE(j.model_ref,''), COALESCE(j.min_memory_gb,0),
 		        COALESCE(t.chunk_index,0), COALESCE(j.split_size,0)
 		 FROM tasks t
@@ -1381,7 +1403,7 @@ func (s *Store) CommitTask(ctx context.Context, taskID, workerID uuid.UUID, c Ta
 		 WHERE t.id = $1`,
 		taskID, workerID, c.ResultKey,
 	).Scan(&info.JobID, &info.IsHoneypot, &info.IsRedundancy, &info.InputRef,
-		&info.ResultKey, &info.SupplierID, &info.HWClass, &info.jobType,
+		&info.ResultKey, &info.SupplierID, &info.HWClass, &info.engine, &info.buildHash, &info.jobType,
 		&info.ModelRef, &info.MinMemoryGB, &info.ChunkIndex, &splitSize)
 	if err != nil {
 		return nil, err
@@ -1635,30 +1657,53 @@ func (s *Store) AvailableHoneypots(ctx context.Context, jobType string, limit in
 	return out, rows.Err()
 }
 
-// GetHoneypotAnswer returns the base64-able known answer bytes for a honeypot
-// input ref, if one exists for this job type.
-func (s *Store) GetHoneypotAnswer(ctx context.Context, jobType, inputRef string) ([]byte, error) {
-	var ans []byte
-	err := s.pool.QueryRow(ctx,
-		`SELECT known_answer FROM honeypots
+// GetHoneypotAnswer returns the known answer bytes for a honeypot input ref (if one
+// exists for this job type) plus the verification class the answer was produced under
+// ("engine|build_hash", or "" = unknown/class-blind). The verifier uses answerClass to
+// decide whether a BYTE-EXACT honeypot mismatch is grounds to auto-quarantine: only
+// when the committing worker shares the answer's class. A "" class means the answer is
+// class-blind and never auto-quarantines a byte-exact job (the safe default).
+func (s *Store) GetHoneypotAnswer(ctx context.Context, jobType, inputRef string) (answer []byte, answerClass string, err error) {
+	err = s.pool.QueryRow(ctx,
+		`SELECT known_answer, COALESCE(answer_class,'') FROM honeypots
 		 WHERE job_type = $1 AND input_ref = $2 LIMIT 1`,
 		jobType, inputRef,
-	).Scan(&ans)
+	).Scan(&answer, &answerClass)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errNotFound
+		return nil, "", errNotFound
 	}
-	return ans, err
+	return answer, answerClass, err
+}
+
+// InsertHoneypot seeds a honeypot probe idempotently, REFUSING a blank-class byte-exact
+// write (validateHoneypotSeed / item 11) so the seed/admin path fails safely rather than
+// writing dead or dangerous coverage. answerClass is the "engine|build_hash" of the worker
+// that produced knownAnswer; tolerant job types may pass "" (class-blind is safe for them).
+func (s *Store) InsertHoneypot(ctx context.Context, jobType, inputRef string, knownAnswer []byte, answerClass string) error {
+	if err := validateHoneypotSeed(jobType, answerClass); err != nil {
+		return err
+	}
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO honeypots (job_type, input_ref, known_answer, answer_class)
+		 SELECT $1, $2, $3, $4
+		 WHERE NOT EXISTS (SELECT 1 FROM honeypots WHERE job_type=$1 AND input_ref=$2)`,
+		jobType, inputRef, knownAnswer, answerClass)
+	return err
 }
 
 // PeerResultKey finds a completed sibling task that ran the SAME input chunk for
 // the same job as the given task but on a DIFFERENT worker, returning its result
-// key for a within-class redundancy comparison. The pairing is by shared
-// input_ref (primary + its redundancy clone carry the same chunk). Returns
-// errNotFound when no committed peer exists yet (the common case — the peer may
-// not have finished, so verification simply has nothing to compare against).
-func (s *Store) PeerResultKey(ctx context.Context, taskID uuid.UUID) (peerResult string, peerSupplier uuid.UUID, err error) {
+// key for a within-class redundancy comparison plus the peer worker's finer
+// verification class (engine + build_hash). The pairing is by shared input_ref
+// (primary + its redundancy clone carry the same chunk). The class lets the
+// verifier's no-object-store fallback decide whether a byte-exact disagreement is
+// same-class (a real mismatch) or cross-class (provisional trust, not a dock).
+// Returns errNotFound when no committed peer exists yet (the common case — the peer
+// may not have finished, so verification simply has nothing to compare against).
+func (s *Store) PeerResultKey(ctx context.Context, taskID uuid.UUID) (peerResult string, peerSupplier uuid.UUID, peerEngine, peerBuildHash string, err error) {
 	err = s.pool.QueryRow(ctx,
-		`SELECT COALESCE(p.result_ref,''), w.supplier_id
+		`SELECT COALESCE(p.result_ref,''), w.supplier_id,
+		        COALESCE(w.engine,''), COALESCE(w.build_hash,'')
 		 FROM tasks t
 		   JOIN tasks p ON p.job_id = t.job_id AND p.input_ref = t.input_ref
 		                AND p.id <> t.id AND p.status = 'complete'
@@ -1668,11 +1713,11 @@ func (s *Store) PeerResultKey(ctx context.Context, taskID uuid.UUID) (peerResult
 		 ORDER BY p.completed_at ASC
 		 LIMIT 1`,
 		taskID,
-	).Scan(&peerResult, &peerSupplier)
+	).Scan(&peerResult, &peerSupplier, &peerEngine, &peerBuildHash)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", uuid.Nil, errNotFound
+		return "", uuid.Nil, "", "", errNotFound
 	}
-	return peerResult, peerSupplier, err
+	return peerResult, peerSupplier, peerEngine, peerBuildHash, err
 }
 
 // ChunkResult is one committed result for a chunk: its result key plus the
@@ -1683,6 +1728,11 @@ type ChunkResult struct {
 	WorkerID   uuid.UUID
 	SupplierID uuid.UUID
 	ResultRef  string
+	// Engine + BuildHash are the finer verification-class axes of the worker behind
+	// this result, so the N-way vote can tell whether two byte-exact results are even
+	// in the same (hw_class, engine, build_hash) class before docking on a mismatch.
+	Engine    string
+	BuildHash string
 }
 
 // ChunkResults returns every committed result for a job's chunk (the primary and
@@ -1691,7 +1741,8 @@ type ChunkResult struct {
 // once a tiebreak commits and does a real majorityVote over them.
 func (s *Store) ChunkResults(ctx context.Context, jobID uuid.UUID, chunkIndex int) ([]ChunkResult, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT t.id, t.worker_id, w.supplier_id, t.result_ref
+		`SELECT t.id, t.worker_id, w.supplier_id, t.result_ref,
+		        COALESCE(w.engine,''), COALESCE(w.build_hash,'')
 		 FROM tasks t JOIN workers w ON w.id = t.worker_id
 		 WHERE t.job_id = $1 AND COALESCE(t.chunk_index,0) = $2
 		   AND t.status = 'complete' AND t.is_honeypot = false
@@ -1705,7 +1756,8 @@ func (s *Store) ChunkResults(ctx context.Context, jobID uuid.UUID, chunkIndex in
 	var out []ChunkResult
 	for rows.Next() {
 		var cr ChunkResult
-		if err := rows.Scan(&cr.TaskID, &cr.WorkerID, &cr.SupplierID, &cr.ResultRef); err != nil {
+		if err := rows.Scan(&cr.TaskID, &cr.WorkerID, &cr.SupplierID, &cr.ResultRef,
+			&cr.Engine, &cr.BuildHash); err != nil {
 			return nil, err
 		}
 		out = append(out, cr)
@@ -2138,18 +2190,34 @@ func (s *Store) JobVerification(ctx context.Context, jobID uuid.UUID) (Verificat
 		if err := rows.Scan(&kind, &n); err != nil {
 			return v, err
 		}
-		v.Checked += n
 		switch kind {
 		case "honeypot_pass":
 			v.HoneypotsPassed += n
+			v.Checked += n
 		case "honeypot_fail":
 			v.HoneypotsFailed += n
+			v.Checked += n
 		case "redundancy_match":
 			v.RedundancyMatched += n
+			v.Checked += n
 		case "redundancy_mismatch":
 			v.RedundancyMismatched += n
+			v.Checked += n
 		case "tiebreak_win", "tiebreak_loss":
 			v.Tiebreaks += n
+			v.Checked += n
+		case "redundancy_same_supplier":
+			// A same-supplier "peer" — NOT an independent cross-check (items 7, 9).
+			// Surfaced as its own count and deliberately NOT added to Checked, so the
+			// receipt can say "no-independent-peer" rather than "verified".
+			v.SameSupplier += n
+		case "redundancy_cross_class", "tiebreak_cross_class":
+			// Cross-class coverage gap: the chunk had a redundant peer but in a
+			// DIFFERENT verification class, so a byte-exact comparison could not be
+			// performed. Surfaced as CrossClassSkipped for the receipt (item 9) but NOT
+			// counted as "checked" — counting an uncheckable comparison as verified
+			// would overstate the receipt (BLACKHOLE: surface the gap, never inflate).
+			v.CrossClassSkipped += n
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -2167,6 +2235,66 @@ func (s *Store) JobVerification(ctx context.Context, jobID uuid.UUID) (Verificat
 	v.DisputeStatus = disputeStatus
 	v.Label = deriveVerificationLabel(v)
 	return v, nil
+}
+
+// JobVerificationClasses returns the DISTINCT verification classes ("engine|build_hash")
+// of the workers that produced this job's completed (non-honeypot) results — the
+// "cleared under" provenance for the ClearingReceipt (items 13, 15). A blank class
+// (unknown build) maps to "" via classKey. Read-only.
+func (s *Store) JobVerificationClasses(ctx context.Context, jobID uuid.UUID) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT DISTINCT COALESCE(w.engine,''), COALESCE(w.build_hash,'')
+		 FROM tasks t JOIN workers w ON w.id = t.worker_id
+		 WHERE t.job_id = $1 AND t.status = 'complete' AND t.is_honeypot = false`,
+		jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var engine, build string
+		if err := rows.Scan(&engine, &build); err != nil {
+			return nil, err
+		}
+		out = append(out, classKey(engine, build))
+	}
+	return out, rows.Err()
+}
+
+// JobTaskReceipts returns the per-task verification drilldown for a job (item 15): each
+// task's chunk, status, honeypot flag, worker verification class, and its latest
+// comparison event kind. It NEVER selects the honeypot known_answer, so the drilldown
+// cannot leak the hidden probe answer. Read-only.
+func (s *Store) JobTaskReceipts(ctx context.Context, jobID uuid.UUID) ([]TaskReceipt, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT COALESCE(t.chunk_index,0), t.status, t.is_honeypot,
+		        COALESCE(w.engine,''), COALESCE(w.build_hash,''),
+		        COALESCE((SELECT ve.kind FROM verification_events ve
+		                  WHERE ve.task_id = t.id ORDER BY ve.created_at DESC LIMIT 1), '')
+		 FROM tasks t LEFT JOIN workers w ON w.id = t.worker_id
+		 WHERE t.job_id = $1
+		 ORDER BY COALESCE(t.chunk_index,0), t.id`,
+		jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TaskReceipt
+	for rows.Next() {
+		var (
+			chunk         int
+			status        string
+			isHoneypot    bool
+			engine, build string
+			kind          string
+		)
+		if err := rows.Scan(&chunk, &status, &isHoneypot, &engine, &build, &kind); err != nil {
+			return nil, err
+		}
+		out = append(out, taskReceiptRow(chunk, status, isHoneypot, engine, build, kind))
+	}
+	return out, rows.Err()
 }
 
 // RecordDispute records a buyer's dispute against a job's result, atomically verifying

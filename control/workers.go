@@ -322,7 +322,7 @@ func (wk *Workers) resolveDisputes(ctx context.Context) error {
 				}
 				continue
 			}
-			peer, perr := wk.store.SelectRedundancyPeerExcluding(ctx, target.JobType, target.ModelRef, target.MinMemGB, target.AnchorWorker, nil)
+			peer, perr := wk.store.SelectRedundancyPeerExcluding(ctx, target.JobType, target.ModelRef, target.MinMemGB, target.AnchorWorker, nil, nil)
 			if perr != nil {
 				// No distinct same-class supplier free → surface the boundary, retry later.
 				if serr := wk.store.SetDisputeStatus(ctx, d.ID, "no_peer"); serr != nil {
@@ -380,7 +380,7 @@ func (wk *Workers) hedgeStragglers(ctx context.Context) error {
 		return err
 	}
 	for _, s := range stragglers {
-		peer, perr := wk.store.SelectRedundancyPeerExcluding(ctx, s.JobType, s.ModelRef, s.MinMemGB, s.WorkerID, nil)
+		peer, perr := wk.store.SelectRedundancyPeerExcluding(ctx, s.JobType, s.ModelRef, s.MinMemGB, s.WorkerID, nil, nil)
 		if errors.Is(perr, ErrNoSupply) {
 			continue // no distinct same-class worker free — leave it; the stale reaper still guards it
 		}

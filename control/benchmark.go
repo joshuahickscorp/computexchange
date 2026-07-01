@@ -21,7 +21,8 @@ import (
 // requirement) → Warm is false for everyone and the ranking is unchanged.
 func (s *Store) CandidateWorkers(ctx context.Context, jobType, modelRef string, minMemGB float32) ([]MatchWorker, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT w.id, COALESCE(w.hw_class,''),
+		`SELECT w.id, w.supplier_id, COALESCE(w.hw_class,''),
+		        COALESCE(w.engine,''), COALESCE(w.build_hash,''),
 		        COALESCE(w.effective_memory_gb, w.memory_gb, 0),
 		        s.reputation, w.last_seen_at, s.tier,
 		        COALESCE(w.throttled, false),
@@ -59,7 +60,7 @@ func (s *Store) CandidateWorkers(ctx context.Context, jobType, modelRef string, 
 			tierRaw int16
 			tps     float32
 		)
-		if err := rows.Scan(&m.ID, &m.HWClass, &m.MemoryGB, &m.Reputation,
+		if err := rows.Scan(&m.ID, &m.SupplierID, &m.HWClass, &m.Engine, &m.BuildHash, &m.MemoryGB, &m.Reputation,
 			&m.LastSeen, &tierRaw, &m.Throttled, &tps, &m.Warm); err != nil {
 			return nil, err
 		}
@@ -70,11 +71,15 @@ func (s *Store) CandidateWorkers(ctx context.Context, jobType, modelRef string, 
 	return out, rows.Err()
 }
 
-// WorkerProfile is the full benchmark/profile view of one worker.
+// WorkerProfile is the full benchmark/profile view of one worker. Engine + BuildHash
+// are the finer verification-class axes (alongside HWClass) so the redundancy-peer
+// path can pin a peer to the anchor's full (hw_class, engine, build_hash) class.
 type WorkerProfile struct {
 	WorkerID   uuid.UUID     `json:"worker_id"`
 	SupplierID uuid.UUID     `json:"supplier_id"`
 	HWClass    string        `json:"hw_class"`
+	Engine     string        `json:"engine"`
+	BuildHash  string        `json:"build_hash"`
 	MemoryGB   float32       `json:"memory_gb"`
 	BwGbps     float32       `json:"bw_gbps"`
 	Version    string        `json:"version"`
@@ -85,11 +90,13 @@ type WorkerProfile struct {
 func (s *Store) GetWorkerProfile(ctx context.Context, workerID uuid.UUID) (*WorkerProfile, error) {
 	var p WorkerProfile
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, supplier_id, COALESCE(hw_class,''), COALESCE(memory_gb,0),
-		        COALESCE(bw_gbps,0), COALESCE(version,'')
+		`SELECT id, supplier_id, COALESCE(hw_class,''),
+		        COALESCE(engine,''), COALESCE(build_hash,''),
+		        COALESCE(memory_gb,0), COALESCE(bw_gbps,0), COALESCE(version,'')
 		 FROM workers WHERE id = $1`,
 		workerID,
-	).Scan(&p.WorkerID, &p.SupplierID, &p.HWClass, &p.MemoryGB, &p.BwGbps, &p.Version)
+	).Scan(&p.WorkerID, &p.SupplierID, &p.HWClass, &p.Engine, &p.BuildHash,
+		&p.MemoryGB, &p.BwGbps, &p.Version)
 	if err != nil {
 		return nil, err
 	}

@@ -92,13 +92,15 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /v1/jobs/{id}", s.authBuyer(http.HandlerFunc(s.handleGetJob)))
 	mux.Handle("GET /v1/jobs/{id}/results", s.authBuyer(http.HandlerFunc(s.handleJobResults)))
 	mux.Handle("GET /v1/jobs/{id}/invoice", s.authBuyer(http.HandlerFunc(s.handleJobInvoice)))
+	mux.Handle("GET /v1/jobs/{id}/receipt", s.authBuyer(http.HandlerFunc(s.handleJobReceipt)))   // ClearingReceipt (items 13-15)
 	mux.Handle("GET /v1/jobs/{id}/events", s.authBuyer(http.HandlerFunc(s.handleJobEvents)))     // Plane C/D: buyer timeline
 	mux.Handle("GET /v1/jobs/{id}/failures", s.authBuyer(http.HandlerFunc(s.handleJobFailures))) // Plane C/D: typed failure history
 	mux.Handle("POST /v1/jobs/{id}/dispute", s.authBuyer(http.HandlerFunc(s.handleFileDispute))) // buyer-dispute seam (optimistic-verification / payout-guarantee foundation)
 	mux.Handle("DELETE /v1/jobs/{id}", s.authBuyer(http.HandlerFunc(s.handleCancelJob)))
 	mux.Handle("GET /v1/models", s.authBuyer(http.HandlerFunc(s.handleModels)))
 	mux.Handle("GET /v1/price-estimate", s.authBuyer(http.HandlerFunc(s.handlePriceEstimate)))
-	mux.Handle("POST /v1/quote", s.authBuyer(http.HandlerFunc(s.handleQuote))) // Plane C: scan + price, no spend
+	mux.Handle("POST /v1/quote", s.authBuyer(http.HandlerFunc(s.handleQuote)))                  // Plane C: scan + price, no spend
+	mux.Handle("POST /v1/quote/pipeline", s.authBuyer(http.HandlerFunc(s.handlePipelineQuote))) // composite multi-stage quote (item 4)
 	mux.Handle("POST /v1/webhooks", s.authBuyer(http.HandlerFunc(s.handleRegisterWebhook)))
 	mux.Handle("POST /v1/private-pool", s.authBuyer(http.HandlerFunc(s.handleAddPrivatePoolMember))) // Private Deployment (research §3)
 
@@ -115,6 +117,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /v1/intake/launch", s.authBuyer(http.HandlerFunc(s.handleLaunchIntake)))
 	mux.Handle("POST /v1/pipelines", s.authBuyer(http.HandlerFunc(s.handleCreatePipeline)))
 	mux.Handle("GET /v1/pipelines/{id}", s.authBuyer(http.HandlerFunc(s.handleGetPipeline)))
+	mux.Handle("GET /v1/pipelines/{id}/receipt", s.authBuyer(http.HandlerFunc(s.handlePipelineReceipt))) // pipeline ClearingReceipt (item 14)
 	mux.Handle("POST /v1/deliver", s.authBuyer(http.HandlerFunc(s.handleDeliver)))
 	mux.HandleFunc("POST /v1/stripe/webhook", s.handleStripeWebhook)          // unauthed; verified by signature
 	mux.HandleFunc("POST /v1/stripe/connect-webhook", s.handleConnectWebhook) // Connect account.updated; verified by signature
@@ -1220,6 +1223,22 @@ func (s *Server) handleWorkerRegister(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid hw_class: "+cap.HWClass)
 		return
 	}
+	// Normalize + validate the engine (the second verification-class axis). An
+	// absent/blank engine (an older agent that does not advertise it) normalizes to
+	// the wired Candle default, so a single-engine fleet's (hw_class, engine) class
+	// collapses to hw_class — exactly today's behavior. An UNKNOWN non-blank engine
+	// is rejected rather than silently stored, so the closed set stays meaningful and
+	// a typo never opens a one-worker verification class by accident.
+	cap.Engine = normalizeEngine(cap.Engine)
+	if !validEngines[cap.Engine] {
+		writeErr(w, http.StatusBadRequest, "invalid engine: "+cap.Engine)
+		return
+	}
+	// build_hash is FREE-FORM (any opaque agent-computed class tag) and intentionally
+	// NOT validated against a closed set — the agent owns the build inputs and the
+	// control plane only compares hashes for equality. A blank value is "unknown
+	// build", which the verifier treats as provisional trust (never an auto-dock), so
+	// no normalization is needed; it is persisted as sent.
 	// Bind the capability to the authenticated worker/supplier — never trust
 	// the body's ids over the token's.
 	cap.WorkerID = auth.WorkerID
@@ -1472,8 +1491,10 @@ func (s *Server) handleWorkerCommit(w http.ResponseWriter, r *http.Request) {
 	// different worker, fetch its result too for a within-class comparison. None
 	// yet → nil, which the verifier treats as "nothing to compare" (honest).
 	var redundancyBytes []byte
-	if peerKey, peerSup, perr := s.store.PeerResultKey(ctx, info.TaskID); perr == nil && peerKey != "" {
+	if peerKey, peerSup, peerEng, peerBuild, perr := s.store.PeerResultKey(ctx, info.TaskID); perr == nil && peerKey != "" {
 		info.peerSupplierID = peerSup // for the verifier's no-object-store fallback (dock the right supplier)
+		info.peerEngine = peerEng     // peer's verification class — same-class vs cross-class byte mismatch
+		info.peerBuildHash = peerBuild
 		if b, gerr := s.storage.GetObject(ctx, peerKey); gerr == nil {
 			redundancyBytes = b
 		}
@@ -1712,6 +1733,43 @@ func (s *Server) handleJobInvoice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, inv)
+}
+
+// handleJobReceipt returns the ClearingReceipt (items 13-15): ONE buyer-scoped projection
+// joining the invoice (quote + actuals + settlement), the verification receipt (counts +
+// label + dispute), and the verification classes that produced the results. JobInvoice is
+// buyer-scoped, so it doubles as the ownership gate (a buyer sees only their own jobs).
+func (s *Server) handleJobReceipt(w http.ResponseWriter, r *http.Request) {
+	auth := r.Context().Value(ctxBuyer).(*AuthResult)
+	id, ok := pathUUID(w, r)
+	if !ok {
+		return
+	}
+	inv, err := s.store.JobInvoice(r.Context(), id, auth.BuyerID)
+	if errors.Is(err, errNotFound) {
+		writeErr(w, http.StatusNotFound, "job not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	verif, verr := s.store.JobVerification(r.Context(), id)
+	if verr != nil {
+		writeErr(w, http.StatusInternalServerError, verr.Error())
+		return
+	}
+	classes, cerr := s.store.JobVerificationClasses(r.Context(), id)
+	if cerr != nil {
+		writeErr(w, http.StatusInternalServerError, cerr.Error())
+		return
+	}
+	tasks, terr := s.store.JobTaskReceipts(r.Context(), id)
+	if terr != nil {
+		writeErr(w, http.StatusInternalServerError, terr.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, assembleClearingReceipt(id, inv.Status, inv, verif, classes, tasks))
 }
 
 // handleDashboard serves the static operator dashboard at the root, same-origin

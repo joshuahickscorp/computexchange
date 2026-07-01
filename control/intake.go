@@ -46,8 +46,18 @@ type PipelineStage struct {
 // the Concierge refuses a shape it cannot map yet (with a Reason) instead of
 // guessing a plan that would burn the buyer's money on the wrong work.
 type DetectedPipeline struct {
-	Pattern   string          `json:"pattern"`
-	Supported bool            `json:"supported"`
+	Pattern   string `json:"pattern"`
+	Supported bool   `json:"supported"`
+	// Launchable is true only when the pattern can actually be EXTRACTED and launched
+	// from a connected repo today (see patternLaunchable). A workload can be recognized
+	// (Supported) yet not launchable from a repo — e.g. audio transcription, whose input
+	// is binary audio via the upload path, not a repo fetch. The UI offers Launch only
+	// when Launchable; the launch handler refuses otherwise (item 20).
+	Launchable bool `json:"launchable"`
+	// Truncated is true when the source file listing was INCOMPLETE (GitHub truncated
+	// the recursive tree), so detection ran over a PARTIAL listing and may be wrong.
+	// The buyer is warned and should review before launch (item 18).
+	Truncated bool            `json:"truncated,omitempty"`
 	Reason    string          `json:"reason,omitempty"`
 	Stages    []PipelineStage `json:"stages"`
 }
@@ -100,6 +110,64 @@ func countExt(files []RepoFile, exts ...string) (int, string) {
 	return n, first
 }
 
+// documentSetExts is the SINGLE source of truth for which files the document-set
+// pattern recognizes AND extracts. Detection (the match below) and extraction
+// (extractInput) MUST use the same set, or a repo gets "supported then 0 records"
+// (the old bug: .pdf matched but was never fetched). PDF is not extractable yet, so
+// it is deliberately absent — a PDF-only repo is honestly unsupported (item 19).
+var documentSetExts = []string{".md", ".txt", ".html"}
+
+// codeRepoExts is the shared source of truth for the code-repo pattern: detection AND
+// extraction agree (like documentSetExts), so a matched source file is always fetched.
+// Common source extensions across Go/Rust/TS/JS/Python/Java/C/C++/etc. (item 21).
+var codeRepoExts = []string{
+	".go", ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".java", ".rb",
+	".c", ".h", ".cc", ".cpp", ".hpp", ".cs", ".kt", ".swift", ".php", ".scala",
+}
+
+// tabularExts is the shared source of truth for the tabular pattern (detect + extract).
+var tabularExts = []string{".csv", ".jsonl", ".tsv"}
+
+// ExtractionStats reports how a source listing became job input (item 23): files that
+// matched the pattern, files actually used (fetched + extracted), files skipped
+// (everything else in the listing), JSONL records produced, and fetched bytes. Surfaced
+// in the intake launch response so the buyer sees what was used vs left out.
+type ExtractionStats struct {
+	FilesMatched int   `json:"files_matched"`
+	FilesUsed    int   `json:"files_used"`
+	FilesSkipped int   `json:"files_skipped"`
+	Records      int   `json:"records"`
+	Bytes        int64 `json:"bytes"`
+}
+
+// docStats computes ExtractionStats for a fetch-and-chunk extraction. Pure — unit-tested.
+func docStats(allFiles []RepoFile, matchExts []string, used []namedContent, records int) ExtractionStats {
+	matched, _ := countExt(allFiles, matchExts...)
+	var b int64
+	for _, d := range used {
+		b += int64(len(d.Content))
+	}
+	return ExtractionStats{
+		FilesMatched: matched,
+		FilesUsed:    len(used),
+		FilesSkipped: len(allFiles) - len(used),
+		Records:      records,
+		Bytes:        b,
+	}
+}
+
+// Intake read caps bound untrusted GitHub content so one file (or one repo) cannot
+// exhaust control-plane memory (items 16-17). Exceeding either returns the typed
+// errIntakeTooLarge, which the intake handlers surface as a 4xx rather than an OOM.
+const (
+	maxIntakeFileBytes  = 25 << 20  // 25 MiB per file
+	maxIntakeTotalBytes = 200 << 20 // 200 MiB aggregate per extract
+)
+
+// errIntakeTooLarge is the typed sentinel for an over-cap intake read (per-file or
+// aggregate). Callers check it with errors.Is.
+var errIntakeTooLarge = fmt.Errorf("intake input too large")
+
 // intakePatterns is the ordered catalogue. Start narrow and honest; widen over
 // time. Each entry is the full "support" the system gives a workload: how to
 // recognize its data and how to turn it into real CX jobs.
@@ -119,7 +187,7 @@ var intakePatterns = []intakePattern{
 	{
 		key: "tabular-text",
 		match: func(files []RepoFile) (bool, string) {
-			if n, p := countExt(files, ".csv", ".jsonl", ".tsv"); n > 0 {
+			if n, p := countExt(files, tabularExts...); n > 0 {
 				return true, "tabular text · " + p
 			}
 			return false, ""
@@ -134,13 +202,28 @@ var intakePatterns = []intakePattern{
 	{
 		key: "document-set",
 		match: func(files []RepoFile) (bool, string) {
-			if n, _ := countExt(files, ".md", ".txt", ".pdf", ".html"); n >= 3 {
+			if n, _ := countExt(files, documentSetExts...); n >= 3 {
 				return true, fmt.Sprintf("%d documents", n)
 			}
 			return false, ""
 		},
 		build: func(ev string) []PipelineStage {
 			return []PipelineStage{{Op: "json_extraction", Model: "llama-3.2-1b-instruct-q4", Detail: ev + " → structured JSON"}}
+		},
+	},
+	{
+		// code-repo: a source-code corpus (>=2 source files) → a deterministic chunked
+		// embed index. The most common shape we used to refuse (item 21). Tried AFTER the
+		// data patterns so a repo that is really tabular/docs/audio still matches those first.
+		key: "code-repo",
+		match: func(files []RepoFile) (bool, string) {
+			if n, _ := countExt(files, codeRepoExts...); n >= 2 {
+				return true, fmt.Sprintf("%d source files", n)
+			}
+			return false, ""
+		},
+		build: func(ev string) []PipelineStage {
+			return []PipelineStage{{Op: "embed", Model: "all-minilm-l6-v2", Detail: ev + " → chunked 384-dim code index"}}
 		},
 	},
 }
@@ -152,7 +235,12 @@ var intakePatterns = []intakePattern{
 func detectPipeline(files []RepoFile) DetectedPipeline {
 	for _, p := range intakePatterns {
 		if ok, ev := p.match(files); ok {
-			return DetectedPipeline{Pattern: p.key, Supported: true, Stages: p.build(ev)}
+			return DetectedPipeline{
+				Pattern:    p.key,
+				Supported:  true,
+				Launchable: patternLaunchable(p.key),
+				Stages:     p.build(ev),
+			}
 		}
 	}
 	return DetectedPipeline{
@@ -160,6 +248,31 @@ func detectPipeline(files []RepoFile) DetectedPipeline {
 		Supported: false,
 		Reason:    "no known data pattern detected — supported today: audio (transcribe), tabular text (embed + classify), document sets (extract). Connect data that matches, or choose a workload manually.",
 	}
+}
+
+// patternLaunchable reports whether a detected pattern can actually be EXTRACTED and
+// launched from a connected repo today. A pattern is launchable only if extractInput
+// has a real extractor for it. audio-transcribe is RECOGNIZED but NOT launchable from
+// a repo (its input is binary audio via the upload path, not a repo fetch), so the
+// launch handler refuses it EARLY instead of fetching the source and failing
+// mid-extract (item 20). Pure — unit-tested, and keyed on the persisted pattern name
+// so old persisted intakes gate correctly too.
+func patternLaunchable(pattern string) bool {
+	switch pattern {
+	case "tabular-text", "document-set", "code-repo":
+		return true
+	default:
+		return false // audio-transcribe + unknown: not launchable from a repo
+	}
+}
+
+// withTruncationWarning marks a detection as made over an INCOMPLETE listing and
+// appends an honest warning to its reason, so a truncated repo never yields a
+// confidently-wrong plan (item 18). Pure — unit-tested.
+func withTruncationWarning(det DetectedPipeline) DetectedPipeline {
+	det.Truncated = true
+	det.Reason = strings.TrimSpace(det.Reason + " NOTE: the repository file listing was truncated by GitHub (too many files); detection may be incomplete — review before launch.")
+	return det
 }
 
 // --- GitHub connection (real HTTP, gated on a configured OAuth app) ---
@@ -226,10 +339,13 @@ func (g *GitHubApp) Exchange(ctx context.Context, code string) (string, error) {
 	return out.AccessToken, nil
 }
 
-// Tree lists a repo's files at a ref via the recursive git-trees API.
-func (g *GitHubApp) Tree(ctx context.Context, token, repoFullName, ref string) ([]RepoFile, error) {
+// Tree lists a repo's files at a ref via the recursive git-trees API. The second
+// return is GitHub's `truncated` flag: when true the listing is INCOMPLETE (the repo
+// has more entries than one tree response carries), so detection over it is partial
+// and the caller marks the result low-confidence rather than trusting it (item 18).
+func (g *GitHubApp) Tree(ctx context.Context, token, repoFullName, ref string) ([]RepoFile, bool, error) {
 	if !g.Configured() {
-		return nil, errGitHubUnconfigured
+		return nil, false, errGitHubUnconfigured
 	}
 	u := fmt.Sprintf("https://api.github.com/repos/%s/git/trees/%s?recursive=1", repoFullName, url.PathEscape(ref))
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
@@ -237,12 +353,12 @@ func (g *GitHubApp) Tree(ctx context.Context, token, repoFullName, ref string) (
 	req.Header.Set("Accept", "application/vnd.github+json")
 	resp, err := g.http.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("github tree (%d): %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, false, fmt.Errorf("github tree (%d): %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 	var out struct {
 		Tree []struct {
@@ -250,9 +366,10 @@ func (g *GitHubApp) Tree(ctx context.Context, token, repoFullName, ref string) (
 			Type string `json:"type"`
 			Size int64  `json:"size"`
 		} `json:"tree"`
+		Truncated bool `json:"truncated"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	files := make([]RepoFile, 0, len(out.Tree))
 	for _, t := range out.Tree {
@@ -260,7 +377,7 @@ func (g *GitHubApp) Tree(ctx context.Context, token, repoFullName, ref string) (
 			files = append(files, RepoFile{Path: t.Path, Size: t.Size})
 		}
 	}
-	return files, nil
+	return files, out.Truncated, nil
 }
 
 // --- handlers ---
@@ -334,6 +451,7 @@ func (s *Server) handleCreateIntake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	files := req.Files
+	var truncated bool
 	// A connected source → list its files from GitHub (real only with a configured
 	// app + stored token; otherwise an honest 503).
 	if len(files) == 0 && req.SourceID != "" {
@@ -350,7 +468,7 @@ func (s *Server) handleCreateIntake(w http.ResponseWriter, r *http.Request) {
 		if ref == "" {
 			ref = "HEAD"
 		}
-		files, err = githubApp.Tree(r.Context(), src.AccessToken, repo, ref)
+		files, truncated, err = githubApp.Tree(r.Context(), src.AccessToken, repo, ref)
 		if err != nil {
 			writeErr(w, http.StatusServiceUnavailable, err.Error())
 			return
@@ -361,6 +479,12 @@ func (s *Server) handleCreateIntake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	det := detectPipeline(files)
+	if truncated {
+		// Incomplete listing — mark + warn so the buyer never trusts a detection made
+		// over a partial repo (item 18). We warn rather than refuse: a truncated listing
+		// is often still enough to recognize the shape.
+		det = withTruncationWarning(det)
+	}
 	status := "detected"
 	if !det.Supported {
 		status = "unsupported"
@@ -422,10 +546,25 @@ func (g *GitHubApp) RawFile(ctx context.Context, token, repo, ref, path string) 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		b, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, fmt.Errorf("github raw %s (%d): %s", path, resp.StatusCode, strings.TrimSpace(string(b)))
 	}
-	return io.ReadAll(resp.Body)
+	// Cap the untrusted raw read so one file cannot exhaust control-plane memory (item 16).
+	return readCapped(resp.Body, maxIntakeFileBytes, path)
+}
+
+// readCapped reads at most `max` bytes from r, returning the typed errIntakeTooLarge
+// if the source exceeds `max`. It reads ONE byte past the cap so it DETECTS an
+// oversize file rather than truncating it silently. Pure — unit-tested without GitHub.
+func readCapped(r io.Reader, max int64, path string) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(r, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > max {
+		return nil, fmt.Errorf("%w: %s exceeds %d bytes", errIntakeTooLarge, path, max)
+	}
+	return b, nil
 }
 
 // handleListRepos returns the repos for a connected source (the picker).
@@ -450,6 +589,15 @@ type launchRequest struct {
 	IntakeID string `json:"intake_id"`
 	Repo     string `json:"repo"`
 	Ref      string `json:"ref"`
+	// LaunchContract fields (items 1-5): the budget/verification/routing the launched
+	// jobs must carry, exactly as a direct /v1/jobs submission would. Without these the
+	// intake path silently dropped the buyer's spend cap, verification policy, reputation
+	// floor, private-pool routing, and quote binding.
+	QuoteID       string             `json:"quote_id,omitempty"`
+	MaxUSD        float64            `json:"max_usd,omitempty"`
+	MinReputation float32            `json:"min_reputation,omitempty"`
+	PrivatePool   bool               `json:"private_pool,omitempty"`
+	Verification  VerificationPolicy `json:"verification,omitempty"`
 }
 
 // handleLaunchIntake takes a detected intake, fetches the source files, EXTRACTS
@@ -475,6 +623,13 @@ func (s *Server) handleLaunchIntake(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "intake has no runnable pipeline")
 		return
 	}
+	// Refuse a recognized-but-not-launchable workload EARLY (item 20), before fetching
+	// the source — e.g. audio transcription from a repo, whose binary-audio input path
+	// is not wired. Keyed on the persisted pattern name so it holds for old intakes too.
+	if !patternLaunchable(det.Pattern) {
+		writeErr(w, http.StatusBadRequest, "this workload is recognized but not launchable from a repo yet (audio transcription needs the binary-audio upload path, not a repo fetch)")
+		return
+	}
 	src, err := s.store.GetGitSource(r.Context(), auth.BuyerID, sourceID)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "intake has no connected source to fetch from")
@@ -490,33 +645,63 @@ func (s *Server) handleLaunchIntake(w http.ResponseWriter, r *http.Request) {
 	if ref == "" {
 		ref = "HEAD"
 	}
-	files, err := githubApp.Tree(r.Context(), src.AccessToken, repo, ref)
+	files, _, err := githubApp.Tree(r.Context(), src.AccessToken, repo, ref)
 	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	jsonl, n, err := s.extractInput(r.Context(), src.AccessToken, repo, ref, det.Pattern, files)
+	jsonl, stats, err := s.extractInput(r.Context(), src.AccessToken, repo, ref, det.Pattern, files)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "could not prepare input: "+err.Error())
 		return
 	}
-	if n == 0 {
+	if stats.Records == 0 {
 		writeErr(w, http.StatusBadRequest, "no input records extracted from the source")
 		return
 	}
 	inputJSON, _ := json.Marshal(string(jsonl)) // a JSON string IS the inline JSONL
 	intakeID, _ := uuid.Parse(req.IntakeID)
+	// LaunchContract (items 1-2, 5): stamp the buyer's budget/verification/routing onto
+	// every launched stage so an intake-launched job carries the SAME guarantees as a
+	// direct /v1/jobs submission, instead of silently dropping the spend cap + routing.
+	contract := LaunchContract{
+		QuoteID:       req.QuoteID,
+		MaxUSD:        req.MaxUSD,
+		MinReputation: req.MinReputation,
+		PrivatePool:   req.PrivatePool,
+		Verification:  req.Verification,
+	}
+	if contract.MaxUSD <= 0 {
+		// Item 2: an auto-launched intake must carry a BUDGET, never run uncapped. With no
+		// buyer cap, GENERATE a composite quote for the detected stages (priced on the
+		// extracted input) and use its worst-case total as the spend cap (max_usd), which
+		// createJob then persists on every launched job. The launch is no longer a back
+		// door around the budget governor.
+		var stageQuotes []Quote
+		for _, stage := range det.Stages {
+			if stage.From == "previous" {
+				continue
+			}
+			stageQuotes = append(stageQuotes, s.buildQuote(r.Context(), jobSubmit{
+				JobType: JobType{Type: stage.Op},
+				Model:   ModelRef{Kind: "gguf", Ref: stage.Model},
+				Tier:    "batch",
+				Input:   inputJSON,
+			}, jsonl))
+		}
+		contract.MaxUSD = composeQuotes(stageQuotes).TotalCost.MaxUSD
+	}
 	var launched []map[string]any
 	for i, stage := range det.Stages {
 		if stage.From == "previous" {
 			continue // chained: advanceIntake submits it when its predecessor completes
 		}
-		resp, herr := s.createJob(r.Context(), auth.BuyerID, jobSubmit{
+		resp, herr := s.createJob(r.Context(), auth.BuyerID, contract.applyTo(jobSubmit{
 			JobType: JobType{Type: stage.Op},
 			Model:   ModelRef{Kind: "gguf", Ref: stage.Model},
 			Tier:    "batch",
 			Input:   inputJSON,
-		})
+		}))
 		if herr != nil {
 			writeErr(w, herr.status, herr.msg)
 			return
@@ -527,7 +712,7 @@ func (s *Server) handleLaunchIntake(w http.ResponseWriter, r *http.Request) {
 		}
 		launched = append(launched, map[string]any{"stage": stage.Op, "job_id": resp.JobID})
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"intake_id": req.IntakeID, "records": n, "jobs": launched})
+	writeJSON(w, http.StatusAccepted, map[string]any{"intake_id": req.IntakeID, "records": stats.Records, "extraction": stats, "jobs": launched})
 }
 
 // advanceIntake chains a multi-stage pipeline: when an intake-linked job completes,
@@ -583,40 +768,88 @@ func (s *Server) advanceIntake(ctx context.Context, jobID uuid.UUID) {
 	_ = s.store.InsertIntakeJobLink(ctx, resp.JobID, intakeID, next)
 }
 
+// hasAnySuffix reports whether s (already lowercased) ends in any of suffixes.
+func hasAnySuffix(s string, suffixes []string) bool {
+	for _, suf := range suffixes {
+		if strings.HasSuffix(s, suf) {
+			return true
+		}
+	}
+	return false
+}
+
+// fetchCappedDocs fetches each file whose path matches one of `exts`, enforcing a
+// per-file cap and an aggregate cap so a malicious or accidental large repo cannot
+// exhaust control-plane memory (items 16-17). Either overflow returns the typed
+// errIntakeTooLarge. Pure over `fetch`, so the caps are unit-tested with a fake
+// fetcher (no GitHub). Detection and extraction share `exts` (documentSetExts), so a
+// matched file is always actually fetched (no "supported then 0 records", item 19).
+func fetchCappedDocs(files []RepoFile, exts []string, fetch func(path string) ([]byte, error), perFile, aggregate int64) ([]namedContent, error) {
+	var docs []namedContent
+	var total int64
+	for _, f := range files {
+		if !hasAnySuffix(strings.ToLower(f.Path), exts) {
+			continue
+		}
+		content, err := fetch(f.Path)
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(content)) > perFile {
+			return nil, fmt.Errorf("%w: %s exceeds %d bytes", errIntakeTooLarge, f.Path, perFile)
+		}
+		total += int64(len(content))
+		if total > aggregate {
+			return nil, fmt.Errorf("%w: document set exceeds %d bytes aggregate", errIntakeTooLarge, aggregate)
+		}
+		docs = append(docs, namedContent{Path: f.Path, Content: content})
+	}
+	return docs, nil
+}
+
 // extractInput fetches + extracts the JSONL the detected pattern needs. The
 // extractors are pure (extract.go); this is the I/O that feeds them.
-func (s *Server) extractInput(ctx context.Context, token, repo, ref, pat string, files []RepoFile) ([]byte, int, error) {
+func (s *Server) extractInput(ctx context.Context, token, repo, ref, pat string, files []RepoFile) ([]byte, ExtractionStats, error) {
 	switch pat {
 	case "tabular-text":
 		for _, f := range files {
-			l := strings.ToLower(f.Path)
-			if strings.HasSuffix(l, ".csv") || strings.HasSuffix(l, ".jsonl") || strings.HasSuffix(l, ".tsv") {
-				content, err := githubApp.RawFile(ctx, token, repo, ref, f.Path)
-				if err != nil {
-					return nil, 0, err
-				}
-				return extractTabular(f.Path, content)
+			if !hasAnySuffix(strings.ToLower(f.Path), tabularExts) {
+				continue
 			}
+			content, err := githubApp.RawFile(ctx, token, repo, ref, f.Path)
+			if err != nil {
+				return nil, ExtractionStats{}, err
+			}
+			out, n, err := extractTabular(f.Path, content)
+			if err != nil {
+				return nil, ExtractionStats{}, err
+			}
+			used := []namedContent{{Path: f.Path, Content: content}}
+			return out, docStats(files, tabularExts, used, n), nil
 		}
-		return nil, 0, fmt.Errorf("no tabular file found in source")
+		return nil, ExtractionStats{}, fmt.Errorf("no tabular file found in source")
 	case "document-set":
-		var docs []namedContent
-		for _, f := range files {
-			l := strings.ToLower(f.Path)
-			if strings.HasSuffix(l, ".md") || strings.HasSuffix(l, ".txt") || strings.HasSuffix(l, ".html") {
-				content, err := githubApp.RawFile(ctx, token, repo, ref, f.Path)
-				if err != nil {
-					return nil, 0, err
-				}
-				docs = append(docs, namedContent{Path: f.Path, Content: content})
-			}
+		docs, err := fetchCappedDocs(files, documentSetExts, func(p string) ([]byte, error) {
+			return githubApp.RawFile(ctx, token, repo, ref, p)
+		}, maxIntakeFileBytes, maxIntakeTotalBytes)
+		if err != nil {
+			return nil, ExtractionStats{}, err
 		}
 		out, n := extractDocuments(docs)
-		return out, n, nil
+		return out, docStats(files, documentSetExts, docs, n), nil
+	case "code-repo":
+		docs, err := fetchCappedDocs(files, codeRepoExts, func(p string) ([]byte, error) {
+			return githubApp.RawFile(ctx, token, repo, ref, p)
+		}, maxIntakeFileBytes, maxIntakeTotalBytes)
+		if err != nil {
+			return nil, ExtractionStats{}, err
+		}
+		out, n := extractCode(docs, codeChunkLines)
+		return out, docStats(files, codeRepoExts, docs, n), nil
 	case "audio-transcribe":
-		return nil, 0, fmt.Errorf("audio transcription input is binary audio — the audio upload path is the next wiring step (not faked)")
+		return nil, ExtractionStats{}, fmt.Errorf("audio transcription input is binary audio — the audio upload path is the next wiring step (not faked)")
 	}
-	return nil, 0, fmt.Errorf("pattern %q has no input extractor yet", pat)
+	return nil, ExtractionStats{}, fmt.Errorf("pattern %q has no input extractor yet", pat)
 }
 
 // --- result writeback: a reviewable PR, never a silent edit ---

@@ -44,6 +44,14 @@ type pipelineCreateRequest struct {
 	Name   string          `json:"name"`
 	Stages []pipelineStage `json:"stages"`
 	Input  json.RawMessage `json:"input"` // inline JSONL string OR {"s3_key":...}, same as jobSubmit
+	// LaunchContract fields (items 1, 3): the budget/verification/routing every stage of
+	// the pipeline must carry, exactly as a direct submission would. Stamped onto each
+	// stage's jobSubmit so a pipelined job is not a back door around the buyer's cap.
+	QuoteID       string             `json:"quote_id,omitempty"`
+	MaxUSD        float64            `json:"max_usd,omitempty"`
+	MinReputation float32            `json:"min_reputation,omitempty"`
+	PrivatePool   bool               `json:"private_pool,omitempty"`
+	Verification  VerificationPolicy `json:"verification,omitempty"`
 }
 
 // PipelineStageView is one stage's live state for the buyer (the builder polls these).
@@ -120,17 +128,26 @@ func (s *Server) handleCreatePipeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// LaunchContract (items 1, 3): stamp the buyer's budget/verification/routing onto
+	// every stage, so a pipelined job carries the SAME guarantees as a direct submission.
+	contract := LaunchContract{
+		QuoteID:       req.QuoteID,
+		MaxUSD:        req.MaxUSD,
+		MinReputation: req.MinReputation,
+		PrivatePool:   req.PrivatePool,
+		Verification:  req.Verification,
+	}
 	var launched []map[string]any
 	for i, st := range req.Stages {
 		if st.From == "previous" {
 			continue // advancePipeline submits this when stage i-1 completes
 		}
-		resp, herr := s.createJob(r.Context(), auth.BuyerID, jobSubmit{
+		resp, herr := s.createJob(r.Context(), auth.BuyerID, contract.applyTo(jobSubmit{
 			JobType: JobType{Type: st.Op},
 			Model:   ModelRef{Kind: "gguf", Ref: st.Model},
 			Tier:    "batch",
 			Input:   req.Input,
-		})
+		}))
 		if herr != nil {
 			writeErr(w, herr.status, "stage "+strconv.Itoa(i)+": "+herr.msg)
 			return
@@ -163,6 +180,39 @@ func (s *Server) handleGetPipeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, view)
+}
+
+// handlePipelineReceipt returns the PipelineReceipt (item 14): each stage's receipt
+// summary (status + verification label + charge), aggregated honestly (real total charge;
+// all_verified only when every stage is verified). Buyer-scoped via GetPipelineView.
+func (s *Server) handlePipelineReceipt(w http.ResponseWriter, r *http.Request) {
+	auth := r.Context().Value(ctxBuyer).(*AuthResult)
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad pipeline id")
+		return
+	}
+	view, err := s.store.GetPipelineView(r.Context(), auth.BuyerID, id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "pipeline not found")
+		return
+	}
+	var stages []PipelineStageReceipt
+	for _, st := range view.Stages {
+		label := ""
+		if st.JobID != "" {
+			if jid, perr := uuid.Parse(st.JobID); perr == nil {
+				if v, verr := s.store.JobVerification(r.Context(), jid); verr == nil {
+					label = v.Label
+				}
+			}
+		}
+		stages = append(stages, PipelineStageReceipt{
+			Index: st.Index, Op: st.Op, JobID: st.JobID, Status: st.Status,
+			VerificationLabel: label, ChargedUSD: st.ActualUSD,
+		})
+	}
+	writeJSON(w, http.StatusOK, assemblePipelineReceipt(id, view.Status, stages))
 }
 
 // advancePipeline chains a user-defined pipeline: when a pipeline-linked job completes, it

@@ -49,7 +49,9 @@ type QuoteInputScan struct {
 	Bytes            int      `json:"bytes"`            // total input bytes
 	EstimatedTokens  int64    `json:"estimated_tokens"` // byte/token heuristic, not exact
 	MalformedRecords int      `json:"malformed_records"`
-	FirstBadLine     int      `json:"first_bad_line"` // 1-based line of the first malformed record; 0 = none
+	BlankRecords     int      `json:"blank_records"`   // blank/whitespace lines (skipped, never records)
+	SkippedRecords   int      `json:"skipped_records"` // blank + malformed: lines NOT usable as input (item 23)
+	FirstBadLine     int      `json:"first_bad_line"`  // 1-based line of the first malformed record; 0 = none
 	MaxLineBytes     int      `json:"max_line_bytes"`
 	SampledRecords   int      `json:"sampled_records"` // records inspected for field names
 	DetectedFields   []string `json:"detected_fields"` // sorted union of top-level keys in the sample
@@ -67,6 +69,7 @@ func scanJSONL(data []byte) QuoteInputScan {
 		lineNo++
 		ln := bytes.TrimRight(raw, "\r")
 		if len(bytes.TrimSpace(ln)) == 0 {
+			scan.BlankRecords++
 			continue // blank line carries no record
 		}
 		scan.Records++
@@ -91,6 +94,10 @@ func scanJSONL(data []byte) QuoteInputScan {
 			scan.SampledRecords++
 		}
 	}
+	// Records used vs skipped (item 23): a blank line is no record, a malformed line is a
+	// record that cannot be processed; both are surfaced so the quote is honest about how
+	// much of the input is actually usable.
+	scan.SkippedRecords = scan.BlankRecords + scan.MalformedRecords
 	scan.EstimatedTokens = int64(math.Ceil(float64(scan.Bytes) / bytesPerTokenHeuristic))
 	scan.DetectedFields = sortedKeys(fields)
 	return scan
@@ -183,6 +190,76 @@ type QuoteConfidence struct {
 type QuoteBudget struct {
 	SuggestedMaxUSD       float64 `json:"suggested_max_usd"`
 	CancelBeforeExceeding bool    `json:"cancel_before_exceeding"`
+}
+
+// CompositeQuote is the quote for a detected MULTI-STAGE pipeline (item 4): the per-stage
+// quotes plus an honest aggregate — total cost (the cap a buyer should set), an ETA BAND
+// (best-case parallel to sequential worst case), the worst-stage confidence, and the worst
+// risk across stages.
+type CompositeQuote struct {
+	Stages        []Quote         `json:"stages"`          // per-stage quote (per-stage cost)
+	TotalCost     QuoteCost       `json:"total_cost"`      // summed across stages (the total cap)
+	TimeBand      QuoteTime       `json:"time_band"`       // p50 = best-case parallel, worst_case = sequential
+	Confidence    QuoteConfidence `json:"confidence"`      // worst-stage score + the union of reasons
+	OOMRisk       string          `json:"oom_risk"`        // worst across stages
+	ColdStartRisk string          `json:"cold_start_risk"` // worst across stages
+	Warnings      []string        `json:"warnings"`
+}
+
+// composeQuotes aggregates per-stage quotes into a CompositeQuote (item 4). Cost is the
+// SUM (the realistic total cap). The ETA band spans best-case parallel (the slowest
+// stage's p50/p90, since fan-out stages run as concurrent jobs) to sequential worst case
+// (the sum of worst cases). Confidence is the WORST stage's score; risk is the WORST
+// across stages. Pure — never inflates and never hides a stage's uncertainty.
+func composeQuotes(stages []Quote) CompositeQuote {
+	var cost QuoteCost
+	var band QuoteTime
+	conf := QuoteConfidence{Score: 1.0}
+	oom, cold := "low", "low"
+	var warnings []string
+	seenReason := map[string]bool{}
+	for _, q := range stages {
+		cost.MinUSD += q.Cost.MinUSD
+		cost.ExpectedUSD += q.Cost.ExpectedUSD
+		cost.MaxUSD += q.Cost.MaxUSD
+		cost.VerificationOverheadUSD += q.Cost.VerificationOverheadUSD
+		cost.PlatformTakeUSD += q.Cost.PlatformTakeUSD
+		if q.Time.P50Secs > band.P50Secs {
+			band.P50Secs = q.Time.P50Secs
+		}
+		if q.Time.P90Secs > band.P90Secs {
+			band.P90Secs = q.Time.P90Secs
+		}
+		band.WorstCaseSecs += q.Time.WorstCaseSecs
+		if q.Confidence.Score < conf.Score {
+			conf.Score = q.Confidence.Score
+		}
+		for _, rs := range q.Confidence.Reasons {
+			if !seenReason[rs] {
+				seenReason[rs] = true
+				conf.Reasons = append(conf.Reasons, rs)
+			}
+		}
+		oom = worseRisk(oom, q.Execution.OOMRisk)
+		cold = worseRisk(cold, q.Execution.ColdStartRisk)
+		warnings = append(warnings, q.Warnings...)
+	}
+	if len(stages) == 0 {
+		conf.Score = 0
+	}
+	return CompositeQuote{
+		Stages: stages, TotalCost: cost, TimeBand: band, Confidence: conf,
+		OOMRisk: oom, ColdStartRisk: cold, Warnings: warnings,
+	}
+}
+
+// worseRisk returns the higher of two low|medium|high risk levels (unknown → low).
+func worseRisk(a, b string) string {
+	rank := map[string]int{"low": 0, "medium": 1, "high": 2}
+	if rank[b] > rank[a] {
+		return b
+	}
+	return a
 }
 
 // The quote's platform-take line uses the same configurable rate as the ledger
@@ -468,6 +545,60 @@ func (s *Server) handleQuote(w http.ResponseWriter, r *http.Request) {
 	}
 	metrics.quotes.Add(1) // observability (Plane D D21): a quote was priced + persisted
 	writeJSON(w, http.StatusOK, q)
+}
+
+type pipelineQuoteStage struct {
+	Op    string `json:"op"`
+	Model string `json:"model"`
+}
+
+type pipelineQuoteRequest struct {
+	Input  json.RawMessage      `json:"input"`
+	Tier   string               `json:"tier"`
+	Stages []pipelineQuoteStage `json:"stages"`
+}
+
+// handlePipelineQuote prices a detected MULTI-STAGE pipeline (item 4): it quotes each
+// stage on the same input (the current patterns are fan-out) via the SAME buildQuote the
+// single-quote path uses, then aggregates honestly with composeQuotes. Advisory only —
+// it persists nothing and binds nothing (a composite preview); the buyer binds per stage.
+func (s *Server) handlePipelineQuote(w http.ResponseWriter, r *http.Request) {
+	_ = r.Context().Value(ctxBuyer).(*AuthResult) // auth-gated
+	var req pipelineQuoteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid pipeline quote json: "+err.Error())
+		return
+	}
+	if len(req.Stages) == 0 {
+		writeErr(w, http.StatusBadRequest, "a pipeline quote needs at least one stage")
+		return
+	}
+	if req.Tier == "" {
+		req.Tier = "batch"
+	}
+	if !validTiers[req.Tier] {
+		writeErr(w, http.StatusBadRequest, "invalid tier: "+req.Tier)
+		return
+	}
+	inputBytes, _, err := s.resolveInput(r.Context(), req.Input)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "resolving input: "+err.Error())
+		return
+	}
+	stages := make([]Quote, 0, len(req.Stages))
+	for _, st := range req.Stages {
+		if st.Op == "" || !validJobTypes[st.Op] {
+			writeErr(w, http.StatusBadRequest, "invalid stage job_type: "+st.Op)
+			return
+		}
+		stages = append(stages, s.buildQuote(r.Context(), jobSubmit{
+			JobType: JobType{Type: st.Op},
+			Model:   ModelRef{Kind: "gguf", Ref: st.Model},
+			Tier:    req.Tier,
+			Input:   req.Input,
+		}, inputBytes))
+	}
+	writeJSON(w, http.StatusOK, composeQuotes(stages))
 }
 
 // --- store (quote-specific *Store methods live with the quote, per benchmark.go) ---
