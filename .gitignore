@@ -10,6 +10,8 @@ cli/cli
 coverage.out
 # Swift (macapp/) build products
 macapp/.build/
+# Assembled .app bundle from macapp/assemble-app.sh (build output; rebuilt on demand)
+build/
 # Python (sdk/) caches
 **/__pycache__/
 *.pyc
