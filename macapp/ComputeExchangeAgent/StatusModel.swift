@@ -35,7 +35,10 @@
 //        "active": true,                    // operator master switch (mirrors prefs)
 //        "eligible_now": true,              // false during quiet hours / on battery (power-only)
 //        "last_heartbeat": 1718900123,      // unix secs; staleness => agent likely down
-//        "last_error": "string|null"        // surfaced verbatim; never hidden
+//        "last_error": "string|null",       // surfaced verbatim; never hidden
+//        "applied_prefs": { "power_only": true, "quiet_hours": [22,6]|null,
+//                           "min_payout_usd_per_hr": 0.05, "memory_headroom_gb": 8.0,
+//                           "max_memory_pct": 85.0, "max_concurrent_tasks": 4 } | null
 //      }
 //
 //  The Rust agent writes this file (agent/src/status.rs): atomically (temp +
@@ -121,6 +124,12 @@ struct AgentStatus: Codable, Equatable {
     var lastHeartbeat: TimeInterval = 0
     var lastError: String?
 
+    /// Item 26: the operator prefs the AGENT is actually running with (the effective
+    /// config after the agent.prefs.toml overlay). OPTIONAL — nil until the agent
+    /// reports it; the UI then shows "applied values not yet reported" instead of
+    /// echoing the local toggles as if they were live truth.
+    var appliedPrefs: AppliedPrefs?
+
     // --- Trust surface (all OPTIONAL on the wire) ------------------------------
     // These are written by the agent only when it has real, control-plane-sourced
     // data to back them. The app NEVER fabricates a payout date or a verification
@@ -168,6 +177,7 @@ struct AgentStatus: Codable, Equatable {
         case eligibleNow = "eligible_now"
         case lastHeartbeat = "last_heartbeat"
         case lastError = "last_error"
+        case appliedPrefs = "applied_prefs"
         case payoutsConfigured = "payouts_configured"
         case payoutsConnected = "payouts_connected"
         case payoutsEnabled = "payouts_enabled"
@@ -190,6 +200,29 @@ struct AgentStatus: Codable, Equatable {
 
     var modelCacheHuman: String {
         ByteCountFormatter.string(fromByteCount: modelCacheBytes, countStyle: .file)
+    }
+}
+
+/// The operator prefs the AGENT is actually running with (item 26) — the effective
+/// config after the agent.prefs.toml overlay, sourced from the agent (truth). The app
+/// shows these as "applied" values, distinct from `OperatorPrefs` below (its own local
+/// toggle state, which may differ until the agent is relaunched). Mirrors the Rust
+/// `AppliedPrefs` in agent/src/status.rs (snake_case wire keys).
+struct AppliedPrefs: Codable, Equatable {
+    var powerOnly: Bool
+    var quietHours: [Int]?            // [start, end] on a 24h clock, or nil when off
+    var minPayoutUsdPerHr: Double
+    var memoryHeadroomGb: Double
+    var maxMemoryPct: Double
+    var maxConcurrentTasks: Int       // the RESOLVED permit count (derived if unset)
+
+    enum CodingKeys: String, CodingKey {
+        case powerOnly = "power_only"
+        case quietHours = "quiet_hours"
+        case minPayoutUsdPerHr = "min_payout_usd_per_hr"
+        case memoryHeadroomGb = "memory_headroom_gb"
+        case maxMemoryPct = "max_memory_pct"
+        case maxConcurrentTasks = "max_concurrent_tasks"
     }
 }
 

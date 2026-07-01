@@ -19,12 +19,16 @@
     /* ===== the concrete field ===== */
     --bg:#060606;                          /* board-formed concrete, never true black */
 
-    /* ===== material light: hairlines + reveals, never drawn boxes ===== */
-    --reveal:rgba(255,255,255,.05);        /* a lit top edge where a surface lifts */
-    --reveal-hi:rgba(255,255,255,.09);
-    --hair:rgba(255,255,255,.045);         /* a single low-opacity separating line */
-    --hair-soft:rgba(255,255,255,.03);
-    --seat:rgba(0,0,0,.45);                /* ambient darkening where a panel meets the field */
+    /* ===== flat surfaces: clean black, distinguished by a single raised tone — no
+       bevels, no gradients, no drop shadows. A panel reads as a slightly lifted black,
+       nothing more. ===== */
+    --panel:#101012;                       /* a raised surface: flat, one tone above the field */
+    --panel-hi:#16161a;                    /* hover/active: one step lighter, still flat */
+    --reveal:transparent;                  /* bevels retired — kept as a no-op so old rules flatten */
+    --reveal-hi:rgba(255,255,255,.14);     /* kept ONLY for the focus ring (accessibility) */
+    --hair:rgba(255,255,255,.05);          /* the single hairline, used sparingly for structure */
+    --hair-soft:transparent;               /* decorative separators retired */
+    --seat:transparent;                    /* ambient under-panel darkening retired */
 
     /* ===== text: one muted system of voices ===== */
     --ash:#595960;                         /* faintest: hashes, idle glyphs */
@@ -36,6 +40,7 @@
     /* ===== status ONLY, anodized (deep + desaturated, not a bright LED): green done/live, red failed ===== */
     --green:#4c9d6e; --green-core:#69c096;
     --red:#c0554b;   --red-core:#dc8079;
+    --gold:#bf9a4e;  --gold-core:#e2c178;   /* anodized gold · steady informational facts (Machine/Payout) */
 
     /* ===== type: Geist Mono carries the whole UI; one Cormorant monument figure ===== */
     --mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
@@ -46,14 +51,11 @@
     --pad:20px; --gap:16px;
   }
   *{box-sizing:border-box}
+  [hidden]{display:none!important}   /* the hidden attribute must always win over a display rule */
   html,body{margin:0;height:100%}
   body{
-    /* concrete: a near-black plane, a single low-contrast lift behind the hero, and the
-       barely-there ghost of Ando form-tie marks. Felt, not seen. */
-    background:
-      radial-gradient(78% 56% at 50% 2%, rgba(255,255,255,.024), rgba(255,255,255,0) 60%),
-      radial-gradient(rgba(255,255,255,.014) 1px, transparent 1.6px) 0 0/104px 104px,
-      var(--bg);
+    /* one clean near-black plane · no texture, no vignette, no shading. */
+    background:var(--bg);
     background-attachment:fixed;
     color:var(--bone); -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
     font:400 13px/1.6 var(--mono);
@@ -83,8 +85,7 @@
   .badge{position:absolute;top:7px;right:8px;width:6px;height:6px;border-radius:50%;background:var(--signal)}
   .badge.hide{display:none}
   .notif{position:absolute;top:54px;right:20px;width:270px;border-radius:var(--r);padding:6px;display:none;z-index:8;
-    background:linear-gradient(180deg,rgba(255,255,255,.022),rgba(0,0,0,.18));
-    box-shadow:inset 0 1px 0 var(--reveal),0 1px 0 var(--seat),0 24px 48px -28px rgba(0,0,0,.9)}
+    background:var(--panel-hi);box-shadow:0 0 0 1px var(--hair)}
   .notif.open{display:block}
   .notif-item{padding:10px 11px;font-size:12px;border-radius:var(--r-sm);color:var(--bone)} .notif-item:hover{background:rgba(255,255,255,.03)}
   .notif-item .t{color:var(--ash);font-size:10px;letter-spacing:.04em;margin-top:3px}
@@ -94,12 +95,11 @@
   /* the apothecary label, one consistent register everywhere */
   .section-label{font-size:10px;font-weight:500;letter-spacing:.22em;text-transform:uppercase;color:var(--mute);margin:0 0 14px}
 
-  /* cast panel: a slab set into the wall. Two-layer surface, a lit top reveal, content recessed
-     so it sits down inside, ambient darkening where it meets the field. No drawn box, no float. */
+  /* flat panel: a single raised black tone, distinguished from the field by tone alone —
+     no gradient, no bevel, no shadow. */
   .card{
     position:relative;border-radius:var(--r);
-    background:linear-gradient(180deg,rgba(255,255,255,.022),rgba(255,255,255,.006) 22%,rgba(0,0,0,.16));
-    box-shadow:inset 0 1px 0 var(--reveal),inset 0 -22px 30px -28px rgba(0,0,0,.8),0 1px 0 var(--seat);
+    background:var(--panel);
   }
 
   /* numerals */
@@ -154,25 +154,27 @@
   .row .l{display:flex;align-items:center;gap:12px;min-width:0;color:var(--bone)}
   .row .k{font-size:10px;font-weight:500;letter-spacing:.2em;text-transform:uppercase;color:var(--mute)}
   .r-meta{color:var(--mute)}
-  /* Machine + Payout are fixed facts, not pass/fail: flat line-glyph ring tokens, quiet + subordinate.
-     No metal puck, no colour, no glow. The bottom of the procession. */
-  .marker{position:relative;width:12px;height:12px;flex:none;border-radius:50%;box-shadow:inset 0 0 0 1.5px rgba(255,255,255,.2)}
+  /* Machine + Payout are steady facts (not pass/fail): a small anodized GOLD knob — the same
+     sphere-from-within idiom as the green/red dots, in gold so it reads as informational, not status. */
+  .marker{position:relative;width:12px;height:12px;flex:none;border-radius:50%;
+    background:radial-gradient(circle at 50% 40%,var(--gold-core),var(--gold) 72%);
+    box-shadow:0 0 5px 0 rgba(191,154,78,.5)}
 
   /* ===== LAUNCH ===== */
   .banner{display:flex;align-items:center;gap:16px;justify-content:space-between;padding:20px 22px;margin-bottom:48px;font-size:12px;line-height:1.6;color:var(--mute)}
-  /* secondary flat controls: separated by a hairline, never a drawn box */
-  .pill{height:34px;padding:0 16px;border-radius:var(--r-pill);background:transparent;color:var(--bone);font:500 11px var(--mono);letter-spacing:.04em;cursor:pointer;box-shadow:inset 0 0 0 1px var(--hair);transition:color var(--dur) var(--ease),box-shadow var(--dur) var(--ease),background var(--dur) var(--ease)}
-  .pill:hover{color:var(--bone-hi);box-shadow:inset 0 0 0 1px var(--reveal-hi)}
+  /* secondary flat controls: a flat raised tone, distinguished by tone alone — no outline */
+  .pill{height:34px;padding:0 16px;border-radius:var(--r-pill);background:var(--panel);color:var(--bone);font:500 11px var(--mono);letter-spacing:.04em;cursor:pointer;box-shadow:none;transition:color var(--dur) var(--ease),background var(--dur) var(--ease)}
+  .pill:hover{color:var(--bone-hi);background:var(--panel-hi)}
   .pill.solid{background:var(--bone-hi);color:var(--bg);box-shadow:none}
   .pill.solid:hover{background:var(--signal)}
 
-  /* drop zone: a slot cut into the concrete (a recessed reveal), never a dashed box */
+  /* drop zone — the one primary affordance, allowed a touch of distinction: a flat raised
+     tone that lifts on hover. No gradient, no inset shadow, no dashed box. */
   .intake{border:none;border-radius:var(--r);padding:44px 16px;text-align:center;color:var(--mute);cursor:pointer;
-    background:linear-gradient(180deg,rgba(0,0,0,.24),rgba(0,0,0,.08));
-    box-shadow:inset 0 1px 0 var(--reveal),inset 0 3px 12px rgba(0,0,0,.55);
-    transition:color var(--dur) var(--ease),box-shadow var(--dur) var(--ease)}
+    background:var(--panel);
+    transition:color var(--dur) var(--ease),background var(--dur) var(--ease)}
   .intake svg{width:22px;height:22px;display:block;margin:0 auto 10px;stroke-width:1.4;color:var(--ash)}
-  .intake:hover,.intake.drag{color:var(--bone);box-shadow:inset 0 1px 0 var(--reveal-hi),inset 0 3px 14px rgba(0,0,0,.72)}
+  .intake:hover,.intake.drag{color:var(--bone);background:var(--panel-hi)}
   .intake.detected .intake-icon{display:none}
   .d-name{display:block;color:var(--bone-hi);font-size:13px;font-weight:500}
   .d-meta{display:block;color:var(--mute);font-size:11px;margin-top:6px;letter-spacing:.02em}
@@ -199,8 +201,7 @@
      the data. Each step lights green as it runs + completes (the oracle marker). ===== */
   .pipe{display:flex;flex-direction:column;margin:16px 0 20px}
   .stage{display:flex;align-items:center;gap:14px;border-radius:var(--r);padding:14px 16px;
-    background:linear-gradient(180deg,rgba(255,255,255,.018),rgba(0,0,0,.14));
-    box-shadow:inset 0 1px 0 var(--reveal),0 1px 0 var(--seat)}
+    background:var(--panel)}
   .stage .dot{position:relative;width:18px;height:18px;flex:none;background:url(assets/dot-ring@3x.png) center/contain no-repeat}
   .stage .dot::before{content:"";position:absolute;inset:24%;border-radius:50%;background:#1a1a1e}
   .stage .dot.run::before,.stage .dot.done::before{background:radial-gradient(circle at 50% 40%,var(--green-core),var(--green) 74%);box-shadow:0 0 5px 0 rgba(76,157,110,.5)}
@@ -216,17 +217,16 @@
   .icon:hover{color:var(--mute)} .icon svg{width:15px;height:15px;stroke-width:1.5}
   .detail{display:none;padding:0 2px 16px} .detail.open{display:block}
   .preview{font-size:12px;color:var(--mute);border-radius:var(--r-sm);padding:11px 13px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;
-    background:linear-gradient(180deg,rgba(0,0,0,.22),rgba(0,0,0,.08));box-shadow:inset 0 1px 0 var(--reveal)}
+    background:var(--bg)}
   .actions{display:flex;align-items:center;gap:10px;margin-top:12px}
-  .mini{height:32px;padding:0 14px;border-radius:var(--r-sm);background:transparent;color:var(--bone);font:500 12px var(--mono);letter-spacing:.02em;cursor:pointer;box-shadow:inset 0 0 0 1px var(--hair);transition:color var(--dur) var(--ease),box-shadow var(--dur) var(--ease)}
-  .mini:hover{color:var(--bone-hi);box-shadow:inset 0 0 0 1px var(--reveal-hi)}
+  .mini{height:30px;padding:0 16px;border-radius:var(--r-pill);background:var(--panel);color:var(--bone);font:500 11px var(--mono);letter-spacing:.04em;cursor:pointer;border:none;box-shadow:none;transition:color var(--dur) var(--ease),background var(--dur) var(--ease)}
+  .mini:hover{color:var(--bone-hi);background:var(--panel-hi)}
 
   /* ===== VERIFICATION RECEIPT: the moat made visible. The hero of a finished run.
      Honest, derived from the job's verification object · never implies cryptographic proof.
      Anodized check rows on hairlines, tabular counts, one quiet heading. ===== */
   .verification{margin:0 0 16px;padding:14px 14px 4px;border-radius:var(--r);
-    background:linear-gradient(180deg,rgba(255,255,255,.018),rgba(0,0,0,.14));
-    box-shadow:inset 0 1px 0 var(--reveal),0 1px 0 var(--seat)}
+    background:var(--panel)}
   .verification .vh{font-size:10px;font-weight:500;letter-spacing:.2em;text-transform:uppercase;color:var(--bone-hi);margin:0 0 4px;display:flex;align-items:center;gap:9px}
   .verification .vh.unverified{color:var(--mute)}
   .verification .vh .vlabel{color:var(--mute);letter-spacing:.04em;text-transform:none;font-size:11px}
@@ -269,17 +269,30 @@
   /* ===== SETTINGS ===== */
   .avatar{width:42px;height:42px;border-radius:var(--r-pill);color:var(--bone-hi);display:flex;align-items:center;justify-content:center;font-weight:600;font-size:13px;flex:none;
     background:linear-gradient(180deg,rgba(255,255,255,.04),rgba(0,0,0,.2));box-shadow:inset 0 1px 0 var(--reveal),inset 0 0 0 1px var(--hair)}
-  .switch{width:40px;height:24px;border-radius:var(--r-pill);background:rgba(0,0,0,.3);cursor:pointer;position:relative;flex:none;box-shadow:inset 0 0 0 1px var(--hair),inset 0 1px 3px rgba(0,0,0,.5);transition:background var(--dur) var(--ease)}
-  .switch::after{content:"";position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:var(--mute);transition:left var(--dur) var(--ease),background var(--dur) var(--ease)}
-  .switch.on{background:rgba(231,227,220,.9)} .switch.on::after{left:19px;background:var(--bg)}
+  /* toggle · fully flat, tone-only: off = recessed black tone + ash knob; on = bone field + bg knob.
+     No inset shadow, no drop shadow, no border ring — distinction by tone alone. */
+  .switch{width:40px;height:24px;border-radius:var(--r-pill);background:rgba(0,0,0,.34);cursor:pointer;position:relative;flex:none;border:none;padding:0;box-shadow:none;transition:background var(--dur) var(--ease)}
+  .switch::after{content:"";position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:var(--ash);box-shadow:none;transition:left var(--dur) var(--ease),background var(--dur) var(--ease)}
+  .switch:hover::after{background:var(--mute)}
+  .switch.on{background:var(--bone-hi)} .switch.on::after{left:19px;background:var(--bg)}
+  .switch:focus-visible{outline:none;box-shadow:0 0 0 1px var(--reveal-hi)}
 
   .toasts{position:fixed;bottom:22px;right:22px;display:flex;flex-direction:column;gap:8px;z-index:20}
   .toast{color:var(--bone);padding:12px 15px;border-radius:var(--r-sm);font-size:12px;opacity:0;transform:translateY(8px);transition:opacity var(--dur-slow) var(--ease),transform var(--dur-slow) var(--ease);max-width:300px;
     background:linear-gradient(180deg,rgba(255,255,255,.03),rgba(0,0,0,.2));box-shadow:inset 0 1px 0 var(--reveal),0 20px 44px -26px rgba(0,0,0,.9)}
   .toast.show{opacity:1;transform:none}
 
-  .keyin{height:32px;width:200px;border-radius:var(--r-sm);background:rgba(0,0,0,.28);color:var(--bone-hi);padding:0 12px;font:400 12px var(--mono);border:none;box-shadow:inset 0 0 0 1px var(--hair),inset 0 2px 6px rgba(0,0,0,.4)}
-  .keyin:focus{outline:none;box-shadow:inset 0 0 0 1px var(--reveal-hi),inset 0 2px 6px rgba(0,0,0,.4)}
+  .keyin{height:32px;width:200px;border-radius:var(--r-sm);background:rgba(0,0,0,.28);color:var(--bone-hi);padding:0 12px;font:400 12px var(--mono);border:none;box-shadow:none}
+  .keyin:focus{outline:none;box-shadow:0 0 0 1px var(--reveal-hi)}
+  /* Settings refinement: domain-section spacing, the Agent demoting aside, the Developer
+     disclosure header, and the quiet Appearance footer. */
+  #v-settings .section-label{margin-top:34px}
+  #v-settings .section-label:first-of-type{margin-top:0}
+  .lbl-aside{color:var(--ash);font-weight:500;letter-spacing:.04em;text-transform:none}
+  .section-label.dev-h{display:flex;align-items:center;justify-content:space-between}
+  .section-label.dev-h .qs-toggle{margin:0}
+  .set-foot{display:flex;align-items:center;justify-content:space-between;margin-top:40px;padding:18px 2px;font-size:13px}
+  .set-foot .l{color:var(--mute)}
   .live-badge{margin-left:10px;font-size:9px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--bg);background:var(--bone-hi);padding:3px 8px;border-radius:var(--r-pill)}
 
   /* ===== Settings · billing + usage + API-keys panels. Same material language as the rest:
@@ -443,19 +456,7 @@
     <div class="notif" id="notif"></div>
 
     <section class="view on" id="v-launch">
-      <div class="auth card" id="auth" hidden>
-        <p class="auth-lead">Create an account to run your first job. You get a sandbox key right away · run jobs on free credit, add a card later.</p>
-        <div class="auth-tabs">
-          <button class="auth-tab on" id="authTabSignup" data-mode="signup">Create account</button>
-          <button class="auth-tab" id="authTabLogin" data-mode="login">Sign in</button>
-        </div>
-        <label class="auth-field"><span class="al">Email</span><input class="auth-in" id="authEmail" type="email" autocomplete="email" autocapitalize="off" spellcheck="false" placeholder="you@company.com" aria-label="Email"></label>
-        <label class="auth-field"><span class="al">Password</span><input class="auth-in" id="authPassword" type="password" autocomplete="current-password" placeholder="at least 8 characters" aria-label="Password"></label>
-        <p class="auth-err" id="authErr" role="alert"></p>
-        <div class="auth-cta"><button class="pill solid" id="authSubmit">Create account</button><span class="auth-hint" id="authHint">Sandbox lane · a cx_test_ key plus free credit, instantly.</span></div>
-        <p class="auth-note"><span class="pip idle"></span><span>No card required to start. The free credit covers your first runs on the sandbox key; adding a card is required only once you exceed it.</span></p>
-      </div>
-      <div class="banner card" id="setup"><span>Add a payment method to run your first job.</span><button class="cx-key is-armed" id="add-payment" aria-label="Add payment"><img class="cx-key-metal" src="assets/btn-add-payment-shell@3x.png" alt=""><span class="cx-key-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="5" width="19" height="14" rx="2.5"/><path d="M2.5 9.5h19"/></svg></span></button></div>
+      <div class="banner card" id="setup" hidden><span>Connect a payment method to run real jobs. It is the only thing we verify · no account, no password.</span><button class="cx-key is-armed" id="add-payment" aria-label="Add payment"><img class="cx-key-metal" src="assets/btn-add-payment-shell@3x.png" alt=""><span class="cx-key-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="5" width="19" height="14" rx="2.5"/><path d="M2.5 9.5h19"/></svg></span></button></div>
       <div class="intake" id="intake">
         <input type="file" id="file" hidden>
         <svg class="intake-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h3.5l2 2H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
@@ -496,28 +497,31 @@
     </section>
 
     <section class="view" id="v-settings">
-      <div style="display:flex;align-items:center;gap:12px;margin:6px 0 26px">
-        <div class="avatar" id="userAvatar">AR</div>
-        <div style="flex:1;min-width:0"><div style="color:var(--bone-hi);font-weight:500" id="userName">Alex Rivera</div><div style="font-size:13px;color:var(--mute)" id="userEmail">alex@acme.co</div></div>
-        <button class="mini" id="signOut" hidden>Sign out</button>
-      </div>
-      <p class="section-label">Connections</p>
-      <div class="row"><span class="l">GitHub</span><button class="mini" data-toast="Connecting to GitHub">Connect</button></div>
-      <p class="section-label" style="margin-top:24px">Billing &amp; usage</p>
+      <!-- PAYMENTS · money-in (buyer card · renderBilling) + money-out (payout/Connect · renderSupplier),
+           one domain, one label. Replaces the old Billing & usage + Payout onboarding headers. -->
+      <p class="section-label">Payments</p>
       <div id="billing"></div>
-      <p class="section-label" style="margin-top:24px">Supplier agent</p>
+      <div id="supplier"></div>
+
+      <!-- AGENT · supplier-side controls. Illustrative in the buyer app (the real surface is the Mac
+           menu-bar app), so condensed to the two real toggles + one combined facts row. -->
+      <p class="section-label agent-h">Agent <span class="lbl-aside">· this Mac · full controls in the menu-bar app</span></p>
       <div class="row"><span class="l">Quiet hours · 10pm to 8am</span><button class="switch on" aria-label="Quiet hours"></button></div>
       <div class="row"><span class="l">Run on power only</span><button class="switch" aria-label="Power only"></button></div>
-      <div class="row"><span class="l">Memory headroom</span><span class="r-meta num">16 GB</span></div>
-      <div class="row"><span class="l">Minimum payout</span><span class="r-meta num">$0.50 / hr</span></div>
-      <p class="section-label" style="margin-top:24px">Payout onboarding</p>
-      <div id="supplier"></div>
-      <p class="section-label" style="margin-top:24px">API keys</p>
-      <div id="apikeys"></div>
-      <div class="row"><span class="l">Live test key</span><input id="liveKey" class="keyin" type="password" placeholder="cx_live_…" aria-label="Live buyer API key"></div>
-      <div class="d-meta" style="margin-top:8px">Paste a buyer key to run real jobs against this server from Launch. Stored locally in this browser. Test harness only, never the shipped client.</div>
-      <p class="section-label" style="margin-top:24px">Appearance</p>
-      <div class="row"><span class="l">Theme</span><span class="r-meta">follows system</span></div>
+      <div class="row"><span class="l">Headroom · payout floor</span><span class="r-meta num">16 GB · $0.50 / hr</span></div>
+
+      <!-- DEVELOPER · GitHub + API keys + override, collapsed by default (identity is automatic, so this
+           is testing-only). Trigger reuses the .qs-toggle idiom + the global [hidden] rule. -->
+      <p class="section-label dev-h"><span>Developer</span><button class="qs-toggle" id="devToggle" aria-expanded="false" aria-controls="devbody">Show</button></p>
+      <div id="devbody" hidden>
+        <div class="row"><span class="l">GitHub</span><button class="mini" data-toast="Connecting to GitHub">Connect</button></div>
+        <div id="apikeys"></div>
+        <div class="row"><span class="l">Override key</span><input id="liveKey" class="keyin" type="password" placeholder="cx_live_…" aria-label="Override buyer API key"></div>
+        <p class="set-note">The device is the account · this overrides it with a specific buyer key, kept in this browser. For testing.</p>
+      </div>
+
+      <!-- Appearance · one quiet footer line, no header. -->
+      <div class="set-foot"><span class="l">Theme</span><span class="r-meta">follows system</span></div>
     </section>
   </main>
 </div>
@@ -650,13 +654,49 @@
   function setPipeStage(i,c){var d=pipePreview.querySelector('.stage[data-i="'+i+'"] .dot');if(d)d.className='dot '+c;}
   function resetPipe(){pipePreview.innerHTML='';pipePreview.hidden=true;}
   function resetIntake(){project=null;curQuote=null;liveFile=null;intake.classList.remove('detected');intakeText.textContent='Connect a repo or drop your data';resetPipe();refreshArm();}
-  function detectFile(file){
-    liveFile=file;
-    var pl=pipelineFor(file.name); pl.name=file.name; project=pl;
+  // Item 22: the UI must show the SERVER's detection (the Concierge in intake.go), not a
+  // divergent local guess. When connected (a live key) we ask /v1/intake and render exactly
+  // what the server recognized; offline (no key / call fails) we fall back to the local
+  // heuristic, labelled "offline guess" so the buyer is never misled about its source.
+  function applyDetected(file,pl){
+    pl.name=file.name; project=pl;
     intake.classList.add('detected');
-    intakeText.innerHTML='<span class="d-name">'+esc(file.name)+'</span><span class="d-meta">detected · '+esc(pl.pattern)+' · '+fmtBytes(file.size)+' · '+pl.stages.length+'-step pipeline · click to reset</span>';
+    var n=pl.stages.length;
+    intakeText.innerHTML='<span class="d-name">'+esc(file.name)+'</span><span class="d-meta">'
+      +(n?'detected · '+esc(pl.pattern)+' · '+fmtBytes(file.size)+' · '+n+'-step pipeline'
+          :'not supported · '+esc(pl.pattern)+' · '+fmtBytes(file.size))+' · click to reset</span>';
     renderPipeline(pl.stages);
     refreshArm();
+  }
+  function localPipeline(name){var pl=pipelineFor(name); pl.pattern=pl.pattern+' · offline guess'; return pl;}
+  function serverDetect(file){
+    return fetch('/v1/intake',{method:'POST',headers:{'Authorization':'Bearer '+liveKey,'Content-Type':'application/json'},
+        body:JSON.stringify({files:[{path:file.name,size:file.size}]})})
+      .then(function(res){return res.ok?res.json():null;})
+      .then(function(j){
+        var p=j&&j.pipeline;
+        if(p&&p.supported&&p.stages&&p.stages.length){
+          return {pattern:p.pattern, supported:true,
+                  stages:p.stages.map(function(s){return {op:s.op,model:s.model,label:s.detail||s.op};})};
+        }
+        // Show the server's HONEST verdict (unsupported), never a prettier local guess.
+        return {pattern:(p&&p.pattern?p.pattern:'unknown')+' · not supported by server', supported:false, stages:[]};
+      });
+  }
+  function detectFile(file){
+    liveFile=file;
+    intake.classList.add('detected');
+    intakeText.innerHTML='<span class="d-name">'+esc(file.name)+'</span><span class="d-meta">detecting…</span>';
+    // Establish the device key first (silent), so even the very first drop on a fresh load
+    // detects on the SERVER; offline it falls back to the local guess.
+    ensureDeviceKey().then(function(){
+      if(isLive()){
+        serverDetect(file).then(function(pl){applyDetected(file,pl);})
+                          .catch(function(){applyDetected(file,localPipeline(file.name));});
+      } else {
+        applyDetected(file, localPipeline(file.name));
+      }
+    });
   }
   intake.addEventListener('click',function(){if(project){resetIntake();}else{fileEl.click();}});
   fileEl.addEventListener('change',function(){if(fileEl.files&&fileEl.files[0])detectFile(fileEl.files[0]);});
@@ -746,8 +786,10 @@
     if(btn.disabled||!project)return;
     var pl=project, name=((pl.name||'pipeline').split('/').pop().replace(/\.[^.]+$/,''))||'pipeline';
     btn.disabled=true; btn.classList.remove('is-armed');
-    if(isLive()&&liveFile) runPipelineLive(pl,name);   // real multi-stage pipeline on this server
-    else runPipelineDemo(pl,name);                      // demo simulation of the chain
+    ensureDeviceKey().then(function(){
+      if(isLive()&&liveFile) runPipelineLive(pl,name);  // real multi-stage pipeline on this server
+      else runPipelineDemo(pl,name);                     // demo simulation of the chain
+    });
   });
   jobs.addEventListener('click',function(e){
     if(e.target.closest('[data-dl]')){e.stopPropagation();toast('Downloaded results to ~/Downloads');}
@@ -777,85 +819,67 @@
     })();
   }
 
-  // ---- live mode: real prod jobs via the /v1 API (same-origin when served at /demo) ----
-  // A pasted buyer key turns Launch into a real submission against THIS server. Without
-  // a key the demo runs its local simulation (everything above). Client-side key is a
-  // test harness only, never the shipped buyer client.
+  // ---- identity: the DEVICE is the account --------------------------------------------------
+  // No sign-in, no password. On first use we silently provision a device-local buyer
+  // (credentials generated + kept in THIS browser) so the app just works; the only thing a
+  // human ever connects is a payment method — that is the real verifier. Offline (no backend
+  // reachable) we stay in the local demo simulation. A pasted key in Settings still overrides.
   var liveBadge=$('liveBadge'), keyIn=$('liveKey'), liveKey='';
   try{liveKey=localStorage.getItem('cx_key')||'';}catch(e){}
   function isLive(){return !!liveKey;}
-  function syncLive(){if(liveBadge)liveBadge.hidden=!isLive();if(keyIn&&!keyIn.value&&liveKey)keyIn.value=liveKey;renderAuth();}
-  if(keyIn)keyIn.addEventListener('change',function(){liveKey=(keyIn.value||'').trim();try{localStorage.setItem('cx_key',liveKey);}catch(e){}syncLive();renderQuickstart();renderSettingsPanels();toast(isLive()?'Live mode on · Launch runs real jobs on this server':'Live mode off');});
-
-  // ===== SELF-SERVE ENTRY (signup / login) =====================================================
-  // A first-run gate at the top of Launch for a buyer with no key yet. Create-account hits
-  // POST /v1/signup {email,password} -> 201 {buyer_id,token,email}; sign-in hits POST /v1/login
-  // {email,password} -> 200 {buyer_id,token} or an honest 401. On success the returned opaque
-  // token is stored as localStorage cx_key (the same credential authBuyer + Launch already use),
-  // entering live mode, and the quickstart is shown. Errors surface inline (BLACKHOLE · never a
-  // silent accept). The gate hides itself the instant a key exists. All server text via esc().
-  var authEl=$('auth'),authEmail=$('authEmail'),authPassword=$('authPassword'),
-      authErrEl=$('authErr'),authSubmitBtn=$('authSubmit'),authHint=$('authHint'),authMode='signup';
-  function authError(msg){if(!authErrEl)return;authErrEl.textContent=msg||'';authErrEl.classList.toggle('show',!!msg);}
-  function setAuthMode(mode){
-    authMode=mode==='login'?'login':'signup';
-    document.querySelectorAll('.auth-tab').forEach(function(b){b.classList.toggle('on',b.dataset.mode===authMode);});
-    if(authSubmitBtn)authSubmitBtn.textContent=authMode==='login'?'Sign in':'Create account';
-    if(authHint)authHint.textContent=authMode==='login'
-      ? 'Welcome back · your key loads into this browser.'
-      : 'Sandbox lane · a cx_test_ key plus free credit, instantly.';
-    if(authPassword)authPassword.setAttribute('autocomplete',authMode==='login'?'current-password':'new-password');
-    authError('');
+  function deviceCreds(){
+    var c=null; try{c=JSON.parse(localStorage.getItem('cx_device')||'null');}catch(e){}
+    if(!c||!c.email){
+      var rnd=function(){return Math.random().toString(36).slice(2);};
+      c={email:'dev-'+rnd()+rnd()+'@device.computexchange.net',password:(rnd()+rnd()+rnd()).slice(0,28)};
+      try{localStorage.setItem('cx_device',JSON.stringify(c));}catch(e){}
+    }
+    return c;
   }
-  // Show the gate only when there is no key yet; hide (and clear the password) once live.
-  function renderAuth(){
-    if(!authEl)return;
-    authEl.hidden=isLive();
-    if(isLive()&&authPassword)authPassword.value='';
-  }
-  function adoptToken(token){
+  function adoptToken(token,email){
     liveKey=(token||'').trim();
     try{localStorage.setItem('cx_key',liveKey);}catch(e){}
-    if(keyIn)keyIn.value=liveKey;             // mirror into the Settings live-key field
-    syncLive();renderQuickstart();renderSettingsPanels();
+    if(email){try{localStorage.setItem('cx_email',email);}catch(e){}}
+    if(keyIn)keyIn.value=liveKey;
+    syncLive();
+    if(typeof renderQuickstart==='function')renderQuickstart();
+    if(typeof renderSettingsPanels==='function')renderSettingsPanels();
   }
-  // The account email, captured at signup/login, is what the supplier endpoints key on
-  // (a pasted api key carries no email, so supplier onboarding needs a signed-in account).
+  var ensuring=null;
+  // Establish a device key against a reachable backend: reuse the stored key, else log the
+  // device in (returning), else sign it up (first run). Silent + idempotent. Resolves to the
+  // key, or '' when no backend is reachable (then the app stays in demo mode).
+  function ensureDeviceKey(){
+    if(liveKey)return Promise.resolve(liveKey);
+    if(ensuring)return ensuring;
+    var c=deviceCreds(), opt={method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(c)};
+    ensuring=fetch('/v1/login',opt)
+      .then(function(r){return r.ok?r.json():fetch('/v1/signup',opt).then(function(r2){return r2.ok?r2.json():null;});})
+      .then(function(j){ensuring=null; if(j&&j.token)adoptToken(j.token,c.email); return liveKey;})
+      .catch(function(){ensuring=null; return liveKey;});
+    return ensuring;
+  }
+  function syncLive(){
+    if(liveBadge)liveBadge.hidden=!isLive();
+    if(keyIn&&!keyIn.value&&liveKey)keyIn.value=liveKey;
+    renderSetupBanner();
+  }
+  // The payment banner is the ONLY onboarding the user sees: shown when we are live but no card
+  // is on file yet, hidden once a card is connected (or offline · nothing to connect).
+  function renderSetupBanner(){
+    var b=$('setup'); if(!b)return;
+    if(!isLive()){b.hidden=true;return;}
+    fetch('/v1/billing/status',{headers:{'Authorization':'Bearer '+liveKey}})
+      .then(function(r){return r.ok?r.json():null;})
+      .then(function(s){b.hidden=!(s&&s.configured&&!s.has_card);})
+      .catch(function(){b.hidden=true;});
+  }
   function cxEmail(){try{return localStorage.getItem('cx_email')||'';}catch(e){return '';}}
-  function doAuth(){
-    if(!authSubmitBtn)return;
-    var email=(authEmail&&authEmail.value||'').trim(), password=(authPassword&&authPassword.value||'');
-    if(!email||email.indexOf('@')<0){authError('Enter a valid email address.');return;}
-    if(!password||password.length<8){authError('Password must be at least 8 characters.');return;}
-    authError('');authSubmitBtn.disabled=true;
-    var path=authMode==='login'?'/v1/login':'/v1/signup';
-    fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email,password:password})})
-      .then(function(res){return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});})
-      .then(function(r){
-        var j={};try{j=JSON.parse(r.t);}catch(e){}
-        if(!r.ok){
-          // Honest inline errors · 401 bad creds, 409 already-registered, 503 unconfigured, else the server string.
-          var msg=(j&&j.error)?String(j.error)
-            :r.status===401?'Email or password is incorrect.'
-            :r.status===409?'That email is already registered · sign in instead.'
-            :r.status===503?'Sign-up is not available on this server yet.'
-            :'Request failed · '+r.status;
-          authError(msg);authSubmitBtn.disabled=false;return;
-        }
-        if(!j||!j.token){authError('No token returned · cannot enter live mode.');authSubmitBtn.disabled=false;return;}
-        adoptToken(j.token);
-        try{localStorage.setItem('cx_email',(j.email||email||'').trim());}catch(e){}
-        notify(authMode==='login'?'Signed in':'Account created',esc(j.email||email));
-        toast(authMode==='login'?'Signed in · live mode on':'Welcome · sandbox key loaded, run a job now');
-        authSubmitBtn.disabled=false;
-      })
-      .catch(function(e){authError('Network error · '+e.message);authSubmitBtn.disabled=false;});
-  }
-  document.querySelectorAll('.auth-tab').forEach(function(b){b.addEventListener('click',function(){setAuthMode(b.dataset.mode);});});
-  if(authSubmitBtn)authSubmitBtn.addEventListener('click',doAuth);
-  // Enter submits from either field.
-  [authEmail,authPassword].forEach(function(inp){if(inp)inp.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();doAuth();}});});
-  setAuthMode('signup');
+  if(keyIn)keyIn.addEventListener('change',function(){liveKey=(keyIn.value||'').trim();try{localStorage.setItem('cx_key',liveKey);}catch(e){}syncLive();if(typeof renderQuickstart==='function')renderQuickstart();if(typeof renderSettingsPanels==='function')renderSettingsPanels();});
+
+  // Establish the device identity now (silent · login-or-signup against a reachable backend),
+  // then sync the UI. Offline → no key, the app stays in its local demo simulation.
+  ensureDeviceKey().then(syncLive);
   syncLive();
 
   // ===== SETTINGS · API keys (B1) + billing & usage (B4) =====================================
@@ -956,9 +980,8 @@
   function renderBilling(){
     if(!billingEl)return;
     if(!isLive()){
-      billingEl.innerHTML='<div class="row"><span class="l"><span class="pip idle"></span>Payment method</span><span class="r-meta">paste a live key to manage billing</span></div>'
-        +'<div class="row"><span class="l"><span class="pip idle"></span>Payout</span><span class="r-meta">Stripe · supplier side</span></div>'
-        +'<p class="set-note warn">Billing status, usage, and the spend cap read from this server with your live key.</p>';
+      billingEl.innerHTML='<div class="row"><span class="l"><span class="pip idle"></span>Payment method</span><span class="r-meta">connect to a server to manage billing</span></div>'
+        +'<p class="set-note warn">Billing status, usage, and the spend cap read from this server once connected.</p>';
       spendFeed=null; return;
     }
     billingEl.innerHTML='<p class="set-note">Loading billing…</p>';
@@ -1129,13 +1152,13 @@
   function renderSupplier(){
     if(!supplierEl)return;
     if(!isLive()){
-      supplierEl.innerHTML='<div class="row"><span class="l"><span class="pip idle"></span>Stripe Connect</span><span class="r-meta">paste a live key to onboard for payouts</span></div>'
+      supplierEl.innerHTML='<div class="row"><span class="l"><span class="pip idle"></span>Stripe Connect</span><span class="r-meta">connect to a server to onboard for payouts</span></div>'
         +'<p class="set-note warn">Onboarding opens a Stripe Connect account-link · provide a tax ID and country, then finish in the new tab.</p>';
       return;
     }
     var em=cxEmail();
     if(!em){
-      supplierEl.innerHTML='<div class="row"><span class="l"><span class="pip idle"></span>Stripe Connect</span><span class="r-meta">sign in with your account email to onboard for payouts</span></div>';
+      supplierEl.innerHTML='<div class="row"><span class="l"><span class="pip idle"></span>Stripe Connect</span><span class="r-meta">device account required to onboard for payouts</span></div>';
       return;
     }
     supplierEl.innerHTML='<p class="set-note">Loading payout status…</p>';
@@ -1195,56 +1218,7 @@
     });
   }
 
-  // ---- LOGGED-IN IDENTITY (Settings user card). Live -> GET /v1/me {buyer_id,email,is_admin,
-  //      free_credit_remaining_usd}; render the real signed-in identity, replacing the mock. email
-  //      is "" for an api-key-only/seeded buyer -> show "api key session". Show remaining sandbox
-  //      credit only when > 0. Not live -> keep an illustrative placeholder. Server text via esc(). ----
-  var userAvatarEl=$('userAvatar'), userNameEl=$('userName'), userEmailEl=$('userEmail'), signOutBtn=$('signOut');
-  function initials(s){var p=String(s||'').replace(/@.*/,'').split(/[.\s_+-]+/).filter(Boolean);
-    return ((p[0]||'')[0]||'')+((p[1]||'')[0]||'')||(String(s||'?')[0]||'?');}
-  function renderUserCard(){
-    if(!userNameEl)return;
-    if(!isLive()){
-      // illustrative placeholder when there is no key
-      if(userAvatarEl)userAvatarEl.textContent='CX';
-      userNameEl.textContent='Not signed in';
-      userEmailEl.textContent='create an account or paste a key in Launch';
-      if(signOutBtn)signOutBtn.hidden=true;
-      return;
-    }
-    if(signOutBtn)signOutBtn.hidden=false;
-    userNameEl.textContent='Signed in';
-    userEmailEl.textContent='loading…';
-    fetch('/v1/me',{headers:authHeaders(false)}).then(function(res){
-      return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});
-    }).then(function(r){
-      var j={};try{j=JSON.parse(r.t);}catch(e){}
-      if(!r.ok){userNameEl.textContent='Signed in';userEmailEl.textContent='could not load account · '+esc(String((j&&j.error)||r.status));return;}
-      var email=(j&&j.email||'').trim();
-      var credit=Number(j&&j.free_credit_remaining_usd)||0;
-      if(userAvatarEl)userAvatarEl.textContent=(email?initials(email):'CX').toUpperCase();
-      userNameEl.textContent=email||'api key session';
-      userEmailEl.textContent=credit>0?('sandbox credit · '+money(credit)+' remaining'):(j&&j.is_admin?'admin':'live key session');
-    }).catch(function(e){userNameEl.textContent='Signed in';userEmailEl.textContent=esc('could not load account · '+e.message);});
-  }
-  // ---- SIGN OUT. POST /v1/logout with the cx_key bearer (best-effort revoke of the cx_sess_
-  //      session), then clear localStorage cx_key + cx_email regardless of the response, and return
-  //      the UI to the signup/login gate. ----
-  function doLogout(){
-    if(signOutBtn)signOutBtn.disabled=true;
-    var finish=function(){
-      liveKey='';
-      try{localStorage.removeItem('cx_key');localStorage.removeItem('cx_email');}catch(e){}
-      if(keyIn)keyIn.value='';
-      syncLive();renderSettingsPanels();renderAuth();
-      if(signOutBtn)signOutBtn.disabled=false;
-      toast('Signed out');
-    };
-    fetch('/v1/logout',{method:'POST',headers:authHeaders(false)}).then(finish).catch(finish);
-  }
-  if(signOutBtn)signOutBtn.addEventListener('click',doLogout);
-
-  function renderSettingsPanels(){renderUserCard();renderApiKeys();renderBilling();renderSupplier();}
+  function renderSettingsPanels(){renderApiKeys();renderBilling();renderSupplier();}
   renderSettingsPanels();
 
   // ===== QUICKSTART empty-state: buyer activation. Three copy-paste snippets · curl, the
@@ -1282,7 +1256,7 @@
       +'<div class="qs-tabs">'+tab('curl','curl')+tab('python','Python')+tab('cli','cx CLI')+'</div>'
       +pane('curl',curl)+pane('python',py)+pane('cli',cli)
       +'<div class="qs-cta"><button class="pill solid" id="qsCta">Copy & run</button>'
-      +'<span class="qs-hint">'+(isLive()?'live key loaded · runs against this server':'paste a buyer key in Settings to go live')+'</span></div>'
+      +'<span class="qs-hint">'+(isLive()?'connected · runs against this server':'offline · running the local simulation')+'</span></div>'
       +'</div>';
   }
   // The empty-state shows when truly empty OR when forced via the header affordance.
@@ -1341,9 +1315,29 @@
     function fail(msg){if(tv)clearInterval(tv);run.dataset.status='failed';run.querySelector('.dot').className='dot fail';st.className='st fail';st.textContent='failed';run.querySelector('.detail').innerHTML='<div class="preview">'+esc(msg)+'</div>';notify('Pipeline failed',name);rearm();}
     if(f.size>1000000){notify('Large file truncated','only the first 1 MB is sent in this demo');}
     f.slice(0,1000000).text().then(function(text){
+      var inputJSONL=toJSONL(f.name,text)+'\n';
       var spec=pl.stages.map(function(s,i){return {op:s.op,model:s.model,from:i===0?'input':'previous'};});
-      return fetch('/v1/pipelines',{method:'POST',headers:{'Authorization':'Bearer '+liveKey,'Content-Type':'application/json'},body:JSON.stringify({name:name,stages:spec,input:toJSONL(f.name,text)+'\n'})});
-    }).then(function(res){return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});}).then(function(r){
+      // Item 5: NO paid launch without a quote. Price the pipeline first (/v1/quote/pipeline),
+      // show the buyer the cost band, and require explicit confirmation; the confirmed
+      // worst-case total is sent as max_usd so a launch can never exceed what was quoted.
+      var qStages=pl.stages.map(function(s){return {op:s.op,model:s.model};});
+      return fetch('/v1/quote/pipeline',{method:'POST',headers:{'Authorization':'Bearer '+liveKey,'Content-Type':'application/json'},
+          body:JSON.stringify({input:JSON.stringify(inputJSONL),tier:'batch',stages:qStages})})
+        .then(function(res){return res.ok?res.json():null;})
+        .then(function(q){
+          var cap=q&&q.total_cost?(q.total_cost.max_usd||0):0;
+          var exp=q&&q.total_cost?(q.total_cost.expected_usd||0):0;
+          var msg=q? ('Launch this '+pl.stages.length+'-step pipeline?\n\nExpected ~$'+exp.toFixed(4)+', capped at $'+cap.toFixed(4)+'.\nYou are charged for actual usage, never above the cap.')
+                   : ('Could not price this pipeline. Launch anyway (uncapped)?');
+          if(!window.confirm(msg)){fail('cancelled before paid launch (no charge)');return null;}
+          return fetch('/v1/pipelines',{method:'POST',headers:{'Authorization':'Bearer '+liveKey,'Content-Type':'application/json'},
+              body:JSON.stringify({name:name,stages:spec,input:inputJSONL,max_usd:cap})});
+        });
+    }).then(function(res){
+      if(!res)return null; // cancelled at the quote confirmation
+      return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});
+    }).then(function(r){
+      if(!r)return; // cancelled
       var j={};try{j=JSON.parse(r.t);}catch(e){}
       if(!r.ok){fail('submit '+r.status+': '+String(j.error||r.t).slice(0,160));return;}
       st.textContent='running · queued';notify('Pipeline submitted',name);pollPipeline(j.pipeline_id,run,st,tv,fail);
@@ -1378,6 +1372,11 @@
 
   // settings switches
   document.querySelectorAll('.switch').forEach(function(s){s.addEventListener('click',function(){s.classList.toggle('on');});});
+  // Developer disclosure: reveal the testing-only block (GitHub + API keys + override). Reuses the
+  // .qs-toggle idiom + the global [hidden] rule. The block is in the DOM at load, so renderApiKeys()
+  // and the #liveKey/[data-toast] handlers all bind normally even while it is collapsed.
+  (function(){var t=$('devToggle'),b=$('devbody');if(!t||!b)return;
+    t.addEventListener('click',function(){var open=b.hidden;b.hidden=!open;t.classList.toggle('on',open);t.setAttribute('aria-expanded',String(open));t.textContent=open?'Hide':'Show';});})();
 })();
 </script>
 <script>

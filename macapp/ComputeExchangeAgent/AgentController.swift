@@ -22,6 +22,10 @@ enum AgentPaths {
     }
     static var statusFile: URL { dataDir.appendingPathComponent("status.json") }
     static var configFile: URL { dataDir.appendingPathComponent("agent.toml") }
+    /// Operator-prefs sidecar the app writes; the agent reads it as an overlay over
+    /// agent.toml (via CX_AGENT_PREFS). Atlas F7 — this is what makes the menu toggles
+    /// real instead of decorative.
+    static var prefsFile: URL { dataDir.appendingPathComponent("agent.prefs.toml") }
 
     /// The bundled agent binary. In a packaged .app it ships in Contents/MacOS;
     /// in dev we fall back to a PATH lookup / the cargo target.
@@ -128,6 +132,13 @@ final class AgentController: ObservableObject {
         let p = Process()
         p.executableURL = bin
         p.arguments = ["run", "--config", AgentPaths.configFile.path]
+        // Point the agent at the operator-prefs overlay (Atlas F7 / item 25). The agent
+        // merges this sidecar over agent.toml, so the menu toggles ACTUALLY control it —
+        // they are no longer decorative. (The agent also auto-discovers this conventional
+        // path next to the config; setting the env var makes the contract explicit.)
+        var env = ProcessInfo.processInfo.environment
+        env["CX_AGENT_PREFS"] = AgentPaths.prefsFile.path
+        p.environment = env
         p.terminationHandler = { [weak self] proc in
             Task { @MainActor in
                 self?.launchedPID = nil
@@ -169,10 +180,11 @@ final class AgentController: ObservableObject {
         prefs = decoded
     }
 
-    /// Persist prefs to UserDefaults and append/patch the agent's TOML config so a
-    /// subsequent agent launch reads them. We write the keys the Rust AgentConfig
-    /// understands; a full TOML rewrite is out of scope for the scaffold, so this
-    /// is best-effort and surfaces write failures rather than hiding them.
+    /// Persist prefs to UserDefaults AND to the agent's prefs overlay so a subsequent
+    /// launch honors them. We write the keys the Rust AgentConfig understands into a
+    /// dedicated `agent.prefs.toml` overlay (NOT the canonical agent.toml), which the
+    /// agent merges over its base config at startup (Atlas F7) — so these toggles
+    /// actually control the agent. Write failures are surfaced, never hidden.
     private func persistPrefs() {
         if let data = try? JSONEncoder().encode(prefs) {
             UserDefaults.standard.set(data, forKey: OperatorPrefs.defaultsKey)
@@ -181,9 +193,10 @@ final class AgentController: ObservableObject {
     }
 
     private func writePrefsToAgentConfig() {
-        // Scaffold note: a production build would parse + re-emit the TOML to
-        // preserve unrelated keys (control_url, worker_token, supplier_id). Here we
-        // only demonstrate the mapping from prefs -> the agent's config fields.
+        // We write a SEPARATE overlay (agent.prefs.toml), not a patch of agent.toml —
+        // that is the intended design, not a limitation: the agent merges this overlay
+        // over its base config (control_url, worker_token, supplier_id stay untouched in
+        // agent.toml). Each line below maps a pref to a key the Rust AgentConfig reads.
         var lines: [String] = []
         lines.append("# Written by ComputeExchangeAgent.app · operator prefs.")
         lines.append("max_concurrent_tasks = 0   # 0 / omit => agent derives from cores+RAM")
@@ -194,10 +207,10 @@ final class AgentController: ObservableObject {
             lines.append("quiet_hours = [\(prefs.quietStartHour), \(prefs.quietEndHour)]")
         }
         let snippet = lines.joined(separator: "\n") + "\n"
-        // We do NOT clobber an existing full config; we write a sidecar the agent
-        // doc tells operators to merge. This keeps the scaffold honest about not
-        // owning the canonical config format.
-        let sidecar = AgentPaths.dataDir.appendingPathComponent("agent.prefs.toml")
+        // We do NOT clobber the canonical agent.toml; we write the overlay the agent
+        // reads via CX_AGENT_PREFS (set in startAgent) and also auto-discovers next to
+        // the config. The toggles apply on the next launch.
+        let sidecar = AgentPaths.prefsFile
         do {
             try FileManager.default.createDirectory(at: AgentPaths.dataDir, withIntermediateDirectories: true)
             try snippet.write(to: sidecar, atomically: true, encoding: .utf8)

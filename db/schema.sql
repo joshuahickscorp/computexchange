@@ -210,6 +210,17 @@ CREATE TABLE IF NOT EXISTS honeypots (
     known_answer BYTEA,
     created_at   TIMESTAMPTZ DEFAULT now()
 );
+-- The verification class the known_answer was produced under, as "engine|build_hash"
+-- (or '' = unknown). For a BYTE-EXACT job type the verifier auto-quarantines on a
+-- honeypot byte mismatch ONLY when the committing worker shares this class — a
+-- class-blind ('' ) or cross-class byte honeypot is NOT grounds to quarantine an
+-- honest worker whose engine/build legitimately produces different bytes (the audit's
+-- "Candle-seeded answer would byte-fail a correct vLLM result" hazard). Tolerant job
+-- types (embed/classification/json/rerank) compare semantics and ignore this column.
+-- DEFAULT '' so existing/seed honeypots (class-blind) keep working — they simply stop
+-- auto-quarantining cross-class byte mismatches, which is the safe behavior. Full
+-- hw_class-aware honeypot seeding is the Wave-2 prerequisite (docs/DETERMINISM_CLASS.md).
+ALTER TABLE honeypots ADD COLUMN IF NOT EXISTS answer_class TEXT NOT NULL DEFAULT '';
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Webhooks + model catalogue
@@ -312,6 +323,28 @@ ALTER TABLE workers ADD COLUMN IF NOT EXISTS supported_jobs     TEXT[];        -
 ALTER TABLE workers ADD COLUMN IF NOT EXISTS supported_models   TEXT[];        -- model ids resident/runnable locally
 ALTER TABLE workers ADD COLUMN IF NOT EXISTS min_payout_usd_hr  REAL DEFAULT 0;-- operator reservation price ($/hr)
 ALTER TABLE workers ADD COLUMN IF NOT EXISTS thermal_ok         BOOLEAN DEFAULT true;
+
+-- The on-device inference ENGINE this worker runs (candle|mlx|vllm|hawking). It is
+-- the SECOND axis of the verification class alongside hw_class: byte-exact redundancy
+-- peers and honeypots are drawn from the same (hw_class, engine), because two engines'
+-- FP kernels differ even on identical hardware, so a future mlx/vllm/hawking worker is
+-- never byte-compared against a Candle one. DEFAULT 'candle' so every existing worker
+-- row (and an older agent that does not advertise the field) keeps today's behavior —
+-- a single-engine Candle fleet's (hw_class, engine) class collapses back to hw_class.
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS engine             TEXT NOT NULL DEFAULT 'candle';
+
+-- The FINER axis of the verification class BELOW (hw_class, engine): a stable hash of
+-- the byte-output-determining BUILD inputs (engine + agent build + device backend +
+-- catalogue quant — agent hardware::engine_build_hash). Two workers in the same
+-- hw_class + engine but on different agent builds (a kernel/codegen change between
+-- releases) can emit different bytes even on identical hardware, so BYTE-EXACT
+-- redundancy peers + honeypots are pinned to the same (hw_class, engine, build_hash);
+-- a cross-build byte mismatch is NOT an auto-dock — it falls back to provisional trust
+-- (the missing-third-worker pattern). DEFAULT '' = "unknown build": an older agent that
+-- does not advertise it is never drawn as a byte-exact peer and never auto-docked, so a
+-- single-build fleet that all reports the same hash collapses the class to today's
+-- behavior. See docs/DETERMINISM_CLASS.md.
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS build_hash         TEXT NOT NULL DEFAULT '';
 
 -- Dynamic-throttling resource state, refreshed on every heartbeat (agent reads
 -- REAL available memory each cycle). The SKIP-LOCKED claim filters on these so a
@@ -424,6 +457,9 @@ CREATE INDEX IF NOT EXISTS tasks_ready_unclaimed_idx ON tasks (status, (COALESCE
 CREATE INDEX IF NOT EXISTS ledger_supplier_payout_idx ON ledger_entries (supplier_id, payout_status);
 CREATE INDEX IF NOT EXISTS ledger_kind_idx             ON ledger_entries (kind);  -- reconcile/audit sums by kind
 CREATE INDEX IF NOT EXISTS workers_hwclass_seen_idx  ON workers (hw_class, last_seen_at);
+-- latest-benchmark lookup for the claim's throughput tiebreak (worker × job_type, newest first)
+CREATE INDEX IF NOT EXISTS benchmark_worker_type_time_idx ON benchmark_results (worker_id, job_type, measured_at DESC);
+CREATE INDEX IF NOT EXISTS workers_class_engine_seen_idx ON workers (hw_class, engine, build_hash, last_seen_at);  -- (hw_class, engine, build_hash) redundancy-peer class lookups
 CREATE INDEX IF NOT EXISTS webhooks_job_idx          ON webhooks (job_id);
 CREATE INDEX IF NOT EXISTS models_job_type_idx       ON models (job_type);
 CREATE INDEX IF NOT EXISTS tasks_job_chunk_idx        ON tasks (job_id, chunk_index);  -- ordered merge
@@ -460,7 +496,12 @@ CREATE TABLE IF NOT EXISTS verification_events (
     job_id      UUID NOT NULL REFERENCES jobs,
     task_id     UUID,
     supplier_id UUID,
-    kind        TEXT NOT NULL,  -- honeypot_pass|honeypot_fail|redundancy_match|redundancy_mismatch|tiebreak_win|tiebreak_loss
+    kind        TEXT NOT NULL,  -- honeypot_pass|honeypot_fail|redundancy_match|redundancy_mismatch|tiebreak_win|tiebreak_loss|redundancy_cross_class|tiebreak_cross_class|redundancy_same_supplier
+                                -- *_cross_class: a byte-exact comparison was skipped because the peer was in a DIFFERENT
+                                -- verification class (engine/build_hash) — recorded for forensics, NOT counted as "checked".
+                                -- redundancy_same_supplier: the only agreeing peer shared the committing supplier, so the
+                                -- match was NOT counted as independent (no redundancy_match credit). The task still
+                                -- succeeds; it is simply not independently verified (backlog P0 items 6-7).
     created_at  TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS verification_events_job_idx ON verification_events (job_id, created_at);

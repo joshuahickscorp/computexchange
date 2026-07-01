@@ -300,6 +300,8 @@
         "worker_id":      { "$ref": "#/$defs/uuid" },
         "supplier_id":    { "$ref": "#/$defs/uuid" },
         "hw_class":       { "$ref": "#/$defs/hw_class" },
+        "engine":         { "type": "string", "enum": ["candle", "mlx", "vllm", "hawking"], "description": "On-device inference engine — the second axis of the verification class (hw_class, engine, build_hash). Optional: an absent/blank value normalizes to 'candle' at registration." },
+        "build_hash":     { "type": "string", "description": "Finer verification-class axis below (hw_class, engine): a stable hash of the byte-output-determining build inputs (engine + agent build + device backend + catalogue quant). Optional: an absent/blank value is 'unknown build' — never byte-compared, provisional trust. See docs/DETERMINISM_CLASS.md." },
         "memory_gb":      { "type": "number", "minimum": 0 },
         "memory_bw_gbps": { "type": "number", "minimum": 0 },
         "supported_jobs": {
