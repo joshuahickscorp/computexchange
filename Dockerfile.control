@@ -34,6 +34,12 @@ WORKDIR /
 COPY --from=build /control /control
 COPY db/schema.sql /db/schema.sql
 
+# The operator panel page (served at /admin, handleAdminPage → web/admin.html). Only
+# admin.html is baked in — it is fully self-contained (inline CSS/JS, no external
+# assets) — so /admin works in prod while /, /demo, /app stay 404 (their HTML is
+# deliberately not shipped: no public website, just the operator panel + the app).
+COPY web/admin.html /web/admin.html
+
 EXPOSE 8080
 # distroless/static:nonroot already runs as uid 65532; be explicit.
 USER nonroot:nonroot

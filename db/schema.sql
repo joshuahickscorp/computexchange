@@ -186,6 +186,32 @@ CREATE TABLE IF NOT EXISTS api_keys (
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS name   TEXT;
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS masked TEXT;
 
+-- Admin passkey (WebAuthn) credentials — the operator's own device authenticators
+-- (Touch ID / a security key) for the /admin panel. Single-operator: every row is the
+-- one operator's. None of these fields is a secret: a credential id + COSE public key
+-- gate nothing on their own — only a device holding the matching PRIVATE key can
+-- produce a valid assertion — so they are stored plainly. sign_count is the standard
+-- clone-detection counter (a decrease signals a cloned authenticator).
+CREATE TABLE IF NOT EXISTS admin_credentials (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    credential_id BYTEA NOT NULL UNIQUE,      -- the WebAuthn credential id (lookup + exclusion)
+    credential    JSONB NOT NULL,             -- the full go-webauthn Credential (public key, sign_count, aaguid, …)
+    label         TEXT,                       -- human label, e.g. "Josh MacBook Touch ID"
+    created_at    TIMESTAMPTZ DEFAULT now(),
+    last_used_at  TIMESTAMPTZ
+);
+
+-- Admin sessions minted after a successful passkey login. Kept SEPARATE from the
+-- buyer `sessions` table by design (a buyer session is never admin). Only the SHA-256
+-- hash of the opaque cx_admin_ token is stored; the raw token lives in an httpOnly
+-- Secure cookie in the operator's browser and is unrecoverable from the DB.
+CREATE TABLE IF NOT EXISTS admin_sessions (
+    token_hash TEXT PRIMARY KEY,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    revoked    BOOLEAN DEFAULT false
+);
+
 CREATE TABLE IF NOT EXISTS worker_tokens (
     token_hash  TEXT PRIMARY KEY,         -- SHA-256 hash of the raw token; raw is shown once at mint, never stored
     worker_id   UUID REFERENCES workers,

@@ -1,0 +1,253 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Computexchange · Operator</title>
+<style>
+  :root { --bg:#060606; --panel:#101012; --hair:rgba(255,255,255,.10); --ink:#e8e8ea;
+          --dim:#8a8a90; --green:#4c9d6e; --red:#c0554b; --acc:#c7c7cc; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:14px/1.5 ui-monospace,"SF Mono",Menlo,monospace; }
+  header { display:flex; align-items:center; justify-content:space-between;
+           padding:16px 22px; border-bottom:1px solid var(--hair); }
+  header .brand { font-weight:600; letter-spacing:.02em; }
+  header .brand span { color:var(--dim); font-weight:400; }
+  main { max-width:1100px; margin:0 auto; padding:22px; }
+  .gate { max-width:440px; margin:8vh auto; text-align:center; }
+  .gate h1 { font-size:19px; margin:0 0 6px; }
+  .gate p { color:var(--dim); margin:0 0 22px; }
+  button { font:inherit; color:var(--ink); background:var(--panel);
+           border:1px solid var(--hair); border-radius:8px; padding:11px 18px;
+           cursor:pointer; transition:border-color .15s; }
+  button:hover { border-color:rgba(255,255,255,.28); }
+  button.primary { background:#17171b; border-color:rgba(255,255,255,.24); }
+  button:disabled { opacity:.5; cursor:default; }
+  .muted { color:var(--dim); font-size:12.5px; }
+  .row { display:flex; gap:10px; align-items:center; justify-content:center; flex-wrap:wrap; }
+  input { font:inherit; color:var(--ink); background:#0c0c0e; border:1px solid var(--hair);
+          border-radius:8px; padding:10px 12px; width:100%; }
+  .panels { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:16px; }
+  .card { background:var(--panel); border:1px solid var(--hair); border-radius:12px; padding:16px; }
+  .card h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim);
+             margin:0 0 12px; font-weight:600; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--hair); white-space:nowrap; }
+  th { color:var(--dim); font-weight:500; }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .dot { display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--dim); }
+  .dot.on { background:var(--green); } .dot.off { background:var(--red); }
+  .err { color:var(--red); font-size:12.5px; min-height:18px; }
+  .hidden { display:none !important; }
+  .metrics { font-size:12.5px; }
+  .metrics div { display:flex; justify-content:space-between; padding:3px 0; border-bottom:1px solid var(--hair); }
+  .metrics span:last-child { font-variant-numeric:tabular-nums; }
+  .toolbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:18px; }
+  a { color:var(--acc); }
+</style>
+
+<header>
+  <div class="brand">computexchange <span>· operator</span></div>
+  <div class="row" style="justify-content:flex-end">
+    <span id="who" class="muted"></span>
+    <button id="signout" class="hidden">Sign out</button>
+  </div>
+</header>
+
+<main>
+  <!-- ── Gate: passkey sign-in / first-time registration ─────────────────── -->
+  <section id="gate" class="gate hidden">
+    <h1 id="gate-title">Operator sign-in</h1>
+    <p id="gate-sub">Use your passkey to open the operator panel.</p>
+
+    <div id="login-box" class="hidden">
+      <div class="row"><button id="btn-login" class="primary">Sign in with passkey</button></div>
+    </div>
+
+    <div id="register-box" class="hidden">
+      <p class="muted">No passkey registered on this system yet. Register one with your
+        admin key (once), then use Touch&nbsp;ID / your security key from then on.</p>
+      <div style="max-width:360px;margin:0 auto 10px"><input id="admin-key" type="password"
+        placeholder="admin bearer key (cx_… )" autocomplete="off"></div>
+      <div class="row"><button id="btn-register" class="primary">Register this device's passkey</button></div>
+    </div>
+
+    <p class="err" id="gate-err"></p>
+    <p class="muted" style="margin-top:26px">Break-glass: the admin bearer key still works
+      directly on the API if a passkey is ever unavailable.</p>
+  </section>
+
+  <!-- ── Panel: the operator dashboard ───────────────────────────────────── -->
+  <section id="panel" class="hidden">
+    <div class="toolbar">
+      <div class="muted">Live view · <span id="stamp"></span></div>
+      <button id="refresh">Refresh</button>
+    </div>
+    <div class="panels">
+      <div class="card"><h2>Jobs</h2><div id="jobs">…</div></div>
+      <div class="card"><h2>Workers</h2><div id="workers">…</div></div>
+      <div class="card"><h2>Payouts owed</h2><div id="payouts">…</div></div>
+      <div class="card"><h2>Fraud flags</h2><div id="fraud">…</div></div>
+      <div class="card"><h2>Control-plane metrics</h2><div id="metrics" class="metrics">…</div></div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const show = (el,on) => $(el).classList.toggle('hidden', !on);
+const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+// WebAuthn helpers: the browser needs ArrayBuffers where the server sends base64url.
+const b64uToBuf = s => { s = s.replace(/-/g,'+').replace(/_/g,'/'); const pad = s.length%4?4-s.length%4:0;
+  const bin = atob(s + '='.repeat(pad)); const u = new Uint8Array(bin.length);
+  for (let i=0;i<bin.length;i++) u[i]=bin.charCodeAt(i); return u.buffer; };
+const bufToB64u = b => { const u = new Uint8Array(b); let s='';
+  for (let i=0;i<u.length;i++) s += String.fromCharCode(u[i]);
+  return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); };
+
+// Rehydrate the PublicKeyCredentialCreationOptions the server sent (its binary fields
+// are base64url JSON) into the ArrayBuffers navigator.credentials.create() expects.
+function prepCreate(o){
+  o.challenge = b64uToBuf(o.challenge);
+  o.user.id = b64uToBuf(o.user.id);
+  (o.excludeCredentials||[]).forEach(c => c.id = b64uToBuf(c.id));
+  return o;
+}
+function prepGet(o){
+  o.challenge = b64uToBuf(o.challenge);
+  (o.allowCredentials||[]).forEach(c => c.id = b64uToBuf(c.id));
+  return o;
+}
+function credToJSON(cred){
+  const r = cred.response, out = {
+    id: cred.id, rawId: bufToB64u(cred.rawId), type: cred.type,
+    clientExtensionResults: cred.getClientExtensionResults ? cred.getClientExtensionResults() : {},
+    response: { clientDataJSON: bufToB64u(r.clientDataJSON) }
+  };
+  if (r.attestationObject) out.response.attestationObject = bufToB64u(r.attestationObject);
+  if (r.authenticatorData) {
+    out.response.authenticatorData = bufToB64u(r.authenticatorData);
+    out.response.signature = bufToB64u(r.signature);
+    out.response.userHandle = r.userHandle ? bufToB64u(r.userHandle) : null;
+  }
+  if (cred.authenticatorAttachment) out.authenticatorAttachment = cred.authenticatorAttachment;
+  return out;
+}
+
+async function api(path, opts={}){
+  const res = await fetch(path, {credentials:'same-origin', ...opts});
+  if (!res.ok){ let m; try { m = (await res.json()).error; } catch { m = res.statusText; }
+    throw new Error(m || ('HTTP '+res.status)); }
+  return res.headers.get('content-type')?.includes('json') ? res.json() : res.text();
+}
+
+// ── passkey ceremonies ──────────────────────────────────────────────────────
+async function registerPasskey(){
+  const key = $('#admin-key').value.trim();
+  if (!key){ $('#gate-err').textContent = 'Enter your admin bearer key to register the first passkey.'; return; }
+  $('#gate-err').textContent = '';
+  try {
+    const auth = {'Authorization':'Bearer '+key};
+    const opts = await api('/admin/passkey/register/begin', {method:'POST', headers:auth});
+    const cred = await navigator.credentials.create({ publicKey: prepCreate(opts.publicKey) });
+    const label = encodeURIComponent((navigator.platform||'device')+' passkey');
+    await api('/admin/passkey/register/finish?label='+label,
+      {method:'POST', headers:{...auth,'Content-Type':'application/json'}, body: JSON.stringify(credToJSON(cred))});
+    // Registered — now sign in with it to get a session.
+    await loginPasskey();
+  } catch(e){ $('#gate-err').textContent = 'Registration failed: '+e.message; }
+}
+
+async function loginPasskey(){
+  $('#gate-err').textContent = '';
+  try {
+    const opts = await api('/admin/passkey/login/begin', {method:'POST'});
+    const cred = await navigator.credentials.get({ publicKey: prepGet(opts.publicKey) });
+    await api('/admin/passkey/login/finish',
+      {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(credToJSON(cred))});
+    await boot();
+  } catch(e){ $('#gate-err').textContent = 'Sign-in failed: '+e.message; }
+}
+
+async function signOut(){ try { await api('/admin/passkey/logout', {method:'POST'}); } catch{} boot(); }
+
+// ── panel data ──────────────────────────────────────────────────────────────
+function rows(arr, cols){
+  if (!arr || !arr.length) return '<div class="muted">none</div>';
+  const head = '<tr>'+cols.map(c=>`<th class="${c.num?'num':''}">${esc(c.h)}</th>`).join('')+'</tr>';
+  const body = arr.slice(0,12).map(o=>'<tr>'+cols.map(c=>{
+    let v = c.f ? c.f(o) : o[c.k];
+    return `<td class="${c.num?'num':''}">${v}</td>`;
+  }).join('')+'</tr>').join('');
+  return `<table>${head}${body}</table>`;
+}
+async function loadPanel(){
+  $('#stamp').textContent = new Date().toLocaleTimeString();
+  const safe = async (fn) => { try { return await fn(); } catch(e){ return {__err:e.message}; } };
+  const [jobs, workers, payouts, fraud] = await Promise.all([
+    safe(()=>api('/admin/jobs')), safe(()=>api('/admin/workers')),
+    safe(()=>api('/admin/payouts')), safe(()=>api('/admin/fraud-flags')),
+  ]);
+  const arr = x => Array.isArray(x) ? x : (x && Array.isArray(x.items) ? x.items : (x && x.__err ? [] : []));
+  $('#jobs').innerHTML = jobs.__err ? `<span class="err">${esc(jobs.__err)}</span>` : rows(arr(jobs), [
+    {h:'id', f:o=>esc(String(o.id||o.job_id||'').slice(0,8))},
+    {h:'type', f:o=>esc(o.job_type||o.type||'')},
+    {h:'status', f:o=>`<span class="dot ${/(done|complete|released)/.test(o.status)?'on':/(fail|error)/.test(o.status)?'off':''}"></span> ${esc(o.status||'')}`},
+  ]);
+  $('#workers').innerHTML = workers.__err ? `<span class="err">${esc(workers.__err)}</span>` : rows(arr(workers), [
+    {h:'id', f:o=>esc(String(o.id||o.worker_id||'').slice(0,8))},
+    {h:'class', f:o=>esc(o.hw_class||'')},
+    {h:'live', f:o=>`<span class="dot ${o.throttled?'off':'on'}"></span>`},
+  ]);
+  $('#payouts').innerHTML = payouts.__err ? `<span class="err">${esc(payouts.__err)}</span>` : rows(arr(payouts), [
+    {h:'supplier', f:o=>esc(String(o.supplier_id||'').slice(0,8))},
+    {h:'status', f:o=>esc(o.payout_status||o.status||'')},
+    {h:'usd', num:true, f:o=>esc(Number(o.amount_usd||o.usd||0).toFixed(2))},
+  ]);
+  $('#fraud').innerHTML = fraud.__err ? `<span class="err">${esc(fraud.__err)}</span>` : rows(arr(fraud), [
+    {h:'worker', f:o=>esc(String(o.worker_id||'').slice(0,8))},
+    {h:'kind', f:o=>esc(o.kind||o.reason||'')},
+  ]);
+  // Metrics: parse the Prometheus text exposition for a few headline cx_* counters.
+  try {
+    const txt = await api('/metrics');
+    const pick = ['cx_jobs_total','cx_tasks_completed_total','cx_payouts_released_total',
+                  'cx_ticker_seconds_since_success','cx_fraud_confirmed_total'];
+    const lines = String(txt).split('\n');
+    $('#metrics').innerHTML = pick.map(name=>{
+      const l = lines.find(x=>x.startsWith(name+' ')||x.startsWith(name+'{'));
+      const v = l ? l.trim().split(/\s+/).pop() : '—';
+      return `<div><span>${name}</span><span>${esc(v)}</span></div>`;
+    }).join('');
+  } catch(e){ $('#metrics').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+}
+
+// ── boot: decide gate vs panel from the passkey status ───────────────────────
+async function boot(){
+  let st;
+  try { st = await api('/admin/passkey/status'); }
+  catch(e){ show('#gate',true); show('#panel',false); $('#gate-err').textContent = e.message; return; }
+  if (st.authenticated){
+    show('#gate',false); show('#panel',true); show('#signout',true);
+    $('#who').textContent = 'signed in';
+    loadPanel();
+    return;
+  }
+  show('#panel',false); show('#signout',false); $('#who').textContent='';
+  show('#gate',true);
+  const hasWA = !!window.PublicKeyCredential;
+  if (!hasWA){ $('#gate-err').textContent = 'This browser has no WebAuthn/passkey support.'; }
+  show('#login-box', st.registered && hasWA);
+  show('#register-box', hasWA);
+  $('#gate-title').textContent = st.registered ? 'Operator sign-in' : 'Register operator passkey';
+  $('#gate-sub').textContent = st.registered
+    ? 'Use your passkey to open the operator panel.'
+    : 'First-time setup on this system.';
+}
+
+$('#btn-login').onclick   = loginPasskey;
+$('#btn-register').onclick= registerPasskey;
+$('#signout').onclick     = signOut;
+$('#refresh').onclick     = loadPanel;
+boot();
+</script>

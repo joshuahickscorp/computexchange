@@ -162,7 +162,23 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /v1/worker/connect", s.authWorker(http.HandlerFunc(s.handleWorkerConnect)))
 	mux.Handle("GET /v1/worker/connect/status", s.authWorker(http.HandlerFunc(s.handleWorkerConnectStatus)))
 
-	// Admin (Bearer admin_key — same lookup, is_admin flag required).
+	// Admin panel page (passkey-gated in the browser; the DATA routes below enforce
+	// auth server-side, so serving the HTML shell itself is safe/public).
+	mux.HandleFunc("GET /admin", s.handleAdminPage)
+	mux.HandleFunc("GET /admin/{$}", s.handleAdminPage)
+
+	// Admin passkey (WebAuthn) — webauthn.go. Register is authAdmin-gated (the bearer
+	// admin key bootstraps the first passkey; a passkey session enrolls the rest).
+	// Login + status + logout are public (they MINT/inspect the session).
+	mux.HandleFunc("GET /admin/passkey/status", s.handleAdminPasskeyStatus)
+	mux.Handle("POST /admin/passkey/register/begin", s.authAdmin(http.HandlerFunc(s.handleAdminRegisterBegin)))
+	mux.Handle("POST /admin/passkey/register/finish", s.authAdmin(http.HandlerFunc(s.handleAdminRegisterFinish)))
+	mux.HandleFunc("POST /admin/passkey/login/begin", s.handleAdminLoginBegin)
+	mux.HandleFunc("POST /admin/passkey/login/finish", s.handleAdminLoginFinish)
+	mux.HandleFunc("POST /admin/passkey/logout", s.handleAdminLogout)
+
+	// Admin data (authAdmin: a valid cx_admin_ passkey session cookie OR the admin
+	// bearer key — see authAdmin in this file).
 	mux.Handle("GET /admin/workers", s.authAdmin(http.HandlerFunc(s.handleAdminWorkers)))
 	mux.Handle("GET /admin/jobs", s.authAdmin(http.HandlerFunc(s.handleAdminJobs)))
 	mux.Handle("GET /admin/payouts", s.authAdmin(http.HandlerFunc(s.handleAdminPayouts)))
@@ -244,16 +260,29 @@ func (s *Server) authBuyer(next http.Handler) http.Handler {
 	})
 }
 
-// authAdmin is authBuyer plus an is_admin requirement.
+// authAdmin gates admin routes on EITHER of two credentials:
+//   1. a valid cx_admin_ passkey session cookie (the operator signed in with a passkey
+//      at /admin — see webauthn.go), or
+//   2. the admin bearer key (authBuyer + is_admin) — kept as BREAK-GLASS so a lost or
+//      not-yet-registered passkey can never lock the operator out.
+// The passkey path is checked first and, on success, synthesizes an admin AuthResult
+// (admin reads are cross-buyer and never dereference BuyerID, verified in api.go).
 func (s *Server) authAdmin(next http.Handler) http.Handler {
-	return s.authBuyer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Context().Value(ctxBuyer).(*AuthResult)
-		if !auth.IsAdmin {
-			writeErr(w, http.StatusForbidden, "admin privilege required")
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.hasValidAdminSession(r) {
+			ctx := context.WithValue(r.Context(), ctxBuyer, &AuthResult{IsAdmin: true})
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
-		next.ServeHTTP(w, r)
-	}))
+		s.authBuyer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			auth := r.Context().Value(ctxBuyer).(*AuthResult)
+			if !auth.IsAdmin {
+				writeErr(w, http.StatusForbidden, "admin privilege required")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})).ServeHTTP(w, r)
+	})
 }
 
 // authWorker authenticates an X-Worker-Token and stashes the WorkerAuth.
@@ -1810,6 +1839,25 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "dashboard not found at "+path+" (set DASHBOARD_PATH)")
+		return
+	}
+	secureHTMLHeaders(w)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(b)
+}
+
+// handleAdminPage serves the passkey-gated operator panel at /admin. The HTML shell
+// itself is public (it just renders the passkey sign-in and, once authed, fetches the
+// admin data routes, which enforce auth server-side). Path is web/admin.html,
+// overridable via ADMIN_PATH; a missing file is a clear 404, never a faked page.
+func (s *Server) handleAdminPage(w http.ResponseWriter, r *http.Request) {
+	path := os.Getenv("ADMIN_PATH")
+	if path == "" {
+		path = "web/admin.html"
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "admin panel not found at "+path+" (set ADMIN_PATH)")
 		return
 	}
 	secureHTMLHeaders(w)

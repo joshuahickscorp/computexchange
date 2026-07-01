@@ -127,6 +127,9 @@ func (s *Server) startRateLimitSweeper(ctx context.Context) {
 			s.buyerLimiter.sweep()
 			s.workerLimiter.sweep()
 			s.signupLimiter.sweep()
+			// Clean out expired/revoked admin passkey sessions (best-effort; the
+			// adminSessionValid check already ignores them, this just bounds the table).
+			_ = s.store.adminSessionSweep(ctx)
 		}
 	}
 }
