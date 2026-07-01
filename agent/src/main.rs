@@ -81,6 +81,35 @@ enum Command {
         #[arg(long, default_value_t = 700.0)]
         model_gb: f32,
     },
+    /// Batch-throughput benchmark: load a GGUF model and sweep batch sizes, timing
+    /// batched vs serial decode. Device-agnostic — it measures whatever backend the
+    /// binary was built for (Metal on macOS, CUDA when built `--features cuda`), so the
+    /// SAME command produces comparable Apple-Silicon and NVIDIA numbers. Prints a
+    /// human table to stderr and a machine-readable JSON record to stdout (redirect
+    /// stdout to capture just the JSON). No network; downloads the GGUF once if absent.
+    BenchBatch {
+        /// Model ref (e.g. llama-3.2-1b-instruct-q4, qwen2.5-7b-instruct-q4).
+        #[arg(long, default_value = "llama-3.2-1b-instruct-q4")]
+        model: String,
+        /// Max new tokens to generate per request (decode length; decode is where
+        /// batching pays off, so keep this realistic, not tiny).
+        #[arg(long, default_value_t = 48)]
+        max_tokens: u32,
+        /// Batch sizes to sweep, comma-separated (e.g. 1,2,4,8,16,32).
+        #[arg(long, default_value = "1,2,4,8,16,32")]
+        batch_sizes: String,
+        /// The prompt every request in the batch runs (identical prompts keep the
+        /// measurement about batching, not prompt variance; greedy output is then
+        /// also checkable for the batched==serial invariant).
+        #[arg(long, default_value = "Write a detailed paragraph about the ocean and its wonders:")]
+        prompt: String,
+        /// Gate mode: exit non-zero if batched output ever diverges from serial. Off by
+        /// default (a throughput benchmark records divergence as data, since GPU
+        /// reduction-order can legitimately flip a greedy tie without invalidating the
+        /// tok/s). Turn ON to use this as a byte-determinism gate.
+        #[arg(long, default_value_t = false)]
+        require_deterministic: bool,
+    },
     /// Print the agent version and exit.
     Version,
 }
@@ -88,7 +117,15 @@ enum Command {
 fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    fmt().with_env_filter(filter).with_target(false).init();
+    // Logs to STDERR so stdout stays clean for the machine-readable JSON the `bench`
+    // and `bench-batch` subcommands print (a harness redirects stdout to capture just
+    // the record). stderr is the conventional stream for diagnostics; under
+    // systemd/launchd/docker both streams are still captured.
+    fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_writer(std::io::stderr)
+        .init();
 }
 
 fn now_unix() -> u64 {
@@ -176,6 +213,16 @@ async fn main() -> Result<()> {
             init_tracing();
             run_bench(config)
         }
+        Command::BenchBatch {
+            model,
+            max_tokens,
+            batch_sizes,
+            prompt,
+            require_deterministic,
+        } => {
+            init_tracing();
+            run_bench_batch(&model, max_tokens, &batch_sizes, &prompt, require_deterministic)
+        }
         Command::ClusterPlan {
             members_gb,
             link_gbps,
@@ -208,6 +255,171 @@ fn run_bench(config: Option<PathBuf>) -> Result<()> {
     // `bench` is informational only — reservation price is 0.0 (not advertised).
     let cap = hardware::detect_and_benchmark(supplier_id, AGENT_VERSION, 0.0, engine);
     println!("{}", serde_json::to_string_pretty(&cap)?);
+    Ok(())
+}
+
+/// `bench-batch` subcommand: sweep batch sizes on a real GGUF model, timing batched
+/// vs serial decode. The batched path (generate_batch) shares the decode step across
+/// the batch — the core throughput lever CX relies on — so this quantifies the win on
+/// whatever backend the binary was built for. Emits a JSON record on stdout; a human
+/// table on stderr. Also asserts the batched==serial greedy invariant so a throughput
+/// number can never be reported over an INCORRECT (diverged) batched decode.
+fn run_bench_batch(
+    model: &str,
+    max_tokens: u32,
+    batch_sizes: &str,
+    prompt: &str,
+    require_deterministic: bool,
+) -> Result<()> {
+    use std::time::Instant;
+
+    let sizes: Vec<usize> = batch_sizes
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            let n = s.parse::<usize>().map_err(|e| anyhow::anyhow!("bad batch size {s:?}: {e}"))?;
+            // Reject 0: a zero-size batch runs zero sequences, so tok/s and
+            // per-request throughput divide by zero → NaN → serializes as JSON null,
+            // breaking the stdout contract AND vacuously "passing" the batched==serial
+            // check (all() over an empty vec is true). Never let it into the sweep.
+            if n == 0 {
+                anyhow::bail!("batch size must be >= 1 (got 0 in --batch-sizes)");
+            }
+            Ok(n)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if sizes.is_empty() {
+        anyhow::bail!("no batch sizes given (e.g. --batch-sizes 1,2,4,8,16,32)");
+    }
+
+    let device = models::device_label();
+    // Report the same class axis the scheduler pins on, so a bench record is
+    // attributable to an exact (device, engine, build_hash). The bench binary is the
+    // default Candle path; the engine tag matches what `run` would advertise.
+    let engine = config::InferenceBackend::default().engine_tag();
+    let build_hash = hardware::engine_build_hash(engine, AGENT_VERSION);
+    eprintln!("== cx-agent bench-batch ==");
+    eprintln!("device={device} model={model} max_tokens={max_tokens} build_hash={build_hash}");
+
+    let mut be = runners::LlamaBackend::load(model)
+        .map_err(|e| anyhow::anyhow!("load {model}: {e}"))?;
+
+    // Warm-up: one generate outside the timed loop so weight upload / first-kernel
+    // JIT / autotune costs land here, not in the measured serial baseline.
+    let (warm_text, _) = be
+        .generate(prompt, max_tokens)
+        .map_err(|e| anyhow::anyhow!("warmup generate: {e}"))?;
+
+    // Serial baseline: time ONE request end-to-end (B=1 through the scalar path). This
+    // is the "no batching" reference every batched tok/s is compared against.
+    let t = Instant::now();
+    let (serial_text, serial_tok) = be
+        .generate(prompt, max_tokens)
+        .map_err(|e| anyhow::anyhow!("serial generate: {e}"))?;
+    let serial_dt = t.elapsed().as_secs_f64();
+    // A zero-token serial baseline (model emitted EOS immediately) would make every
+    // speedup = tps/0 = ±inf/NaN → JSON null downstream. That is a degenerate input
+    // (bad model/prompt), not a measurable run — fail loudly rather than emit nulls.
+    if serial_tok == 0 {
+        anyhow::bail!(
+            "serial baseline produced 0 tokens for model {model:?} — cannot benchmark \
+             (check the model ref and prompt)"
+        );
+    }
+    let serial_tps = serial_tok as f64 / serial_dt;
+    eprintln!("serial (B=1): {serial_tok} tok in {serial_dt:.2}s = {serial_tps:.1} tok/s");
+
+    #[derive(serde::Serialize)]
+    struct SweepRow {
+        batch: usize,
+        wall_s: f64,
+        total_tokens: usize,
+        tokens_per_s: f64,
+        per_request_tok_s: f64,
+        speedup_vs_serial: f64,
+        batched_equals_serial: bool,
+    }
+
+    let mut rows: Vec<SweepRow> = Vec::with_capacity(sizes.len());
+    let mut peak_tps = serial_tps;
+    for &b in &sizes {
+        let prompts: Vec<String> = std::iter::repeat(prompt.to_string()).take(b).collect();
+        let t = Instant::now();
+        let res = be
+            .generate_batch(&prompts, max_tokens)
+            .map_err(|e| anyhow::anyhow!("generate_batch b={b}: {e}"))?;
+        let wall = t.elapsed().as_secs_f64();
+        let total_tok: usize = res.iter().map(|(_, n)| n).sum();
+        let tps = total_tok as f64 / wall;
+        // Byte-determinism vs serial: does batched greedy output match one-at-a-time?
+        // This is a SEPARATE property from throughput. On Apple/Metal it holds at every
+        // batch size (mask-cache + active-set-shrink determinism). On CUDA it can FLIP a
+        // greedy argmax TIE because GPU float reductions vary with batch composition —
+        // the batched tokens are still a valid greedy decode, just not byte-identical to
+        // serial. So a divergence does NOT invalidate the tok/s (the tokens really were
+        // produced at that rate); it is recorded as a determinism data point, and only a
+        // gate (--require-deterministic) treats it as a hard failure.
+        let equals_serial = res.iter().all(|(text, _)| *text == serial_text);
+        let row = SweepRow {
+            batch: b,
+            wall_s: wall,
+            total_tokens: total_tok,
+            tokens_per_s: tps,
+            per_request_tok_s: tps / b as f64,
+            speedup_vs_serial: tps / serial_tps,
+            batched_equals_serial: equals_serial,
+        };
+        eprintln!(
+            "batch={b:>3}: {total_tok:>5} tok in {wall:>6.2}s = {tps:>7.1} tok/s  ({:.2}x serial){}",
+            row.speedup_vs_serial,
+            if equals_serial { "" } else { "  !! batched != serial" }
+        );
+        peak_tps = peak_tps.max(tps);
+        rows.push(row);
+    }
+
+    let all_deterministic = rows.iter().all(|r| r.batched_equals_serial);
+    let diverged: Vec<usize> = rows.iter().filter(|r| !r.batched_equals_serial).map(|r| r.batch).collect();
+    eprintln!(
+        "peak {peak_tps:.1} tok/s = {:.2}x serial · byte-determinism vs serial: {}",
+        peak_tps / serial_tps,
+        if all_deterministic {
+            "IDENTICAL at every batch size".to_string()
+        } else {
+            format!("DIVERGES at batch {diverged:?} (GPU reduction-order tie-flip; throughput still valid)")
+        }
+    );
+
+    let record = serde_json::json!({
+        "kind": "bench_batch",
+        "device": device,
+        "build_hash": build_hash,
+        "model": model,
+        "max_tokens": max_tokens,
+        "prompt_preview": prompt.chars().take(60).collect::<String>(),
+        "warmup_ok": !warm_text.is_empty(),
+        "serial_baseline_tok_s": serial_tps,
+        "peak_tok_s": peak_tps,
+        "peak_speedup_vs_serial": peak_tps / serial_tps,
+        // Byte-determinism vs serial (NOT a throughput validity flag). true = batched
+        // output byte-identical to serial at every batch size; false = at least one
+        // batch diverged (see `diverged_batches`).
+        "batched_deterministic_vs_serial": all_deterministic,
+        "diverged_batches": diverged,
+        "sweep": rows,
+    });
+    println!("{}", serde_json::to_string_pretty(&record)?);
+
+    // Divergence is a data point, not a failure — the tok/s are real. Only a caller that
+    // explicitly demands byte-determinism (--require-deterministic, e.g. a verification
+    // gate) treats a divergence as a hard, non-zero-exit failure.
+    if require_deterministic && !all_deterministic {
+        anyhow::bail!(
+            "batched decode diverged from serial at batch {diverged:?} and \
+             --require-deterministic was set — failing the determinism gate"
+        );
+    }
     Ok(())
 }
 

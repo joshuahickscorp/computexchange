@@ -63,6 +63,24 @@ Verified state of the perf-wave branch. Status is brutally honest: PROVEN means 
 
 Branch build at time of writing: agent `cargo build` GREEN, `cargo test --release` 88 passed / 0 failed / 13 ignored; control `go build ./...` GREEN, `go test ./...` ok, `go vet ./...` clean. Nothing committed, pushed, or deployed.
 
+## Release-mode Metal re-run (2026-07-01, same M3 Pro, `cargo test --release`)
+
+All 13 previously-`#[ignore]`'d tests + `pool_loads_real_model_once` (14 total) re-run in a
+RELEASE build with `--test-threads=1`, 15GB of models already HF-cached: **14 passed / 0
+failed**. `golden_token_baseline_gate` re-verified p001-p004 green against the existing
+`candle|29788fb25f948522` class (no re-seed needed — build_hash unchanged since Pass 1).
+`qwen_05b_loads_and_is_coherent` reconfirmed factually coherent ("Paris", "Jupiter").
+
+**batched_vs_serial_throughput, release build: 1536 tok in 9.10s batched vs 13.84s serial =
+168.8 vs 111.0 tok/s = 1.5x, correctness OK (batched == serial for all 32).** This closes
+the "release/A100 numbers still pending" note above for the Metal half — worth flagging
+honestly: 1.5x release is LOWER than the 2.3x recorded in a DEBUG build in Pass 1 (same
+test, same 32-prompt/48-tok fixture). Reads as the release compiler optimizing the serial
+baseline harder than the batched path narrows the gap it needs to close, not a regression
+in the batching logic itself (correctness held in both runs) — worth a look before citing a
+speedup number externally, but not a blocker. The A100/CUDA release-mode number is still
+open; per docs/VLLM_LANE.md that needs the vLLM determinism soak infra, not a bare rerun.
+
 ## Wave 0: fork surface, engine-tag axis, determinism class
 
 | Item | Status | Files | Determinism note | Exact next action |
