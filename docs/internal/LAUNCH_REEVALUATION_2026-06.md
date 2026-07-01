@@ -1,9 +1,10 @@
 # Launch Re-Evaluation — 2026-06-30
 
-Supersedes the verdict in `SHIP_AND_DOMINATE.md` §1–§3, which predates the Phase 2/3/3.5
-work, the P0 backend frontier work, and the 2026-06-30 web-app simplification (sign-in
-removed; device + payment is the only identity). Read this first; that doc's perf/market
-sections (§4–§7) still stand.
+Supersedes the verdict in `SHIP_AND_DOMINATE.md` §1–§3 (archived, see `docs/ARCHIVE_INDEX.md`;
+retrieve with `git checkout pre-consolidation-2026-07-01 -- docs/internal/SHIP_AND_DOMINATE.md`),
+which predates the Phase 2/3/3.5 work, the P0 backend frontier work, and the 2026-06-30 web-app
+simplification (sign-in removed; device + payment is the only identity). Read this first; that
+doc's perf/market sections (§4–§7) still stand.
 
 ## Do we need a launch audit? — Yes, but a SHORT one.
 

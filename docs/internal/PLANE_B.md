@@ -7,7 +7,9 @@
 > simulator that exercises the control-plane seam; that boundary is drawn
 > explicitly below. References the action plan's Plane B sections
 > (`COMPUTE_EXCHANGE_HARDENED_ACTION_PLAN.md` §F decision log, §P, Phase 6 of §L,
-> and the open-source map in §C).
+> and the open-source map in §C — archived, see `docs/ARCHIVE_INDEX.md`;
+> retrieve with `git checkout pre-consolidation-2026-07-01 --
+> docs/internal/COMPUTE_EXCHANGE_HARDENED_ACTION_PLAN.md`).
 
 ## 0. Why Plane B exists, and why it is NOT Plane A
 
