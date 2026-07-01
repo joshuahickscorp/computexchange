@@ -96,6 +96,90 @@ fn classify_nvidia(vram_gb: f32) -> HardwareClass {
     }
 }
 
+/// The quantization the wired (Candle) runners load the catalogue under. This is
+/// the byte-output-determining weight format, and it is a fixed property of the
+/// shipped catalogue (every GGUF in `models.rs` is `Q4_K_M`), not a runtime knob.
+/// It is folded into the build hash so that a future requant (e.g. a sub-Q4 codec
+/// lane, audit Wave 3) lands in a DIFFERENT verification class and is never
+/// byte-compared against a Q4_K_M peer. A bare string keeps the seam honest: when
+/// a runtime ever varies quant per model, derive this from the loaded weights.
+const CATALOGUE_QUANT: &str = "q4_k_m";
+
+/// A stable, short identity of the ENGINE BUILD this worker runs — the finer axis
+/// of the verification class below hardware (mirrors Hawking's profile identity,
+/// which keys on device_name + shader_hash + tensor_layout_hash; see
+/// docs/DETERMINISM_CLASS.md). It hashes the byte-output-determining build inputs:
+///   - `engine`        — the runtime tag (`candle` / `mlx` / `vllm` / `hawking`);
+///   - `agent_version` — the cx-agent build (a kernel/codegen change ships with a
+///                       new agent build, so the version stands in for "shader/kernel
+///                       build" the way Hawking's shader_hash does);
+///   - device backend  — `metal` vs `cuda` vs `cpu` (the same engine emits DIFFERENT
+///                       FP bytes per backend, exactly the cross-Mac/CUDA split the
+///                       audit's determinism ledger calls out);
+///   - `CATALOGUE_QUANT` — the weight format the catalogue is loaded under;
+///   - inference-module content hash — a SHA-256 of the vendored
+///     `quantized_llama_batched.rs` source (`infer_content_id`), so an
+///     output-changing kernel/forward patch (a new rotary convention, a KV-layout
+///     change, an attention edit) moves the class even WITHOUT an `agent_version`
+///     bump. This closes the moat hole where a kernel patch shipped into the SAME
+///     class and could dock honest old-kernel peers (CANDLE_EXPANSION_RESEARCH L17).
+///
+/// The control plane pins BYTE-EXACT redundancy peers and honeypots to the same
+/// (hw_class, engine, build_hash). Two workers in the same hw_class + engine but on
+/// different agent builds (a kernel change between releases) therefore do NOT
+/// auto-dock each other on a pure byte mismatch — they are a different class and
+/// fall back to provisional trust, the same pattern the third-worker tiebreak uses.
+/// Hawking's own research proves token-level determinism is impossible across
+/// heterogeneous Apple-Silicon generations, so this boundary is the moat, not a
+/// nicety. The hash is the first 16 hex chars of a SHA-256 — short, stable, and
+/// collision-safe for a class tag (NOT a security primitive).
+/// SHA-256 (first 8 bytes, hex) of the vendored inference module's SOURCE — the
+/// "kernel/content identity". `include_str!` pins `quantized_llama_batched.rs` at
+/// COMPILE time, so ANY change to the forward pass, rotary convention, KV layout,
+/// attention, or quant constants changes this id, which moves the worker into a NEW
+/// (hw_class, engine, build_hash) class automatically — even when `agent_version` is
+/// not bumped. Over-sensitive by design (a comment-only edit also moves the class):
+/// the only cost is an unnecessary reseed, never a wrongful same-class byte-compare.
+pub fn infer_content_id() -> String {
+    use sha2::{Digest, Sha256};
+    // Relative to this file's directory (agent/src/) -> agent/src/quantized_llama_batched.rs.
+    const SRC: &str = include_str!("quantized_llama_batched.rs");
+    let mut h = Sha256::new();
+    h.update(SRC.as_bytes());
+    h.finalize()
+        .iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+pub fn engine_build_hash(engine: &str, agent_version: &str) -> String {
+    engine_build_hash_inner(engine, agent_version, &infer_content_id())
+}
+
+/// Pure core of `engine_build_hash`, taking the inference-module content id
+/// explicitly so a test can prove a content-id change moves the class WITHOUT
+/// mutating a source file. The public wrapper feeds it `infer_content_id()`.
+fn engine_build_hash_inner(engine: &str, agent_version: &str, infer_content_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    // Length-prefix each field so distinct field splits never collide
+    // (e.g. ("ab","c") vs ("a","bc")). NUL-separate as a second guard.
+    for field in [
+        engine,
+        agent_version,
+        crate::models::device_label(),
+        CATALOGUE_QUANT,
+        infer_content_id,
+    ] {
+        h.update((field.len() as u32).to_le_bytes());
+        h.update(field.as_bytes());
+        h.update([0]);
+    }
+    let digest = h.finalize();
+    digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
 /// Read the OS version string for the capability record.
 /// Uses `sw_vers -productVersion` on macOS, falling back to `sysinfo`.
 fn os_version() -> String {
@@ -233,13 +317,18 @@ pub fn read_vram_snapshot() -> Option<MemorySnapshot> {
 ///
 /// `worker_id` is freshly minted per process start; `supplier_id` comes from
 /// config. `min_payout_usd_hr` is the operator reservation price (0.0 from
-/// `bench`). The advertised `supported_models`/`supported_jobs` are the CANONICAL
-/// catalogue (contract #4), not whatever happened to benchmark — the control
-/// plane's hard model filter dispatches against these exact ids.
+/// `bench`). `engine` is the on-device inference engine tag this worker advertises
+/// (`candle` default, from `config.inference_backend.engine_tag()`); it is the
+/// second axis of the verification class so a future mlx/vllm/hawking worker is
+/// never byte-compared against a Candle one. The advertised
+/// `supported_models`/`supported_jobs` are the CANONICAL catalogue (contract #4),
+/// not whatever happened to benchmark — the control plane's hard model filter
+/// dispatches against these exact ids.
 pub fn detect_and_benchmark(
     supplier_id: Uuid,
     agent_version: &str,
     min_payout_usd_hr: f32,
+    engine: &str,
 ) -> WorkerCapability {
     let mut sys = System::new();
     sys.refresh_memory();
@@ -326,6 +415,18 @@ pub fn detect_and_benchmark(
         worker_id: Uuid::new_v4(),
         supplier_id,
         hw_class,
+        // The on-device inference engine this worker runs (`candle` default). It is
+        // the second axis of the verification class: the control plane pins byte-exact
+        // redundancy peers + honeypots to the SAME (hw_class, engine), so a future
+        // mlx/vllm/hawking worker is never byte-compared against a Candle one.
+        engine: engine.to_string(),
+        // The finer axis of the verification class BELOW (hw_class, engine): a stable
+        // hash of the byte-output-determining build inputs (engine + agent build +
+        // device backend + catalogue quant). The control plane pins byte-exact
+        // redundancy peers + honeypots to the same (hw_class, engine, build_hash), so a
+        // kernel/codegen change shipped in a NEW agent build lands in a new class and is
+        // never byte-docked against an old-build peer (docs/DETERMINISM_CLASS.md).
+        build_hash: engine_build_hash(engine, agent_version),
         memory_gb,
         memory_bw_gbps,
         // Job types this agent will accept dispatch for. `can_run` in runners.rs
@@ -438,6 +539,50 @@ mod tests {
             }
             .used_pct(),
             0.0
+        );
+    }
+
+    #[test]
+    fn engine_build_hash_is_stable_and_sensitive() {
+        // Stable: same inputs → same hash, every call (a class tag must not drift).
+        let a = engine_build_hash("candle", "0.1.0");
+        let b = engine_build_hash("candle", "0.1.0");
+        assert_eq!(a, b, "build hash must be deterministic");
+
+        // Short, hex, non-empty: a 16-char (8-byte) tag the wire carries cheaply.
+        assert_eq!(a.len(), 16, "build hash is the first 8 bytes as hex");
+        assert!(
+            a.chars().all(|c| c.is_ascii_hexdigit()),
+            "build hash must be hex"
+        );
+
+        // Sensitive: a different engine OR a different agent build → a different
+        // class. A kernel/codegen change ships in a new agent build, so an
+        // agent-version bump MUST move the class (this is the whole point — a
+        // silent byte-shift between builds is caught by class divergence, not by a
+        // false auto-dock against an old-build peer).
+        assert_ne!(a, engine_build_hash("mlx", "0.1.0"), "engine changes class");
+        assert_ne!(
+            a,
+            engine_build_hash("candle", "0.2.0"),
+            "agent build changes class"
+        );
+
+        // Content/kernel identity: an output-changing engine patch (a different
+        // inference-module source) MUST move the class even at the SAME engine +
+        // agent_version — the moat hole the content id closes (CANDLE_EXPANSION L17).
+        assert_ne!(
+            engine_build_hash_inner("candle", "0.1.0", "aaaaaaaaaaaaaaaa"),
+            engine_build_hash_inner("candle", "0.1.0", "bbbbbbbbbbbbbbbb"),
+            "a content/kernel identity change must move the verification class"
+        );
+        // The real inference-module content id is deterministic and a 16-char hex tag.
+        let cid = infer_content_id();
+        assert_eq!(cid, infer_content_id(), "content id must be deterministic");
+        assert_eq!(cid.len(), 16, "content id is the first 8 bytes as hex");
+        assert!(
+            cid.chars().all(|c| c.is_ascii_hexdigit()),
+            "content id must be hex"
         );
     }
 

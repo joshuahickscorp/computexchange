@@ -169,8 +169,13 @@ pub fn is_big_llama(model_ref: &str) -> bool {
 /// Our batch-inference model: a quantized (GGUF) Llama-architecture LLM.
 /// Default is Llama-3.2-1B-Instruct (Q4_K_M). Qwen2.5-0.5B-Instruct is an accepted
 /// small alternate, and Qwen2.5-7B-Instruct (Q4_K_M) is the BIG model for high-VRAM
-/// workers (selected by a `7b` ref, gated by `BIG_LLAMA_MIN_MEMORY_GB`). All three
-/// are llama-arch GGUF, supported by candle's quantized-llama path.
+/// workers (selected by a `7b` ref, gated by `BIG_LLAMA_MIN_MEMORY_GB`). The Llama
+/// GGUF is llama-arch; the Qwen GGUFs are qwen2-arch (`qwen2.*` metadata keys, q/k/v
+/// biases, NEOX rope) and load through the architecture-aware path in
+/// `quantized_llama_batched::from_gguf` (P-arch / P-rope / P-qkvbias). NOTE: Qwen
+/// output parity is UNPROVEN until a real-GGUF Metal parity run — see
+/// docs/CANDLE_EXPANSION_RESEARCH.md. Earlier this comment wrongly called all three
+/// llama-arch; the official Qwen GGUFs are not.
 pub fn llama_gguf_spec(model_ref: &str) -> ModelSpec {
     let r = model_ref.to_ascii_lowercase();
     if is_big_llama(&r) {

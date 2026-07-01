@@ -229,12 +229,53 @@ pub struct BenchResult {
     pub thermal_ok: bool,
 }
 
+/// Default engine tag for a `WorkerCapability` deserialized without one (an older
+/// agent or the register echo from a server that does not round-trip the field):
+/// the wired Candle path, which is what such a worker is running. Keeps a
+/// single-engine Candle fleet's behavior unchanged.
+fn default_engine() -> String {
+    "candle".to_string()
+}
+
+/// Default build hash for a `WorkerCapability` deserialized without one (an older
+/// agent, or the register echo from a server that does not round-trip the field):
+/// an empty string, which the control plane treats as "unknown build". An unknown
+/// build is NEVER drawn as a byte-exact redundancy peer or auto-docked on a pure
+/// byte mismatch — it falls back to provisional trust (mirrors the missing-third-
+/// worker pattern), so an older agent that does not advertise the finer class is
+/// safe by default, never wrongly quarantined. See docs/DETERMINISM_CLASS.md.
+fn default_build_hash() -> String {
+    String::new()
+}
+
 /// What this worker advertises to the control plane on registration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerCapability {
     pub worker_id: Uuid,
     pub supplier_id: Uuid,
     pub hw_class: HardwareClass,
+    /// On-device inference ENGINE this worker runs (`candle` default, plus the
+    /// `mlx`/`vllm`/`hawking` lanes). It is the second axis of the verification
+    /// class: the control plane draws byte-exact redundancy peers and seeds
+    /// honeypots from the SAME (hw_class, engine) class, because two engines'
+    /// FP kernels differ even on identical hardware. `default` (deserializes to
+    /// "candle" via the field default below — see `default_engine`) keeps the
+    /// registration echo decodable against a server that does not round-trip it,
+    /// and a single-engine Candle fleet behaves exactly as before.
+    #[serde(default = "default_engine")]
+    pub engine: String,
+    /// Finer verification-class axis BELOW (hw_class, engine): a stable hash of the
+    /// byte-output-determining BUILD inputs (engine + agent build + device backend +
+    /// catalogue quant — see `hardware::engine_build_hash`). The control plane draws
+    /// byte-exact redundancy peers and seeds honeypots from the SAME (hw_class, engine,
+    /// build_hash), because a kernel/codegen change between agent builds can shift bytes
+    /// even on identical hardware running the same engine (Hawking's own research proves
+    /// token-level determinism is impossible across heterogeneous Apple-Silicon
+    /// generations). `default` (deserializes to "" — see `default_build_hash`) keeps the
+    /// registration echo decodable against a server that does not round-trip it, and an
+    /// empty build hash is treated as "unknown" → provisional trust, never an auto-dock.
+    #[serde(default = "default_build_hash")]
+    pub build_hash: String,
     pub memory_gb: f32,
     pub memory_bw_gbps: f32,
     pub supported_jobs: Vec<String>,

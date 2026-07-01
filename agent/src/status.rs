@@ -16,7 +16,7 @@ use std::sync::Mutex;
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::config::ThrottleDecision;
+use crate::config::{AgentConfig, ThrottleDecision};
 use crate::types::Earnings;
 
 /// Bumped only on a breaking change to the on-disk shape (the app tolerates a
@@ -37,6 +37,40 @@ struct CurrentJob {
 struct InflightTask {
     task_id: Uuid,
     job: CurrentJob,
+}
+
+/// The operator preferences the agent is ACTUALLY running with (Atlas F7 / item 26):
+/// the effective config AFTER the `agent.prefs.toml` overlay merged into `agent.toml`.
+/// The app shows these as "applied" values sourced from the agent (truth), distinct
+/// from its own local toggle state (which may differ until the agent is relaunched).
+/// `max_concurrent_tasks` is the RESOLVED permit count (the derived default when the
+/// operator left it on auto), so the app shows the real number, never "auto". Mirrors
+/// the `AppliedPrefs` the Swift `StatusModel` decodes.
+#[derive(Serialize, Clone)]
+pub struct AppliedPrefs {
+    pub power_only: bool,
+    pub quiet_hours: Option<(u8, u8)>,
+    pub min_payout_usd_per_hr: f32,
+    pub memory_headroom_gb: f32,
+    pub max_memory_pct: f32,
+    pub max_concurrent_tasks: usize,
+}
+
+impl AppliedPrefs {
+    /// Snapshot the effective operator prefs from the loaded config. `memory_gb` is
+    /// the box's advertised memory, used to resolve the concurrency permit count the
+    /// agent actually runs with (so an unset `max_concurrent_tasks` shows its derived
+    /// value, not a placeholder).
+    pub fn from_config(cfg: &AgentConfig, memory_gb: f32) -> Self {
+        Self {
+            power_only: cfg.power_only,
+            quiet_hours: cfg.quiet_hours,
+            min_payout_usd_per_hr: cfg.min_payout_usd_per_hr,
+            memory_headroom_gb: cfg.memory_headroom_gb,
+            max_memory_pct: cfg.max_memory_pct,
+            max_concurrent_tasks: cfg.concurrency(memory_gb),
+        }
+    }
 }
 
 /// The serialized status document. Field names/types mirror `AgentStatus` in
@@ -73,6 +107,9 @@ struct StatusDoc<'a> {
     eligible_now: bool,
     last_heartbeat: u64,
     last_error: Option<&'a str>,
+    /// The operator prefs the agent is actually running with (item 26). `None` until
+    /// the runtime sets it right after config load; the app shows "unknown" then.
+    applied_prefs: Option<&'a AppliedPrefs>,
 }
 
 /// Mutable status shared between the heartbeat arm and the task pipeline.
@@ -100,6 +137,9 @@ struct Inner {
     eligible_now: bool,
     last_heartbeat: u64,
     last_error: Option<String>,
+    /// The effective operator prefs after the overlay (item 26). Set once by the
+    /// runtime after config load; `None` until then.
+    applied_prefs: Option<AppliedPrefs>,
 }
 
 /// Owns the status file and the shared mutable state behind a mutex. Cheap to
@@ -139,8 +179,21 @@ impl StatusWriter {
                 eligible_now: true,
                 last_heartbeat: 0,
                 last_error: None,
+                applied_prefs: None,
             }),
         }
+    }
+
+    /// Record the operator prefs the agent is ACTUALLY running with (item 26), called
+    /// once by the runtime right after config load. Every subsequent status write then
+    /// carries the applied values, so the app can show agent truth instead of only its
+    /// local toggle state.
+    pub fn set_applied_prefs(&self, prefs: AppliedPrefs) {
+        {
+            let mut i = self.inner.lock().unwrap();
+            i.applied_prefs = Some(prefs);
+        }
+        self.write();
     }
 
     /// Emit the initial `idle` status right after registration, so the app has a
@@ -271,6 +324,7 @@ impl StatusWriter {
                 eligible_now: i.eligible_now,
                 last_heartbeat: i.last_heartbeat,
                 last_error: i.last_error.as_deref(),
+                applied_prefs: i.applied_prefs.as_ref(),
             };
             serde_json::to_vec_pretty(&doc)
         };
@@ -432,6 +486,15 @@ mod tests {
             }),
             &ample(64.0, 40.0, 8.0),
         );
+        // Item 26: the agent echoes the APPLIED prefs (effective config after overlay).
+        w.set_applied_prefs(AppliedPrefs {
+            power_only: true,
+            quiet_hours: Some((22, 6)),
+            min_payout_usd_per_hr: 2.5,
+            memory_headroom_gb: 8.0,
+            max_memory_pct: 85.0,
+            max_concurrent_tasks: 4,
+        });
         let v: serde_json::Value = {
             let i = w.inner.lock().unwrap();
             let doc = StatusDoc {
@@ -458,6 +521,7 @@ mod tests {
                 eligible_now: i.eligible_now,
                 last_heartbeat: i.last_heartbeat,
                 last_error: i.last_error.as_deref(),
+                applied_prefs: i.applied_prefs.as_ref(),
             };
             serde_json::to_value(&doc).unwrap()
         };
@@ -485,6 +549,7 @@ mod tests {
             "eligible_now",
             "last_heartbeat",
             "last_error",
+            "applied_prefs",
         ] {
             assert!(v.get(key).is_some(), "missing key {key}");
         }
@@ -497,6 +562,12 @@ mod tests {
         assert_eq!(v["effective_memory_gb"], 32.0);
         assert_eq!(v["reserved_headroom_gb"], 8.0);
         assert_eq!(v["throttled"], false);
+        // Item 26: applied prefs are echoed from the agent (the values it runs with).
+        assert_eq!(v["applied_prefs"]["power_only"], true);
+        assert_eq!(v["applied_prefs"]["quiet_hours"][0], 22);
+        assert_eq!(v["applied_prefs"]["quiet_hours"][1], 6);
+        assert_eq!(v["applied_prefs"]["min_payout_usd_per_hr"], 2.5);
+        assert_eq!(v["applied_prefs"]["max_concurrent_tasks"], 4);
     }
 
     /// A throttled heartbeat flips state to `paused` and surfaces the reason.

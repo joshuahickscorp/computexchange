@@ -15,10 +15,22 @@
 //!
 //! ![](https://raw.githubusercontent.com/huggingface/candle/main/candle-examples/examples/quantized/assets/aoc.gif)
 //!
-//! VENDORED + PATCHED copy of candle-transformers 0.10.2 `quantized_llama`. The ONLY
-//! behavioral change is `.contiguous()` on the output-projection's last-position slice
-//! (search "PATCH") so a batch (bsz>1) prefill's quantized matmul succeeds — candle
-//! rejects the non-contiguous slice. Keep in sync if candle is bumped. Lints are
+//! VENDORED + PATCHED copy of candle-transformers 0.10.2 `quantized_llama`. This file
+//! carries SEVERAL CX behavioral deltas, each tagged `PATCH` in-source (grep for it):
+//!   - P-contiguous: `.contiguous()` on the output-projection's last-position slice so
+//!     a batch (bsz>1) prefill's quantized matmul succeeds (candle rejects the strided
+//!     slice).
+//!   - P-kv: `KvCacheSlot` preallocated KV append via `slice_set` (replaces the per-step
+//!     `Tensor::cat`); byte-identical, plus snapshot/restore for prefix-fork.
+//!   - P-arch + P-rope + P-qkvbias: architecture-aware load. Reads GGUF
+//!     `general.architecture`, prefixes the metadata keys with it (official Qwen2 GGUFs
+//!     use `qwen2.*`, not `llama.*`), selects NEOX vs interleaved rotary, and loads the
+//!     optional Qwen2 q/k/v biases. Llama is byte-identical (arch defaults to `llama`,
+//!     interleaved rope, no bias). Ports the intent of candle 0.11 PR #3411 onto 0.10.2.
+//! Any edit here changes `hardware::infer_content_id()` and therefore the worker's
+//! (hw_class, engine, build_hash) class, so golden hashes + honeypots must be reseeded.
+//! See docs/CANDLE_FORK.md and docs/CANDLE_EXPANSION_RESEARCH.md.
+//! Keep in sync if candle is bumped. Lints are
 //! blanket-allowed: this is upstream code, not ours to restyle.
 #![allow(clippy::all, dead_code)]
 
@@ -37,6 +49,152 @@ pub const MAX_SEQ_LEN: usize = 4096;
 /// warm model. Eviction is insertion-order (oldest first) and determinism-safe:
 /// a recomputed mask is bitwise identical to the evicted one.
 const MASK_CACHE_CAP: usize = 64;
+
+/// Preallocated per-layer KV cache that appends new keys/values via
+/// `slice_set` at a running offset instead of the per-decode-step
+/// `Tensor::cat` (the Wave-2 "preallocate the KV cache" lever in
+/// docs/PERF_AND_CAPABILITY_AUDIT.md). This mirrors candle-nn's `Cache`
+/// (candle-nn/src/kv_cache.rs): a buffer of `(b_sz, n_kv_head, MAX_SEQ_LEN,
+/// head_dim)` is allocated once on the first append, each step writes its
+/// `seq_len` tokens at `cur_len` along the sequence dim (dim 2), and the live
+/// region is exposed as `narrow(2, 0, cur_len)`.
+///
+/// DETERMINISM: safe by construction. `slice_set` copies the source bytes
+/// verbatim to the same logical (batch, head, position, dim) coordinates that
+/// `Tensor::cat` wrote them to, and `attention()` consumes the live region as
+/// `.narrow(..).contiguous()`, which is byte-for-byte the same contiguous
+/// tensor `Tensor::cat` previously produced. Logits are bitwise identical.
+/// The `slice_set == cat` byte-equality is pinned by the
+/// `prealloc_kv_append_matches_cat` test below.
+///
+/// Two wrinkles this code carries that vanilla candle-nn's `Cache` does not:
+///  - Reset on prefill: a warm model is reused across jobs and the caller
+///    signals a fresh sequence with `index_pos == 0` (see `forward_attn`),
+///    which drops the buffer so the next append reallocates at the new batch
+///    size — exactly the old `Tensor::cat` reset behaviour.
+///  - Batch-row compaction: `compact_kv_cache` drops finished (EOS) rows from
+///    dim 0 mid-decode. We `index_select` the live region and re-seat it as a
+///    fresh, tightly-batched buffer so the next append's `slice_set` shape
+///    matches.
+#[derive(Debug, Clone)]
+struct KvCacheSlot {
+    /// `(b_sz, n_kv_head, MAX_SEQ_LEN, head_dim)`, allocated lazily on first
+    /// append. The live keys/values occupy `[.., .., 0..cur_len, ..]`.
+    buf: Option<Tensor>,
+    /// Number of valid sequence positions currently written into `buf`.
+    cur_len: usize,
+}
+
+impl KvCacheSlot {
+    fn new() -> Self {
+        Self {
+            buf: None,
+            cur_len: 0,
+        }
+    }
+
+    /// Drop the buffer so the next `append` reallocates. Used on a fresh
+    /// prefill (`index_pos == 0`), matching the old cat path's reset semantics.
+    fn reset(&mut self) {
+        self.buf = None;
+        self.cur_len = 0;
+    }
+
+    /// Append `src` (shape `(b_sz, n_kv_head, seq_len, head_dim)`) at the
+    /// current offset and return the live region `(b_sz, n_kv_head, cur_len,
+    /// head_dim)` as a contiguous tensor — byte-identical to what
+    /// `Tensor::cat(&[cache, src], 2)` produced.
+    fn append(&mut self, src: &Tensor) -> Result<Tensor> {
+        let (b_sz, n_kv_head, seq_len, head_dim) = src.dims4()?;
+        if self.buf.is_none() {
+            let buf = Tensor::zeros(
+                (b_sz, n_kv_head, MAX_SEQ_LEN, head_dim),
+                src.dtype(),
+                src.device(),
+            )?;
+            self.buf = Some(buf);
+            self.cur_len = 0;
+        }
+        let buf = self.buf.as_mut().unwrap();
+        // slice_set requires both operands contiguous; the source comes from a
+        // transpose/rotary chain so make it contiguous first (a no-op when it
+        // already is). The narrowed read below is then made contiguous too,
+        // reproducing the exact contiguous tensor the old `cat` returned.
+        buf.slice_set(&src.contiguous()?, 2, self.cur_len)?;
+        self.cur_len += seq_len;
+        buf.narrow(2, 0, self.cur_len)?.contiguous()
+    }
+
+    /// Keep only the named batch rows (indices into dim 0, ascending), used by
+    /// `compact_kv_cache` when EOS rows are dropped. Re-seats the live region
+    /// as a fresh tightly-batched buffer so the next append's `slice_set`
+    /// shape matches the shrunk batch.
+    fn compact(&mut self, idx: &Tensor) -> Result<()> {
+        if let Some(buf) = &self.buf {
+            // narrow yields a strided view; index_select needs contiguous.
+            let live = buf.narrow(2, 0, self.cur_len)?.contiguous()?;
+            let kept = live.index_select(idx, 0)?;
+            let (b_sz, n_kv_head, _seq, head_dim) = kept.dims4()?;
+            let new_buf = Tensor::zeros(
+                (b_sz, n_kv_head, MAX_SEQ_LEN, head_dim),
+                kept.dtype(),
+                kept.device(),
+            )?;
+            new_buf.slice_set(&kept.contiguous()?, 2, 0)?;
+            self.buf = Some(new_buf);
+        }
+        Ok(())
+    }
+
+    /// Snapshot the live region as a standalone contiguous tensor + its length,
+    /// used by the prefix-KV-sharing path (`prefill_shared_prefix` + per-item
+    /// `restore`). The snapshot is a deep copy of `[.., .., 0..cur_len, ..]`, so
+    /// later in-place mutation of this slot (or restore into a fresh buffer)
+    /// cannot disturb it. `None` when nothing has been prefilled yet.
+    fn snapshot(&self) -> Result<Option<(Tensor, usize)>> {
+        match &self.buf {
+            Some(buf) if self.cur_len > 0 => {
+                let live = buf.narrow(2, 0, self.cur_len)?.contiguous()?;
+                Ok(Some((live, self.cur_len)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Re-seat this slot from a `snapshot` (live region + length) as a fresh
+    /// tightly-allocated buffer, exactly the way `compact` re-seats a kept
+    /// region. The next `append` continues from `cur_len`. Used to fork a shared
+    /// prefix into a per-item sequence: every item restores the SAME prefix
+    /// snapshot, then appends only its own remaining tokens.
+    ///
+    /// DETERMINISM: `slice_set` writes the snapshot bytes verbatim at offset 0,
+    /// so the restored live region is bitwise identical to the prefix the
+    /// snapshot captured — the per-item forward sees the same KV it would have
+    /// seen had the prefix been prefilled inline. Byte-for-byte equal to serial.
+    fn restore(&mut self, snapshot: &(Tensor, usize)) -> Result<()> {
+        let (live, len) = snapshot;
+        let (b_sz, n_kv_head, _seq, head_dim) = live.dims4()?;
+        let new_buf = Tensor::zeros(
+            (b_sz, n_kv_head, MAX_SEQ_LEN, head_dim),
+            live.dtype(),
+            live.device(),
+        )?;
+        new_buf.slice_set(&live.contiguous()?, 2, 0)?;
+        self.buf = Some(new_buf);
+        self.cur_len = *len;
+        Ok(())
+    }
+}
+
+/// One layer's snapshotted KV state for the prefix-KV-sharing path. `None` when
+/// that slot held nothing (no prefix prefilled). Produced by
+/// `ModelWeights::snapshot_kv_cache` and consumed by `restore_kv_cache`; each
+/// inner tensor is `(b_sz, n_kv_head, prefix_len, head_dim)` with its length.
+#[derive(Debug, Clone)]
+pub struct KvSnapshot {
+    k: Option<(Tensor, usize)>,
+    v: Option<(Tensor, usize)>,
+}
 
 // QMatMul wrapper adding some tracing.
 #[derive(Debug, Clone)]
@@ -169,7 +327,20 @@ struct LayerWeights {
     cos: Tensor,
     sin: Tensor,
     neg_inf: Tensor,
-    kv_cache: Option<(Tensor, Tensor)>,
+    /// PATCH (P-qkvbias): optional attention q/k/v biases. Qwen2 carries them; Llama
+    /// does not. Applied to q/k/v BEFORE rotary in `forward_attn`. `None` -> the
+    /// bias-free path, byte-identical to upstream for Llama.
+    attention_bq: Option<Tensor>,
+    attention_bk: Option<Tensor>,
+    attention_bv: Option<Tensor>,
+    /// PATCH (P-rope): true for NEOX-style rotary (Qwen/Falcon/Phi/...), false for
+    /// interleaved (Llama/Mistral). Chosen from GGUF `general.architecture`.
+    rope_is_neox: bool,
+    /// Preallocated KV cache (k, v) appended via `slice_set` (see
+    /// `KvCacheSlot`). Replaces the old per-step `Tensor::cat`; byte-identical
+    /// logits, no behavioural change.
+    kv_k: KvCacheSlot,
+    kv_v: KvCacheSlot,
     span_attn: tracing::Span,
     span_rot: tracing::Span,
     span_mlp: tracing::Span,
@@ -189,7 +360,15 @@ impl LayerWeights {
         let sin = self.sin.narrow(0, index_pos, seq_len)?;
         // The call to contiguous below is only necessary when processing the prompt.
         // When the seq_len is 1 in the inference loop, this is a no-op.
-        candle_nn::rotary_emb::rope_i(&x.contiguous()?, &cos, &sin)
+        let x = x.contiguous()?;
+        // PATCH (P-rope, candle 0.11 #3411): dispatch the rotary convention by
+        // architecture. NEOX (Qwen/Falcon/Phi/...) pairs i with i+d/2; interleaved
+        // (Llama/Mistral) pairs 2i with 2i+1. Llama keeps rope_i -> byte-identical.
+        if self.rope_is_neox {
+            candle_nn::rotary_emb::rope(&x, &cos, &sin)
+        } else {
+            candle_nn::rotary_emb::rope_i(&x, &cos, &sin)
+        }
     }
 
     fn forward_attn(
@@ -203,6 +382,21 @@ impl LayerWeights {
         let q = self.attention_wq.forward(x)?;
         let k = self.attention_wk.forward(x)?;
         let v = self.attention_wv.forward(x)?;
+        // PATCH (P-qkvbias): Qwen2 attention carries q/k/v biases; Llama does not.
+        // broadcast_add over the last (projection) dim. None -> untouched, so the
+        // Llama path is byte-identical to upstream.
+        let q = match &self.attention_bq {
+            Some(b) => q.broadcast_add(b)?,
+            None => q,
+        };
+        let k = match &self.attention_bk {
+            Some(b) => k.broadcast_add(b)?,
+            None => k,
+        };
+        let v = match &self.attention_bv {
+            Some(b) => v.broadcast_add(b)?,
+            None => v,
+        };
 
         let q = q
             .reshape((b_sz, seq_len, self.n_head, self.head_dim))?
@@ -221,19 +415,19 @@ impl LayerWeights {
         let q = self.apply_rotary_emb(&q, index_pos)?;
         let k = self.apply_rotary_emb(&k, index_pos)?;
 
-        let (k, v) = match &self.kv_cache {
-            None => (k, v),
-            Some((k_cache, v_cache)) => {
-                if index_pos == 0 {
-                    (k, v)
-                } else {
-                    let k = Tensor::cat(&[k_cache, &k], 2)?;
-                    let v = Tensor::cat(&[v_cache, &v], 2)?;
-                    (k, v)
-                }
-            }
-        };
-        self.kv_cache = Some((k.clone(), v.clone()));
+        // A fresh prefill (index_pos == 0) starts a new sequence: drop any
+        // stale buffer (a warm model is reused across jobs and possibly at a
+        // different batch size) so the append below reallocates. This mirrors
+        // the old cat path, where index_pos == 0 ignored the cached tensors.
+        if index_pos == 0 {
+            self.kv_k.reset();
+            self.kv_v.reset();
+        }
+        // Append the new keys/values at the running offset via slice_set into a
+        // preallocated buffer and read back the live region. Byte-identical to
+        // the previous `Tensor::cat(&[cache, new], 2)` (see KvCacheSlot).
+        let k = self.kv_k.append(&k)?;
+        let v = self.kv_v.append(&v)?;
 
         let y = if q.device().is_metal() && seq_len == 1 {
             // SDPA will do MQA for us
@@ -309,6 +503,30 @@ fn precomput_freqs_cis(
     Ok((cos, sin))
 }
 
+/// PATCH (P-rope): NEOX-style rotary architectures (pair index `i` with `i+d/2`), per
+/// candle 0.11 PR #3411. Everything not listed (Llama, Mistral, DeepSeek-arch GGUFs) is
+/// interleaved (`rope_i`, pairs `2i` with `2i+1`). Keyed on GGUF `general.architecture`;
+/// an absent/unknown arch defaults to interleaved, which is the Llama-safe default.
+fn is_neox_arch(arch: &str) -> bool {
+    matches!(
+        arch,
+        "qwen"
+            | "qwen2"
+            | "qwen2moe"
+            | "qwen3"
+            | "qwen3moe"
+            | "falcon"
+            | "grok"
+            | "dbrx"
+            | "phi2"
+            | "phi3"
+            | "phimoe"
+            | "stablelm"
+            | "starcoder2"
+            | "olmo2"
+    )
+}
+
 impl ModelWeights {
     pub fn from_ggml(mut ct: ggml_file::Content, gqa: usize) -> Result<Self> {
         let head_dim = (ct.hparams.n_embd / ct.hparams.n_head) as usize;
@@ -354,7 +572,13 @@ impl ModelWeights {
                 cos: cos.clone(),
                 sin: sin.clone(),
                 neg_inf: neg_inf.clone(),
-                kv_cache: None,
+                // Legacy GGML format is Llama-arch only: no biases, interleaved rope.
+                attention_bq: None,
+                attention_bk: None,
+                attention_bv: None,
+                rope_is_neox: false,
+                kv_k: KvCacheSlot::new(),
+                kv_v: KvCacheSlot::new(),
                 span_attn,
                 span_rot,
                 span_mlp,
@@ -384,22 +608,43 @@ impl ModelWeights {
             Some(v) => Ok(v),
         };
 
-        // Parameter extraction from metadata.
-        let n_expert = md_get("llama.expert_count")
-            .and_then(|v| v.to_u32())
-            .unwrap_or(0) as usize;
-        let n_expert_used = md_get("llama.expert_used_count")
-            .and_then(|v| v.to_u32())
-            .unwrap_or(0) as usize;
-        let head_count = md_get("llama.attention.head_count")?.to_u32()? as usize;
-        let head_count_kv = md_get("llama.attention.head_count_kv")?.to_u32()? as usize;
-        let block_count = md_get("llama.block_count")?.to_u32()? as usize;
-        let embedding_length = md_get("llama.embedding_length")?.to_u32()? as usize;
-        let rope_dim = md_get("llama.rope.dimension_count")?.to_u32()? as usize;
-        // Strangely this value is generally 1e-6 in GGUF file but used to be 1e-5 by default.
-        let rms_norm_eps = md_get("llama.attention.layer_norm_rms_epsilon")?.to_f32()? as f64;
+        // PATCH (P-arch, candle 0.11 #3411): GGUF metadata keys are prefixed by the
+        // model architecture, NOT hardcoded "llama." — official Qwen2 GGUFs use
+        // "qwen2.*". Read `general.architecture` and prefix every dimension key with
+        // it; default "llama" so a Llama GGUF (or one without the field) reads exactly
+        // the same keys as before -> byte-identical. The rope convention (P-rope) and
+        // the optional q/k/v bias (P-qkvbias) follow from the same architecture.
+        let arch = ct
+            .metadata
+            .get("general.architecture")
+            .and_then(|v| v.to_string().ok())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "llama".to_string());
+        let rope_is_neox = is_neox_arch(&arch);
+        let mdk = |k: &str| format!("{arch}.{k}");
 
-        let rope_freq_base = md_get("llama.rope.freq_base")
+        // Parameter extraction from metadata.
+        let n_expert = md_get(&mdk("expert_count"))
+            .and_then(|v| v.to_u32())
+            .unwrap_or(0) as usize;
+        let n_expert_used = md_get(&mdk("expert_used_count"))
+            .and_then(|v| v.to_u32())
+            .unwrap_or(0) as usize;
+        let head_count = md_get(&mdk("attention.head_count"))?.to_u32()? as usize;
+        let head_count_kv = md_get(&mdk("attention.head_count_kv"))?.to_u32()? as usize;
+        let block_count = md_get(&mdk("block_count"))?.to_u32()? as usize;
+        let embedding_length = md_get(&mdk("embedding_length"))?.to_u32()? as usize;
+        // PATCH (P-arch): Qwen2 GGUFs omit `rope.dimension_count` (rotary spans the full
+        // head_dim); Llama always sets it. Fall back to head_dim when absent so both load.
+        // For Llama the key is present and equals head_dim, so this is byte-identical.
+        let rope_dim = md_get(&mdk("rope.dimension_count"))
+            .and_then(|v| v.to_u32())
+            .map(|d| d as usize)
+            .unwrap_or(embedding_length / head_count);
+        // Strangely this value is generally 1e-6 in GGUF file but used to be 1e-5 by default.
+        let rms_norm_eps = md_get(&mdk("attention.layer_norm_rms_epsilon"))?.to_f32()? as f64;
+
+        let rope_freq_base = md_get(&mdk("rope.freq_base"))
             .and_then(|m| m.to_f32())
             .unwrap_or(10000f32);
         let (cos, sin) = precomput_freqs_cis(rope_dim, rope_freq_base, device)?;
@@ -423,6 +668,22 @@ impl ModelWeights {
             let attention_wv = ct.tensor(reader, &format!("{prefix}.attn_v.weight"), device)?;
             let attention_wo =
                 ct.tensor(reader, &format!("{prefix}.attn_output.weight"), device)?;
+            // PATCH (P-qkvbias): load optional q/k/v biases (dequantized to the device).
+            // Qwen2 has them; Llama does not (absent -> None -> bias-free, byte-identical).
+            // A missing tensor returns Err without touching the reader, so the fallback
+            // is safe. attn_output has no bias in Qwen2, so it is not loaded.
+            let attention_bq = match ct.tensor(reader, &format!("{prefix}.attn_q.bias"), device) {
+                Ok(t) => Some(t.dequantize(device)?),
+                Err(_) => None,
+            };
+            let attention_bk = match ct.tensor(reader, &format!("{prefix}.attn_k.bias"), device) {
+                Ok(t) => Some(t.dequantize(device)?),
+                Err(_) => None,
+            };
+            let attention_bv = match ct.tensor(reader, &format!("{prefix}.attn_v.bias"), device) {
+                Ok(t) => Some(t.dequantize(device)?),
+                Err(_) => None,
+            };
             let mlp_or_moe = if n_expert <= 1 {
                 let feed_forward_w1 =
                     ct.tensor(reader, &format!("{prefix}.ffn_gate.weight"), device)?;
@@ -478,7 +739,12 @@ impl ModelWeights {
                 cos: cos.clone(),
                 sin: sin.clone(),
                 neg_inf: neg_inf.clone(),
-                kv_cache: None,
+                attention_bq,
+                attention_bk,
+                attention_bv,
+                rope_is_neox,
+                kv_k: KvCacheSlot::new(),
+                kv_v: KvCacheSlot::new(),
                 span_attn,
                 span_rot,
                 span_mlp,
@@ -544,8 +810,10 @@ impl ModelWeights {
 
     /// Drop finished rows from every layer's per-batch KV cache, keeping only
     /// the batch rows named by `keep` (indices into the CURRENT cached batch
-    /// ordering, ascending). The KV cache `(k, v)` tensors are shaped
-    /// `(b_sz, n_kv_head, seq_len, head_dim)`, so we `index_select` along dim 0.
+    /// ordering, ascending). The cache buffers are shaped `(b_sz, n_kv_head,
+    /// MAX_SEQ_LEN, head_dim)` with the live region in `[.., .., 0..cur_len,
+    /// ..]`, so we `index_select` the live region along dim 0 and re-seat it
+    /// as a fresh tightly-batched buffer (see `KvCacheSlot::compact`).
     ///
     /// Determinism note: `index_select` copies the kept rows verbatim · the
     /// retained sequences' keys/values are bitwise unchanged, and all surviving
@@ -563,10 +831,58 @@ impl ModelWeights {
             device,
         )?;
         for layer in self.layers.iter_mut() {
-            if let Some((k, v)) = &layer.kv_cache {
-                let k = k.index_select(&idx, 0)?;
-                let v = v.index_select(&idx, 0)?;
-                layer.kv_cache = Some((k, v));
+            layer.kv_k.compact(&idx)?;
+            layer.kv_v.compact(&idx)?;
+        }
+        Ok(())
+    }
+
+    /// Snapshot every layer's live KV region (the prefix-KV-sharing lever in
+    /// docs/PERF_AND_CAPABILITY_AUDIT.md, Wave 1 B). Capture the KV state after
+    /// a shared-prefix prefill ONCE, then `restore_kv_cache` it per item so the
+    /// shared instruction+labels/schema prefill is computed a single time for the
+    /// whole batch instead of once per item. Returns one `(k, v, len)` triple per
+    /// layer; the lengths are all equal (the shared prefix length).
+    ///
+    /// DETERMINISM: a snapshot is a deep contiguous copy of the live region, and
+    /// `restore_kv_cache` writes it back verbatim, so a per-item forward that
+    /// continues from a restored prefix sees byte-identical KV to a forward that
+    /// prefilled the prefix inline. Output stays token-identical to serial — pinned
+    /// by `prefix_shared_prefill_matches_inline` and the batched==serial gate.
+    pub fn snapshot_kv_cache(&self) -> Result<Vec<KvSnapshot>> {
+        let mut out = Vec::with_capacity(self.layers.len());
+        for layer in self.layers.iter() {
+            let k = layer.kv_k.snapshot()?;
+            let v = layer.kv_v.snapshot()?;
+            out.push(KvSnapshot { k, v });
+        }
+        Ok(out)
+    }
+
+    /// Restore every layer's KV cache from a `snapshot_kv_cache` result, re-seating
+    /// the shared prefix so the next per-item `append` continues from it. The caller
+    /// passes the prefix length back to `forward` as `index_pos` so rotary/mask use
+    /// the right global positions. See `snapshot_kv_cache` for the determinism note.
+    pub fn restore_kv_cache(&mut self, snapshot: &[KvSnapshot]) -> Result<()> {
+        if snapshot.len() != self.layers.len() {
+            candle_core::bail!(
+                "restore_kv_cache: snapshot has {} layers, model has {}",
+                snapshot.len(),
+                self.layers.len()
+            );
+        }
+        for (layer, snap) in self.layers.iter_mut().zip(snapshot.iter()) {
+            match (&snap.k, &snap.v) {
+                (Some(k), Some(v)) => {
+                    layer.kv_k.restore(k)?;
+                    layer.kv_v.restore(v)?;
+                }
+                // An empty snapshot (no prefix prefilled) resets the slots so the
+                // next append reallocates — same as a fresh `index_pos == 0`.
+                _ => {
+                    layer.kv_k.reset();
+                    layer.kv_v.reset();
+                }
             }
         }
         Ok(())
@@ -605,8 +921,199 @@ impl ModelWeights {
 
 #[cfg(test)]
 mod tests {
+    use super::KvCacheSlot;
     use candle_core::{Device, Result, Tensor};
     use candle_transformers::utils::build_causal_mask;
+
+    /// PATCH (P-rope / P-arch) regression: the rotary convention is chosen from GGUF
+    /// `general.architecture`. Qwen-family + the other NEOX archs select NEOX rope;
+    /// Llama/Mistral/unknown/absent stay interleaved (the Llama-safe default), so a
+    /// Llama GGUF is byte-identical to upstream. Network-free proof of the dispatch;
+    /// full token parity vs llama.cpp needs a real GGUF (see docs/CANDLE_EXPANSION_RESEARCH.md).
+    #[test]
+    fn neox_arch_selection() {
+        for a in [
+            "qwen", "qwen2", "qwen2moe", "qwen3", "qwen3moe", "falcon", "phi3", "stablelm",
+        ] {
+            assert!(super::is_neox_arch(a), "{a} must select NEOX rope");
+        }
+        for a in ["llama", "mistral", "deepseek2", "", "unknown"] {
+            assert!(
+                !super::is_neox_arch(a),
+                "{a} must stay interleaved (the Llama-safe default)"
+            );
+        }
+    }
+
+    // ── KV-cache preallocation determinism tests ──────────────────────────────
+
+    /// Build a deterministic `(b_sz, n_kv_head, seq_len, head_dim)` tensor whose
+    /// every element is a distinct, reproducible value — so a byte-equality
+    /// check is meaningful (no accidental all-zero matches).
+    fn ramp(b: usize, h: usize, s: usize, d: usize, base: f32) -> Result<Tensor> {
+        let n = b * h * s * d;
+        let data: Vec<f32> = (0..n).map(|i| base + i as f32).collect();
+        Tensor::from_vec(data, (b, h, s, d), &Device::Cpu)
+    }
+
+    /// THE determinism pin for the KV-cache preallocation lever: appending
+    /// keys/values via `KvCacheSlot` (preallocated buffer + `slice_set` at a
+    /// running offset, read back as `narrow(..).contiguous()`) yields a tensor
+    /// byte-for-byte identical to the old per-step `Tensor::cat(&[cache,new],2)`
+    /// path. If this ever fails, logits would diverge and verification would
+    /// quarantine an honest worker — so it must stay green.
+    #[test]
+    fn prealloc_kv_append_matches_cat() -> Result<()> {
+        let (b, h, d) = (3usize, 2usize, 4usize);
+
+        // Reference: the previous behaviour — concatenate each step along dim 2.
+        // Prefill of 5 tokens, then 6 single-token decode steps.
+        let prefill = ramp(b, h, 5, d, 1.0)?;
+        let mut cat_cache = prefill.clone();
+
+        // New path: append into the preallocated slot.
+        let mut slot = KvCacheSlot::new();
+        let appended = slot.append(&prefill)?;
+        // Prefill result must already match.
+        assert_eq!(
+            appended.flatten_all()?.to_vec1::<f32>()?,
+            cat_cache.flatten_all()?.to_vec1::<f32>()?,
+            "prefill append must equal the input"
+        );
+
+        for step in 0..6 {
+            let tok = ramp(b, h, 1, d, 1000.0 + step as f32 * 100.0)?;
+            cat_cache = Tensor::cat(&[&cat_cache, &tok], 2)?;
+            let got = slot.append(&tok)?;
+            assert_eq!(
+                got.dims(),
+                cat_cache.dims(),
+                "shape must match cat at step {step}"
+            );
+            assert_eq!(
+                got.flatten_all()?.to_vec1::<f32>()?,
+                cat_cache.flatten_all()?.to_vec1::<f32>()?,
+                "slice_set append must be byte-identical to cat at step {step}"
+            );
+        }
+        Ok(())
+    }
+
+    /// `KvCacheSlot::reset` mirrors the old `index_pos == 0` reset: after a
+    /// reset the next append reallocates and the stale contents are gone, even
+    /// if the new prefill has a different batch size.
+    #[test]
+    fn prealloc_kv_reset_starts_fresh() -> Result<()> {
+        let (h, d) = (2usize, 4usize);
+        let mut slot = KvCacheSlot::new();
+
+        // First sequence: batch 4, prefill 3.
+        let first = ramp(4, h, 3, d, 1.0)?;
+        let out1 = slot.append(&first)?;
+        assert_eq!(out1.dims(), [4, h, 3, d]);
+
+        // Reset (a fresh prefill at a different batch size).
+        slot.reset();
+        let second = ramp(2, h, 2, d, 500.0)?;
+        let out2 = slot.append(&second)?;
+        assert_eq!(
+            out2.dims(),
+            [2, h, 2, d],
+            "reset must reallocate at the new batch size"
+        );
+        assert_eq!(
+            out2.flatten_all()?.to_vec1::<f32>()?,
+            second.flatten_all()?.to_vec1::<f32>()?,
+            "after reset the slot holds only the new prefill"
+        );
+        Ok(())
+    }
+
+    /// `KvCacheSlot::compact` drops EOS rows from dim 0 verbatim and keeps the
+    /// surviving rows' live KV bytewise identical, so a later append continues
+    /// against the shrunk batch. Matches `index_select` on the old `(k,v)` cat
+    /// cache exactly.
+    #[test]
+    fn prealloc_kv_compact_keeps_rows_verbatim() -> Result<()> {
+        let (h, d) = (2usize, 3usize);
+        let mut slot = KvCacheSlot::new();
+
+        // Prefill batch 4, length 2, then one decode step -> live len 3.
+        let prefill = ramp(4, h, 2, d, 1.0)?;
+        slot.append(&prefill)?;
+        let step = ramp(4, h, 1, d, 9000.0)?;
+        let full = slot.append(&step)?; // (4, h, 3, d)
+
+        // Drop rows 1 and 3, keep rows 0 and 2.
+        let keep = [0u32, 2u32];
+        let idx = Tensor::from_vec(keep.to_vec(), keep.len(), &Device::Cpu)?;
+        slot.compact(&idx)?;
+
+        // The compacted live region must equal index_select(full, dim0, keep).
+        let expected = full.index_select(&idx, 0)?;
+        // Re-read the slot's live region via a zero-length append of the right shape.
+        // (append of seq_len 0 is degenerate, so read by appending one more token
+        //  and comparing the prefix instead.)
+        let next = ramp(2, h, 1, d, 7777.0)?;
+        let after = slot.append(&next)?; // (2, h, 4, d)
+        let live_prefix = after.narrow(2, 0, 3)?;
+        assert_eq!(
+            live_prefix.flatten_all()?.to_vec1::<f32>()?,
+            expected.flatten_all()?.to_vec1::<f32>()?,
+            "compact must keep the named rows' KV bytewise identical"
+        );
+        Ok(())
+    }
+
+    /// THE determinism pin for the prefix-KV-sharing lever (Wave 1 B). After a
+    /// shared-prefix prefill, `snapshot` then `restore` must re-seat the SAME KV
+    /// the prefix produced, AND a subsequent append must continue exactly as if
+    /// the prefix had stayed in place — so a per-item forward that forks the
+    /// prefix sees byte-identical KV to one that prefilled the prefix inline. If
+    /// this drifts, the prefix-shared path would diverge from serial and break the
+    /// batched==serial token-identity gate.
+    #[test]
+    fn snapshot_restore_continues_prefix_verbatim() -> Result<()> {
+        let (h, d) = (2usize, 4usize);
+
+        // Reference: prefill a 5-token prefix, then append a 3-token remainder,
+        // all in one continuous slot (the "inline" path).
+        let prefix = ramp(1, h, 5, d, 1.0)?;
+        let remainder = ramp(1, h, 3, d, 500.0)?;
+        let mut inline = KvCacheSlot::new();
+        inline.append(&prefix)?;
+        let inline_full = inline.append(&remainder)?; // (1, h, 8, d)
+
+        // Forked path: prefill the prefix, snapshot it, then for two independent
+        // "items" restore the snapshot and append a remainder. Both must match the
+        // inline result byte-for-byte (here both items use the same remainder, so
+        // the comparison is exact; the point is restore re-seats the prefix KV).
+        let mut shared = KvCacheSlot::new();
+        shared.append(&prefix)?;
+        let snap = shared.snapshot()?.expect("prefix snapshot");
+        assert_eq!(snap.1, 5, "snapshot length is the prefix length");
+
+        for item in 0..2 {
+            let mut forked = KvCacheSlot::new();
+            // Pre-dirty the slot so we prove restore fully re-seats it.
+            forked.append(&ramp(1, h, 2, d, 9000.0)?)?;
+            forked.restore(&snap)?;
+            let forked_full = forked.append(&remainder)?; // (1, h, 8, d)
+            assert_eq!(
+                forked_full.dims(),
+                inline_full.dims(),
+                "item {item}: forked shape must match inline"
+            );
+            assert_eq!(
+                forked_full.flatten_all()?.to_vec1::<f32>()?,
+                inline_full.flatten_all()?.to_vec1::<f32>()?,
+                "item {item}: forked prefix+remainder must be byte-identical to inline"
+            );
+        }
+        // The original snapshot must be untouched by the forks (deep copy).
+        assert_eq!(snap.1, 5, "snapshot length unchanged after forks");
+        Ok(())
+    }
 
     // ── Mask shape tests ──────────────────────────────────────────────────────
 

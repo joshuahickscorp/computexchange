@@ -651,6 +651,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "sysinfo",
  "thiserror 1.0.69",
  "tokenizers 0.23.1",

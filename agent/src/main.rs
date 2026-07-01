@@ -7,6 +7,7 @@
 
 mod cluster;
 mod config;
+mod continuous_batch; // Apple-Silicon continuous-batch lane skeleton (Hawking port; docs/HAWKING_PORT_PLAN.md)
 mod failure;
 mod hardware;
 mod models;
@@ -193,16 +194,19 @@ async fn main() -> Result<()> {
 
 /// `bench` subcommand: detect + benchmark, print WorkerCapability JSON.
 fn run_bench(config: Option<PathBuf>) -> Result<()> {
-    let supplier_id = match config {
+    // Read supplier id + the configured engine tag from the config when present, so
+    // `bench` prints the SAME engine the agent will advertise; with no config it is the
+    // default Candle path (engine "candle").
+    let (supplier_id, engine) = match config {
         Some(path) => {
-            AgentConfig::load(&path)
-                .with_context(|| format!("loading config {}", path.display()))?
-                .supplier_id
+            let cfg = AgentConfig::load(&path)
+                .with_context(|| format!("loading config {}", path.display()))?;
+            (cfg.supplier_id, cfg.inference_backend.engine_tag())
         }
-        None => uuid::Uuid::nil(),
+        None => (uuid::Uuid::nil(), config::InferenceBackend::default().engine_tag()),
     };
     // `bench` is informational only — reservation price is 0.0 (not advertised).
-    let cap = hardware::detect_and_benchmark(supplier_id, AGENT_VERSION, 0.0);
+    let cap = hardware::detect_and_benchmark(supplier_id, AGENT_VERSION, 0.0, engine);
     println!("{}", serde_json::to_string_pretty(&cap)?);
     Ok(())
 }
@@ -534,8 +538,14 @@ struct WorkCtx {
 /// behind each model's mutex (in the pool); the wins are no per-task model reload
 /// and overlapping S3 GET/PUT with compute.
 async fn run_agent(cfg: AgentConfig) -> Result<()> {
-    let cap =
-        hardware::detect_and_benchmark(cfg.supplier_id, AGENT_VERSION, cfg.min_payout_usd_per_hr);
+    let cap = hardware::detect_and_benchmark(
+        cfg.supplier_id,
+        AGENT_VERSION,
+        cfg.min_payout_usd_per_hr,
+        // The configured on-device engine (candle default). It becomes the second
+        // axis of the worker's verification class on the control plane.
+        cfg.inference_backend.engine_tag(),
+    );
     let worker_id = cap.worker_id;
     let permits = cfg.concurrency(cap.memory_gb);
 
@@ -555,6 +565,9 @@ async fn run_agent(cfg: AgentConfig) -> Result<()> {
     // Menu-bar status surface: write the status file now (idle), then on every
     // heartbeat and task transition. The macOS app reads it (see macapp/).
     let status = Arc::new(StatusWriter::new(AGENT_VERSION, worker_id));
+    // Echo the APPLIED operator prefs (the effective config after the agent.prefs.toml
+    // overlay) so the app shows agent truth, not just its local toggle state (item 26).
+    status.set_applied_prefs(status::AppliedPrefs::from_config(&cfg, cap.memory_gb));
     status.registered();
 
     let ctx = WorkCtx {
@@ -562,14 +575,30 @@ async fn run_agent(cfg: AgentConfig) -> Result<()> {
         cap: Arc::new(cap),
         runners: Arc::new({
             let mut rs = default_runners();
-            // MLX serving-lane seam: only when the operator opts in. Inserted right AFTER
-            // ClusterRunner (index 0) so a giant cluster model still routes to the Plane B
-            // seam, but BEFORE the Candle generative runners so MLX-lane jobs route here.
-            // (MlxRunner::can_run also yields cluster models, defense-in-depth.) Default
+            // Serving-lane seams: only when the operator opts in. Each is inserted right
+            // AFTER ClusterRunner (index 0) so a giant cluster model still routes to the
+            // Plane B seam, but BEFORE the Candle generative runners so lane jobs route
+            // here. (Each seam's can_run also yields cluster models, defense-in-depth.)
+            // The backends are mutually exclusive (one inference_backend), and the default
             // Candle backend leaves dispatch byte-for-byte unchanged.
-            if cfg.inference_backend == config::InferenceBackend::Mlx {
-                rs.insert(1, Box::new(runners::MlxRunner));
-                tracing::info!("inference_backend=mlx: MLX serving-lane seam active (generative LLM jobs route to the MLX boundary until the runtime is wired)");
+            match cfg.inference_backend {
+                config::InferenceBackend::Candle => {}
+                config::InferenceBackend::Mlx => {
+                    rs.insert(1, Box::new(runners::MlxRunner));
+                    tracing::info!("inference_backend=mlx: MLX serving-lane seam active (generative LLM jobs route to the MLX boundary until the runtime is wired)");
+                }
+                config::InferenceBackend::Vllm => {
+                    rs.insert(1, Box::new(runners::VllmRunner));
+                    tracing::info!("inference_backend=vllm: vLLM CUDA serving-lane seam active (generative LLM jobs route to the vLLM boundary until a pinned server is configured + the determinism soak passes — docs/VLLM_LANE.md)");
+                }
+                config::InferenceBackend::Hawking => {
+                    // The Hawking Apple-Silicon continuous-batch lane is a module-level
+                    // scheduler skeleton (continuous_batch.rs), inert-by-default: it falls
+                    // back to the existing per-task batched decode, so behavior is unchanged
+                    // today. The engine tag still flows to the control plane so the
+                    // verification class is correct ahead of the port landing.
+                    tracing::info!("inference_backend=hawking: Apple-Silicon continuous-batch lane registered (engine=hawking); the scheduler port is a compiling skeleton that falls back to per-task batched decode — docs/HAWKING_PORT_PLAN.md");
+                }
             }
             rs
         }),

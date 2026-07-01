@@ -33,15 +33,42 @@ fn default_max_memory_pct() -> f32 {
 /// reservation-price reporting, model cache placement); they are parsed and
 /// validated today even though the honest-stub loop does not yet act on them.
 /// Which on-device runtime serves generative LLM jobs. `candle` (default) is the
-/// wired path; `mlx` opts into the MLX serving-lane SEAM (vLLM-MLX continuous
-/// batching — see `runners::MlxRunner`), which surfaces an honest boundary until the
-/// MLX runtime (mlx-rs / Metal FFI) is wired. Set in agent.toml: `inference_backend = "mlx"`.
+/// wired path; the others opt into serving-lane SEAMs that surface an honest
+/// boundary until their runtime is wired:
+/// - `mlx`     — Apple MLX (mlx-rs / Metal FFI), `runners::MlxRunner`.
+/// - `vllm`    — pinned vLLM OpenAI-compatible CUDA server, `runners::VllmRunner`
+///   (PERF_AND_CAPABILITY_AUDIT Wave 2; docs/VLLM_LANE.md). The CUDA serving lane.
+/// - `hawking` — Apple-Silicon continuous-batch lane ported from the founder's
+///   Hawking engine, `continuous_batch` module (docs/HAWKING_PORT_PLAN.md). Apple-only.
+/// Set in agent.toml: `inference_backend = "vllm"` (etc).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InferenceBackend {
     #[default]
     Candle,
     Mlx,
+    Vllm,
+    Hawking,
+}
+
+impl InferenceBackend {
+    /// Stable wire string the worker advertises as its `engine` discriminator
+    /// (control/types.go WorkerCapability.Engine). The control plane draws
+    /// byte-exact redundancy peers and seeds honeypots from the SAME
+    /// (hw_class, engine) class, so two workers running DIFFERENT engines (whose
+    /// FP kernels differ) are never byte-compared. `candle` is the default and the
+    /// only wired path today; `mlx`, `vllm`, and `hawking` are serving-lane seams,
+    /// each with its OWN tag so its (FP-distinct) output is only ever compared
+    /// within its own engine class. Matches the lowercase serde rename so the
+    /// advertised string is the same token the config accepts.
+    pub fn engine_tag(&self) -> &'static str {
+        match self {
+            InferenceBackend::Candle => "candle",
+            InferenceBackend::Mlx => "mlx",
+            InferenceBackend::Vllm => "vllm",
+            InferenceBackend::Hawking => "hawking",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -86,6 +113,35 @@ pub struct AgentConfig {
     /// `mlx` to route them to the MLX serving-lane seam). See `InferenceBackend`.
     #[serde(default)]
     pub inference_backend: InferenceBackend,
+}
+
+/// Operator-preferences overlay (Atlas F7 / backlog item 25). A PARTIAL TOML the
+/// menu-bar app writes as `agent.prefs.toml` carrying ONLY the operator-tunable
+/// knobs. Every field is optional: a present value OVERRIDES the base `agent.toml`,
+/// an absent one leaves the base untouched. This is what makes the Mac app's menu
+/// toggles real instead of decorative — the launched agent reads this overlay (via
+/// `CX_AGENT_PREFS` or the conventional sidecar next to the config) and merges it.
+/// Unknown keys are ignored on purpose, so a newer app writing a key an older agent
+/// build doesn't know never breaks the launch.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct OperatorPrefs {
+    pub power_only: Option<bool>,
+    pub min_payout_usd_per_hr: Option<f32>,
+    pub memory_headroom_gb: Option<f32>,
+    pub max_memory_pct: Option<f32>,
+    pub max_cpu_pct: Option<f32>,
+    pub quiet_hours: Option<(u8, u8)>,
+    pub max_concurrent_tasks: Option<usize>,
+}
+
+impl OperatorPrefs {
+    /// Parse a prefs TOML file. A malformed file is a surfaced error, never silently
+    /// dropped — a decorative toggle is worse than an absent one (F7).
+    pub fn load(path: &Path) -> Result<Self> {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("reading prefs file {}", path.display()))?;
+        toml::from_str(&text).with_context(|| format!("parsing prefs TOML {}", path.display()))
+    }
 }
 
 /// The outcome of a memory-throttle evaluation. Pure data carried into the
@@ -179,7 +235,61 @@ impl AgentConfig {
                 cfg.worker_token = token;
             }
         }
+
+        // Operator-prefs overlay (Atlas F7 / item 25). Source, in precedence order:
+        //   1. CX_AGENT_PREFS — an explicit path (the app sets it on launch), else
+        //   2. the conventional `agent.prefs.toml` sidecar next to the config file —
+        //      the exact path the menu-bar app writes — so its toggles apply with no
+        //      extra wiring. A present pref value overrides the base; absent leaves it.
+        // An explicit path that won't read, or an existing sidecar that won't parse, is
+        // a HARD error (surfaced) — silently-ignored prefs ARE the decorative-toggle bug.
+        let prefs_path: Option<PathBuf> = match std::env::var("CX_AGENT_PREFS") {
+            Ok(p) if !p.is_empty() => Some(PathBuf::from(p)),
+            _ => {
+                let sidecar = path.with_file_name("agent.prefs.toml");
+                if sidecar.exists() {
+                    Some(sidecar)
+                } else {
+                    None
+                }
+            }
+        };
+        if let Some(pp) = prefs_path {
+            cfg.apply_prefs(&OperatorPrefs::load(&pp)?);
+        }
+
         Ok(cfg)
+    }
+
+    /// Merge an operator-prefs overlay over this config (Atlas F7 / item 25). Each
+    /// PRESENT pref field replaces the base value (prefs win); an ABSENT field is left
+    /// untouched. `quiet_hours` is set when present; the app omits the key entirely
+    /// when quiet hours are disabled, so an absent `quiet_hours` leaves the base value
+    /// rather than clearing it. Pure — unit-tested without I/O.
+    pub fn apply_prefs(&mut self, prefs: &OperatorPrefs) {
+        if let Some(v) = prefs.power_only {
+            self.power_only = v;
+        }
+        if let Some(v) = prefs.min_payout_usd_per_hr {
+            self.min_payout_usd_per_hr = v;
+        }
+        if let Some(v) = prefs.memory_headroom_gb {
+            self.memory_headroom_gb = v;
+        }
+        if let Some(v) = prefs.max_memory_pct {
+            self.max_memory_pct = v;
+        }
+        if let Some(v) = prefs.max_cpu_pct {
+            self.max_cpu_pct = v;
+        }
+        if let Some(v) = prefs.quiet_hours {
+            self.quiet_hours = Some(v);
+        }
+        if let Some(v) = prefs.max_concurrent_tasks {
+            // The app writes 0 to mean "derive from cores+RAM" (its sidecar comment), so
+            // map 0 to None (the derive sentinel) rather than pinning concurrency to 1.
+            self.max_concurrent_tasks = if v == 0 { None } else { Some(v) };
+        }
     }
 
     /// Decide whether the agent may pick up work right now.
@@ -385,5 +495,85 @@ mod tests {
         assert!(!c.is_eligible_to_run(5, false));
         assert!(c.is_eligible_to_run(6, false));
         assert!(c.is_eligible_to_run(12, false));
+    }
+
+    #[test]
+    fn operator_prefs_overlay_overrides_present_fields_only() {
+        let mut c = cfg(None, false); // base: no quiet hours, not power-only, headroom 8
+        c.min_payout_usd_per_hr = 1.0;
+        let prefs = OperatorPrefs {
+            power_only: Some(true),
+            quiet_hours: Some((22, 6)),
+            memory_headroom_gb: Some(2.0),
+            min_payout_usd_per_hr: None, // absent → base value (1.0) survives
+            ..Default::default()
+        };
+        c.apply_prefs(&prefs);
+        assert!(c.power_only, "present pref overrides");
+        assert_eq!(c.quiet_hours, Some((22, 6)));
+        assert_eq!(c.memory_headroom_gb, 2.0);
+        assert_eq!(
+            c.min_payout_usd_per_hr, 1.0,
+            "absent pref leaves the base value untouched"
+        );
+    }
+
+    #[test]
+    fn operator_prefs_actually_control_eligibility() {
+        // F7's whole point: a toggled pref must CHANGE agent behavior, not be
+        // decorative. The base config is always eligible at 02:00; applying a
+        // quiet-hours pref makes the agent refuse work in the window, and a power-only
+        // pref makes it refuse on battery — proving the overlay reaches the governor.
+        let mut c = cfg(None, false);
+        assert!(c.is_eligible_to_run(2, false), "base: eligible at 02:00");
+        c.apply_prefs(&OperatorPrefs {
+            quiet_hours: Some((22, 6)),
+            ..Default::default()
+        });
+        assert!(
+            !c.is_eligible_to_run(2, false),
+            "after prefs: quiet hours refuse 02:00"
+        );
+        c.apply_prefs(&OperatorPrefs {
+            power_only: Some(true),
+            ..Default::default()
+        });
+        assert!(
+            !c.is_eligible_to_run(12, true),
+            "after prefs: power-only refuses on battery"
+        );
+    }
+
+    #[test]
+    fn operator_prefs_parse_partial_toml_ignoring_unknown_keys() {
+        // The app writes a PARTIAL toml (only the toggled knobs). Absent keys parse as
+        // None, present ones as Some, and an unknown future key is ignored (forward
+        // compat: an older agent never breaks on a newer app's key).
+        let toml = "power_only = true\nmin_payout_usd_per_hr = 3.5\nquiet_hours = [22, 6]\nunknown_future_key = 7\n";
+        let prefs: OperatorPrefs = toml::from_str(toml).unwrap();
+        assert_eq!(prefs.power_only, Some(true));
+        assert_eq!(prefs.min_payout_usd_per_hr, Some(3.5));
+        assert_eq!(prefs.quiet_hours, Some((22, 6)));
+        assert_eq!(prefs.memory_headroom_gb, None, "absent key → None");
+    }
+
+    #[test]
+    fn operator_prefs_zero_concurrency_means_derive() {
+        // The app writes `max_concurrent_tasks = 0` to mean "derive from cores+RAM".
+        // The overlay must map 0 → None (derive), NOT pin concurrency to 1.
+        let mut c = cfg(None, false);
+        c.max_concurrent_tasks = Some(7); // base had an explicit pin
+        c.apply_prefs(&OperatorPrefs {
+            max_concurrent_tasks: Some(0),
+            ..Default::default()
+        });
+        assert_eq!(c.max_concurrent_tasks, None, "0 from the app means derive");
+        assert_eq!(c.concurrency(64.0), 4, "derive path: big box caps at 4");
+        // A positive pref still pins.
+        c.apply_prefs(&OperatorPrefs {
+            max_concurrent_tasks: Some(3),
+            ..Default::default()
+        });
+        assert_eq!(c.max_concurrent_tasks, Some(3));
     }
 }

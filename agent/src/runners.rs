@@ -424,17 +424,78 @@ impl Embedder {
     /// Embed a batch of strings → one L2-normalized `EMBED_DIM`-vector each.
     /// Pools the last hidden state per the model's pooling (mean over real
     /// tokens for MiniLM, the [CLS] token for bge-small), then L2-normalizes.
+    ///
+    /// LENGTH-BUCKETED (PERF_AND_CAPABILITY_AUDIT Wave 1): the BERT forward pads
+    /// every sequence to the batch's LONGEST one, so a single long chunk drags
+    /// the whole batch's matmul width up. We instead group texts by exact token
+    /// length and run each length-bucket as its own no-pad forward (mirroring
+    /// `generate_batch`'s bucketing), then SCATTER each bucket's vectors back to
+    /// the caller's original index. On length-skewed inputs this is ~1.15-1.6x
+    /// (no wasted pad-token compute); on uniform-length inputs it is a single
+    /// bucket == the old behaviour, so ~0 overhead.
+    ///
+    /// DETERMINISM: rerankAgree (control/verification.go) demands EXACT order-array
+    /// equality and meanCosine pairs BY POSITION, so the scatter-back MUST restore
+    /// the caller's order exactly. Buckets are keyed by token length and the
+    /// per-bucket member lists preserve ascending original index (a stable sort by
+    /// construction — we push indices in input order), so the scatter is a pure
+    /// permutation back to the input order with no tie-break ambiguity. The math is
+    /// the same per-sequence computation as the single-pad path (mean pooling masks
+    /// pad tokens out; CLS reads token 0); only the absence of pad columns changes,
+    /// which is byte-equivalent up to BERT fp32 attention-softmax rounding over the
+    /// (now-removed) all-masked pad positions. Pinned by `embed_bucketed_matches_single_pad`.
     pub fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, RunError> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
         let backend = "embed";
-        let encs = self
-            .tokenizer
-            .encode_batch(texts.to_vec(), true)
+        // Tokenize each text on its own with padding DISABLED so we read its TRUE
+        // token length and bucket by it. The loaded tokenizer carries
+        // `with_padding(BatchLongest)`, so a single `encode_batch` would pad every
+        // sequence to the global max and collapse all texts into one bucket — which
+        // is exactly the old wasteful behaviour. We bypass that by encoding each
+        // text individually (no batch padding) here; within a length-bucket every
+        // sequence is already the same length, so re-batching them needs no padding.
+        let encs: Vec<tokenizers::Encoding> = texts
+            .iter()
+            .map(|t| self.tokenizer.encode(t.as_str(), true))
+            .collect::<Result<Vec<_>, _>>()
             .map_err(infer_err(backend))?;
 
+        // Bucket original indices by exact token length. Pushing in input order
+        // keeps each member list ascending (stable), so the scatter-back below is
+        // an unambiguous permutation to the caller's order.
+        let mut buckets: std::collections::HashMap<usize, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (i, e) in encs.iter().enumerate() {
+            buckets.entry(e.get_ids().len()).or_default().push(i);
+        }
+
+        let mut out: Vec<Vec<f32>> = vec![Vec::new(); texts.len()];
+        for members in buckets.values() {
+            // Slice this bucket's encodings (all the same length → no padding).
+            let bucket_encs: Vec<&tokenizers::Encoding> =
+                members.iter().map(|&i| &encs[i]).collect();
+            let vectors = self.embed_bucket(&bucket_encs)?;
+            // SCATTER back to original index. `members` is ascending and `vectors`
+            // is in `members` order, so out[orig] gets exactly this text's vector.
+            for (b, &orig) in members.iter().enumerate() {
+                out[orig] = vectors[b].clone();
+            }
+        }
+        Ok(out)
+    }
+
+    /// Run one length-bucket (all encodings the SAME token length, no padding)
+    /// through the BERT forward + pooling + L2-normalize, returning one vector per
+    /// encoding in the bucket's order. This is the single shared forward path; the
+    /// public `embed` only buckets and scatters around it.
+    fn embed_bucket(&self, encs: &[&tokenizers::Encoding]) -> Result<Vec<Vec<f32>>, RunError> {
+        let backend = "embed";
         let (bsz, seq) = (encs.len(), encs[0].len());
         let mut ids = Vec::with_capacity(bsz * seq);
         let mut mask = Vec::with_capacity(bsz * seq);
-        for e in &encs {
+        for e in encs {
             ids.extend(e.get_ids().iter().map(|&x| x as i64));
             mask.extend(e.get_attention_mask().iter().map(|&x| x as f32));
         }
@@ -1119,7 +1180,151 @@ impl LlamaBackend {
         }
         Ok(out)
     }
+
+    /// Prefix-KV-sharing greedy generation (PERF_AND_CAPABILITY_AUDIT Wave 1, B).
+    /// classification_prompt / extraction_prompt put the fixed instruction +
+    /// label-list / schema FIRST and the variable item LAST, so every prompt in a
+    /// batch begins with a long shared token prefix. We tokenize each full prompt
+    /// EXACTLY as `generate_batch` does (same chat wrap), find the LONGEST COMMON
+    /// TOKEN PREFIX across the batch, prefill that prefix's KV cache ONCE, snapshot
+    /// it, then for each item restore the shared prefix and prefill only its own
+    /// remaining tokens before decoding. The shared instruction is forwarded once
+    /// for the whole batch instead of once per item — the ~2-4x classification /
+    /// ~1.5-2.5x extraction win, biggest when the prefix:item token ratio is large.
+    ///
+    /// DETERMINISM: the shared prefix is the longest common prefix of each item's
+    /// REAL token sequence (computed AFTER full tokenization), so there is no
+    /// tokenizer-merge-boundary hazard — each item's complete token sequence is
+    /// byte-identical to what `generate` would tokenize. Restoring the snapshot
+    /// re-seats bitwise-identical KV (KvCacheSlot::restore), and the per-item
+    /// remainder is prefilled at `index_pos == prefix_len` so rotary/mask use the
+    /// correct global positions. Output is therefore token-for-token identical to
+    /// per-item `generate` / `generate_batch`. classification/json verify by
+    /// LABEL / canonical-JSON (tolerant), and this path additionally stays
+    /// byte-exact. Pinned by `prefix_shared_prefill_matches_inline` (network-free
+    /// bookkeeping) and the live `batch_shared_prefix_equals_serial` gate.
+    ///
+    /// Further optimization (documented, not yet landed): the per-item remainder
+    /// prefill + decode runs one sequence at a time. A future pass can BATCH the
+    /// remainder by bucketing items on remainder length (like `generate_batch`)
+    /// after a single `expand_kv_cache(B)` of the shared prefix, to also batch the
+    /// decode. That is the "full fork" the audit flags as larger; this lands the
+    /// correct token-identical shared-prefix PREFILL first.
+    pub fn generate_batch_shared_prefix(
+        &mut self,
+        prompts: &[String],
+        max_tokens: u32,
+    ) -> Result<Vec<(String, usize)>, RunError> {
+        let backend = "batch_infer";
+        if prompts.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Tokenize every prompt with the SAME chat wrap as `generate`/`generate_batch`
+        // so the token sequences (and thus the outputs) are identical to serial.
+        let mut encoded: Vec<Vec<u32>> = Vec::with_capacity(prompts.len());
+        for p in prompts {
+            let wrapped = format!(
+                "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{p}<|eot_id|>\
+                 <|start_header_id|>assistant<|end_header_id|>\n\n"
+            );
+            let enc = self
+                .tokenizer
+                .encode(wrapped, true)
+                .map_err(infer_err(backend))?;
+            encoded.push(enc.get_ids().to_vec());
+        }
+
+        // Longest common TOKEN prefix across the batch. Capped at one below the
+        // shortest sequence so every item keeps at least one remainder token to
+        // prefill (the position whose logits seed decode). This guarantees the
+        // shared prefix is a true prefix of each item's real token sequence.
+        let shortest = encoded.iter().map(|e| e.len()).min().unwrap_or(0);
+        let mut prefix_len = shortest;
+        'outer: for col in 0..shortest {
+            let t = encoded[0][col];
+            for e in &encoded[1..] {
+                if e[col] != t {
+                    prefix_len = col;
+                    break 'outer;
+                }
+            }
+        }
+        // Keep >=1 remainder token per item; also require a prefix worth sharing.
+        if prefix_len >= shortest {
+            prefix_len = shortest.saturating_sub(1);
+        }
+        // Tiny shared prefix or single item: the fork overhead is not worth it,
+        // fall back to the proven bucketed path (byte-identical outputs either way).
+        if prompts.len() < 2 || prefix_len < SHARED_PREFIX_MIN_TOKENS {
+            return self.generate_batch(prompts, max_tokens);
+        }
+
+        // Prefill the shared prefix ONCE (bsz=1, index_pos=0 → fresh sequence) and
+        // snapshot the resulting KV so each item can fork from it.
+        let prefix_ids = &encoded[0][..prefix_len];
+        let prefix_input = Tensor::from_vec(prefix_ids.to_vec(), (1, prefix_len), &self.device)
+            .map_err(infer_err(backend))?;
+        // We do not need the prefill logits (decode reads the item's last position),
+        // but running it populates every layer's KV for positions 0..prefix_len.
+        let _ = self
+            .model
+            .forward(&prefix_input, 0)
+            .map_err(infer_err(backend))?;
+        let prefix_kv = self.model.snapshot_kv_cache().map_err(infer_err(backend))?;
+
+        let mut out: Vec<(String, usize)> = vec![(String::new(), 0); prompts.len()];
+        for (m, ids) in encoded.iter().enumerate() {
+            // Fork: re-seat the shared prefix, then prefill only this item's
+            // remaining tokens at index_pos = prefix_len so rotary/mask line up.
+            self.model
+                .restore_kv_cache(&prefix_kv)
+                .map_err(infer_err(backend))?;
+
+            let mut index_pos = prefix_len;
+            let mut generated: Vec<u32> = Vec::new();
+            // Remainder of the prompt (everything after the shared prefix).
+            let remainder = &ids[prefix_len..];
+            // Step 0 prefills the remainder (seq_len > 1) against the shared prefix
+            // KV at index_pos == prefix_len; later steps feed one token each. The
+            // (1, vocab) logits are the last position only, exactly as `generate`.
+            let mut next_input: Vec<u32> = remainder.to_vec();
+            for _ in 0..max_tokens as usize {
+                let seq_len = next_input.len();
+                let input = Tensor::from_vec(next_input.clone(), (1, seq_len), &self.device)
+                    .map_err(infer_err(backend))?;
+                let logits = self
+                    .model
+                    .forward(&input, index_pos)
+                    .map_err(infer_err(backend))?; // (1, vocab) · last position only
+                index_pos += seq_len;
+                let next = logits
+                    .squeeze(0)
+                    .map_err(infer_err(backend))?
+                    .argmax(0)
+                    .map_err(infer_err(backend))?
+                    .to_scalar::<u32>()
+                    .map_err(infer_err(backend))?;
+                if next == self.eos {
+                    break;
+                }
+                generated.push(next);
+                next_input = vec![next];
+            }
+            let text = self
+                .tokenizer
+                .decode(&generated, true)
+                .map_err(infer_err(backend))?;
+            out[m] = (text.trim().to_string(), generated.len());
+        }
+        Ok(out)
+    }
 }
+
+/// Minimum shared TOKEN-prefix length for `generate_batch_shared_prefix` to fork
+/// rather than fall back to plain bucketing. A short shared prefix (e.g. just the
+/// chat-wrap header) does not amortize the snapshot/restore overhead; the
+/// classification/extraction instruction+labels/schema prefixes are far longer.
+const SHARED_PREFIX_MIN_TOKENS: usize = 16;
 
 /// Load the HF tokenizer.json that pairs with the GGUF model (from the base repo,
 /// not the GGUF repo, which usually lacks tokenizer.json). Must mirror
@@ -1349,12 +1554,17 @@ impl JobRunner for BatchClassificationRunner {
             tokio::task::spawn_blocking(move || -> Result<_, RunError> {
                 let mut backend = model.blocking_lock();
                 // Batched: classify all texts B-per-forward-pass (short generations,
-                // many items — exactly where bucketed batching pays off).
+                // many items — exactly where bucketed batching pays off). The shared
+                // instruction + label list is a long contiguous token prefix on every
+                // prompt, so prefix-KV sharing prefills it ONCE for the whole batch
+                // (PERF_AND_CAPABILITY_AUDIT Wave 1 B). Output stays token-identical to
+                // the per-item path (shared prefix is the items' longest common token
+                // prefix), so classificationAgree is unaffected.
                 let prompts: Vec<String> = texts
                     .iter()
                     .map(|t| classification_prompt(t, &labels))
                     .collect();
-                let results = backend.generate_batch(&prompts, 12)?;
+                let results = backend.generate_batch_shared_prefix(&prompts, 12)?;
                 let total: usize = results.iter().map(|(_, n)| *n).sum();
                 let out: Vec<LabelAssignment> = results
                     .into_iter()
@@ -1477,12 +1687,17 @@ impl JobRunner for JsonExtractionRunner {
         let model = pool.llama(&manifest.model.model_ref).await?;
         let (extracted, total) = tokio::task::spawn_blocking(move || -> Result<_, RunError> {
             let mut backend = model.blocking_lock();
-            // Batched: extract from all texts B-per-forward-pass.
+            // Batched: extract from all texts B-per-forward-pass. The fixed
+            // instruction + schema is a long shared token prefix on every prompt, so
+            // prefix-KV sharing prefills it ONCE for the batch (PERF_AND_CAPABILITY_AUDIT
+            // Wave 1 B). Output stays token-identical to the per-item path (shared
+            // prefix is the items' longest common token prefix), so the canonical-JSON
+            // jsonExtractionAgree check is unaffected.
             let prompts: Vec<String> = texts
                 .iter()
                 .map(|t| extraction_prompt(t, &schema))
                 .collect();
-            let results = backend.generate_batch(&prompts, 256)?;
+            let results = backend.generate_batch_shared_prefix(&prompts, 256)?;
             let total: usize = results.iter().map(|(_, n)| *n).sum();
             // Validate each parses to a JSON object; on failure surface an empty
             // object with an `_error` so the row is accounted for, never faked as a
@@ -1755,6 +1970,110 @@ impl JobRunner for MlxRunner {
 
     fn backend_name(&self) -> &'static str {
         "mlx"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VllmRunner — vLLM CUDA serving-lane SEAM (PERF_AND_CAPABILITY_AUDIT Wave 2 A)
+// ---------------------------------------------------------------------------
+
+/// Environment variable an operator sets to point this seam at a running, PINNED
+/// vLLM OpenAI-compatible server (e.g. `http://127.0.0.1:8000`). Until it is set
+/// the lane is NOT configured and `run` returns an honest typed boundary — never a
+/// fabricated result. When it IS set, the wiring still shells out through the same
+/// locked-down sandbox path the `custom` lane uses (sandbox.rs), so the only egress
+/// is to the pinned server; the determinism contract (docs/VLLM_LANE.md) gates any
+/// throughput claim.
+const VLLM_SERVER_ENV: &str = "CX_VLLM_BASE_URL";
+
+/// The vLLM CUDA serving lane. The Candle CUDA decode path leaves tensor cores idle
+/// (the fused SDPA fast path is `is_metal() && seq_len==1`, quantized_llama_batched.rs;
+/// CUDA falls through to a dequant-to-f32 manual decode), so a pinned vLLM
+/// OpenAI-compatible server at greedy/temp=0 is a real ~3-6x per GPU on the nvidia_*
+/// lane (PERF_AND_CAPABILITY_AUDIT Wave 2; docs/VLLM_LANE.md). This runner is the SEAM:
+/// when an operator sets `inference_backend = "vllm"` it is inserted FIRST (after
+/// ClusterRunner, see main.rs) so generative LLM jobs route here and register
+/// engine="vllm" on the control plane — so vLLM output is ONLY ever byte-compared with
+/// other vLLM workers (within nvidia_*, a distinct hw family never cross-compared with
+/// Apple). It NEVER fabricates a forward pass (BLACKHOLE): until `CX_VLLM_BASE_URL`
+/// points at a pinned server the lane is "not configured" and surfaces the boundary,
+/// exactly like the MLX stub. With the default Candle backend the runner is not inserted
+/// at all, so normal dispatch is byte-for-byte unchanged.
+pub struct VllmRunner;
+
+#[async_trait]
+impl JobRunner for VllmRunner {
+    async fn can_run(&self, manifest: &JobManifest, _cap: &WorkerCapability) -> bool {
+        // The Llama-backed generative LLM job types the vLLM lane serves: batch_infer,
+        // batch_classification, json_extraction, and rerank (rerank is generation-free
+        // on Candle today, but vLLM serves it via greedy scoring, so the lane claims it).
+        // Embed (MiniLM) and audio_transcribe (whisper) are NOT vLLM-lane targets and
+        // stay on Candle. A giant cluster model yields to ClusterRunner so the correct
+        // Plane B boundary is surfaced (defense-in-depth with main.rs's dispatch order,
+        // which keeps ClusterRunner first).
+        !is_cluster_model(&manifest.model.model_ref)
+            && matches!(
+                manifest.job_type,
+                JobType::BatchInfer { .. }
+                    | JobType::BatchClassification { .. }
+                    | JobType::JsonExtraction { .. }
+                    | JobType::Rerank { .. }
+            )
+    }
+
+    async fn run(
+        &self,
+        manifest: &JobManifest,
+        _input: &[u8],
+        _pool: &ModelPool,
+    ) -> Result<JobOutput, RunError> {
+        // The lane is wired ONLY when an operator has stood up a pinned vLLM server and
+        // pointed us at it. Until then we surface the boundary — never a fabricated
+        // result. The de-risk spike in docs/VLLM_LANE.md (two pinned workers, cross-SKU
+        // and restart byte-stability soak, hw_class-aware honeypot seeding) MUST pass
+        // before the wired body below is allowed to claim throughput.
+        let base_url = match std::env::var(VLLM_SERVER_ENV) {
+            Ok(u) if !u.trim().is_empty() => u,
+            _ => {
+                return Err(RunError::NotImplemented {
+                    job_type: "vllm",
+                    detail: format!(
+                        "vLLM serving lane selected via inference_backend=vllm, but no pinned \
+                         vLLM server is configured ({VLLM_SERVER_ENV} unset). Stand up a PINNED \
+                         vLLM OpenAI-compatible server (engine+dtype pinned, greedy/temp=0) and \
+                         set {VLLM_SERVER_ENV}; the within-nvidia_* byte-equality soak and \
+                         hw_class-aware honeypot seeding (docs/VLLM_LANE.md) MUST pass before \
+                         this lane carries verified work. This seam surfaces the boundary and \
+                         never fabricates a result."
+                    ),
+                })
+            }
+        };
+
+        // SEAM: the wired path shells out to the pinned vLLM OpenAI server through the
+        // same locked-down sandbox as the `custom` lane (sandbox::run_sandboxed), with a
+        // greedy/temp=0 request body keyed on the manifest's model + job type, then maps
+        // the OpenAI `choices` back into the job's result contract (BatchInferResult /
+        // ClassificationResult / ExtractionResult / RerankResult) so verification is
+        // unchanged. It is intentionally NOT YET CONNECTED: enabling it before the
+        // determinism soak in docs/VLLM_LANE.md would put unverified bytes on the
+        // redundancy market. Returns the boundary until the soak gates it on.
+        let _ = base_url;
+        Err(RunError::NotImplemented {
+            job_type: "vllm",
+            detail: format!(
+                "vLLM server configured at {VLLM_SERVER_ENV}, but the verified shell-out path is \
+                 gated behind the within-nvidia_* byte-stability soak + hw_class-aware honeypot \
+                 seeding (docs/VLLM_LANE.md). Refusing to emit unverified bytes onto the \
+                 redundancy market — surface the boundary, never fabricate a result. \
+                 Model: {}.",
+                short_model_id(&manifest.model.model_ref, "vllm-model")
+            ),
+        })
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "vllm"
     }
 }
 
@@ -2368,6 +2687,128 @@ mod tests {
         );
     }
 
+    // ── Embedder length-bucketing (PERF_AND_CAPABILITY_AUDIT Wave 1, A) ───────
+
+    /// Network-free determinism proof for the embedder's length-bucketing
+    /// scatter-back. The forward pass needs a model, but the bucket→scatter
+    /// bookkeeping is pure index arithmetic and that is where a botched
+    /// permutation would silently mis-order embeddings against rerankAgree's
+    /// EXACT order requirement (control/verification.go). We model the forward
+    /// with an identity oracle (each text's "embedding" IS its original index),
+    /// run the SAME bucket-by-length + scatter-back `embed` uses, and assert the
+    /// output lands back in the caller's order regardless of length skew.
+    #[test]
+    fn embed_bucketing_scatters_back_to_original_order() {
+        // Token lengths chosen to be heavily skewed and to repeat, so multiple
+        // texts share a bucket and the within-bucket order matters.
+        let lengths = [7usize, 3, 7, 1, 3, 7, 12, 1];
+        let n = lengths.len();
+
+        // Bucket original indices by length, pushing in input order (the exact
+        // construction `embed` uses → ascending, stable member lists).
+        let mut buckets: std::collections::HashMap<usize, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (i, &len) in lengths.iter().enumerate() {
+            buckets.entry(len).or_default().push(i);
+        }
+
+        // Scatter back: the oracle "embedding" for original index `orig` is the
+        // single-element vector [orig as f32]; after the scatter, out[orig] must
+        // equal that, i.e. the permutation is the identity over original indices.
+        let mut out: Vec<Vec<f32>> = vec![Vec::new(); n];
+        for members in buckets.values() {
+            // Per-bucket "forward" returns vectors in member order (oracle).
+            let vectors: Vec<Vec<f32>> = members.iter().map(|&i| vec![i as f32]).collect();
+            for (b, &orig) in members.iter().enumerate() {
+                out[orig] = vectors[b].clone();
+            }
+        }
+
+        let want: Vec<Vec<f32>> = (0..n).map(|i| vec![i as f32]).collect();
+        assert_eq!(
+            out, want,
+            "scatter-back must restore the caller's original order exactly"
+        );
+        // Every bucket's member list is ascending — no tie-break ambiguity.
+        for members in buckets.values() {
+            assert!(
+                members.windows(2).all(|w| w[0] < w[1]),
+                "bucket members must be ascending (stable, in input order)"
+            );
+        }
+    }
+
+    /// Live-model parity gate for the length-bucketed embedder: on a LENGTH-SKEWED
+    /// input, the bucketed `embed` must produce embeddings equal (same order, byte-
+    /// for-byte) to the old single-pad-batch path. We reconstruct the old behaviour
+    /// by forcing every text into ONE bucket (pad to the global longest via a single
+    /// `embed_bucket` over all encodings, padding-enabled) and compare to `embed`.
+    /// rerankAgree pairs by position and meanCosine pairs by position, so any
+    /// re-ordering or drift past tolerance here would break the market.
+    ///
+    /// Run with:
+    ///   cargo test --release embed_bucketed_matches_single_pad -- --ignored --nocapture
+    #[test]
+    #[ignore = "downloads all-MiniLM-L6-v2 (~90MB) and runs a real forward pass"]
+    fn embed_bucketed_matches_single_pad() {
+        let embedder = Embedder::load("").expect("load MiniLM");
+        // Heavily length-skewed: short, medium, long, repeated lengths interleaved
+        // so the buckets are non-trivial and the scatter-back is exercised.
+        let texts: Vec<String> = vec![
+            "hi".to_string(),
+            "a cat sits quietly on the warm windowsill in the afternoon".to_string(),
+            "hello world".to_string(),
+            "the quick brown fox jumps over the lazy sleeping dog by the river".to_string(),
+            "ok".to_string(),
+            "machine learning embeddings map text into a dense vector space".to_string(),
+            "yes".to_string(),
+            "a cat sits quietly on the warm windowsill in the afternoon".to_string(),
+        ];
+
+        // Bucketed path (production).
+        let bucketed = embedder.embed(&texts).expect("bucketed embed");
+
+        // Single-pad reference: encode the WHOLE batch with padding on (pads every
+        // sequence to the global longest), then run one `embed_bucket` over all of
+        // them — exactly the pre-bucketing forward. Order is the input order.
+        let encs = embedder
+            .tokenizer
+            .encode_batch(texts.clone(), true)
+            .expect("encode_batch");
+        let refs: Vec<&tokenizers::Encoding> = encs.iter().collect();
+        let single_pad = embedder
+            .embed_bucket(&refs)
+            .expect("single-pad reference embed");
+
+        assert_eq!(bucketed.len(), single_pad.len(), "same count");
+        assert_eq!(bucketed.len(), texts.len(), "one vector per text");
+        // SAME ORDER, near-identical values. The only numeric difference is BERT
+        // fp32 softmax rounding over the (now-absent) all-masked pad columns, well
+        // within rerank/meanCosine tolerance; assert a tight bound and also that
+        // the per-text argmax dimension is unchanged (the order-sensitive signal).
+        for (i, (b, s)) in bucketed.iter().zip(single_pad.iter()).enumerate() {
+            assert_eq!(b.len(), EMBED_DIM, "text {i}: dim");
+            let max_abs = b
+                .iter()
+                .zip(s.iter())
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                max_abs < 1e-4,
+                "text {i}: bucketed vs single-pad drift {max_abs} exceeds tolerance"
+            );
+            let cos: f32 = b.iter().zip(s.iter()).map(|(x, y)| x * y).sum();
+            assert!(
+                cos > 0.9999,
+                "text {i}: bucketed vs single-pad cosine {cos} below 0.9999"
+            );
+        }
+        eprintln!(
+            "embed bucketing parity OK: {} texts, bucketed == single-pad within 1e-4",
+            texts.len()
+        );
+    }
+
     /// Build a tiny 16kHz mono WAV (sine sweep) as base64 — a self-contained
     /// audio fixture so the whisper path needs no external file.
     fn synthetic_wav_b64(secs: f32) -> String {
@@ -2479,6 +2920,8 @@ mod tests {
             worker_id: uuid::Uuid::nil(),
             supplier_id: uuid::Uuid::nil(),
             hw_class,
+            engine: "candle".into(),
+            build_hash: "test".into(),
             memory_gb,
             memory_bw_gbps: 80.0,
             supported_jobs: vec![],
@@ -2564,6 +3007,52 @@ mod tests {
             match MlxRunner.run(&infer, b"", &pool).await {
                 Err(RunError::ExternalSubstrate { detail, .. }) => assert!(detail.contains("MLX")),
                 other => panic!("expected ExternalSubstrate boundary, got {other:?}"),
+            }
+        });
+    }
+
+    /// The vLLM CUDA serving-lane seam: VllmRunner claims the generative LLM job types
+    /// plus rerank (so when an operator sets inference_backend=vllm and it is inserted
+    /// first, those route to it), declines embed (MiniLM stays on Candle), yields a
+    /// giant cluster model to ClusterRunner, and its `run` surfaces the "not configured"
+    /// boundary rather than fabricating a forward pass — even though the wired path is a
+    /// pinned-server shell-out, it stays gated behind the determinism soak.
+    #[test]
+    fn vllm_runner_gates_llm_jobs_and_surfaces_boundary() {
+        let cap = cap_with(HardwareClass::Nvidia80g, 80.0);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let infer = test_manifest(JobType::BatchInfer {
+                max_tokens: 16,
+                temperature: 0.0,
+            });
+            assert!(VllmRunner.can_run(&infer, &cap).await);
+            // rerank IS a vLLM-lane target (vLLM scores it via greedy generation).
+            let rerank = test_manifest(JobType::Rerank { top_k: 5 });
+            assert!(VllmRunner.can_run(&rerank, &cap).await);
+            // embed (MiniLM) is not a vLLM-lane target → stays on Candle.
+            let embed = test_manifest(JobType::Embed {
+                batch_size: 8,
+                binary: false,
+            });
+            assert!(!VllmRunner.can_run(&embed, &cap).await);
+            // a giant cluster model yields to ClusterRunner so the Plane B boundary
+            // is surfaced — even for a generative job type.
+            let mut giant = test_manifest(JobType::BatchInfer {
+                max_tokens: 16,
+                temperature: 0.0,
+            });
+            giant.model.model_ref = "llama-3.1-405b-instruct-q4".into();
+            assert!(!VllmRunner.can_run(&giant, &cap).await);
+            // run() surfaces the boundary; it must NOT fabricate a result. With no
+            // pinned server configured the detail names the env var to set.
+            let pool = ModelPool::new();
+            match VllmRunner.run(&infer, b"", &pool).await {
+                Err(RunError::NotImplemented { job_type, detail }) => {
+                    assert_eq!(job_type, "vllm");
+                    assert!(detail.contains(VLLM_SERVER_ENV));
+                }
+                other => panic!("expected NotImplemented boundary, got {other:?}"),
             }
         });
     }
@@ -2785,6 +3274,8 @@ mod tests {
             worker_id: uuid::Uuid::nil(),
             supplier_id: uuid::Uuid::nil(),
             hw_class: crate::types::HardwareClass::AppleSiliconMax,
+            engine: "candle".into(),
+            build_hash: "test".into(),
             memory_gb: 64.0,
             memory_bw_gbps: 400.0,
             supported_jobs: vec![],
@@ -3114,5 +3605,352 @@ mod tests {
             );
         }
         println!("correctness: OK · active-shrink batched == serial on mixed lengths");
+    }
+
+    // ── B1 prefix-KV sharing (PERF_AND_CAPABILITY_AUDIT Wave 1, B) ────────────
+
+    /// Longest-common-token-prefix over a slice of token sequences, mirroring the
+    /// exact loop in `generate_batch_shared_prefix` (capped one below the shortest
+    /// so every item keeps a remainder token). Kept as a free function so the
+    /// network-free test can assert the bookkeeping without a model.
+    fn longest_common_token_prefix(encoded: &[Vec<u32>]) -> usize {
+        let shortest = encoded.iter().map(|e| e.len()).min().unwrap_or(0);
+        let mut prefix_len = shortest;
+        'outer: for col in 0..shortest {
+            let t = encoded[0][col];
+            for e in &encoded[1..] {
+                if e[col] != t {
+                    prefix_len = col;
+                    break 'outer;
+                }
+            }
+        }
+        if prefix_len >= shortest {
+            prefix_len = shortest.saturating_sub(1);
+        }
+        prefix_len
+    }
+
+    /// Network-free determinism proof for prefix-KV sharing's bookkeeping. The
+    /// forward pass needs a model, but the load-bearing correctness claim is that
+    /// `[shared_prefix] ++ [per-item remainder]` reconstructs EACH item's COMPLETE
+    /// token sequence byte-for-byte — because only then is the prefix-shared output
+    /// token-identical to serial `generate`. We model classification/extraction's
+    /// shape (a long shared instruction+labels prefix, a short distinct item tail)
+    /// and assert: (1) the detected prefix is a true common prefix, (2) prefix ++
+    /// remainder == the original sequence for every item, (3) every item retains at
+    /// least one remainder token (the position whose logits seed decode).
+    #[test]
+    fn prefix_shared_prefill_matches_inline() {
+        // Shared instruction+labels prefix (identical tokens), then a distinct tail.
+        let shared: Vec<u32> = (1000..1040).collect(); // 40-token shared prefix
+        let tails: Vec<Vec<u32>> = vec![
+            vec![1, 2, 3],
+            vec![4, 5],
+            vec![6, 7, 8, 9],
+            vec![10],
+            vec![1, 2, 3], // duplicate tail — buckets/forks must still be exact
+        ];
+        let encoded: Vec<Vec<u32>> = tails
+            .iter()
+            .map(|t| {
+                let mut s = shared.clone();
+                s.extend_from_slice(t);
+                s
+            })
+            .collect();
+
+        let prefix_len = longest_common_token_prefix(&encoded);
+        // The shared region is 40 tokens; the shortest sequence is 40+1=41, so the
+        // prefix is capped at 40 (one below the shortest) — exactly the shared part.
+        assert_eq!(
+            prefix_len, 40,
+            "detected prefix must be the full shared region"
+        );
+
+        let prefix = &encoded[0][..prefix_len];
+        for (i, e) in encoded.iter().enumerate() {
+            // (1) true common prefix.
+            assert_eq!(&e[..prefix_len], prefix, "item {i}: prefix mismatch");
+            // (2) prefix ++ remainder == the original sequence (token-identity).
+            let remainder = &e[prefix_len..];
+            let mut recon = prefix.to_vec();
+            recon.extend_from_slice(remainder);
+            assert_eq!(&recon, e, "item {i}: prefix++remainder must equal full seq");
+            // (3) at least one remainder token.
+            assert!(
+                !remainder.is_empty(),
+                "item {i}: remainder must be non-empty"
+            );
+        }
+    }
+
+    /// Single-item / no-shared-prefix inputs fall back to plain bucketing rather
+    /// than forking, and the cap keeps a remainder token even when one sequence is
+    /// a strict prefix of another. Network-free guard on the fallback branch.
+    #[test]
+    fn prefix_shared_falls_back_when_no_useful_prefix() {
+        // No common prefix at all → prefix_len 0 (and the runner falls back).
+        let none = vec![vec![9u32, 8, 7], vec![1u32, 2, 3]];
+        assert_eq!(longest_common_token_prefix(&none), 0);
+
+        // One sequence is a strict prefix of the other → cap one below the shorter
+        // so the shorter still has a remainder token to decode from.
+        let nested = vec![vec![5u32, 6, 7, 8], vec![5u32, 6]];
+        assert_eq!(longest_common_token_prefix(&nested), 1);
+
+        // Single item → still well-defined (shortest-1), runner falls back on len<2.
+        let single = vec![vec![1u32, 2, 3, 4]];
+        assert_eq!(longest_common_token_prefix(&single), 3);
+    }
+
+    /// Live-model token-identity gate for prefix-KV sharing: a classification-shaped
+    /// batch (long shared instruction+labels prefix, distinct item tails) decoded via
+    /// `generate_batch_shared_prefix` MUST equal per-item `generate` token-for-token,
+    /// and also equal `generate_batch` (the proven path). classification/json verify
+    /// by label/canonical-JSON (tolerant) so tolerance would suffice, but the
+    /// shared-prefix path is byte-exact and this pins it. Run on a GPU box.
+    ///
+    /// Run with:
+    ///   cargo test --release batch_shared_prefix_equals_serial -- --ignored --nocapture
+    #[test]
+    #[ignore = "downloads the GGUF llama (~800MB) + needs a GPU; proves shared-prefix == serial"]
+    fn batch_shared_prefix_equals_serial() {
+        let mut be = LlamaBackend::load("llama-3.2-1b-instruct-q4").expect("load gguf");
+        // Classification shape: every prompt shares the instruction + label list
+        // (a long common prefix) and differs only in the trailing `Text: {text}`.
+        let labels = vec![
+            "positive".to_string(),
+            "negative".to_string(),
+            "neutral".to_string(),
+        ];
+        let texts = [
+            "I absolutely loved this, best purchase all year.",
+            "Terrible experience, it broke on the first day.",
+            "It is fine, nothing special either way.",
+            "The packaging was nice but the product is mediocre.",
+            "Five stars, would recommend to everyone.",
+        ];
+        let prompts: Vec<String> = texts
+            .iter()
+            .map(|t| classification_prompt(t, &labels))
+            .collect();
+        let max = 12u32;
+
+        let serial: Vec<(String, usize)> = prompts
+            .iter()
+            .map(|p| be.generate(p, max).unwrap())
+            .collect();
+        let shared = be.generate_batch_shared_prefix(&prompts, max).unwrap();
+        let bucketed = be.generate_batch(&prompts, max).unwrap();
+
+        assert_eq!(shared.len(), serial.len());
+        for (i, ((sh, _), (se, _))) in shared.iter().zip(serial.iter()).enumerate() {
+            assert_eq!(sh, se, "item {i}: shared-prefix text must equal serial");
+        }
+        for (i, ((sh, _), (bu, _))) in shared.iter().zip(bucketed.iter()).enumerate() {
+            assert_eq!(sh, bu, "item {i}: shared-prefix text must equal bucketed");
+        }
+        println!(
+            "correctness: OK · shared-prefix == serial == bucketed on {} items",
+            texts.len()
+        );
+    }
+
+    // ── Golden token-baseline gate ────────────────────────────────────────────
+    //
+    // The computexchange transplant of Hawking's golden-hash discipline
+    // (crates/hawking-core/tests/golden/*.hashes). It pins the GREEDY token
+    // baseline of the DEFAULT batch_infer model so a future kernel/codegen change
+    // that SILENTLY shifts bytes is caught HERE — on the build that changed — rather
+    // than surfacing as a false cross-worker auto-dock against a peer in a different
+    // verification class. See docs/DETERMINISM_CLASS.md for why this is class-scoped.
+
+    /// The pinned prompt set + max-new-tokens, in a stable order. Mirrors Hawking's
+    /// short fixed corpus (Once upon a time / def quicksort / capital of France / …).
+    /// Keep this list and the ids in the .hashes file in lockstep.
+    const GOLDEN_PROMPTS: &[(&str, u32, &str)] = &[
+        ("p001", 16, "Once upon a time"),
+        ("p002", 16, "The capital of France is"),
+        ("p003", 16, "def quicksort(arr):"),
+        ("p004", 16, "2 + 2 ="),
+    ];
+
+    /// Path to the golden hashes file, CWD-independent (CARGO_MANIFEST_DIR-anchored)
+    /// exactly like Hawking's `pinned_profiles_still_load_after_field_additions`.
+    fn golden_hashes_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("golden")
+            .join("llama32_1b_q4k_greedy.hashes")
+    }
+
+    /// SHA-256 (hex) of the greedy output text — the same short-hash idea Hawking
+    /// uses for its token baselines, here over the decoded+trimmed output string.
+    fn golden_output_hash(output: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(output.as_bytes());
+        h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Parse `<id> <max> <hash> <prompt...>` rows from the golden file, skipping
+    /// blank lines, comments (`#`), and the placeholder example rows (which carry a
+    /// literal `<hash>`). Returns id -> recorded hash.
+    fn parse_golden(path: &std::path::Path) -> std::collections::HashMap<String, String> {
+        let mut out = std::collections::HashMap::new();
+        let Ok(data) = std::fs::read_to_string(path) else {
+            return out;
+        };
+        for line in data.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut it = line.split_whitespace();
+            let (Some(id), Some(_max), Some(hash)) = (it.next(), it.next(), it.next()) else {
+                continue;
+            };
+            if hash == "<hash>" {
+                continue; // an unseeded placeholder example row
+            }
+            out.insert(id.to_string(), hash.to_string());
+        }
+        out
+    }
+
+    /// Golden-hash regression gate (Hawking transplant). Ignored by default because it
+    /// downloads the GGUF llama (~800MB) and is device-class specific — run it on the
+    /// REFERENCE box of the target (device, engine, build_hash) class.
+    ///
+    /// Two modes, mirroring Hawking's record-then-gate flow:
+    ///   * RECORD — set `CX_GOLDEN_RECORD=1` (or leave the file unseeded). The harness
+    ///     prints the recorded `<id> <max> <hash> <prompt>` rows to stdout; paste them
+    ///     into tests/golden/llama32_1b_q4k_greedy.hashes on a known-good build.
+    ///   * GATE — with the rows seeded, the greedy output for each pinned prompt MUST
+    ///     hash to the recorded value, or this fails (a silent byte-shift was caught).
+    ///
+    /// When a prompt has no recorded hash yet, the harness RECORDS it (and does not
+    /// fail) so the first run on a new class seeds the baseline rather than red-failing.
+    #[test]
+    #[ignore = "downloads the GGUF llama (~800MB); device-class specific — run on the reference box to seed/gate the golden token baseline"]
+    fn golden_token_baseline_gate() {
+        let record_mode = std::env::var("CX_GOLDEN_RECORD").is_ok();
+        let path = golden_hashes_path();
+        let golden = parse_golden(&path);
+
+        let mut be = LlamaBackend::load("llama-3.2-1b-instruct-q4").expect("load gguf");
+
+        let mut recorded: Vec<String> = Vec::new();
+        let mut failures: Vec<String> = Vec::new();
+        for (id, max, prompt) in GOLDEN_PROMPTS {
+            let (text, _n) = be.generate(prompt, *max).expect("greedy generate");
+            let hash = golden_output_hash(&text);
+            match golden.get(*id) {
+                Some(expected) if !record_mode => {
+                    if &hash != expected {
+                        failures.push(format!(
+                            "{id}: HASH DRIFT (kernel byte-shift in this class)\n   expected {expected}\n   got      {hash}\n   output   {text:?}"
+                        ));
+                    } else {
+                        println!("{id}: OK ({hash})");
+                    }
+                }
+                _ => {
+                    // Unseeded (or record mode): emit the row to paste into the file.
+                    recorded.push(format!("{id} {max} {hash} {prompt}"));
+                    println!("{id}: RECORD {hash}  (output {text:?})");
+                }
+            }
+        }
+
+        if !recorded.is_empty() {
+            println!(
+                "\n=== seed these rows into {} on this (device, engine, build_hash) class ===",
+                path.display()
+            );
+            for row in &recorded {
+                println!("{row}");
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "golden token baseline drifted within the verification class:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// Diagnostic (no model download): print THIS build's verification-class identity
+    /// so an operator knows EXACTLY which (device, engine, build_hash) class any golden
+    /// hashes or honeypots recorded on this box belong to (docs/DETERMINISM_CLASS.md).
+    /// Prints only; asserts nothing device-specific, so it is portable. Run with:
+    ///   cargo test -p cx-agent print_current_verification_class -- --nocapture
+    #[test]
+    fn print_current_verification_class() {
+        let device = crate::models::device_label();
+        let version = env!("CARGO_PKG_VERSION");
+        let content = crate::hardware::infer_content_id();
+        let build_hash = crate::hardware::engine_build_hash("candle", version);
+        println!(
+            "VERIFICATION CLASS  device_label={device}  engine=candle  agent_version={version}  infer_content_id={content}  build_hash={build_hash}  classKey=candle|{build_hash}"
+        );
+    }
+
+    /// Qwen2.5-0.5B end-to-end SMOKE + coherence through the architecture-aware path
+    /// (P-arch / P-rope / P-qkvbias). BEFORE the fix, `from_gguf` could not even load the
+    /// official qwen2-arch GGUF (it read `llama.*` keys); a correct load PLUS coherent
+    /// factual output is strong evidence the NEOX rope + q/k/v biases are right (a wrong
+    /// rope or dropped bias yields garbage, which this asserts against). This is NOT a
+    /// byte-parity claim (cross-engine byte determinism is impossible); for the llama.cpp
+    /// token cross-check see docs/CANDLE_EXPANSION_RESEARCH.md.
+    #[test]
+    #[ignore = "downloads Qwen2.5-0.5B-Instruct GGUF (~400MB) + needs Metal; proves the qwen2 arch-aware load + NEOX rope + q/k/v bias"]
+    fn qwen_05b_loads_and_is_coherent() {
+        let mut be = LlamaBackend::load("qwen2.5-0.5b-instruct-q4")
+            .expect("qwen2 must load via arch-aware from_gguf");
+        // Factual prompts with an unambiguous coherent answer. Garbage (wrong rope/bias)
+        // would not contain the needle.
+        let cases = [
+            ("The capital of France is", "paris"),
+            ("The largest planet in our solar system is", "jupiter"),
+        ];
+        for (prompt, needle) in cases {
+            let (text, n) = be.generate(prompt, 24).expect("greedy generate");
+            println!("QWEN {prompt:?} -> {text:?} ({n} tokens)");
+            assert!(n > 0, "must generate at least one token");
+            assert!(
+                text.to_lowercase().contains(needle),
+                "qwen output for {prompt:?} should be coherent (contain {needle:?}); got {text:?}. Garbage here means the NEOX rope or q/k/v bias is wrong."
+            );
+        }
+    }
+
+    /// CPU-only guard for the golden harness PLUMBING (no model download): the
+    /// hash is stable + sensitive, the prompt ids are unique, and the golden file
+    /// parser ignores comments/placeholders. This keeps the gate's machinery
+    /// honest even where the #[ignore]d model run cannot execute.
+    #[test]
+    fn golden_harness_plumbing_is_sound() {
+        // Stable + sensitive hash.
+        assert_eq!(golden_output_hash("hello"), golden_output_hash("hello"));
+        assert_ne!(golden_output_hash("hello"), golden_output_hash("world"));
+        assert_eq!(golden_output_hash("hello").len(), 64); // sha256 hex
+
+        // Prompt ids are unique and the corpus is non-empty (a real baseline).
+        let mut ids = std::collections::HashSet::new();
+        for (id, max, prompt) in GOLDEN_PROMPTS {
+            assert!(ids.insert(*id), "duplicate golden prompt id {id}");
+            assert!(*max > 0, "{id}: max-new-tokens must be positive");
+            assert!(!prompt.is_empty(), "{id}: prompt must be non-empty");
+        }
+        assert!(!ids.is_empty());
+
+        // The shipped (unseeded) golden file parses to ZERO recorded hashes — every
+        // row is a comment or a `<hash>` placeholder — so the gate records rather
+        // than red-fails on a fresh class. (When seeded, this count goes positive.)
+        let parsed = parse_golden(&golden_hashes_path());
+        for (id, hash) in &parsed {
+            assert_ne!(hash, "<hash>", "{id}: placeholder must not parse as a hash");
+        }
     }
 }

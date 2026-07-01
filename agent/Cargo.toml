@@ -28,6 +28,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # AES-256-GCM key, ciphertext-only on disk, wiped after upload.
 aes-gcm = "0.10"
 rand = "0.8"
+# Stable build-identity hashing for the verification class (hardware::engine_build_hash).
+# Already in the lock as a transitive dep of the candle stack at this version, so a
+# direct entry adds no new fetch — it just makes the import a first-class dependency.
+sha2 = "0.10"
 
 # Real inference (pure Rust). Metal on Apple Silicon, CPU fallback elsewhere.
 candle-core = "0.10"
