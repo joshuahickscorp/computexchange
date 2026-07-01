@@ -40,6 +40,14 @@ type Server struct {
 	ipLimiter     *rateLimiter
 	buyerLimiter  *rateLimiter
 	workerLimiter *rateLimiter
+	// signupLimiter is a SEPARATE, much tighter cap on account creation specifically
+	// (see limitSignupByIP). The generic ipLimiter (30 req/s, burst 60) is a flood
+	// guard, not an abuse guard: at that rate one IP can mint dozens of buyers a
+	// minute. Each signup is a fresh Sybil identity that qualifies for
+	// CX_SANDBOX_CREDIT_USD (free, cardless spend) the moment an operator sets that
+	// env above zero for a public launch — so signup itself needs its own daily cap,
+	// independent of whatever the flood limiter allows.
+	signupLimiter *rateLimiter
 }
 
 // NewServer wires the handler dependencies.
@@ -49,8 +57,16 @@ func NewServer(store *Store, storage *Storage, verifier *Verifier, payout Payout
 		ipLimiter:     newRateLimiter(30, 60), // 30 req/s, burst 60, per IP
 		buyerLimiter:  newRateLimiter(20, 40), // 20 req/s, burst 40, per api key
 		workerLimiter: newRateLimiter(30, 60), // 30 req/s, burst 60, per worker token
+		// signupsPerIPPerDay accounts per IP per rolling day (burst = daily cap,
+		// rate = burst/86400s so a spent bucket refills to 1 signup roughly every
+		// ~4.8h). Generous enough for a household/NAT sharing one public IP across a
+		// few real devices; far too slow for a credit-farming script to matter.
+		signupLimiter: newRateLimiter(signupsPerIPPerDay/86400.0, signupsPerIPPerDay),
 	}
 }
+
+// signupsPerIPPerDay is the daily self-serve account-creation cap per source IP.
+const signupsPerIPPerDay = 5
 
 // ctxKey is the private type for request-context values.
 type ctxKey int

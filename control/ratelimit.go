@@ -126,6 +126,7 @@ func (s *Server) startRateLimitSweeper(ctx context.Context) {
 			s.ipLimiter.sweep()
 			s.buyerLimiter.sweep()
 			s.workerLimiter.sweep()
+			s.signupLimiter.sweep()
 		}
 	}
 }

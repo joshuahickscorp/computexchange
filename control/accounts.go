@@ -316,6 +316,15 @@ type signupRequest struct {
 // it as a bearer). The sandbox key is also returned so a CLI/SDK caller has a
 // long-lived credential without the session. Never logs the password.
 func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
+	// Daily per-IP account-creation cap (independent of the generic flood limiter —
+	// see signupLimiter's doc comment in api.go). Checked before the body is even
+	// decoded so a capped IP costs us nothing per attempt. Loopback (local dev, the
+	// in-process test harness) is exempt, matching every other limiter in the file.
+	if isRemote(r) && !s.signupLimiter.allow(clientIP(r)) {
+		writeErr(w, http.StatusTooManyRequests, "too many accounts created from this address today")
+		return
+	}
+
 	var req signupRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid signup json: "+err.Error())

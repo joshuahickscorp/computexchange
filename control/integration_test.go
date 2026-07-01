@@ -54,6 +54,34 @@ var (
 	demoBuyerUUID    = uuid.MustParse(demoBuyerID)
 )
 
+// A second and third supplier, INDEPENDENT of demoSupplierUUID and of each other.
+// prunePeers (backlog P0 items 6+8) now excludes same-supplier candidates, so any
+// fixture that wants a genuinely eligible redundancy/tiebreak/hedge peer must put it
+// on a different supplier than the anchor it is meant to cross-check — a same-supplier
+// worker is deliberately never independent. ensureExtraDemoSuppliers is idempotent
+// (ON CONFLICT DO NOTHING) since suppliers is not truncated by reset().
+var (
+	demoSupplier2UUID = uuid.MustParse("00000000-0000-0000-0000-0000000000a2")
+	demoSupplier3UUID = uuid.MustParse("00000000-0000-0000-0000-0000000000a3")
+)
+
+func ensureExtraDemoSuppliers(t *testing.T, ctx context.Context) {
+	t.Helper()
+	for _, s := range []struct {
+		id    uuid.UUID
+		email string
+	}{
+		{demoSupplier2UUID, "demo-supplier-2@computexchange.test"},
+		{demoSupplier3UUID, "demo-supplier-3@computexchange.test"},
+	} {
+		if _, err := itPool.Exec(ctx,
+			`INSERT INTO suppliers (id, email, reputation, status) VALUES ($1,$2,0.90,'active')
+			 ON CONFLICT (id) DO NOTHING`, s.id, s.email); err != nil {
+			t.Fatalf("ensureExtraDemoSuppliers: %v", err)
+		}
+	}
+}
+
 func TestMain(m *testing.M) {
 	ctx := context.Background()
 	dsn := os.Getenv("DATABASE_URL")
@@ -1878,7 +1906,10 @@ func TestAutoQuarantineOnHoneypotFail(t *testing.T) {
 func TestTiebreakThreeWay(t *testing.T) {
 	reset(t)
 	ctx := context.Background()
-	// A second worker on the same supplier (same hw class) so a distinct peer exists.
+	ensureExtraDemoSuppliers(t, ctx)
+	// A second worker on an INDEPENDENT supplier (same hw class) so a distinct peer
+	// exists. Must NOT share demoSupplierUUID: prunePeers excludes same-supplier
+	// candidates (backlog P0 item 6), so a same-supplier "peer" is never eligible.
 	peerWorker := uuid.New()
 	if _, err := itPool.Exec(ctx,
 		`INSERT INTO workers (id, supplier_id, hw_class, memory_gb, bw_gbps, last_seen_at, version,
@@ -1886,20 +1917,21 @@ func TestTiebreakThreeWay(t *testing.T) {
 		 VALUES ($1,$2,'apple_silicon_max',64,400,now(),'seed',
 		         ARRAY['embed'],ARRAY['all-minilm-l6-v2'],0,true)
 		 ON CONFLICT (id) DO UPDATE SET last_seen_at=now(), supported_jobs=ARRAY['embed']`,
-		peerWorker, demoSupplierUUID); err != nil {
+		peerWorker, demoSupplier2UUID); err != nil {
 		t.Fatal(err)
 	}
 	defer itPool.Exec(ctx, `DELETE FROM worker_tokens WHERE worker_id=$1`, peerWorker)
 
-	// A THIRD distinct same-class worker. A real tiebreak excludes BOTH workers
-	// whose results disagreed, so it can only be pinned here.
+	// A THIRD distinct same-class worker on a THIRD supplier. A real tiebreak excludes
+	// BOTH disputants' suppliers (backlog P0 item 8, prunePeers' alsoSuppliers), not
+	// just their worker ids, so it can only be pinned here.
 	tiebreakPeer := uuid.New()
 	if _, err := itPool.Exec(ctx,
 		`INSERT INTO workers (id, supplier_id, hw_class, memory_gb, bw_gbps, last_seen_at, version,
 		                      supported_jobs, supported_models, min_payout_usd_hr, thermal_ok)
 		 VALUES ($1,$2,'apple_silicon_max',64,400,now(),'seed',
 		         ARRAY['embed'],ARRAY['all-minilm-l6-v2'],0,true)`,
-		tiebreakPeer, demoSupplierUUID); err != nil {
+		tiebreakPeer, demoSupplier3UUID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1935,7 +1967,7 @@ func TestTiebreakThreeWay(t *testing.T) {
 	// Verifier WITH storage so the 3-way machinery runs.
 	v := NewVerifier(itStore).WithStorage(itStorage)
 	info := &CommitTaskInfo{TaskID: redun, JobID: jobID, WorkerID: peerWorker,
-		SupplierID: demoSupplierUUID, IsRedundancy: true, jobType: "embed",
+		SupplierID: demoSupplier2UUID, IsRedundancy: true, jobType: "embed",
 		ModelRef: "all-minilm-l6-v2", MinMemoryGB: 2, ChunkIndex: 0,
 		InputRef: "jobs/t/tasks/0/input.jsonl"}
 	// The committing redundancy result is bKey; the peer present is aKey → mismatch.
@@ -1970,13 +2002,16 @@ func TestTiebreakThreeWay(t *testing.T) {
 func TestStragglerHedge(t *testing.T) {
 	reset(t)
 	ctx := context.Background()
-	// A distinct same-class peer to receive the hedge.
+	ensureExtraDemoSuppliers(t, ctx)
+	// A distinct same-class peer, on an INDEPENDENT supplier, to receive the hedge.
+	// Must NOT share demoSupplierUUID: SelectRedundancyPeerExcluding (which
+	// hedgeStragglers calls) excludes the anchor's own supplier (backlog P0 item 6).
 	peer := uuid.New()
 	if _, err := itPool.Exec(ctx,
 		`INSERT INTO workers (id, supplier_id, hw_class, memory_gb, bw_gbps, last_seen_at, version,
 		                      supported_jobs, supported_models, min_payout_usd_hr, thermal_ok)
 		 VALUES ($1,$2,'apple_silicon_max',64,400,now(),'seed',ARRAY['embed'],ARRAY['all-minilm-l6-v2'],0,true)
-		 ON CONFLICT (id) DO UPDATE SET last_seen_at=now()`, peer, demoSupplierUUID); err != nil {
+		 ON CONFLICT (id) DO UPDATE SET last_seen_at=now()`, peer, demoSupplier2UUID); err != nil {
 		t.Fatal(err)
 	}
 	jobID, slow := uuid.New(), uuid.New()
@@ -3150,5 +3185,40 @@ func TestSignupRejectsOversizePassword(t *testing.T) {
 	reset(t)
 	if c, _ := req(t, "POST", "/v1/signup", map[string]any{"email": uniqueEmail("long"), "password": strings.Repeat("a", 73)}, jsonCT()); c != http.StatusBadRequest {
 		t.Fatalf("password > 72 bytes must 400, got %d", c)
+	}
+}
+
+// TestSignupPerIPDailyCapEnforced proves the signup-specific abuse cap (independent
+// of the generic flood limiter): signupsPerIPPerDay accounts succeed from one source
+// IP, the next one 429s, and a DIFFERENT source IP is unaffected. X-Forwarded-For
+// simulates a remote caller — the test harness itself connects over loopback, which
+// every limiter in ratelimit.go exempts, so without a spoofed forwarded IP this path
+// would never be exercised.
+func TestSignupPerIPDailyCapEnforced(t *testing.T) {
+	reset(t)
+	const fromIP = "203.0.113.10"
+	for i := 0; i < signupsPerIPPerDay; i++ {
+		code, out := req(t, "POST", "/v1/signup",
+			map[string]any{"email": uniqueEmail("cap"), "password": "hunter2hunter2"},
+			jsonCT(), hdr{"X-Forwarded-For", fromIP})
+		if code != http.StatusCreated {
+			t.Fatalf("signup %d/%d from %s: want 201, got %d: %s", i+1, signupsPerIPPerDay, fromIP, code, out)
+		}
+	}
+	// One more from the SAME IP must be capped, before it even touches the DB
+	// (so a distinct email doesn't rescue it).
+	code, out := req(t, "POST", "/v1/signup",
+		map[string]any{"email": uniqueEmail("cap"), "password": "hunter2hunter2"},
+		jsonCT(), hdr{"X-Forwarded-For", fromIP})
+	if code != http.StatusTooManyRequests {
+		t.Fatalf("signup %d from %s: want 429 (daily cap), got %d: %s", signupsPerIPPerDay+1, fromIP, code, out)
+	}
+
+	// A DIFFERENT source IP is a separate bucket and must still be allowed through.
+	code, out = req(t, "POST", "/v1/signup",
+		map[string]any{"email": uniqueEmail("cap-other"), "password": "hunter2hunter2"},
+		jsonCT(), hdr{"X-Forwarded-For", "203.0.113.20"})
+	if code != http.StatusCreated {
+		t.Fatalf("signup from a different, uncapped IP: want 201, got %d: %s", code, out)
 	}
 }
