@@ -1,4 +1,4 @@
-# BLACK HOLE — the compression doctrine for Claude Code
+# BLACK HOLE — the compression doctrine for this codebase
 
 ## The philosophy
 

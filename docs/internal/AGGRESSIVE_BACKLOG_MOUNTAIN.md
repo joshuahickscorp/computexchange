@@ -3,7 +3,7 @@
 Audit date: 2026-06-30
 
 This is a work queue, not a vibe document. Every item has a proof gate. The goal is to keep
-Claude or any agent moving through real repo-grounded progress until the remaining work is either
+progress grounded in the real repo until the remaining work is either
 shipped, measured and rejected, or blocked by a named external dependency.
 
 ## Operating Rule
@@ -503,7 +503,7 @@ surface agree.
 - Do not hide missing peer coverage.
 - Do not let docs be the deliverable when a test can exist.
 
-## Compact Claude Goal Handoff
+## Compact Goal Handoff
 
 Use this only after reading the linked docs. It is intentionally below the goal-length limit.
 
