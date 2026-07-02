@@ -64,3 +64,4 @@ data/
 
 # agent worktrees / local tooling
 .claude/
+web/admin-demo.html
