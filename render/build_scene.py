@@ -358,7 +358,7 @@ def foam_flat_material():
     ao = img("foam-ao.png"); ao.image.colorspace_settings.name = "Non-Color"
     tint = nt.nodes.new("ShaderNodeMixRGB")
     tint.blend_type = "MULTIPLY"; tint.inputs["Fac"].default_value = 1.0
-    tint.inputs["Color1"].default_value = (0.55, 0.42, 0.22, 1)
+    tint.inputs["Color1"].default_value = (0.72, 0.56, 0.30, 1)
     nt.links.new(ao.outputs["Color"], tint.inputs["Color2"])
     nt.links.new(tint.outputs["Color"], b.inputs["Base Color"])
     # roughness
