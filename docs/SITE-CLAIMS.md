@@ -268,3 +268,12 @@ receipts, so the ctrl-F contract holds:
   `control/payment.go:108` `Kind: KindSupplierCredit`) · quiet-hours and battery eligibility on
   the device is claim 5 (`agent/src/config.rs:328`) · the 3% take is claim 12
   (`control/payment.go:63`).
+- **Proof row** `results come back verified · every run ends in a receipt`: verification is
+  claim 6; the receipt is real and assembled per job and per pipeline
+  (`control/receipt.go:59` `func assembleClearingReceipt(...) ClearingReceipt`,
+  `control/api.go:1833` `handleJobReceipt`, `control/pipeline.go:188` `handlePipelineReceipt`).
+
+Page structure note (2026-07-02): the page is desktop-only by owner decision · under 900px it
+becomes a hand-off screen (share / email / copy the link, all functional, no claims made). The
+full claim lines live verbatim in the receipts dialog; the on-page rows are strict subsets of
+ledger lines plus the composite rows mapped above.

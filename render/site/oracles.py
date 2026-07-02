@@ -225,7 +225,7 @@ def principled(name, base, rough, metallic=1.0, coat=0.0, coat_rough=0.1):
 def blasted_aluminum():
     """Bead-blasted (NOT brushed) light aluminum: fine isotropic roughness variation
     plus a whisper of bump for the micro-sparkle."""
-    m = principled("mac-blasted-alu", (0.42, 0.44, 0.47), 0.38, coat=0.0)
+    m = principled("mac-blasted-alu", (0.58, 0.60, 0.63), 0.36, coat=0.0)
     nt = m.node_tree
     b = nt.nodes["Principled BSDF"]
     tc = nt.nodes.new("ShaderNodeTexCoord")
@@ -255,7 +255,7 @@ def led_glass():
     return principled("led-glass", (0.02, 0.022, 0.025), 0.08, metallic=0.0, coat=1.0, coat_rough=0.05)
 
 
-FOAM_CELL = 2.6  # pore pitch in true mm, shared by displacement and shading
+FOAM_CELL = 2.2  # pore pitch in true mm, shared by displacement and shading
 
 
 def foam_field(nt):
@@ -282,19 +282,41 @@ def foam_field(nt):
     return mul.outputs["Value"]
 
 
+def perforated_band():
+    """The Mac Studio base band: near-black metal speckled with the perforation
+    holes that show in the 8 mm float gap (Voronoi F1 dots as darker pits)."""
+    m = principled("mac-base-band", (0.16, 0.165, 0.175), 0.45)
+    nt = m.node_tree
+    b = nt.nodes["Principled BSDF"]
+    tc = nt.nodes.new("ShaderNodeTexCoord")
+    v = nt.nodes.new("ShaderNodeTexVoronoi")
+    v.voronoi_dimensions = "3D"
+    v.feature = "F1"
+    v.inputs["Scale"].default_value = 1.0 / mm(2.4)
+    nt.links.new(tc.outputs["Object"], v.inputs["Vector"])
+    ramp = nt.nodes.new("ShaderNodeValToRGB")
+    ramp.color_ramp.elements[0].position = 0.28
+    ramp.color_ramp.elements[0].color = (0.015, 0.015, 0.018, 1)
+    ramp.color_ramp.elements[1].position = 0.42
+    ramp.color_ramp.elements[1].color = (0.16, 0.165, 0.175, 1)
+    nt.links.new(v.outputs["Distance"], ramp.inputs["Fac"])
+    nt.links.new(ramp.outputs["Color"], b.inputs["Base Color"])
+    return m
+
+
 def champagne_gold(rough=0.28, pore_darken=False):
     m = principled("spark-gold" + ("-foam" if pore_darken else ""),
-                   (0.60, 0.45, 0.26), rough)
+                   (0.58, 0.45, 0.27), rough)
     if pore_darken:
         nt = m.node_tree
         b = nt.nodes["Principled BSDF"]
         field = foam_field(nt)
         ramp = nt.nodes.new("ShaderNodeValToRGB")
         # Ridge web stays champagne; pore floors fall 3+ stops dark.
-        ramp.color_ramp.elements[0].position = 0.16
-        ramp.color_ramp.elements[0].color = (0.62, 0.48, 0.28, 1)
-        ramp.color_ramp.elements[1].position = 0.45
-        ramp.color_ramp.elements[1].color = (0.055, 0.042, 0.028, 1)
+        ramp.color_ramp.elements[0].position = 0.13
+        ramp.color_ramp.elements[0].color = (0.66, 0.52, 0.30, 1)
+        ramp.color_ramp.elements[1].position = 0.38
+        ramp.color_ramp.elements[1].color = (0.035, 0.026, 0.017, 1)
         nt.links.new(field, ramp.inputs["Fac"])
         nt.links.new(ramp.outputs["Color"], b.inputs["Base Color"])
         rramp = nt.nodes.new("ShaderNodeMapRange")
@@ -307,13 +329,15 @@ def champagne_gold(rough=0.28, pore_darken=False):
 
 # ---- the devices ---------------------------------------------------------------------
 def build_mac_studio(loc_x=0.0, yaw_deg=0.0):
-    """197 x 197 x 95 mm: racetrack body floating 8 mm on an inset circular base,
-    front USB-C x2 + SD recesses + LED glass dot. Rear perforation field SKIPPED:
-    at the hero camera (front three-quarter, pitched down) the rear face is not
-    visible, and the doctrine is skip rather than fake with a flat texture."""
+    """197 x 197 x 95 mm, matched to Apple's front product photo: racetrack body
+    (corner radius ~36 mm) floating 8 mm on the inset base whose visible band is
+    the speckled perforation ring; front, left to right: two USB-C at -68/-52 mm,
+    SD slot left of center at -24 mm, power LED far right at +68 mm, all in the
+    lower third. Rear perforation field SKIPPED: not visible at the hero camera,
+    and the doctrine is skip rather than fake."""
     body_h = mm(87.0)
     body = rounded_box("mac-studio", mm(197), mm(197), body_h,
-                       mm(28), mm(3), mm(2), seg_corner=28, seg_fillet=7)
+                       mm(36), mm(3), mm(2), seg_corner=32, seg_fillet=7)
     body.location = (0, 0, mm(8.0))
     bpy.context.view_layer.update()
 
@@ -322,30 +346,30 @@ def build_mac_studio(loc_x=0.0, yaw_deg=0.0):
     body.data.materials.append(alu)
     body.data.materials.append(plastic)
 
-    # Front recesses (front = -Y): two USB-C at left, SD slot right, LED far right.
     front_y = -mm(197) / 2.0
-    zc = mm(8.0 + 18.0)
+    zc = mm(8.0 + 16.0)
     cutters = [
-        cutter_box(mm(9), mm(7), mm(3.5), mm(1.6), (-mm(45), front_y + mm(1.5), zc)),
-        cutter_box(mm(9), mm(7), mm(3.5), mm(1.6), (-mm(22), front_y + mm(1.5), zc)),
-        cutter_box(mm(24), mm(7), mm(2.5), mm(1.1), (mm(38), front_y + mm(1.5), zc)),
+        cutter_box(mm(9), mm(7), mm(3.5), mm(1.6), (-mm(68), front_y + mm(1.5), zc)),
+        cutter_box(mm(9), mm(7), mm(3.5), mm(1.6), (-mm(52), front_y + mm(1.5), zc)),
+        cutter_box(mm(26), mm(7), mm(2.8), mm(1.2), (-mm(24), front_y + mm(1.5), zc)),
     ]
     boxes = apply_boolean(body, cutters)
     assign_interior(body, boxes, 1, ymin=front_y + mm(0.4))
     smooth(body, 40)
 
-    # Stand ring: inset circular base the body floats on (the signature shadow line).
-    bpy.ops.mesh.primitive_cylinder_add(radius=mm(70), depth=mm(9.5),
-                                        location=(0, 0, mm(4.5)), vertices=96)
+    # Base: the floating ring. Its side band reads as the dark perforated mesh in
+    # the 8 mm shadow gap, exactly what Apple's front photo shows.
+    bpy.ops.mesh.primitive_cylinder_add(radius=mm(72), depth=mm(9.5),
+                                        location=(0, 0, mm(4.75)), vertices=128)
     base = bpy.context.active_object
     base.name = "mac-studio-base"
-    base.data.materials.append(principled("base-alu", (0.32, 0.33, 0.34), 0.4))
+    base.data.materials.append(perforated_band())
     smooth(base, 40)
 
     # Power LED: a 2 mm darker glass dot, no emission.
     bpy.ops.mesh.primitive_cylinder_add(radius=mm(1.0), depth=mm(0.6), vertices=24,
                                         rotation=(math.radians(90), 0, 0),
-                                        location=(mm(62), front_y + mm(0.05), zc))
+                                        location=(mm(68), front_y + mm(0.05), zc))
     led = bpy.context.active_object
     led.name = "mac-studio-led"
     led.data.materials.append(led_glass())
@@ -353,8 +377,7 @@ def build_mac_studio(loc_x=0.0, yaw_deg=0.0):
 
     group = [body, base, led]
     for ob in group:
-        ob.rotation_euler = (0, 0, math.radians(yaw_deg))
-        # rotate positions of children around origin, then translate the group
+        ob.rotation_euler.z = math.radians(yaw_deg)
         x, y = ob.location.x, ob.location.y
         c, s = math.cos(math.radians(yaw_deg)), math.sin(math.radians(yaw_deg))
         ob.location.x, ob.location.y = x * c - y * s, x * s + y * c
@@ -362,39 +385,66 @@ def build_mac_studio(loc_x=0.0, yaw_deg=0.0):
     return group
 
 
+def stadium(name, w, h, d, r, loc):
+    """A vertical pill/stadium prism in the X-Z plane (rounded in X-Z), depth d
+    along Y, centered at loc."""
+    ob = rounded_box(name, w, h, d, r, 0, 0, seg_corner=16)
+    ob.rotation_euler = (math.radians(90), 0, 0)
+    ob.location = (loc[0], loc[1] + d / 2.0, loc[2] - h / 2.0 + h / 2.0)
+    # rounded_box origin is bottom-center of its w x h footprint; after the X
+    # rotation the footprint stands upright and "bottom" points toward +Y.
+    ob.location = (loc[0], loc[1] + d / 2.0, loc[2])
+    bpy.context.view_layer.update()
+    return ob
+
+
 def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
-    """150 x 150 x 50.5 mm: champagne-gold body, the signature porous metallic foam
-    front as TRUE displaced geometry (self-shadowing pores; bump-only reads fake and
-    fails the bar). Rear foam skipped: not visible at any shipped camera. No NVIDIA
-    mark anywhere; the face where branding would sit stays blank."""
+    """150 x 150 x 50.5 mm, matched to the StorageReview front photos: the porous
+    metal foam IS the whole front face, flush between two ~7 mm champagne side
+    rails and ~2.5 mm top/bottom lips, with two vertical stadium cutouts (about
+    20 x 32 mm, centers near +/-47 mm) whose smooth gold tubs sit recessed in the
+    foam. The real device's left tub carries the NVIDIA plate; ours stays BLANK
+    (trademark gate). Rear foam skipped: never visible at the shipped cameras.
+    Satin anodize on the body, no jewelry polish."""
     body = rounded_box("dgx-spark", mm(150), mm(150), mm(50.5),
                        mm(10), mm(4), mm(4), seg_corner=20, seg_fillet=7)
     bpy.context.view_layer.update()
 
-    gold = champagne_gold(0.30)
+    gold = champagne_gold(0.38)
     body.data.materials.append(gold)
 
-    # Front foam recess: rounded-rect pocket across most of the face.
+    # Full-face pocket between the rails: 136 wide x 44.5 tall, 4 mm deep.
     front_y = -mm(150) / 2.0
-    fw, fh, fdepth = mm(140), mm(42), mm(8)
+    fw, fh = mm(136), mm(44.5)
     zc = mm(50.5 / 2.0)
-    pocket = cutter_box(fw, mm(24), fh, mm(8), (0, front_y + mm(4.0), zc), seg=12)
+    pocket = cutter_box(fw, mm(24), fh, mm(6), (0, front_y + mm(4.0), zc), seg=12)
     boxes = apply_boolean(body, [pocket])
-    # Pocket interior: darker warm gray backing behind the foam.
-    backing = principled("spark-pocket", (0.12, 0.10, 0.08), 0.6, metallic=0.4)
+    backing = principled("spark-pocket", (0.10, 0.085, 0.06), 0.6, metallic=0.4)
     body.data.materials.append(backing)
     assign_interior(body, boxes, 1)
     smooth(body, 40)
 
-    # The foam sheet: a dense grid sunk 1 mm behind the face plane, displaced inward
-    # by a Voronoi F2-F1 field (true geometry, real self-shadowing pores).
-    bpy.ops.mesh.primitive_grid_add(x_subdivisions=640, y_subdivisions=200,
-                                    size=1.0, location=(0, front_y + mm(1.0), zc),
+    # The foam sheet: dense grid, two stadium holes punched through BEFORE
+    # displacement, then carved by the Voronoi F2-F1 field (true geometry).
+    bpy.ops.mesh.primitive_grid_add(x_subdivisions=720, y_subdivisions=240,
+                                    size=1.0, location=(0, front_y + mm(1.2), zc),
                                     rotation=(math.radians(90), 0, 0))
     foam = bpy.context.active_object
     foam.name = "dgx-spark-foam"
     foam.scale = (fw + mm(3), fh + mm(3), 1.0)
     bpy.ops.object.transform_apply(scale=True)
+    holes = [
+        stadium("hole-l", mm(16.5), mm(30.5), mm(30), mm(8.0), (-mm(47), front_y - mm(10), zc)),
+        stadium("hole-r", mm(16.5), mm(30.5), mm(30), mm(8.0), (mm(47), front_y - mm(10), zc)),
+    ]
+    bpy.context.view_layer.objects.active = foam
+    for h in holes:
+        mod = foam.modifiers.new("hole", "BOOLEAN")
+        mod.operation = "DIFFERENCE"
+        mod.solver = "EXACT"
+        mod.object = h
+        bpy.ops.object.modifier_apply(modifier=mod.name)
+        bpy.data.objects.remove(h, do_unlink=True)
     tex = bpy.data.textures.new("foam-voronoi", "VORONOI")
     tex.distance_metric = "DISTANCE"
     tex.weight_1 = -1.0
@@ -405,16 +455,24 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
     disp.texture = tex
     disp.texture_coords = "LOCAL"
     disp.direction = "Y"
-    disp.mid_level = 0.4
-    disp.strength = mm(4.5)
-    bpy.context.view_layer.objects.active = foam
+    disp.mid_level = 0.42
+    disp.strength = mm(3.2)
     bpy.ops.object.modifier_apply(modifier=disp.name)
     foam.data.materials.append(champagne_gold(pore_darken=True))
     smooth(foam, 70)
 
-    group = [body, foam]
+    # The two smooth tubs, recessed 1.5 mm behind the foam face, blank.
+    tubs = []
+    for sx in (-1, 1):
+        tub = stadium("tub", mm(19), mm(33), mm(3), mm(9.2),
+                      (sx * mm(47), front_y + mm(2.2), zc))
+        tub.data.materials.append(principled("tub-gold", (0.36, 0.28, 0.16), 0.5))
+        smooth(tub, 50)
+        tubs.append(tub)
+
+    group = [body, foam] + tubs
     for ob in group:
-        ob.rotation_euler = (0, 0, math.radians(yaw_deg))
+        ob.rotation_euler.z = math.radians(yaw_deg)
         x, y = ob.location.x, ob.location.y
         c, s = math.cos(math.radians(yaw_deg)), math.sin(math.radians(yaw_deg))
         ob.location.x, ob.location.y = x * c - y * s, x * s + y * c

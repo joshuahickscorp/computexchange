@@ -1,10 +1,12 @@
 <!doctype html>
 <!-- computexchange · the public page · one page, one download, no signup, no email capture.
      Every factual sentence here traces to a path:line receipt in docs/SITE-CLAIMS.md.
-     Served by control at GET / (handleRoot, SITE_PATH=web/index.html); images via the
-     whitelisted /assets/site/ handler. Self-contained otherwise: inline CSS, no build
-     step, no JS, the same Google Fonts loads the app makes. Dash gate: no U+2014, no
-     U+2013 anywhere in this file · the separator is the middot. -->
+     DESKTOP-ONLY by design: under 900px the page becomes a hand-off screen that sends
+     the link to a Mac (share sheet / AirDrop, email, copy) instead of cramming the
+     site onto a phone. Served by control at GET / (handleRoot, SITE_PATH); images via
+     the whitelisted /assets/site/ handler. Inline CSS + a few lines of JS for the
+     receipts dialog and the hand-off controls. Dash gate: no U+2014, no U+2013
+     anywhere in this file · the separator is the middot. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -20,12 +22,13 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="preload" as="image" media="(min-width: 561px)"
+<link rel="preload" as="image" media="(min-width: 900px)"
       imagesrcset="/assets/site/oracles-pair@1x.png 1200w, /assets/site/oracles-pair@2x.png 2400w, /assets/site/oracles-pair@3x.png 3600w"
-      imagesizes="(max-width: 1000px) 94vw, 940px">
+      imagesizes="(max-width: 1240px) 92vw, 1140px">
 <style>
   :root{
-    /* tokens migrated from the product (web/demo.html :root · the concrete field) */
+    /* material tokens shared with the product (web/demo.html :root) · the page
+       differentiates by SCALE and VOID, not by palette */
     --bg:#060606;
     --panel:#101012;
     --hair:rgba(255,255,255,.05);
@@ -33,7 +36,6 @@
     --mute:#83838b;
     --bone:#bfbcb5;
     --bone-hi:#e7e3dc;
-    --signal:#ffffff;
     --green:#4c9d6e; --green-core:#69c096;
     --gold:#bf9a4e;  --gold-core:#e2c178;
     --mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
@@ -47,175 +49,215 @@
     background:var(--bg);
     color:var(--bone);
     -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
-    font:400 13px/1.7 var(--mono);
+    font:400 14px/1.75 var(--mono);
     font-variant-numeric:tabular-nums;
   }
   ::selection{background:var(--bone-hi);color:var(--bg)}
   img{display:block}
-  .wrap{max-width:940px;margin:0 auto;padding:0 24px}
+  button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;padding:0}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 32px}
+  .measure{max-width:660px;margin-left:auto;margin-right:auto}
 
-  /* ── hero ─────────────────────────────────────────────────────────────── */
-  .hero{min-height:min(88vh,860px);display:flex;flex-direction:column;padding-top:28px}
-  .masthead{display:flex;align-items:center;gap:12px}
-  .masthead img{width:26px;height:26px;opacity:.92}
-  .eyebrow{font-size:11px;letter-spacing:.34em;color:var(--ash);text-transform:uppercase}
-  .oracles{flex:1;display:flex;align-items:center;justify-content:center;padding:48px 0 12px}
-  .oracles img,.oracles picture{width:100%;max-width:940px}
-  .oracles img{height:auto}
-  .oracles .solo{display:none}
-  .thesis{color:var(--bone-hi);font-size:15px;text-align:center;margin:0 0 10px}
-  .ash-line{color:var(--ash);font-size:12px;text-align:center;margin:0 0 56px}
-  @media (max-width:560px){
-    .oracles{flex-direction:column;gap:8px}
-    .oracles .pair{display:none}
-    .oracles .solo{display:block;width:82%;max-width:340px}
-  }
+  /* ── the desktop site ─────────────────────────────────────────────────── */
+  .site{display:none}
+  @media (min-width:900px){.site{display:block}}
 
-  /* ── shared section furniture ─────────────────────────────────────────── */
-  section{padding:56px 0 34px}
-  .sec-label{font-size:11px;letter-spacing:.34em;color:var(--ash);text-transform:uppercase;margin:0 0 26px}
+  .hero{min-height:100vh;display:flex;flex-direction:column;padding-top:34px}
+  .masthead{display:flex;align-items:center;gap:14px}
+  .masthead img{width:28px;height:28px;opacity:.92}
+  .eyebrow{font-size:11px;letter-spacing:.38em;color:var(--ash);text-transform:uppercase}
+  .oracles{flex:1;display:flex;align-items:center;justify-content:center;padding:40px 0 0}
+  .oracles img{width:100%;max-width:1140px;height:auto}
+  .thesis{color:var(--bone-hi);font-size:20px;line-height:1.5;text-align:center;margin:0 0 12px;letter-spacing:.01em}
+  .ash-line{color:var(--ash);font-size:12.5px;text-align:center;margin:0 0 64px}
 
-  /* ── how it works: three hairline rows, anodized dots the only ornament ── */
-  .how{display:flex;flex-direction:column}
-  .row{display:flex;gap:18px;align-items:baseline;padding:18px 2px;box-shadow:0 1px 0 var(--hair)}
-  .row:first-of-type{box-shadow:0 1px 0 var(--hair),0 -1px 0 var(--hair)}
+  section{padding:110px 0 0}
+  .sec-label{font-size:11px;letter-spacing:.38em;color:var(--ash);text-transform:uppercase;margin:0 0 34px;text-align:center}
+
+  /* how · three hairline rows, anodized dots the only ornament */
+  .how .row{display:flex;gap:22px;align-items:baseline;padding:22px 4px;box-shadow:0 1px 0 var(--hair);font-size:14.5px}
+  .how .row:first-of-type{box-shadow:0 1px 0 var(--hair),0 -1px 0 var(--hair)}
   .dot{flex:none;width:7px;height:7px;border-radius:999px;align-self:center}
-  .dot.d-ash{background:var(--ash)}
-  .dot.d-gold{background:var(--gold);box-shadow:0 0 6px rgba(226,193,120,.25)}
-  .dot.d-green{background:var(--green);box-shadow:0 0 6px rgba(105,192,150,.25)}
+  .d-ash{background:var(--ash)}
+  .d-gold{background:var(--gold);box-shadow:0 0 6px rgba(226,193,120,.25)}
+  .d-green{background:var(--green);box-shadow:0 0 6px rgba(105,192,150,.25)}
   @media (prefers-reduced-motion: no-preference){
-    .dot.d-green{animation:breathe 3.4s ease-in-out infinite}
+    .d-green{animation:breathe 3.4s ease-in-out infinite}
     @keyframes breathe{50%{box-shadow:0 0 10px rgba(105,192,150,.45)}}
   }
-  .row .k{flex:none;width:64px;color:var(--mute);font-size:11px;letter-spacing:.18em;text-transform:uppercase}
-  .row .v{color:var(--bone)}
+  .how .k{flex:none;width:72px;color:var(--mute);font-size:11px;letter-spacing:.2em;text-transform:uppercase}
+  .receipts-line{text-align:center;margin-top:34px}
+  .receipts-btn{color:var(--mute);font-size:12px;letter-spacing:.14em;text-transform:uppercase;
+    padding:10px 22px;border-radius:999px;background:var(--panel);transition:color var(--dur) var(--ease)}
+  .receipts-btn:hover{color:var(--bone-hi)}
 
-  /* ── highlights: flat panels, no borders, one claim each ─────────────── */
-  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-  @media (max-width:720px){.grid{grid-template-columns:1fr}}
-  .panel{background:var(--panel);border-radius:var(--r);padding:18px 20px}
-  .panel .k{display:block;color:var(--ash);font-size:10px;letter-spacing:.26em;text-transform:uppercase;margin-bottom:8px}
-  .panel .v{color:var(--bone);font-size:12.5px}
-  .footnote{color:var(--ash);font-size:11.5px;margin:22px 2px 0}
-  .footnote .path{color:var(--mute)}
+  /* the one serif monument */
+  .monument{text-align:center}
+  .monument .fig{font:600 96px/1 var(--serif);color:var(--bone-hi);letter-spacing:.01em}
+  .monument .lab{color:var(--ash);font-size:11px;letter-spacing:.34em;text-transform:uppercase;margin-top:14px}
 
-  /* ── simplicity: prose + the one serif monument ──────────────────────── */
-  .simple{display:grid;grid-template-columns:1.5fr 1fr;gap:34px;align-items:center}
-  @media (max-width:720px){.simple{grid-template-columns:1fr}}
-  .prose{color:var(--bone);font-size:13px}
-  .monument{text-align:center;padding:26px 8px}
-  .monument .fig{font:600 64px/1 var(--serif);color:var(--bone-hi);letter-spacing:.01em}
-  .monument .lab{color:var(--ash);font-size:11px;letter-spacing:.3em;text-transform:uppercase;margin-top:10px}
+  /* earn · one row, the resting knob */
+  .earn{display:flex;align-items:center;justify-content:center;gap:38px}
+  .earn img{width:132px;height:132px;flex:none}
+  .earn p{margin:0;max-width:440px}
 
-  /* ── earn: one row, the resting knob ─────────────────────────────────── */
-  .earn{display:flex;align-items:center;gap:30px}
-  @media (max-width:560px){.earn{flex-direction:column;text-align:center}}
-  .earn img{width:120px;height:120px;flex:none}
-  .earn .v{color:var(--bone)}
-
-  /* ── download: the honest state, no control ──────────────────────────── */
+  /* download · the honest state, no control */
+  .download{text-align:center;padding-bottom:20px}
   .download .state{display:inline-block;background:var(--panel);border-radius:999px;
-    padding:7px 18px;color:var(--gold-core);font-size:11px;letter-spacing:.26em;
-    text-transform:uppercase;margin-bottom:18px}
-  .download p{color:var(--bone);max-width:640px;margin:0}
+    padding:8px 20px;color:var(--gold-core);font-size:11px;letter-spacing:.28em;
+    text-transform:uppercase;margin-bottom:22px}
+  .download p{color:var(--bone);max-width:620px;margin:0 auto}
 
-  /* ── footer ───────────────────────────────────────────────────────────── */
-  footer{padding:72px 0 40px;display:flex;align-items:center;gap:12px;color:var(--ash);font-size:11.5px}
+  footer{padding:110px 0 44px;display:flex;align-items:center;justify-content:center;gap:12px;color:var(--ash);font-size:11.5px}
   footer img{width:18px;height:18px;opacity:.8}
+
+  /* receipts dialog · the claims live here, off the page */
+  dialog{background:var(--panel);color:var(--bone);border:0;border-radius:var(--r);
+    max-width:760px;width:92vw;max-height:82vh;padding:34px 36px;font:inherit}
+  dialog::backdrop{background:rgba(6,6,6,.82)}
+  .dlg-head{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:8px}
+  .dlg-title{font-size:11px;letter-spacing:.34em;color:var(--ash);text-transform:uppercase}
+  .dlg-close{color:var(--mute);font-size:12px;letter-spacing:.12em;text-transform:uppercase}
+  .dlg-close:hover{color:var(--bone-hi)}
+  .claim{padding:16px 2px;box-shadow:0 1px 0 var(--hair);font-size:12.5px}
+  .claim .k{display:block;color:var(--ash);font-size:10px;letter-spacing:.26em;text-transform:uppercase;margin-bottom:5px}
+  .dlg-foot{color:var(--ash);font-size:11.5px;margin:20px 2px 0}
+  .dlg-foot .path{color:var(--mute)}
+
+  /* ── the phone hand-off ───────────────────────────────────────────────── */
+  .handoff{display:none;min-height:100svh;flex-direction:column;align-items:center;
+    justify-content:center;text-align:center;padding:40px 28px;gap:0}
+  @media (max-width:899px){.handoff{display:flex}}
+  .handoff img{width:44px;height:44px;opacity:.92;margin-bottom:22px}
+  .handoff .eyebrow{margin-bottom:34px}
+  .handoff h1{font:400 17px/1.6 var(--mono);color:var(--bone-hi);margin:0 0 8px;max-width:300px}
+  .handoff .sub{color:var(--ash);font-size:12px;margin:0 0 44px;max-width:300px}
+  .handoff .keys{display:flex;flex-direction:column;gap:14px;width:100%;max-width:280px}
+  .hand-key{display:block;width:100%;background:var(--panel);border-radius:999px;
+    padding:14px 20px;color:var(--bone);font-size:12px;letter-spacing:.16em;
+    text-transform:uppercase;text-align:center;text-decoration:none}
+  .hand-key:active{color:var(--bone-hi)}
 </style>
 </head>
 <body>
 
+<!-- phones get a hand-off, not a cramped site -->
+<div class="handoff">
+  <img src="/assets/site/cx-mark-white.png" alt="Cx" width="44" height="44">
+  <span class="eyebrow">computexchange</span>
+  <h1>this page is built for a desktop</h1>
+  <p class="sub">send it to your Mac · AirDrop, email, or copy the link</p>
+  <div class="keys">
+    <button class="hand-key" id="hand-share" hidden>share · AirDrop</button>
+    <a class="hand-key" href="mailto:?subject=computexchange&amp;body=https%3A%2F%2Fcomputexchange.net%2F">email me the link</a>
+    <button class="hand-key" id="hand-copy">copy the link</button>
+  </div>
+</div>
+
+<div class="site">
 <header class="hero wrap">
   <div class="masthead">
-    <img src="/assets/site/cx-mark-white.png" alt="Cx" width="26" height="26">
+    <img src="/assets/site/cx-mark-white.png" alt="Cx" width="28" height="28">
     <span class="eyebrow">computexchange</span>
   </div>
   <div class="oracles">
-    <picture class="pair">
-      <source media="(min-width: 561px)"
+    <picture>
+      <source media="(min-width: 900px)"
               srcset="/assets/site/oracles-pair@1x.png 1200w, /assets/site/oracles-pair@2x.png 2400w, /assets/site/oracles-pair@3x.png 3600w"
-              sizes="(max-width: 1000px) 94vw, 940px">
-      <img class="pair"
-           src="/assets/site/mac-studio@1x.png"
+              sizes="(max-width: 1240px) 92vw, 1140px">
+      <img src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw=="
            width="1200" height="750" fetchpriority="high"
            alt="A Mac Studio and an NVIDIA DGX Spark side by side in studio light">
     </picture>
-    <img class="solo" loading="lazy"
-         src="/assets/site/mac-studio@1x.png"
-         srcset="/assets/site/mac-studio@1x.png 682w, /assets/site/mac-studio@2x.png 1365w"
-         sizes="82vw" width="682" height="682"
-         alt="A Mac Studio in studio light">
-    <img class="solo" loading="lazy"
-         src="/assets/site/dgx-spark@1x.png"
-         srcset="/assets/site/dgx-spark@1x.png 682w, /assets/site/dgx-spark@2x.png 1365w"
-         sizes="82vw" width="682" height="682"
-         alt="An NVIDIA DGX Spark in studio light">
   </div>
-  <p class="thesis">a verified spot market for batch inference · Metal by default, CUDA as a build flag</p>
-  <p class="ash-line">there is no sign-in screen · the device provisions itself on first use, and a payment method is the only credential you connect by hand</p>
+  <p class="thesis">a verified spot market for batch inference</p>
+  <p class="ash-line">no sign-in screen · the device provisions itself · a payment method is the only credential you connect</p>
 </header>
 
 <main>
   <section class="wrap">
     <h2 class="sec-label">how it works</h2>
-    <div class="how">
+    <div class="how measure">
       <div class="row"><span class="dot d-ash" aria-hidden="true"></span><span class="k">drop</span>
-        <span class="v">drop your data · the pipeline is detected · embeddings, Whisper transcription, or Llama 3.2 1B batch.</span></div>
+        <span>drop your data · the pipeline is detected</span></div>
       <div class="row"><span class="dot d-gold" aria-hidden="true"></span><span class="k">cap</span>
-        <span class="v">priced before you spend · $0.002 per 1,000 units of Llama 3.2 1B, from $0.004 per audio minute of Whisper · the quote is advisory, the max_usd cap you set at submission binds at dispatch.</span></div>
+        <span>priced before you spend · the cap you set binds at dispatch</span></div>
       <div class="row"><span class="dot d-green" aria-hidden="true"></span><span class="k">proof</span>
-        <span class="v">results come back verified · honeypots, N-way majority votes, and a 0.25 audit floor stand behind every receipt.</span></div>
+        <span>results come back verified · every run ends in a receipt</span></div>
+    </div>
+    <div class="receipts-line">
+      <button class="receipts-btn" id="open-receipts">the receipts</button>
     </div>
   </section>
 
   <section class="wrap">
-    <h2 class="sec-label">highlights</h2>
-    <div class="grid">
-      <div class="panel"><span class="k">proof</span><span class="v">make prove-local · 168 pass · 0 skip · 0 fail · a matrix-only run, tallied by grep over its own ledger</span></div>
-      <div class="panel"><span class="k">queue</span><span class="v">the job queue is a plain Postgres table claimed with FOR UPDATE SKIP LOCKED · no Kafka, RabbitMQ, NATS, or Redis in the dependency tree</span></div>
-      <div class="panel"><span class="k">binaries</span><span class="v">two binaries at the core · a Rust supplier agent and a Go control plane · the buyer CLI and macOS menu bar app are optional layers on top</span></div>
-      <div class="panel"><span class="k">inference</span><span class="v">real inference through Candle in pure Rust · MiniLM and bge-small embeddings, Whisper tiny and base, quantized Llama 3.2 1B · Metal by default on Apple Silicon, CUDA as a build flag</span></div>
-      <div class="panel"><span class="k">scheduler</span><span class="v">tasks are sized for a 45 second runtime target · five hard filters gate every claim · quiet hours are enforced by the agent on the device itself</span></div>
-      <div class="panel"><span class="k">verification</span><span class="v">honeypot known-answer tasks, within-class redundancy, N-way majority votes · a 0.25 audit floor, so even the most trusted supplier is spot-checked about one task in four · a failed honeypot docks reputation, claws back the credit, and quarantines the supplier</span></div>
-      <div class="panel"><span class="k">quote</span><span class="v">a quote before any spend at POST /v1/quote · the max_usd cap set at submission is enforced at dispatch, pausing the job before the cap is breached</span></div>
-      <div class="panel"><span class="k">payouts</span><span class="v">credits are held, then released against a real transfer reference or marked ready when owed · a read-only pass reconciles against Stripe every 15 minutes and never moves money</span></div>
-      <div class="panel"><span class="k">api</span><span class="v">an OpenAI-compatible Batch API at /v1/files and /v1/batches · the Python SDK is one file and imports only the standard library</span></div>
-      <div class="panel"><span class="k">rails</span><span class="v">payouts are real Stripe Connect transfers when the key is configured · an unconfigured deployment keeps credits marked owed and never fakes a paid transfer</span></div>
-    </div>
-    <p class="footnote">every sentence on this page traces to a path and line in the source tree · the ledger is <span class="path">docs/SITE-CLAIMS.md</span> · what could not be evidenced was not softened, it was killed</p>
-  </section>
-
-  <section class="wrap">
-    <h2 class="sec-label">simplicity</h2>
-    <div class="simple">
-      <p class="prose">The core is two binaries · a Rust supplier agent and a Go control plane. The job queue is a plain Postgres table claimed with FOR UPDATE SKIP LOCKED · there is no Kafka, RabbitMQ, NATS, or Redis anywhere in the dependency tree. There is no sign-in screen · on first use the console silently provisions a device-local account, and the only credential connected by hand is a payment method. Buyers speak an OpenAI-compatible Batch API at /v1/files and /v1/batches, or a Python SDK that is a single file importing only the standard library.</p>
-      <div class="monument">
-        <div class="fig">$0.001</div>
-        <div class="lab">embeddings · per thousand</div>
-      </div>
+    <div class="monument">
+      <div class="fig">$0.001</div>
+      <div class="lab">embeddings · per thousand</div>
     </div>
   </section>
 
   <section class="wrap">
     <h2 class="sec-label">earn</h2>
     <div class="earn">
-      <img src="/assets/site/knob-off@3x.png" alt="" loading="lazy" width="120" height="120">
-      <p class="v">flip your Mac online and it earns while it idles · quiet hours and battery rules are enforced by the agent on the device itself · the platform take defaults to 3%</p>
+      <img src="/assets/site/knob-off@3x.png" alt="" loading="lazy" width="132" height="132">
+      <p>flip your Mac online and it earns while it idles · quiet hours and battery rules are enforced on the device itself</p>
     </div>
   </section>
 
   <section class="wrap download">
     <h2 class="sec-label">download</h2>
     <span class="state">closed alpha</span>
-    <p>There is no public download yet. The supplier agent installs with one command from the alpha build · it compiles on your Mac and runs as a login LaunchAgent on Apple Silicon. The macOS menu bar app builds today and the signing and notarization pipeline is written · the notarized public release is the next step. Ask for alpha access to run it now.</p>
+    <p>There is no public download yet. The supplier agent installs with one command from the alpha build · the macOS menu bar app builds today, and the notarized public release is the next step. Ask for alpha access to run it now.</p>
   </section>
 </main>
 
-<footer class="wrap">
+<footer>
   <img src="/assets/site/cx-mark-white.png" alt="" width="18" height="18">
   <span>computexchange · 2026</span>
 </footer>
 
+<dialog id="receipts" aria-label="the receipts">
+  <div class="dlg-head">
+    <span class="dlg-title">the receipts</span>
+    <button class="dlg-close" id="close-receipts">close</button>
+  </div>
+  <div class="claim"><span class="k">proof</span>make prove-local · 168 pass · 0 skip · 0 fail · a matrix-only run, tallied by grep over its own ledger</div>
+  <div class="claim"><span class="k">queue</span>the job queue is a plain Postgres table claimed with FOR UPDATE SKIP LOCKED · no Kafka, RabbitMQ, NATS, or Redis in the dependency tree</div>
+  <div class="claim"><span class="k">binaries</span>two binaries at the core · a Rust supplier agent and a Go control plane · the buyer CLI and macOS menu bar app are optional layers on top</div>
+  <div class="claim"><span class="k">inference</span>real inference through Candle in pure Rust · MiniLM and bge-small embeddings, Whisper tiny and base, quantized Llama 3.2 1B · Metal by default on Apple Silicon, CUDA as a build flag</div>
+  <div class="claim"><span class="k">scheduler</span>tasks are sized for a 45 second runtime target · five hard filters gate every claim · quiet hours are enforced by the agent on the device itself</div>
+  <div class="claim"><span class="k">verification</span>honeypot known-answer tasks, within-class redundancy, N-way majority votes · a 0.25 audit floor, so even the most trusted supplier is spot-checked about one task in four · a failed honeypot docks reputation, claws back the credit, and quarantines the supplier</div>
+  <div class="claim"><span class="k">quote</span>a quote before any spend at POST /v1/quote · the max_usd cap set at submission is enforced at dispatch, pausing the job before the cap is breached · $0.002 per 1,000 units of Llama 3.2 1B, from $0.004 per audio minute of Whisper</div>
+  <div class="claim"><span class="k">payouts</span>credits are held, then released against a real transfer reference or marked ready when owed · a read-only pass reconciles against Stripe every 15 minutes and never moves money · the platform take defaults to 3%</div>
+  <div class="claim"><span class="k">api</span>an OpenAI-compatible Batch API at /v1/files and /v1/batches · the Python SDK is one file and imports only the standard library</div>
+  <div class="claim"><span class="k">rails</span>payouts are real Stripe Connect transfers when the key is configured · an unconfigured deployment keeps credits marked owed and never fakes a paid transfer</div>
+  <div class="claim"><span class="k">identity</span>there is no sign-in screen · on first use the console silently provisions a device-local account, and the only credential a person ever connects by hand is a payment method</div>
+  <p class="dlg-foot">every sentence above traces to a path and line in the source tree · the ledger is <span class="path">docs/SITE-CLAIMS.md</span> · what could not be evidenced was not softened, it was killed</p>
+</dialog>
+</div>
+
+<script>
+  // receipts dialog
+  var dlg = document.getElementById('receipts');
+  document.getElementById('open-receipts').addEventListener('click', function () { dlg.showModal(); });
+  document.getElementById('close-receipts').addEventListener('click', function () { dlg.close(); });
+  dlg.addEventListener('click', function (e) { if (e.target === dlg) dlg.close(); });
+
+  // phone hand-off · the share key appears only where the share sheet exists
+  var URL_SELF = 'https://computexchange.net/';
+  var shareBtn = document.getElementById('hand-share');
+  if (navigator.share) {
+    shareBtn.hidden = false;
+    shareBtn.addEventListener('click', function () {
+      navigator.share({ title: 'computexchange', url: URL_SELF }).catch(function () {});
+    });
+  }
+  var copyBtn = document.getElementById('hand-copy');
+  copyBtn.addEventListener('click', function () {
+    var done = function () { copyBtn.textContent = 'copied'; setTimeout(function () { copyBtn.textContent = 'copy the link'; }, 1600); };
+    if (navigator.clipboard) { navigator.clipboard.writeText(URL_SELF).then(done).catch(done); } else { done(); }
+  });
+</script>
 </body>
 </html>
