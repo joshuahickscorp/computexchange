@@ -32,6 +32,11 @@ const (
 	KindSupplierCredit = "supplier_credit"
 	KindPlatformTake   = "platform_take"
 	KindClawback       = "clawback"
+	// KindStripeFee is the REAL Stripe processing fee of one successful
+	// PaymentIntent (latest_charge.balance_transaction.fee — fetched from Stripe,
+	// never estimated), stored negative with payout_ref = the PI id. One row per
+	// PI (ledger_stripe_fee_ref_uniq), so a retried fee fetch never double-counts.
+	KindStripeFee = "stripe_fee"
 )
 
 // payout_status values (match ledger_entries.payout_status).

@@ -109,7 +109,11 @@ ALTER TABLE tasks SET (
 CREATE TABLE IF NOT EXISTS ledger_entries (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     created_at    TIMESTAMPTZ DEFAULT now(),
-    kind          TEXT NOT NULL,  -- 'buyer_charge'|'supplier_credit'|'platform_take'|'clawback'
+    kind          TEXT NOT NULL,  -- 'buyer_charge'|'supplier_credit'|'platform_take'|'clawback'|'stripe_fee'
+                                  -- 'stripe_fee': the REAL Stripe processing fee of one successful PaymentIntent
+                                  -- (latest_charge.balance_transaction.fee, fetched — never estimated), stored
+                                  -- negative with payout_ref = the PaymentIntent id. One row per PI, enforced by
+                                  -- ledger_stripe_fee_ref_uniq below, so a retried fee fetch can never double-count.
     supplier_id   UUID REFERENCES suppliers,
     buyer_id      UUID,
     task_id       UUID REFERENCES tasks,
@@ -325,7 +329,12 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS data_residency     TEXT[];           -
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS split_size         INT;              -- adaptive chunk size chosen at submit
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS offered_rate_usd_hr REAL;            -- price-derived $/hr a worker earns running this (min-payout gate)
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS eta_secs           INT;              -- predicted completion seconds at submit
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS charge_status      TEXT NOT NULL DEFAULT 'not_attempted'; -- not_attempted|charged|failed|no_payment_method (queryable charge state, not log-only)
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS charge_status      TEXT NOT NULL DEFAULT 'not_attempted'; -- not_attempted|charged|failed|no_payment_method|deferred (queryable charge state, not log-only).
+-- 'deferred': the job settled BELOW the CX_CHARGE_MIN_USD batching threshold, so it is
+-- deliberately not charged alone (a ~30¢ Stripe fixed fee on a sub-$5 charge is fee
+-- bleed); the charge-collect sweep groups deferred jobs per buyer into charge_batches
+-- and bills once the buyer's deferred sum crosses the threshold or the oldest deferred
+-- job turns 24h old. The money stays honestly owed in the ledger the whole time.
 -- Full submitted JobType (tag + variant fields: labels/schema/max_tokens/...), so
 -- the poll dispatch can carry buyer params to the agent, not just the bare tag.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS job_type_spec      JSONB;
@@ -648,3 +657,63 @@ CREATE INDEX IF NOT EXISTS eta_calibration_type_idx ON eta_calibration (job_type
 -- is not atomic under READ COMMITTED — without this index both could insert,
 -- duplicating rows and double-counting the near-miss metric.
 CREATE UNIQUE INDEX IF NOT EXISTS eta_calibration_job_uniq ON eta_calibration (job_id);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Charge batching + Stripe fee truth (control/collect.go, control/billing.go).
+-- ─────────────────────────────────────────────────────────────────────────────
+-- A charge batch is ONE PaymentIntent covering many small ('deferred') jobs of one
+-- buyer, formed by the charge-collect sweep once the buyer's deferred sum crosses
+-- CX_CHARGE_MIN_USD or the oldest deferred job turns 24h old. amount_usd is FROZEN
+-- at formation: every retry re-sends exactly this amount under the same Stripe
+-- idempotency key ("cxbatch-"+id), so an ambiguous prior attempt (e.g. a network
+-- timeout after the PaymentIntent may or may not have been created) can never
+-- double-charge — Stripe replays the first outcome. status: 'attempting' (formed,
+-- not yet confirmed charged; retried every sweep) | 'charged' (stripe_pi + charged_at
+-- set, member jobs flipped to charge_status='charged').
+CREATE TABLE IF NOT EXISTS charge_batches (
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    buyer_id   UUID NOT NULL,
+    amount_usd NUMERIC(10,6) NOT NULL,       -- FROZEN sum of the member jobs at formation
+    status     TEXT NOT NULL DEFAULT 'attempting',  -- attempting|charged
+    stripe_pi  TEXT,                          -- the PaymentIntent id, once confirmed
+    created_at TIMESTAMPTZ DEFAULT now(),
+    charged_at TIMESTAMPTZ
+);
+-- Money-truth hardening (adversarial-review fixes):
+--   deferred_at        · when the job entered 'deferred'; the 24h batching age counts
+--                        from here, not from job creation (long-queued jobs keep their
+--                        full accumulation window).
+--   charge_attempt_usd · the FROZEN amount of the first single-job charge attempt;
+--                        every retry replays the same (idempotency key, amount) pair,
+--                        immune to a later actual_usd re-settle.
+--   charge_batches.attempts/next_at · failed-batch backoff (30min x attempts <= 6h),
+--                        so a hard-declined card is not retried once a minute forever.
+--   charge_batches.amount_usd widened to NUMERIC(12,6): an unbounded re-armed debt
+--                        must overflow at $999,999, not at $9,999 (formation is also
+--                        capped at 500 member jobs per batch).
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS deferred_at TIMESTAMPTZ;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS charge_attempt_usd NUMERIC(10,6);
+ALTER TABLE charge_batches ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0;
+ALTER TABLE charge_batches ADD COLUMN IF NOT EXISTS next_at TIMESTAMPTZ;
+ALTER TABLE charge_batches ALTER COLUMN amount_usd TYPE NUMERIC(12,6);
+
+CREATE INDEX IF NOT EXISTS charge_batches_status_idx ON charge_batches (status, created_at);
+-- charge_batch_id stamps a deferred job into exactly one batch (stamped WHERE
+-- charge_status='deferred' AND charge_batch_id IS NULL, so a concurrent sweep can
+-- never double-batch a job). charge_attempts / charge_next_at back off the retry of
+-- FAILED single-job charges (30min × attempts, capped at 6h) so a dead card is not
+-- hammered every sweep; the amount stays owed in the ledger regardless.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS charge_batch_id UUID;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS charge_attempts INT NOT NULL DEFAULT 0;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS charge_next_at  TIMESTAMPTZ;
+-- The PaymentIntent id of a successfully charged SINGLE job (batches carry theirs on
+-- charge_batches.stripe_pi). Needed by the stripe_fee backfill scan: a charge whose
+-- fee fetch failed is found by "charged with a pi, no stripe_fee ledger row" and the
+-- real fee is fetched again next sweep. NULL for jobs charged before this column
+-- existed (their fee is honestly unknown, never estimated).
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS stripe_pi TEXT;
+CREATE INDEX IF NOT EXISTS jobs_charge_status_idx ON jobs (charge_status);
+-- One stripe_fee row per PaymentIntent, structurally: the fee recorder is
+-- INSERT-if-absent by payout_ref, and this partial unique index makes a racing
+-- double-insert impossible rather than merely unlikely.
+CREATE UNIQUE INDEX IF NOT EXISTS ledger_stripe_fee_ref_uniq ON ledger_entries (payout_ref) WHERE kind = 'stripe_fee';

@@ -215,6 +215,34 @@ func (s *Store) Migrate(ctx context.Context) error {
 		   created_at     TIMESTAMPTZ DEFAULT now()
 		 )`,
 		`CREATE INDEX IF NOT EXISTS eta_calibration_type_idx ON eta_calibration (job_type, tier, created_at DESC)`,
+		// Charge batching + Stripe fee truth (MIRRORS db/schema.sql; see collect.go).
+		// A charge batch is ONE PaymentIntent covering many small deferred jobs of one
+		// buyer; amount_usd is FROZEN at formation and every retry reuses the same
+		// idempotency key, so an ambiguous prior attempt can never double-charge.
+		`CREATE TABLE IF NOT EXISTS charge_batches (
+		   id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		   buyer_id   UUID NOT NULL,
+		   amount_usd NUMERIC(10,6) NOT NULL,
+		   status     TEXT NOT NULL DEFAULT 'attempting',
+		   stripe_pi  TEXT,
+		   created_at TIMESTAMPTZ DEFAULT now(),
+		   charged_at TIMESTAMPTZ
+		 )`,
+		`CREATE INDEX IF NOT EXISTS charge_batches_status_idx ON charge_batches (status, created_at)`,
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS charge_status TEXT NOT NULL DEFAULT 'not_attempted'`,
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS charge_batch_id UUID`,
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS charge_attempts INT NOT NULL DEFAULT 0`,
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS charge_next_at TIMESTAMPTZ`,
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS deferred_at TIMESTAMPTZ`,
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS charge_attempt_usd NUMERIC(10,6)`,
+		`ALTER TABLE charge_batches ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0`,
+		`ALTER TABLE charge_batches ADD COLUMN IF NOT EXISTS next_at TIMESTAMPTZ`,
+		`ALTER TABLE charge_batches ALTER COLUMN amount_usd TYPE NUMERIC(12,6)`,
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS stripe_pi TEXT`,
+		`CREATE INDEX IF NOT EXISTS jobs_charge_status_idx ON jobs (charge_status)`,
+		// One stripe_fee ledger row per PaymentIntent, structurally (the fee recorder
+		// is INSERT-if-absent by payout_ref; the partial unique index closes the race).
+		`CREATE UNIQUE INDEX IF NOT EXISTS ledger_stripe_fee_ref_uniq ON ledger_entries (payout_ref) WHERE kind = 'stripe_fee'`,
 	}
 	for _, q := range stmts {
 		if _, err := s.pool.Exec(ctx, q); err != nil {

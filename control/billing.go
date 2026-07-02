@@ -232,33 +232,106 @@ func (s *Server) handleStripeWebhook(w http.ResponseWriter, r *http.Request) {
 // chargeForJob bills the buyer's saved card for a completed job's actual cost.
 // GATED: with no Stripe key OR no saved card it is a no-op — the internal ledger
 // still records what is owed, so nothing is faked and the proven lifecycle is
-// unchanged. Idempotent by job id so a re-finalize never double-charges.
+// unchanged. Idempotent by job id so a re-finalize never double-charges. The
+// actual decision + charge live in chargeOrDeferJob so the charge-collect sweep
+// (collect.go) can route watchdog/fail-settled jobs through the SAME logic.
 func (s *Server) chargeForJob(ctx context.Context, jobID uuid.UUID) {
+	chargeOrDeferJob(ctx, s.store, jobID)
+}
+
+// chargeOrDeferJob is the single immediate-or-defer charge decision for one
+// settled job. Below the CX_CHARGE_MIN_USD batching threshold the job is marked
+// 'deferred' — deliberately NOT charged alone (Stripe's ~30¢ fixed fee would eat
+// a sub-threshold charge), left for the charge-collect sweep to batch per buyer.
+// At or above the threshold it charges immediately, exactly as before: no key →
+// no-op; no saved card → 'no_payment_method' (owed, surfaced on the timeline);
+// a Stripe failure → 'failed' (retried with backoff by the sweep). The Stripe
+// idempotency key stays "job-"+jobID so ANY retry of the same job — including a
+// retry after an ambiguous network timeout — can never double-charge.
+func chargeOrDeferJob(ctx context.Context, store *Store, jobID uuid.UUID) {
 	if stripeKey() == "" {
 		return
 	}
-	buyerID, usd, err := s.store.JobChargeInfo(ctx, jobID)
+	buyerID, usd, err := store.JobChargeInfo(ctx, jobID)
 	if err != nil || usd <= 0 {
 		return
 	}
-	cust, pm, err := s.store.GetBillingCustomer(ctx, buyerID)
+	// DOUBLE-CHARGE GUARD: only a job whose charge was never decided may be decided
+	// here. finalizeJobIfDone re-runs on late sibling commits (hedge/redundancy) and
+	// would otherwise re-decide a job that is already charged or deferred — worst
+	// case flipping 'charged' back to 'deferred' and re-charging it under a NEW
+	// batch idempotency key, which Stripe cannot dedupe. Every later transition is
+	// owned by the charge-collect sweep, never by a re-finalize.
+	if st, serr := store.JobChargeStatus(ctx, jobID); serr != nil || st != "not_attempted" {
+		return
+	}
+	if shouldDeferCharge(usd, chargeMinUSD()) {
+		if _, derr := store.MarkJobDeferred(ctx, jobID); derr != nil {
+			log.Printf("billing: deferring sub-threshold charge for job %s: %v (stays owed in the ledger)", jobID, derr)
+		}
+		return
+	}
+	cust, pm, err := store.GetBillingCustomer(ctx, buyerID)
 	if err != nil || cust == "" || pm == "" {
-		_ = s.store.SetChargeStatus(ctx, jobID, "no_payment_method")
+		_ = store.SetChargeStatus(ctx, jobID, "no_payment_method")
 		// Surface the silent debt on the buyer's timeline (best-effort): the work ran
 		// and is owed, but there was no saved card to charge off-session.
-		_ = s.store.InsertJobEvent(ctx, jobID, nil, "charge_failed",
+		_ = store.InsertJobEvent(ctx, jobID, nil, "charge_failed",
 			"Job complete but no saved payment method · amount is owed and will be charged once a card is on file", nil)
 		return // no saved card → nothing to charge off-session (still owed in the ledger)
 	}
-	if _, err := chargeBuyer(ctx, s.store, buyerID, usd, "job-"+jobID.String()); err != nil {
-		_ = s.store.SetChargeStatus(ctx, jobID, "failed")
+	// Freeze the attempted amount BEFORE the charge: retries must replay the SAME
+	// (key, amount) pair. If actual_usd drifted after a failed attempt (a late
+	// sibling commit re-settling), reusing the key with a different amount is a
+	// permanent Stripe idempotency_error loop — and a double charge once the key
+	// expires. The frozen figure is what every retry charges.
+	if ferr := store.FreezeChargeAmount(ctx, jobID, usd); ferr != nil {
+		log.Printf("billing: freezing charge amount for job %s: %v (charge deferred to the sweep)", jobID, ferr)
+		return
+	}
+	pi, err := chargeBuyer(ctx, store, buyerID, usd, "job-"+jobID.String())
+	if err != nil {
+		_ = store.SetChargeStatus(ctx, jobID, "failed")
 		// Make the charge failure visible to the buyer (best-effort), not just a log line.
-		_ = s.store.InsertJobEvent(ctx, jobID, nil, "charge_failed",
+		_ = store.InsertJobEvent(ctx, jobID, nil, "charge_failed",
 			"Charge for this job failed · amount is owed and will be reconciled", nil)
 		log.Printf("billing: charge for job %s failed (owed, will reconcile): %v", jobID, err)
 		return
 	}
-	_ = s.store.SetChargeStatus(ctx, jobID, "charged")
+	if serr := store.SetJobCharged(ctx, jobID, pi); serr != nil {
+		log.Printf("billing: marking job %s charged (pi %s): %v", jobID, pi, serr)
+		return
+	}
+	// Record the REAL Stripe fee (never estimated). A fetch failure is logged and
+	// left to the charge-collect sweep's backfill scan — the charge itself stands.
+	if ferr := recordStripeFee(ctx, store, buyerID, pi); ferr != nil {
+		log.Printf("billing: stripe fee for job %s (pi %s) not recorded yet: %v (backfilled by the charge-collect sweep)", jobID, pi, ferr)
+	}
+}
+
+// recordStripeFee fetches the REAL processing fee of a successful PaymentIntent
+// (latest_charge.balance_transaction.fee, integer cents) and inserts exactly one
+// negative 'stripe_fee' ledger row with payout_ref = the PI id. Idempotent: a PI
+// that already has its fee row is a clean no-op (INSERT-if-absent, backed by the
+// ledger_stripe_fee_ref_uniq index), so the finalize path and the backfill sweep
+// can both call this without double-counting. A missing/not-yet-settled
+// balance_transaction is an error (retried by the backfill scan) — the fee is
+// never guessed.
+func recordStripeFee(ctx context.Context, store *Store, buyerID uuid.UUID, pi string) error {
+	if pi == "" {
+		return fmt.Errorf("no payment intent id to fetch a fee for")
+	}
+	out, err := stripeGet(ctx, "payment_intents/"+pi+"?expand[]=latest_charge.balance_transaction")
+	if err != nil {
+		return err
+	}
+	lc, _ := out["latest_charge"].(map[string]any)
+	bt, _ := lc["balance_transaction"].(map[string]any)
+	feeCents, ok := bt["fee"].(float64) // JSON number; Stripe fees are integer cents
+	if !ok {
+		return fmt.Errorf("payment intent %s: latest_charge.balance_transaction.fee absent (not settled yet?) — fee not recorded, never estimated", pi)
+	}
+	return store.InsertStripeFee(ctx, buyerID, pi, feeCents/100)
 }
 
 // stripeGet does a GET against the Stripe API (used by the Connect status check).

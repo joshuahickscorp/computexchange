@@ -123,7 +123,7 @@ func reset(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
 	if _, err := itPool.Exec(ctx,
-		`TRUNCATE tasks, jobs, webhooks, ledger_entries, benchmark_results, disputes, verification_events RESTART IDENTITY CASCADE`); err != nil {
+		`TRUNCATE tasks, jobs, webhooks, ledger_entries, benchmark_results, disputes, verification_events, charge_batches RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatalf("reset truncate: %v", err)
 	}
 	// Workers/worker_tokens are NOT truncated above (FK from worker_tokens). Drop
@@ -3882,6 +3882,19 @@ func TestAdminSummary(t *testing.T) {
 	near(sum.Money.PlatformTakeUSD, 0.10, "platform_take_usd")
 	near(sum.Money.ClawedBackUSD, 0.05, "clawed_back_usd")
 	near(sum.Money.FlowOwedUSD, 0.90, "flow_owed_usd (held+pending)")
+	// Money-truth extensions: nothing here was ever collected externally (the
+	// seeded jobs carry no actual_usd and no charge), so the collection figures
+	// are zero, the take-net equals the take (no stripe_fee rows), and nothing
+	// was transferred out (the credit is held, not released).
+	near(sum.Money.CollectedUSD, 0, "collected_usd")
+	near(sum.Money.UncollectedUSD, 0, "uncollected_usd")
+	near(sum.Money.StripeFeesUSD, 0, "stripe_fees_usd")
+	near(sum.Money.TakeNetUSD, 0.10, "take_net_usd")
+	near(sum.Money.TransferredUSD, 0, "transferred_usd")
+	if sum.Accessible == nil {
+		t.Fatal("accessible section must be present (its query did not fail)")
+	}
+	near(sum.Accessible.TakeCollectedUSD, 0, "accessible.take_collected_usd (no charged job)")
 	if sum.JobsByStatus["running"] != 1 || sum.JobsByStatus["complete"] != 1 {
 		t.Fatalf("jobs_by_status: want running=1 complete=1, got %v", sum.JobsByStatus)
 	}

@@ -52,6 +52,11 @@ import (
 //   - ledger-reconcile (15m): released supplier credits are audited against actual
 //     Stripe transfers and any drift is logged — read-only, never moves money (see
 //     reconcile.go).
+//   - charge-collect (60s): the money-truth collection sweep — retries attempting
+//     charge batches under their frozen amount + stable idempotency key, forms new
+//     per-buyer batches of sub-threshold deferred jobs, routes watchdog/fail-settled
+//     terminal jobs into collection, backs off failed single-job charges, and
+//     backfills real stripe_fee ledger rows (see collect.go).
 //
 // Every failure is logged, never swallowed; nothing here pretends success.
 
@@ -244,6 +249,7 @@ func (wk *Workers) Run(ctx context.Context) {
 		{stuckInterval, "dead-claim-rescue", wk.rescueDeadClaims},
 		{reconcileInterval, "ledger-reconcile", wk.reconcileLedger},
 		{disputeInterval, "dispute-resolve", wk.resolveDisputes},
+		{chargeCollectInterval, "charge-collect", wk.collectCharges},
 	}
 	for _, t := range tickers {
 		liveness.register(t.name, t.interval)
