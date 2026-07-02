@@ -38,7 +38,7 @@ run: **82/82 pass** (Computexchange **Turbo** — see [docs/TURBO.md](docs/TURBO
 | Mismatch / fraud path | divergent results flagged; confirmed fraud clawed back | `TestRedundancyVerify` + `TestHoneypotVerify` |
 | Duplicate commit / idempotency | second commit → 409, credited exactly once | `TestDuplicateCommitIdempotent` |
 | Stale running tasks requeue | claimed-but-uncommitted → back to queue w/ backoff | `TestStaleRequeue` |
-| Failed jobs requeue → refund | retries exhausted → task+job fail, buyer refunded | `TestFailAndRefund` |
+| Failed jobs → partial settle | retries exhausted → task+job fail, settled at completed work (delivered chunks stay charged, no refund row) | `TestFailPathPartialSettle` |
 | Webhook retries | backoff retry to a local receiver; exactly-once delivery | `TestWebhookRetry`, `TestWebhookSweepExactlyOnce` |
 | Payout hold → ready | held credit past its window → `ready` (queued) | `TestPayoutHoldToReadyAndBlocked` |
 | **Payout transfer stays blocked** | stub rail errors; never marks `released` w/o a ref | `payout-blocked` |
@@ -169,7 +169,7 @@ real release checklist.
       ([`docs/PLANE_C_ERRATA.md`](docs/PLANE_C_ERRATA.md) §6). The structural fix for
       silent OOM / money drain: `POST /v1/worker/task/{id}/fail` (immediate typed
       failure), `task_failures` + `job_events`, a shared agent⇄control failure
-      taxonomy, retryable→requeue-in-seconds / buyer-bad-input→terminal+refund,
+      taxonomy, retryable→requeue-in-seconds / buyer-bad-input→terminal+partial-settle,
       buyer-visible `GET /v1/jobs/{id}/events` + `/failures` (+ `cx`/SDK), and the
       `tasks_ready_unclaimed_idx` claim index proven load-bearing. Proof rows:
       `matrix:TestFailEndpoint{RequeuesImmediately,BadInputTerminal,OnlyClaimingWorker}`,

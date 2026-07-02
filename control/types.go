@@ -226,15 +226,21 @@ type WorkerCapability struct {
 // TaskDispatch is handed to a worker in response to a poll. result_key is the
 // canonical server-side object key the worker PUTs its result to (and echoes in
 // the commit); output_url is that same key presigned for upload. The Rust agent
-// reads result_key (serde default) and uploads to output_url.
+// reads result_key (serde default) and uploads to output_url. partial_put_url is
+// the OPTIONAL intra-task checkpoint seam (shared wire contract): result_key +
+// ".partial" presigned for upload, sent only for checkpointable job types — the
+// agent MAY periodically PUT a partial result document there (final-result JSON
+// shape plus a top-level "partial": true marker); the final commit is unchanged,
+// and old agents ignore the field.
 type TaskDispatch struct {
 	TaskID           uuid.UUID   `json:"task_id"`
 	JobID            uuid.UUID   `json:"job_id"`
 	Manifest         JobManifest `json:"manifest"`
 	InputURL         string      `json:"input_url"`
 	OutputURL        string      `json:"output_url"`
-	ResultKey        string      `json:"result_key"`          // canonical result object key (agent echoes it)
-	OfferedRateUsdHr float32     `json:"offered_rate_usd_hr"` // $/hr this task pays (matches the worker's min-payout gate)
+	PartialPutURL    string      `json:"partial_put_url,omitempty"` // presigned PUT for result_key+".partial" (checkpointable job types only)
+	ResultKey        string      `json:"result_key"`                // canonical result object key (agent echoes it)
+	OfferedRateUsdHr float32     `json:"offered_rate_usd_hr"`       // $/hr this task pays (matches the worker's min-payout gate)
 	Deadline         uint64      `json:"deadline"`
 }
 

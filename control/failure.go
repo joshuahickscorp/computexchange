@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"time"
 
@@ -15,7 +16,8 @@ import (
 // §6): the structural fix for "silent OOM and money drain." When a worker KNOWS a
 // task cannot complete it reports a typed failure (POST /v1/worker/task/{id}/fail)
 // instead of stranding it for the 30-min stale reaper. Retryable provider/system
-// failures requeue in SECONDS; buyer-bad-input fails terminally and is refunded —
+// failures requeue in SECONDS; buyer-bad-input fails terminally and settles at
+// delivered work (completed chunks stay charged; the rest was never charged) —
 // and either way the buyer sees what happened in the job_events timeline.
 //
 // The stale reaper (control/workers.go) remains the FALLBACK for workers that die
@@ -27,7 +29,8 @@ import (
 // `retryable` decides requeue-vs-terminal; `buyerFault` records who is at fault
 // (drives the event text + future charge/reputation policy). A failed task is
 // never charged (charging happens only on a verified commit); a terminal failure
-// refunds any prior charge on the job (refundJobChargesTx).
+// settles the job at the completed work — delivered chunks stay charged, un-run
+// work was never charged, nothing refunds (failJobAndSettleOnce).
 
 type failurePolicy struct {
 	retryable  bool
@@ -93,7 +96,7 @@ type FailOutcome string
 
 const (
 	FailRequeued FailOutcome = "requeued" // retryable, under the retry cap → claimable again now
-	FailTerminal FailOutcome = "failed"   // terminal (bad input, or retries exhausted) → job failed + refunded
+	FailTerminal FailOutcome = "failed"   // terminal (bad input, or retries exhausted) → job failed + settled at completed work
 	FailNoop     FailOutcome = "noop"     // idempotent: task already resolved
 )
 
@@ -101,11 +104,13 @@ const (
 var errNotOwner = errors.New("task is not claimed by this worker")
 
 // FailTask records a typed task failure and either requeues it immediately
-// (retryable, under the cap) or fails the job and refunds the buyer (terminal /
-// retries exhausted) — all in ONE transaction, so the timeline and the requeue can
-// never disagree. Only the claiming worker may fail a task (anti-spoof). Idempotent:
-// a task already resolved (not running/queued/retrying) records nothing and returns
-// FailNoop. The stale reaper remains the fallback for workers that never report.
+// (retryable, under the cap) or fails the job and settles it at the completed work
+// (terminal / retries exhausted; delivered chunks stay charged, un-run work was
+// never charged — see failJobAndSettleOnce) — all in ONE transaction, so the
+// timeline and the requeue can never disagree. Only the claiming worker may fail a
+// task (anti-spoof). Idempotent: a task already resolved (not
+// running/queued/retrying) records nothing and returns FailNoop. The stale reaper
+// remains the fallback for workers that never report.
 func (s *Store) FailTask(ctx context.Context, taskID, workerID uuid.UUID, rep FailureReport) (FailOutcome, error) {
 	policy, known := classifyFailure(rep.Class)
 	class := rep.Class
@@ -166,19 +171,20 @@ func (s *Store) FailTask(ctx context.Context, taskID, workerID uuid.UUID, rep Fa
 		if _, err := tx.Exec(ctx, `UPDATE tasks SET status = 'failed' WHERE id = $1`, taskID); err != nil {
 			return FailNoop, err
 		}
-		// Flip the job + refund EXACTLY once, even if several of its tasks fail
-		// terminally (or the stale reaper also fires) — no double refund.
-		flipped, err := failJobAndRefundOnce(ctx, tx, jobID)
+		// Flip the job + settle EXACTLY once, even if several of its tasks fail
+		// terminally (or the stale reaper also fires) — no double settle/event.
+		flipped, err := failJobAndSettleOnce(ctx, tx, jobID)
 		if err != nil {
 			return FailNoop, err
 		}
 		if flipped {
 			reason := "retries exhausted"
 			if policy.buyerFault {
-				reason = "invalid input — failed before charge"
+				reason = "invalid input"
 			}
 			if err := insertEventTx(ctx, tx, jobID, &taskID, "job_failed",
-				"Job failed ("+class+"): "+reason+"; any prior charge refunded", nil); err != nil {
+				"Job failed ("+class+"): "+reason+". You are charged only for the chunks that "+
+					"completed and were delivered; the rest was never charged.", nil); err != nil {
 				return FailNoop, err
 			}
 		}
@@ -356,6 +362,22 @@ func (s *Server) handleWorkerFail(w http.ResponseWriter, r *http.Request) {
 	}
 	if outcome == FailRequeued || outcome == FailTerminal {
 		metrics.taskFailures.Add(1)
+	}
+	// Partial-settle everywhere: when a VALIDATED report (owner + failable state,
+	// both enforced by FailTask above) terminally failed the job, checkpoint the
+	// delivered chunks into output_ref. Deliberately AFTER FailTask — checkpointing
+	// on a mere preview let any registered worker trigger merges on task ids it
+	// never claimed (an amplification vector, and a race against the completion
+	// sweep's merge-then-mark). Post-fail is still ahead of every consumer: the
+	// results_url is presigned at webhook delivery / results fetch, both strictly
+	// later than this call. Best-effort — a lookup or merge failure is logged and
+	// never blocks the response.
+	if outcome == FailTerminal {
+		if jobID, jerr := s.store.TaskJobID(r.Context(), taskID); jerr != nil {
+			log.Printf("fail: job lookup for checkpoint of task %s: %v", taskID, jerr)
+		} else {
+			checkpointBeforeFail(r.Context(), s.store, s.storage, jobID)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"outcome": string(outcome)})
 }

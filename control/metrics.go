@@ -39,7 +39,10 @@ type metricsState struct {
 	budgetStops      atomic.Int64 // capped jobs paused before breach (Budget Governor stop, §14 D8)
 	longPollTimeouts atomic.Int64 // worker long-poll waits that returned empty on timeout (§7 D1; 0 until the long-poll slice lands)
 	// Stuck-run watchdog:
-	stuckCancels atomic.Int64 // runs auto-cancelled at stuckEtaFactor × ETA with no progress (checkpointed + partially settled)
+	stuckCancels atomic.Int64 // runs auto-cancelled past their deadline with no progress (checkpointed + partially settled; strike >= 1)
+	stuckRescues atomic.Int64 // runs rescued on their FIRST stuck verdict (unfinished tasks requeued; strike 0 → 1)
+	// ETA calibration loop:
+	watchdogNearMiss atomic.Int64 // finalized jobs that finished LATE (realized > 1.2 × predicted eta_secs) — the data that tunes stuckEtaFactor
 }
 
 var metrics metricsState
@@ -63,7 +66,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(w, "cx_quotes_total", "Quotes priced and persisted via POST /v1/quote.", metrics.quotes.Load())
 	writeCounter(w, "cx_budget_stops_total", "Capped jobs paused before breach by the Budget Governor.", metrics.budgetStops.Load())
 	writeCounter(w, "cx_long_poll_timeouts_total", "Worker long-poll waits that returned empty on timeout.", metrics.longPollTimeouts.Load())
-	writeCounter(w, "cx_stuck_cancelled_total", "Stuck runs auto-cancelled by the watchdog (past 1.5x ETA, no progress; checkpointed + settled at completed work).", metrics.stuckCancels.Load())
+	writeCounter(w, "cx_stuck_cancelled_total", "Stuck runs auto-cancelled by the watchdog (repeat stall past the deadline; checkpointed + settled at completed work).", metrics.stuckCancels.Load())
+	writeCounter(w, "cx_stuck_rescued_total", "Stuck runs rescued by the watchdog's first strike (unfinished tasks requeued to a different machine).", metrics.stuckRescues.Load())
+	writeCounter(w, "cx_watchdog_near_miss_total", "Jobs that finalized LATE (realized > 1.2x the predicted eta_secs) — calibration data for the watchdog's ETA factor.", metrics.watchdogNearMiss.Load())
 
 	// Bound the metric DB queries; widened to 10s so a slow scrape under load still
 	// completes rather than truncating the exposition.
@@ -97,7 +102,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	fmt.Fprintf(w, "# HELP cx_ticker_seconds_since_success Seconds since a background ticker last completed a successful run.\n")
 	fmt.Fprintf(w, "# TYPE cx_ticker_seconds_since_success gauge\n")
-	for name, secs := range liveness.snapshot(now, workersStartedAt) {
+	for name, secs := range liveness.snapshot(now, workersStarted()) {
 		fmt.Fprintf(w, "cx_ticker_seconds_since_success{ticker=%q} %.3f\n", name, secs)
 	}
 }

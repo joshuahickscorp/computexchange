@@ -135,6 +135,29 @@ func (s *Storage) PresignPut(ctx context.Context, key string, ttl time.Duration)
 	return u.String(), nil
 }
 
+// ObjectExists reports whether an object exists at key — a StatObject HEAD via
+// the internal client, the cheapest possible check (no body transfer). A missing
+// object (NoSuchKey) is a definitive false, never retried; a transient error
+// retries and, if exhausted, SURFACES — an unknown existence must never be
+// reported as "absent" (the watchdog uses this to decide whether a buyer gets a
+// partial-checkpoint URL, and silently dropping one would lose real work).
+func (s *Storage) ObjectExists(ctx context.Context, key string) (bool, error) {
+	var exists bool
+	err := s.withRetry(ctx, func() (bool, error) {
+		_, serr := s.internal.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{})
+		if serr == nil {
+			exists = true
+			return false, nil
+		}
+		if minio.ToErrorResponse(serr).Code == "NoSuchKey" {
+			exists = false
+			return false, nil // definitive: the store answered "not there"
+		}
+		return true, fmt.Errorf("stat object %q: %w", key, serr)
+	})
+	return exists, err
+}
+
 // errStoreCircuitOpen is returned (fast) while the breaker is open after a sustained
 // object-store outage, instead of making every caller grind through full retries.
 var errStoreCircuitOpen = fmt.Errorf("object store circuit open (recent sustained failures); failing fast")

@@ -486,7 +486,7 @@ func (s *Store) ClaimTask(ctx context.Context, w WorkerAuth) (*ClaimedTask, erro
 		     -- Budget Governor (Plane C §12 / Plane D §14 D8): when the job has a hard
 		     -- spend cap, NEVER dispatch a new task whose projected charge would breach
 		     -- it. Projected = already-charged on this job's tasks (buyer_charge debits,
-		     -- same ledger shape refundJobChargesTx uses) + the per-task estimate for
+		     -- same ledger shape failJobAndSettleOnce settles from) + the per-task estimate for
 		     -- every IN-FLIGHT (claimed, running, not-yet-committed) task of this job
 		     -- (each will charge at commit, so it is exposure-in-flight) + ONE more for
 		     -- the candidate. Counting in-flight work is what makes the cap hold under
@@ -760,7 +760,7 @@ func budgetNearLimit(chargedUSD, perTaskUSD, maxUSD float64) bool {
 
 // budgetProjectedExpr is the SQL fragment for a job's PROJECTED charge: everything
 // already charged on its tasks (buyer_charge debits, the same ledger shape
-// refundJobChargesTx uses) PLUS one more task's estimated cost
+// failJobAndSettleOnce settles from) PLUS one more task's estimated cost
 // (estimated_usd / task_count). It is the exact quantity the claim's budget gate
 // compares to max_usd, reused here so the warn/stop bookkeeping agrees with the
 // gate to the cent. `j` must be the alias of the jobs row in the enclosing query.

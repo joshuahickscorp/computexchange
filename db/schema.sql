@@ -613,3 +613,38 @@ CREATE TABLE IF NOT EXISTS worker_model_state (
 );
 CREATE INDEX IF NOT EXISTS worker_model_state_model_idx
     ON worker_model_state (model_id, last_seen_warm DESC);  -- "which live workers have THIS model warm" (scheduler + quote)
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Stuck-run watchdog V2 (control/workers.go reapStuckJobs) — escalation ladder,
+-- buyer deadline policy, and the ETA calibration loop.
+-- ─────────────────────────────────────────────────────────────────────────────
+-- watchdog_strikes is the escalation state: 0 = never judged stuck; the first
+-- stuck verdict RESCUES (unfinished tasks requeued to a different machine) and
+-- sets it to 1; a second verdict KILLS (checkpoint + cancel + settle). Guarded
+-- transitions (WHERE status='running' AND watchdog_strikes=0) keep concurrent
+-- sweeps idempotent.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS watchdog_strikes INT NOT NULL DEFAULT 0;
+-- deadline_secs is the buyer's watchdog policy knob (POST /v1/jobs):
+--   NULL / 0 → default behavior (ETA-derived deadline with floor + 24h cap),
+--   -1       → opt OUT of the watchdog entirely (run to completion),
+--   60..604800 → an explicit wall-clock deadline (1 minute to 7 days).
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS deadline_secs INT;
+-- eta_calibration is the feedback loop that tunes the watchdog's ETA factor:
+-- one row per finalized job with an ETA prediction, pairing what was PREDICTED
+-- at submit (jobs.eta_secs) with what was REALIZED (seconds from created_at to
+-- finalize). Real observations only — a job with no prediction inserts nothing.
+CREATE TABLE IF NOT EXISTS eta_calibration (
+    id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    job_id         UUID,
+    job_type       TEXT,
+    tier           TEXT,
+    predicted_secs INT,
+    realized_secs  INT,
+    created_at     TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS eta_calibration_type_idx ON eta_calibration (job_type, tier, created_at DESC);
+-- One calibration row per job, enforced structurally: the two finalize sites (the
+-- commit-path finalize and the webhook sweep) can race, and INSERT..WHERE NOT EXISTS
+-- is not atomic under READ COMMITTED — without this index both could insert,
+-- duplicating rows and double-counting the near-miss metric.
+CREATE UNIQUE INDEX IF NOT EXISTS eta_calibration_job_uniq ON eta_calibration (job_id);

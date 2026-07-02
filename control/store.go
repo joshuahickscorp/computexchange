@@ -201,6 +201,20 @@ func (s *Store) Migrate(ctx context.Context) error {
 		   revoked    BOOLEAN DEFAULT false
 		 )`,
 		`CREATE INDEX IF NOT EXISTS sessions_buyer_idx ON sessions (buyer_id)`,
+		// Stuck-run watchdog V2 (MIRRORS db/schema.sql): escalation strikes, the
+		// buyer deadline knob, and the ETA calibration loop.
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS watchdog_strikes INT NOT NULL DEFAULT 0`,
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS deadline_secs INT`,
+		`CREATE TABLE IF NOT EXISTS eta_calibration (
+		   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		   job_id         UUID,
+		   job_type       TEXT,
+		   tier           TEXT,
+		   predicted_secs INT,
+		   realized_secs  INT,
+		   created_at     TIMESTAMPTZ DEFAULT now()
+		 )`,
+		`CREATE INDEX IF NOT EXISTS eta_calibration_type_idx ON eta_calibration (job_type, tier, created_at DESC)`,
 	}
 	for _, q := range stmts {
 		if _, err := s.pool.Exec(ctx, q); err != nil {
@@ -1113,14 +1127,16 @@ func (s *Store) CreateJobWithTasks(ctx context.Context, j *jobRow, tasks []taskR
 		   (id, buyer_id, status, job_type, model_ref, input_ref, output_ref,
 		    tier, verification_policy, estimated_usd, actual_usd, task_count, tasks_done,
 		    min_memory_gb, hw_classes, data_residency, job_type_spec, split_size,
-		    offered_rate_usd_hr, eta_secs, max_usd, budget_state, quote_id, min_reputation, private_pool)
+		    offered_rate_usd_hr, eta_secs, max_usd, budget_state, quote_id, min_reputation, private_pool,
+		    deadline_secs)
 		 VALUES ($1,$2,'queued',$3,$4,$5,$6,$7,$8,$9,0,$10,0,
-		         $11,$12,$13,$14,$15,$16,$17,$18,'tracking',$19,$20,$21)`,
+		         $11,$12,$13,$14,$15,$16,$17,$18,'tracking',$19,$20,$21,$22)`,
 		j.ID, j.BuyerID, j.JobType, j.ModelRef, j.InputRef, j.OutputRef,
 		j.Tier, j.VerificationPolicy, j.EstimatedUSD, j.TaskCount,
 		j.MinMemoryGB, nullStrSlice(j.HWClasses), nullStrSlice(j.DataResidency),
 		nullJSON(j.JobTypeSpec), j.SplitSize, j.OfferedRateUsdHr, j.ETASecs,
 		nullPosFloat(j.MaxUSD), nullUUID(j.QuoteID), j.MinReputation, j.PrivatePool,
+		j.DeadlineSecs,
 	)
 	if err != nil {
 		return err
@@ -1167,6 +1183,7 @@ type jobRow struct {
 	QuoteID            uuid.UUID // advisory quote bound to this job (Plane D D7); zero = none → persisted NULL
 	MinReputation      float32   // Elite-supplier gate: claim only by suppliers with reputation >= this (0 = any)
 	PrivatePool        bool      // Private Deployment: route ONLY to the buyer's bound suppliers (private_pool_members)
+	DeadlineSecs       int       // watchdog policy: -1 opt out, 0 default, 60..604800 explicit wall-clock deadline
 }
 
 // taskRow mirrors the tasks columns we write at creation. Each task is one chunk
@@ -1420,7 +1437,7 @@ func (s *Store) CommitTask(ctx context.Context, taskID, workerID uuid.UUID, c Ta
 	// REAL committed-task wall-time so the Exchange Brain can learn an observed p90
 	// the next quote's ETA leans on. This lives INSIDE the commit transaction so a
 	// duration is recorded if and only if the task truly committed — a failed or
-	// malformed task takes the fail path (failJobAndRefundOnce), never this one, so
+	// malformed task takes the fail path (failJobAndSettleOnce), never this one, so
 	// it can never poison the estimate. duration_ms is the worker's reported value;
 	// we store it verbatim (real telemetry, never fabricated).
 	_, err = tx.Exec(ctx,
@@ -1618,6 +1635,21 @@ func (s *Store) DockReputation(ctx context.Context, supplierID uuid.UUID, event 
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// DockReputationMild applies an event's delta (the same pure reputationDelta the
+// full DockReputation uses) clamped to [0, 1], WITHOUT the quarantine/ban side
+// effects. Used by the dead-claim rescue: a machine that went silent mid-claim is
+// a soft reliability signal (mildest dock), not fraud — a repeat offender's score
+// still erodes toward the claim filter's reputation gates, but this path NEVER
+// suspends or bans on its own.
+func (s *Store) DockReputationMild(ctx context.Context, supplierID uuid.UUID, event ReputationEvent) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE suppliers
+		   SET reputation = GREATEST(0.0, LEAST(1.0, reputation + $2))
+		 WHERE id = $1`,
+		supplierID, reputationDelta(event))
+	return err
 }
 
 // RequeueTask resets a failed-verification task to retrying and bumps the retry
@@ -2077,16 +2109,19 @@ type PendingWebhook struct {
 	Status string
 }
 
-// PendingWebhooks returns webhooks whose job has completed but that have not yet
-// been delivered (delivered_at IS NULL). Job-scoped webhooks only — a webhook
-// without a job_id is a buyer catch-all with no single completion event to fire.
+// PendingWebhooks returns webhooks whose job has reached a terminal state
+// (complete, failed, or cancelled — a watchdog stuck-cancel is a terminal outcome
+// the buyer registered to hear about) but that have not yet been delivered
+// (delivered_at IS NULL — the single flag that governs exactly-once firing).
+// Job-scoped webhooks only — a webhook without a job_id is a buyer catch-all with
+// no single terminal event to fire.
 func (s *Store) PendingWebhooks(ctx context.Context, limit int) ([]PendingWebhook, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT wh.id, wh.job_id, wh.url, j.status
 		 FROM webhooks wh JOIN jobs j ON j.id = wh.job_id
 		 WHERE wh.delivered_at IS NULL
 		   AND wh.job_id IS NOT NULL
-		   AND j.status IN ('complete','failed')
+		   AND j.status IN ('complete','failed','cancelled')
 		 ORDER BY j.created_at ASC LIMIT $1`,
 		limit)
 	if err != nil {
@@ -2579,11 +2614,12 @@ func (s *Store) RequeueStaleTask(ctx context.Context, taskID uuid.UUID, backoff 
 	return err
 }
 
-// FailTaskAndRefundJob marks a task permanently failed (retries exhausted) and
-// fails its parent job, writing a refund ledger row for any buyer charges already
-// taken on that job. This is the job-level refund the action plan calls for when
-// a task cannot be completed by any worker.
-func (s *Store) FailTaskAndRefundJob(ctx context.Context, taskID, jobID uuid.UUID) error {
+// FailTaskAndSettleJob marks a task permanently failed (retries exhausted) and
+// fails its parent job, settling the job at the work that actually completed
+// (partial-settle everywhere — see failJobAndSettleOnce). The caller checkpoints
+// completed chunks BEFORE calling this (merge-before-mark), so delivered work is
+// downloadable even off the failure path.
+func (s *Store) FailTaskAndSettleJob(ctx context.Context, taskID, jobID uuid.UUID) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -2594,49 +2630,51 @@ func (s *Store) FailTaskAndRefundJob(ctx context.Context, taskID, jobID uuid.UUI
 		`UPDATE tasks SET status = 'failed' WHERE id = $1`, taskID); err != nil {
 		return err
 	}
-	if _, err := failJobAndRefundOnce(ctx, tx, jobID); err != nil {
+	if _, err := failJobAndSettleOnce(ctx, tx, jobID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
 }
 
-// refundJobChargesTx writes a refund ledger row (released) for any buyer_charge
-// debits already taken on a job's tasks, so the buyer's net for a failed job is
-// zero. Tx-scoped so the failure path and the stale reaper share one refund rule
-// (no duplicated money math). No-op when nothing was charged.
-func refundJobChargesTx(ctx context.Context, tx pgx.Tx, jobID uuid.UUID) error {
-	var buyer uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT buyer_id FROM jobs WHERE id = $1`, jobID).Scan(&buyer); err != nil {
-		return err
+// JobCheckpointInfo returns what the merge-before-fail discipline needs to decide
+// whether a checkpoint merge is worth attempting: the job's output_ref (empty =
+// nowhere to write) and its completed-task count (0 = nothing to checkpoint).
+func (s *Store) JobCheckpointInfo(ctx context.Context, jobID uuid.UUID) (outputRef string, tasksDone int, err error) {
+	err = s.pool.QueryRow(ctx,
+		`SELECT COALESCE(output_ref,''), COALESCE(tasks_done,0) FROM jobs WHERE id = $1`,
+		jobID).Scan(&outputRef, &tasksDone)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", 0, errNotFound
 	}
-	var charged float64
-	if err := tx.QueryRow(ctx,
-		`SELECT COALESCE(SUM(-amount_usd),0) FROM ledger_entries
-		 WHERE kind = 'buyer_charge' AND buyer_id = $1
-		   AND task_id IN (SELECT id FROM tasks WHERE job_id = $2)`,
-		buyer, jobID,
-	).Scan(&charged); err != nil {
-		return err
-	}
-	if charged > 0 {
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO ledger_entries (kind, buyer_id, amount_usd, payout_status)
-			 VALUES ('refund', $1, $2, 'released')`,
-			buyer, charged); err != nil {
-			return err
-		}
-	}
-	return nil
+	return outputRef, tasksDone, err
 }
 
-// failJobAndRefundOnce flips a job to 'failed' and refunds the buyer EXACTLY once,
-// even when several of the job's tasks fail terminally (e.g. multiple workers each
-// report bad input, or the stale reaper and the fail endpoint both fire). It is a
-// no-op when the job is already terminal — refunding per-failed-task would
-// over-refund a job that had prior committed charges. `flipped` is true only on the
-// call that actually transitioned the job, so the caller emits the job_failed event
-// (and the refund) exactly once.
-func failJobAndRefundOnce(ctx context.Context, tx pgx.Tx, jobID uuid.UUID) (flipped bool, err error) {
+// TaskJobID resolves a task's parent job. Used by the fail endpoint to checkpoint
+// delivered chunks AFTER a validated terminal failure (the checkpoint needs the job,
+// FailTask returns only the outcome). errNotFound when the task does not exist.
+func (s *Store) TaskJobID(ctx context.Context, taskID uuid.UUID) (uuid.UUID, error) {
+	var jobID uuid.UUID
+	err := s.pool.QueryRow(ctx, `SELECT job_id FROM tasks WHERE id = $1`, taskID).Scan(&jobID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, errNotFound
+	}
+	return jobID, err
+}
+
+// failJobAndSettleOnce flips a job to 'failed' EXACTLY once, even when several of
+// the job's tasks fail terminally (e.g. multiple workers each report bad input, or
+// the stale reaper and the fail endpoint both fire). It is a no-op when the job is
+// already terminal. `flipped` is true only on the call that actually transitioned
+// the job, so the caller emits the job_failed event exactly once.
+//
+// MONEY (partial-settle everywhere, same rule as the stuck-run watchdog): nothing
+// is refunded via ledger rows, because per-task charges settle only at a verified
+// commit — completed chunks were DELIVERED and stay charged (the supplier earned
+// them), and the un-run remainder was never charged in the first place. The job's
+// actual_usd is settled here to the sum of those completed-task charges, so a job
+// with ZERO delivered chunks honestly settles at $0 (nothing charged, nothing owed)
+// with no refund row needed.
+func failJobAndSettleOnce(ctx context.Context, tx pgx.Tx, jobID uuid.UUID) (flipped bool, err error) {
 	ct, err := tx.Exec(ctx,
 		`UPDATE jobs SET status = 'failed' WHERE id = $1 AND status NOT IN ('complete','cancelled','failed')`,
 		jobID)
@@ -2644,16 +2682,24 @@ func failJobAndRefundOnce(ctx context.Context, tx pgx.Tx, jobID uuid.UUID) (flip
 		return false, err
 	}
 	if ct.RowsAffected() == 0 {
-		return false, nil // already terminal — do not re-refund
+		return false, nil // already terminal — nothing to settle again
 	}
-	if err := refundJobChargesTx(ctx, tx, jobID); err != nil {
+	// Settle at completed work (the tx-scoped twin of SetJobActualUSD).
+	if _, err := tx.Exec(ctx,
+		`UPDATE jobs SET actual_usd = COALESCE((
+		   SELECT SUM(-amount_usd) FROM ledger_entries
+		   WHERE kind = 'buyer_charge'
+		     AND task_id IN (SELECT id FROM tasks WHERE job_id = $1)
+		 ),0)
+		 WHERE id = $1`, jobID); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-// StuckJob is a running job the watchdog judged stuck: past its ETA multiple with
-// no task progress. Carries what the reaper needs to checkpoint + cancel + settle.
+// StuckJob is a running job the watchdog judged stuck: past its deadline with no
+// task progress. Carries what the reaper needs to escalate (rescue or kill),
+// checkpoint, cancel + settle, and attribute the stall.
 type StuckJob struct {
 	ID        uuid.UUID
 	BuyerID   uuid.UUID
@@ -2661,30 +2707,66 @@ type StuckJob struct {
 	EtaSecs   int
 	TasksDone int
 	TaskCount int
+	Strikes   int  // watchdog_strikes: 0 → rescue next, >=1 → kill next
+	DeadClaim bool // an unfinished task is claimed by a DEAD worker (machine-stuck, not workload-stuck)
 }
 
-// StuckRunningJobs returns running jobs past factor × their predicted eta_secs with
-// NO task progress (no commit AND no fresh claim) within grace. Progress within
-// grace — even slow progress — exempts a job: the watchdog kills stuck runs, never
-// merely slow ones (hedging already covers slow). Jobs with no ETA prediction are
-// never judged (no honest deadline exists to hold them to).
-func (s *Store) StuckRunningJobs(ctx context.Context, factor float64, grace time.Duration, limit int) ([]StuckJob, error) {
+// StuckRunningJobs returns running jobs past their deadline with NO task progress
+// (no commit, no fresh claim, and no recently-scheduled retry visibility) within
+// grace. Progress within grace — even slow progress — exempts a job: the watchdog
+// regulates stuck runs, never merely slow ones (hedging already covers slow).
+//
+// The deadline is, in precedence order (each case OWNS its jobs — a later clause
+// never overrides an earlier one, so an explicit 3-day deadline is never cut short
+// by the fallback cap):
+//   - an explicit buyer deadline_secs (> 0): a hard wall-clock deadline;
+//   - otherwise the ETA-derived deadline: factor × eta_secs, FLOORED at
+//     eta_secs + 120s so a tiny prediction (eta 10s → 15s at 1.5×) cannot judge a
+//     job faster than a human could blink;
+//   - otherwise (no explicit deadline AND no ETA) a 24-hour wall-clock cap — the
+//     only deadline a no-prediction job can honestly be held to.
+//
+// deadline_secs = -1 is the buyer's opt-out: the job is NEVER judged, not even by
+// the 24h cap (they asked for run-to-completion and get exactly that).
+//
+// The visible_at term in the progress check makes a just-rescued/requeued task
+// count as progress: its visibility backoff sits in the near future, which proves
+// the queue is actively re-placing the work — without it, a rescue would be judged
+// "still no progress" on the very next sweep and killed before any worker could
+// claim. deadAfter bounds the worker-liveness attribution: DeadClaim is true when
+// an unfinished task's claiming worker has not heartbeated within it (or ever).
+func (s *Store) StuckRunningJobs(ctx context.Context, factor float64, grace, deadAfter time.Duration, limit int) ([]StuckJob, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT j.id, j.buyer_id, COALESCE(j.output_ref,''), COALESCE(j.eta_secs,0),
-		        j.tasks_done, j.task_count
+		        j.tasks_done, j.task_count, COALESCE(j.watchdog_strikes,0),
+		        EXISTS (
+		          SELECT 1 FROM tasks t JOIN workers w ON w.id = t.claimed_by
+		          WHERE t.job_id = j.id AND t.status = 'running'
+		            AND (w.last_seen_at IS NULL OR w.last_seen_at < now() - make_interval(secs => $4::float8))
+		        ) AS dead_claim
 		 FROM jobs j
 		 WHERE j.status = 'running'
-		   AND COALESCE(j.eta_secs,0) > 0
-		   AND now() > j.created_at + make_interval(secs => j.eta_secs::float8 * $1)
+		   AND COALESCE(j.deadline_secs, 0) <> -1
+		   AND (
+		     (j.deadline_secs IS NOT NULL AND j.deadline_secs > 0
+		       AND now() > j.created_at + make_interval(secs => j.deadline_secs::float8))
+		     OR (COALESCE(j.deadline_secs, 0) = 0 AND COALESCE(j.eta_secs, 0) > 0
+		       AND now() > j.created_at + GREATEST(
+		             make_interval(secs => j.eta_secs::float8 * $1),
+		             make_interval(secs => j.eta_secs::float8 + 120)))
+		     OR (COALESCE(j.deadline_secs, 0) = 0 AND COALESCE(j.eta_secs, 0) = 0
+		       AND now() > j.created_at + interval '24 hours')
+		   )
 		   AND NOT EXISTS (
 		     SELECT 1 FROM tasks t
 		     WHERE t.job_id = j.id
 		       AND (t.completed_at > now() - make_interval(secs => $2::float8)
-		         OR t.claimed_at   > now() - make_interval(secs => $2::float8))
+		         OR t.claimed_at   > now() - make_interval(secs => $2::float8)
+		         OR t.visible_at   > now() - make_interval(secs => $2::float8))
 		   )
 		 ORDER BY j.created_at ASC
 		 LIMIT $3`,
-		factor, grace.Seconds(), limit)
+		factor, grace.Seconds(), limit, deadAfter.Seconds())
 	if err != nil {
 		return nil, err
 	}
@@ -2692,12 +2774,185 @@ func (s *Store) StuckRunningJobs(ctx context.Context, factor float64, grace time
 	var out []StuckJob
 	for rows.Next() {
 		var j StuckJob
-		if err := rows.Scan(&j.ID, &j.BuyerID, &j.OutputRef, &j.EtaSecs, &j.TasksDone, &j.TaskCount); err != nil {
+		if err := rows.Scan(&j.ID, &j.BuyerID, &j.OutputRef, &j.EtaSecs, &j.TasksDone, &j.TaskCount,
+			&j.Strikes, &j.DeadClaim); err != nil {
 			return nil, err
 		}
 		out = append(out, j)
 	}
 	return out, rows.Err()
+}
+
+// RescueStuckJob is the watchdog's FIRST strike: instead of killing a stuck job it
+// moves every unfinished task back to the queue for a different machine — the claim
+// is cleared, a small visibility backoff applied (same mechanics as the stale
+// requeue), and retry_count is deliberately NOT incremented (the stall is not the
+// task's fault; burning its retries here would fast-track it to a terminal fail).
+// The strike transition is guarded (status='running' AND watchdog_strikes=0), so
+// concurrent sweeps rescue at most once: flipped=false means another sweep won the
+// race (or the job progressed/went terminal) and NOTHING was touched.
+func (s *Store) RescueStuckJob(ctx context.Context, jobID uuid.UUID, backoff time.Duration) (flipped bool, err error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	ct, err := tx.Exec(ctx,
+		`UPDATE jobs SET watchdog_strikes = 1
+		 WHERE id = $1 AND status = 'running' AND COALESCE(watchdog_strikes, 0) = 0`, jobID)
+	if err != nil {
+		return false, err
+	}
+	if ct.RowsAffected() == 0 {
+		return false, nil
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE tasks
+		   SET status = 'queued', claimed_by = NULL, claimed_at = NULL,
+		       started_at = NULL, worker_id = NULL,
+		       visible_at = now() + make_interval(secs => $2)
+		 WHERE job_id = $1 AND status IN ('running','retrying')`,
+		jobID, backoff.Seconds()); err != nil {
+		return false, err
+	}
+	// Already-queued tasks with a STALE visible_at get it refreshed too. Without
+	// this, a job whose unfinished work is all sitting unclaimed in the queue (e.g.
+	// no capacity for its hw_class) gets a "rescue" that touches zero rows and no
+	// fresh progress term — so the very next sweep would judge it stuck again and
+	// kill it 30s after promising a second chance. The refresh makes the second
+	// window real; if capacity never appears, the deadline clause catches it again
+	// honestly at strike 1.
+	if _, err := tx.Exec(ctx,
+		`UPDATE tasks SET visible_at = now() + make_interval(secs => $2)
+		 WHERE job_id = $1 AND status = 'queued'
+		   AND visible_at < now() + make_interval(secs => $2)`,
+		jobID, backoff.Seconds()); err != nil {
+		return false, err
+	}
+	return true, tx.Commit(ctx)
+}
+
+// DeadClaim is a running task held by a worker that stopped heartbeating: the
+// machine is gone (crash, sleep, network loss), so waiting for a commit is
+// hopeless. Carries who to dock and where to requeue.
+type DeadClaim struct {
+	TaskID     uuid.UUID
+	JobID      uuid.UUID
+	WorkerID   uuid.UUID
+	SupplierID uuid.UUID // zero when the worker row has no supplier (never docked)
+	JobType    string
+}
+
+// DeadClaimedTasks finds running tasks whose claiming worker has been silent past
+// olderThan (last_seen_at older than it, or never seen) AND whose claim itself is
+// older than olderThan — the double condition so a task claimed a moment before a
+// heartbeat lull is not misread as dead. These are the fast-rescue set: a dead
+// machine is a certainty, so its tasks requeue immediately instead of waiting for
+// the 30-min stale reaper or the job-level watchdog.
+func (s *Store) DeadClaimedTasks(ctx context.Context, olderThan time.Duration, limit int) ([]DeadClaim, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT t.id, t.job_id, w.id, w.supplier_id, j.job_type
+		 FROM tasks t
+		 JOIN workers w ON w.id = t.claimed_by
+		 JOIN jobs j ON j.id = t.job_id
+		 WHERE t.status = 'running'
+		   AND t.claimed_at IS NOT NULL
+		   AND t.claimed_at < now() - make_interval(secs => $1)
+		   AND (w.last_seen_at IS NULL OR w.last_seen_at < now() - make_interval(secs => $1))
+		   AND j.status = 'running'
+		 ORDER BY t.claimed_at ASC
+		 LIMIT $2`,
+		olderThan.Seconds(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DeadClaim
+	for rows.Next() {
+		var d DeadClaim
+		var sup *uuid.UUID
+		if err := rows.Scan(&d.TaskID, &d.JobID, &d.WorkerID, &sup, &d.JobType); err != nil {
+			return nil, err
+		}
+		if sup != nil {
+			d.SupplierID = *sup
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// RescueRunningTask requeues ONE running task with the rescue mechanics (claim
+// cleared, small visibility backoff, retry_count NOT incremented — the worker died
+// or wedged; the task did nothing wrong). Guarded by status='running' so a task
+// that committed/failed between selection and here is untouched; rescued=false
+// reports exactly that, so the caller only events/docks on a real rescue.
+func (s *Store) RescueRunningTask(ctx context.Context, taskID uuid.UUID, backoff time.Duration) (rescued bool, err error) {
+	ct, err := s.pool.Exec(ctx,
+		`UPDATE tasks
+		   SET status = 'queued', claimed_by = NULL, claimed_at = NULL,
+		       started_at = NULL, worker_id = NULL,
+		       visible_at = now() + make_interval(secs => $2)
+		 WHERE id = $1 AND status = 'running'`,
+		taskID, backoff.Seconds())
+	if err != nil {
+		return false, err
+	}
+	return ct.RowsAffected() > 0, nil
+}
+
+// CancelledTaskResultKeys returns the result_key of every cancelled PRIMARY task
+// of a job — the keys whose "<result_key>.partial" objects the watchdog's kill
+// path checks for mid-chunk checkpoint documents. Honeypot/redundancy clones are
+// excluded (verification probes, never buyer output).
+func (s *Store) CancelledTaskResultKeys(ctx context.Context, jobID uuid.UUID) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT result_key FROM tasks
+		 WHERE job_id = $1 AND status = 'cancelled'
+		   AND is_honeypot = false AND is_redundancy = false
+		   AND result_key IS NOT NULL AND result_key <> ''
+		 ORDER BY chunk_index ASC, id ASC`,
+		jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, err
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// RecordEtaCalibration inserts one eta_calibration row for a finalized job —
+// predicted_secs = the eta_secs persisted at submit, realized_secs = wall-clock
+// seconds from created_at to now (the finalize moment). A job with no prediction
+// (eta_secs NULL/0) inserts NOTHING (there is no predicted value to calibrate,
+// and fabricating one would poison the loop), and a job already recorded is a
+// no-op (both finalize sites can fire once each in a race). Returns the recorded
+// pair — (0, 0) when nothing was inserted — so the caller can count near-misses.
+func (s *Store) RecordEtaCalibration(ctx context.Context, jobID uuid.UUID) (predicted, realized int, err error) {
+	// ON CONFLICT (job_id) DO NOTHING makes the once-only guarantee ATOMIC (the
+	// eta_calibration_job_uniq index): when the two finalize sites race, exactly one
+	// insert wins and returns the row; the loser scans ErrNoRows and records nothing
+	// — so the near-miss counter can never double-count a job.
+	err = s.pool.QueryRow(ctx,
+		`INSERT INTO eta_calibration (job_id, job_type, tier, predicted_secs, realized_secs)
+		 SELECT id, job_type, tier, eta_secs,
+		        GREATEST(0, EXTRACT(EPOCH FROM (now() - created_at)))::int
+		 FROM jobs
+		 WHERE id = $1 AND COALESCE(eta_secs, 0) > 0
+		 ON CONFLICT (job_id) DO NOTHING
+		 RETURNING predicted_secs, realized_secs`,
+		jobID).Scan(&predicted, &realized)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, 0, nil // no ETA prediction (or already recorded) — nothing to calibrate
+	}
+	return predicted, realized, err
 }
 
 // CancelStuckJob flips a stuck job to 'cancelled' and cancels its unfinished tasks.

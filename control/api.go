@@ -340,7 +340,7 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not_ready", "reason": "database unreachable"})
 		return
 	}
-	if stale := liveness.stale(time.Now(), workersStartedAt); len(stale) > 0 {
+	if stale := liveness.stale(time.Now(), workersStarted()); len(stale) > 0 {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not_ready", "stale_tickers": stale})
 		return
 	}
@@ -380,6 +380,11 @@ type jobSubmit struct {
 	// PrivatePool routes this job ONLY to the buyer's bound suppliers (Private Deployment
 	// tier, research §3): their dedicated fleet, so the data never touches a shared pool.
 	PrivatePool bool `json:"private_pool,omitempty"`
+	// DeadlineSecs is the buyer's stuck-run watchdog policy knob: -1 opts OUT of the
+	// watchdog entirely (run to completion — never judged, not even by the 24h cap),
+	// 0 (the default) keeps the ETA-derived deadline, and 60..604800 (1 minute to
+	// 7 days) sets an explicit wall-clock deadline. Anything else is a 400.
+	DeadlineSecs int `json:"deadline_secs,omitempty"`
 }
 
 // defaultSplitSize is the JSONL chunk size (lines per task) when params omits it.
@@ -444,6 +449,14 @@ func (s *Server) createJob(ctx context.Context, buyerID uuid.UUID, sub jobSubmit
 	// leaves a job created with no webhook.
 	if sub.WebhookURL != "" && !strings.HasPrefix(sub.WebhookURL, "https://") {
 		return JobSubmitResponse{}, &httpError{http.StatusBadRequest, "webhook_url must be https"}
+	}
+	// Watchdog policy knob: only -1 (opt out), 0 (default), or an explicit
+	// 60..604800 wall-clock deadline are meaningful; anything else is a typo the
+	// buyer should hear about now, not a silently-misread deadline.
+	if sub.DeadlineSecs != 0 && sub.DeadlineSecs != -1 &&
+		(sub.DeadlineSecs < 60 || sub.DeadlineSecs > 604800) {
+		return JobSubmitResponse{}, &httpError{http.StatusBadRequest,
+			"deadline_secs must be -1 (run to completion), 0 (default watchdog), or 60..604800 seconds"}
 	}
 
 	// Require a saved payment method before accepting billable work WHEN billing is
@@ -657,6 +670,7 @@ func (s *Server) createJob(ctx context.Context, buyerID uuid.UUID, sub jobSubmit
 		ETASecs:            etaSecs,
 		MaxUSD:             sub.MaxUSD,   // Budget Governor cap (0 = none → persisted NULL)
 		QuoteID:            boundQuoteID, // D7 quote binding (zero = none → persisted NULL)
+		DeadlineSecs:       sub.DeadlineSecs,
 	}
 	if err := s.store.CreateJobWithTasks(ctx, jr, tasks); err != nil {
 		return JobSubmitResponse{}, &httpError{http.StatusInternalServerError, "failed to create job: " + err.Error()}
@@ -1389,6 +1403,17 @@ func (s *Server) claimWithWait(ctx context.Context, auth WorkerAuth, wait time.D
 	}
 }
 
+// checkpointableJobTypes are the job types whose dispatch carries a
+// partial_put_url (shared wire contract): per-record batch work where a mid-chunk
+// checkpoint document is meaningful. Other types (embeddings finish in seconds;
+// custom runtimes are opaque) are deliberately excluded — old agents ignore the
+// field either way, so the contract stays fully backward compatible.
+var checkpointableJobTypes = map[string]bool{
+	"batch_infer":          true,
+	"batch_classification": true,
+	"json_extraction":      true,
+}
+
 // handleWorkerPoll claims the next eligible task via the SKIP-LOCKED queue and
 // returns it as a TaskDispatch, or 204 when nothing is available.
 //
@@ -1436,6 +1461,22 @@ func (s *Server) handleWorkerPoll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "presign result: "+err.Error())
 		return
 	}
+	// Intra-task checkpointing (shared wire contract with the agent): for the
+	// checkpointable batch job types, also presign a PUT for result_key+".partial"
+	// (same expiry as the result presign) so the agent MAY periodically upload a
+	// mid-chunk partial result document. The final commit is UNCHANGED (full result
+	// to output_url; byte-determinism unaffected); partials are never merged and
+	// never affect money — the watchdog's kill path merely hands the buyer GET URLs
+	// to the ones that exist. Best-effort: a presign failure here degrades only the
+	// optional checkpoint, so it is logged and the dispatch proceeds without it.
+	partialPutURL := ""
+	if checkpointableJobTypes[c.JobType] {
+		if u, perr := s.storage.PresignPut(ctx, c.ResultKey+".partial", time.Hour); perr == nil {
+			partialPutURL = u
+		} else {
+			log.Printf("poll: presign partial for task %s: %v (dispatched without checkpoint URL)", c.TaskID, perr)
+		}
+	}
 
 	// Reconstruct a minimal manifest for the dispatch from the stored job
 	// fields. The verification policy round-trips from jsonb.
@@ -1466,6 +1507,7 @@ func (s *Server) handleWorkerPoll(w http.ResponseWriter, r *http.Request) {
 		},
 		InputURL:         inputURL,
 		OutputURL:        outputURL,
+		PartialPutURL:    partialPutURL,
 		ResultKey:        c.ResultKey,
 		OfferedRateUsdHr: c.OfferedRateUsdHr,
 		Deadline:         uint64(time.Now().Add(time.Hour).Unix()),
@@ -1609,6 +1651,8 @@ func (s *Server) finalizeJobIfDone(ctx context.Context, jobID uuid.UUID) error {
 	if err := s.store.SetJobActualUSD(ctx, jobID); err != nil {
 		return err
 	}
+	// Feed the ETA calibration loop (predicted vs realized; best-effort).
+	recordEtaCalibration(ctx, s.store, jobID)
 	// Best-effort external charge: gated on Stripe + a saved card, idempotent by
 	// job id. A no-op (and unchanged lifecycle) when billing isn't configured.
 	s.chargeForJob(ctx, jobID)

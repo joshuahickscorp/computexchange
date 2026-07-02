@@ -16,8 +16,11 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // workers.go — the background loops that turn the job lifecycle from "rows in a
@@ -30,7 +33,8 @@ import (
 //     'released' with the rail reference.
 //   - stale-task requeue (30s): tasks claimed but never committed past a timeout
 //     are pushed back to the queue with backoff, up to maxRetries, then failed
-//     (with a buyer refund).
+//     (settled at delivered work; completed chunks stay charged, the rest was
+//     never charged — see failJobAndSettleOnce).
 //   - webhook delivery / job sweep (20s): jobs whose tasks are all done are
 //     finalized to 'complete', and registered completion webhooks are POSTed once
 //     (SSRF-guarded + HMAC-signed; see deliverWebhook) with retries, then flagged
@@ -38,6 +42,13 @@ import (
 //   - straggler-hedge (30s): a running primary past the hedge window gets one
 //     duplicate copy on a distinct same-class peer so a slow worker cannot stall
 //     the job tail.
+//   - stuck-reaper (30s): the stuck-run watchdog's escalation ladder — a job past
+//     its deadline with no progress is RESCUED on the first strike (unfinished
+//     tasks requeued to a different machine) and KILLED on a repeat (checkpoint,
+//     cancel, settle at completed work). See reapStuckJobs.
+//   - dead-claim-rescue (30s): a running task whose claiming worker stopped
+//     heartbeating is requeued immediately (dead machine = fast rescue, mildest
+//     supplier dock on catalogue work). See rescueDeadClaims.
 //   - ledger-reconcile (15m): released supplier credits are audited against actual
 //     Stripe transfers and any drift is logged — read-only, never moves money (see
 //     reconcile.go).
@@ -80,15 +91,25 @@ const (
 	hedgeAfter       = 90 * time.Second // 2 × ~45s target per-task time
 	hedgeMaxInFlight = 4                // concurrent hedges per job
 	hedgeBatch       = 20               // max new hedges per tick
-	// Stuck-run watchdog: a running job past stuckEtaFactor × its predicted eta_secs
-	// (the machine-throughput-derived prediction persisted at submit) with NO task
-	// progress — no commit and no fresh claim — within stuckProgressGrace is judged
-	// STUCK, not slow: completed chunks are checkpointed (partial merge), the rest is
-	// cancelled, and the job settles at what actually ran. Grace is 2 × hedgeAfter so
-	// hedging always gets its chance to rescue a straggler before the reaper rules.
+	// Stuck-run watchdog: a running job past its deadline (buyer deadline_secs when
+	// set, else stuckEtaFactor × the predicted eta_secs floored at eta+120s, else the
+	// 24h wall-clock cap — see StuckRunningJobs) with NO task progress — no commit,
+	// no fresh claim, no freshly-scheduled retry — within stuckProgressGrace is
+	// judged STUCK, not slow. The watchdog is a REGULATOR with an escalation ladder,
+	// not a kill switch: the FIRST verdict rescues (unfinished tasks requeued to a
+	// different machine, watchdog_strikes → 1), a REPEAT verdict kills (completed
+	// chunks checkpointed, the rest cancelled, the job settled at what actually ran).
+	// Grace is 2 × hedgeAfter so hedging always gets its chance to rescue a
+	// straggler before the watchdog rules.
 	stuckInterval      = 30 * time.Second
 	stuckEtaFactor     = 1.5
 	stuckProgressGrace = 2 * hedgeAfter
+	// Worker-liveness attribution: a running task whose claiming worker has neither
+	// heartbeated nor held its claim for less than deadWorkerAfter is on a DEAD
+	// machine — a certainty worth acting on immediately (per-task rescue, no job
+	// strike), instead of waiting out the 30-min stale reaper. Heartbeats arrive
+	// ~every 30s, so 180s is six missed beats: sleep, crash, or network loss, not jitter.
+	deadWorkerAfter = 180 * time.Second
 )
 
 // --- ticker liveness guard ---
@@ -185,17 +206,31 @@ func (l *tickerLiveness) snapshot(now, since time.Time) map[string]float64 {
 	return out
 }
 
-// workersStartedAt is the loop start time the never-succeeded staleness budget is
-// measured from. Set once when Run launches; the readiness probe reads it so a
-// freshly-booted process is not judged stale before a ticker has had a chance to run.
-var workersStartedAt = time.Now()
+// workersStartedAtNano is the loop start time (unix nanos) the never-succeeded
+// staleness budget is measured from. Written once when Run launches, read by the
+// readiness probe and the metrics handler — which run on OTHER goroutines, so the
+// value is an atomic (a bare time.Time write racing an HTTP-handler read is a data
+// race the race detector rightly flags). Zero until Run runs — the watchdog sweeps
+// read that zero as "not the real server" (tests drive them directly) and skip
+// their startup grace, while a real process gets one observation window after
+// downtime before judging anything stalled.
+var workersStartedAtNano atomic.Int64
+
+// workersStarted returns the loop start time, or the zero time before Run ran.
+func workersStarted() time.Time {
+	n := workersStartedAtNano.Load()
+	if n == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, n)
+}
 
 // Run launches the background tickers and blocks until ctx is cancelled. Each tick
 // runs in the foreground of its own goroutine (ticks never overlap themselves),
 // and ctx cancellation stops all promptly. Every ticker is registered with the
 // liveness guard up front so a never-ran loop is observable, not merely absent.
 func (wk *Workers) Run(ctx context.Context) {
-	workersStartedAt = time.Now()
+	workersStartedAtNano.Store(time.Now().UnixNano())
 	tickers := []struct {
 		interval time.Duration
 		name     string
@@ -206,6 +241,7 @@ func (wk *Workers) Run(ctx context.Context) {
 		{webhookInterval, "webhook-sweep", wk.sweepAndDeliver},
 		{hedgeInterval, "straggler-hedge", wk.hedgeStragglers},
 		{stuckInterval, "stuck-reaper", wk.reapStuckJobs},
+		{stuckInterval, "dead-claim-rescue", wk.rescueDeadClaims},
 		{reconcileInterval, "ledger-reconcile", wk.reconcileLedger},
 		{disputeInterval, "dispute-resolve", wk.resolveDisputes},
 	}
@@ -273,7 +309,9 @@ func (wk *Workers) releasePayouts(ctx context.Context) error {
 
 // requeueStaleTasks pushes tasks that were claimed but never committed past the
 // timeout back onto the queue with a backoff, incrementing retry_count. Past
-// maxTaskRetries a task is permanently failed and its job refunded.
+// maxTaskRetries a task is permanently failed and its job settled at the completed
+// work (delivered chunks stay charged, un-run work was never charged), with the
+// completed chunks checkpointed into output_ref BEFORE the flip.
 func (wk *Workers) requeueStaleTasks(ctx context.Context) error {
 	stale, err := wk.store.StaleRunningTasks(ctx, staleTaskTimeout, sweepBatch)
 	if err != nil {
@@ -281,10 +319,13 @@ func (wk *Workers) requeueStaleTasks(ctx context.Context) error {
 	}
 	for _, t := range stale {
 		if int(t.RetryCount) >= maxTaskRetries {
-			if ferr := wk.store.FailTaskAndRefundJob(ctx, t.ID, t.JobID); ferr != nil {
+			// Merge-before-mark on the fail path: checkpoint what completed so the
+			// buyer keeps it (best-effort — a merge failure never blocks the fail).
+			checkpointBeforeFail(ctx, wk.store, wk.storage, t.JobID)
+			if ferr := wk.store.FailTaskAndSettleJob(ctx, t.ID, t.JobID); ferr != nil {
 				return ferr
 			}
-			log.Printf("workers: task %s failed after %d retries (job %s refunded)", t.ID, t.RetryCount, t.JobID)
+			log.Printf("workers: task %s failed after %d retries (job %s settled at completed work)", t.ID, t.RetryCount, t.JobID)
 			continue
 		}
 		// Exponential backoff by prior retries (1m, 2m, 4m, 8m, 16m capped) so a
@@ -406,25 +447,69 @@ func (wk *Workers) hedgeStragglers(ctx context.Context) error {
 	return nil
 }
 
-// reapStuckJobs is the stuck-run watchdog: a running job past stuckEtaFactor × its
-// predicted ETA with no task progress within stuckProgressGrace is cancelled — with
-// the buyer made whole for what did not run and NOT refunded for what did:
+// reapStuckJobs is the stuck-run watchdog — a REGULATOR with an escalation
+// ladder, not a kill switch. A running job past its deadline (buyer deadline_secs
+// when set, else the floored ETA multiple, else the 24h cap — StuckRunningJobs
+// owns the geometry) with no task progress within stuckProgressGrace escalates
+// one rung per verdict:
 //
-//  1. CHECKPOINT first (merge-before-mark, same discipline as completion): the
-//     completed chunks are folded into the buyer-ready artifact at output_ref, so a
-//     buyer whose own code has no checkpointing still keeps every finished chunk.
-//     A failed merge leaves the job untouched for retry — never cancel-then-lose.
-//  2. Cancel the job + its unfinished tasks (CancelStuckJob). Charges settle per
-//     task at commit, so the un-run remainder was never charged; completed tasks
-//     stay charged — the suppliers earned them (users owe each other).
-//  3. Settle actual_usd to the completed work and tell the buyer on the job
-//     timeline exactly what happened and what they owe.
+//   - STRIKE 0 → RESCUE: every unfinished task is requeued for a different
+//     machine (claim cleared, small visibility backoff, retry_count untouched —
+//     the stall is not the task's fault), watchdog_strikes flips to 1, and the
+//     buyer is told honestly what happened and what happens next.
+//   - STRIKE 1+ → KILL: checkpoint first (merge-before-mark, same discipline as
+//     completion — a failed merge leaves the job untouched for retry, never
+//     cancel-then-lose), cancel the job + its unfinished tasks (CancelStuckJob),
+//     settle actual_usd at the completed work (per-task charges settle at commit,
+//     so the un-run remainder was never charged and completed tasks stay charged —
+//     the suppliers earned them), and hand the buyer presigned URLs to any
+//     mid-chunk partial checkpoint documents the agents uploaded (never merged
+//     into the verified artifact, never money — just not lost).
+//
+// Both rungs are idempotent under concurrent sweeps: the strike flip and the
+// cancel are guarded UPDATEs, and the loser of either race touches nothing.
 func (wk *Workers) reapStuckJobs(ctx context.Context) error {
-	stuck, err := wk.store.StuckRunningJobs(ctx, stuckEtaFactor, stuckProgressGrace, sweepBatch)
+	// Startup grace: right after control-plane downtime every claim and heartbeat
+	// looks ancient — the plane simply was not there to observe them — so every
+	// running job would be falsely judged stalled. Observe for one grace window
+	// before judging. workersStarted() is zero when a test drives this sweep
+	// directly (Run never ran), so tests are unaffected.
+	if ws := workersStarted(); !ws.IsZero() && time.Since(ws) < stuckProgressGrace {
+		return nil
+	}
+	stuck, err := wk.store.StuckRunningJobs(ctx, stuckEtaFactor, stuckProgressGrace, deadWorkerAfter, sweepBatch)
 	if err != nil {
 		return err
 	}
 	for _, j := range stuck {
+		// Attribution for the buyer text + logs: a dead claiming worker means the
+		// MACHINE is stuck; a live-but-silent one makes the workload the suspect.
+		cause := "the workload made no progress"
+		if j.DeadClaim {
+			cause = "the machine running it went unresponsive"
+		}
+
+		if j.Strikes == 0 {
+			// RESCUE (strike 0): move the unfinished work, warn the buyer, arm the ladder.
+			flipped, rerr := wk.store.RescueStuckJob(ctx, j.ID, staleBackoff)
+			if rerr != nil {
+				log.Printf("workers: rescuing stuck job %s: %v", j.ID, rerr)
+				continue
+			}
+			if !flipped {
+				continue // progressed, went terminal, or a concurrent sweep already rescued
+			}
+			msg := fmt.Sprintf(
+				"Run stalled past its deadline (%s); unfinished work was moved to a different machine. "+
+					"If it stalls again it will be cancelled with completed work checkpointed.", cause)
+			_ = wk.store.InsertJobEvent(ctx, j.ID, nil, "job_stuck_rescued", msg, nil)
+			metrics.stuckRescues.Add(1)
+			log.Printf("workers: stuck job %s rescued (strike 1 · %d/%d tasks done · dead_claim=%v)",
+				j.ID, j.TasksDone, j.TaskCount, j.DeadClaim)
+			continue
+		}
+
+		// KILL (strike >= 1): checkpoint, cancel, settle, tell the buyer.
 		if j.OutputRef != "" && j.TasksDone > 0 {
 			if _, merr := mergeJobResults(ctx, wk.store, wk.storage, j.ID); merr != nil {
 				log.Printf("workers: stuck job %s: checkpoint merge failed: %v (left running for retry)", j.ID, merr)
@@ -444,16 +529,138 @@ func (wk *Workers) reapStuckJobs(ctx context.Context) error {
 			log.Printf("workers: settling stuck job %s actual_usd: %v", j.ID, serr)
 		}
 		msg := fmt.Sprintf(
-			"Run stuck · exceeded %.1fx its predicted ETA with no progress and was cancelled automatically. "+
+			"Run stuck · stalled past its deadline with no progress (%s) and was cancelled automatically. "+
 				"You are charged only for the %d of %d tasks that completed; the rest was never charged. "+
 				"Completed results are checkpointed and downloadable.",
-			stuckEtaFactor, j.TasksDone, j.TaskCount)
-		_ = wk.store.InsertJobEvent(ctx, j.ID, nil, "job_stuck_cancelled", msg, nil)
+			cause, j.TasksDone, j.TaskCount)
+		_ = wk.store.InsertJobEvent(ctx, j.ID, nil, "job_stuck_cancelled", msg, wk.stuckPartialDetail(ctx, j.ID))
 		metrics.stuckCancels.Add(1)
-		log.Printf("workers: stuck job %s cancelled (%d/%d tasks done · eta %ds exceeded %.1fx · grace %s)",
-			j.ID, j.TasksDone, j.TaskCount, j.EtaSecs, stuckEtaFactor, stuckProgressGrace)
+		log.Printf("workers: stuck job %s cancelled (strike %d · %d/%d tasks done · eta %ds · dead_claim=%v · grace %s)",
+			j.ID, j.Strikes, j.TasksDone, j.TaskCount, j.EtaSecs, j.DeadClaim, stuckProgressGrace)
 	}
 	return nil
+}
+
+// stuckPartialDetail checks each cancelled primary task's "<result_key>.partial"
+// object — the agent's optional mid-chunk checkpoint document (shared wire
+// contract: TaskDispatch.partial_put_url) — and returns a job_events detail JSON
+// {"partial_urls": [...]} of presigned GET URLs for the ones that actually exist,
+// so the buyer can retrieve mid-chunk progress from a killed run. Partial objects
+// are NEVER merged into the verified artifact and NEVER affect money — unverified
+// work is not paid and not verified; the URLs only keep it from being lost.
+// Returns nil (no detail) when none exist; every stat/presign failure is logged,
+// never papered over as "no partials".
+func (wk *Workers) stuckPartialDetail(ctx context.Context, jobID uuid.UUID) []byte {
+	keys, err := wk.store.CancelledTaskResultKeys(ctx, jobID)
+	if err != nil {
+		log.Printf("workers: stuck job %s: listing cancelled result keys: %v (no partial_urls detail)", jobID, err)
+		return nil
+	}
+	var urls []string
+	for _, k := range keys {
+		pk := k + ".partial"
+		exists, serr := wk.storage.ObjectExists(ctx, pk)
+		if serr != nil {
+			log.Printf("workers: stuck job %s: checking partial %q: %v", jobID, pk, serr)
+			continue
+		}
+		if !exists {
+			continue
+		}
+		u, perr := wk.storage.PresignGet(ctx, pk, time.Hour)
+		if perr != nil {
+			log.Printf("workers: stuck job %s: presigning partial %q: %v", jobID, pk, perr)
+			continue
+		}
+		urls = append(urls, u)
+	}
+	if len(urls) == 0 {
+		return nil
+	}
+	detail, _ := json.Marshal(map[string]any{"partial_urls": urls})
+	return detail
+}
+
+// rescueDeadClaims is the worker-liveness rescue: a running task whose claiming
+// worker has been silent past deadWorkerAfter (and whose claim is at least that
+// old) sits on a DEAD machine — waiting for its commit is hopeless, so the task is
+// requeued immediately (rescue mechanics: claim cleared, small backoff, no retry
+// burned, and NO job strike — the job did nothing wrong) instead of aging into the
+// 30-min stale reaper or dragging its whole job to the watchdog. For catalogue
+// work (job_type <> 'custom') the wedged worker's supplier takes the MILDEST
+// reputation dock (DockReputationMild — never a quarantine from here): a machine
+// that goes dark mid-claim is a soft reliability signal, and custom jobs are
+// exempt because their buyer-defined runtime proves nothing about the machine.
+func (wk *Workers) rescueDeadClaims(ctx context.Context) error {
+	// Startup grace — the same reasoning as reapStuckJobs: after control-plane
+	// downtime every heartbeat looks ancient because nobody was listening. One
+	// observation window before judging any machine dead. A zero workersStarted()
+	// (tests driving the sweep directly) skips the grace.
+	if ws := workersStarted(); !ws.IsZero() && time.Since(ws) < stuckProgressGrace {
+		return nil
+	}
+	dead, err := wk.store.DeadClaimedTasks(ctx, deadWorkerAfter, sweepBatch)
+	if err != nil {
+		return err
+	}
+	for _, d := range dead {
+		rescued, rerr := wk.store.RescueRunningTask(ctx, d.TaskID, staleBackoff)
+		if rerr != nil {
+			return rerr
+		}
+		if !rescued {
+			continue // committed/failed between selection and here — leave it alone
+		}
+		taskID := d.TaskID
+		_ = wk.store.InsertJobEvent(ctx, d.JobID, &taskID, "task_rescued_dead_worker",
+			"Chunk moved to a different machine: the machine running it stopped responding. "+
+				"No retry was counted against the task.", nil)
+		if d.JobType != "custom" && d.SupplierID != uuid.Nil {
+			if derr := wk.store.DockReputationMild(ctx, d.SupplierID, EventThermalThrottle); derr != nil {
+				log.Printf("workers: docking supplier %s for dead claim on task %s: %v", d.SupplierID, d.TaskID, derr)
+			}
+		}
+		log.Printf("workers: rescued task %s (job %s) from dead worker %s", d.TaskID, d.JobID, d.WorkerID)
+	}
+	return nil
+}
+
+// checkpointBeforeFail attempts the partial checkpoint merge for a job that is
+// about to be terminally failed — the same merge-before-mark discipline the
+// watchdog's kill path uses, so a buyer keeps every delivered chunk even when the
+// job dies on the fail path. Strictly best-effort: no output_ref or no completed
+// chunks is a clean no-op, and a lookup/merge failure is LOGGED and the fail
+// proceeds — a failed job must not be blocked forever on a merge.
+func checkpointBeforeFail(ctx context.Context, store *Store, storage *Storage, jobID uuid.UUID) {
+	outputRef, done, err := store.JobCheckpointInfo(ctx, jobID)
+	if err != nil {
+		log.Printf("fail-path checkpoint: job %s lookup: %v (proceeding with the fail)", jobID, err)
+		return
+	}
+	if outputRef == "" || done == 0 {
+		return // nowhere to write, or nothing completed to checkpoint
+	}
+	if _, err := mergeJobResults(ctx, store, storage, jobID); err != nil {
+		log.Printf("fail-path checkpoint: job %s merge: %v (proceeding with the fail — completed chunks remain per-task objects)", jobID, err)
+	}
+}
+
+// recordEtaCalibration feeds the watchdog's calibration loop at a finalize site:
+// one eta_calibration row pairing the submit-time prediction with the realized
+// wall-clock, plus the cx_watchdog_near_miss_total counter when the job finished
+// but LATE (realized > 1.2 × predicted) — exactly the observations that tune
+// stuckEtaFactor, with no value fabricated (a job without a prediction records
+// nothing). Best-effort: a calibration failure is logged and never fails the
+// finalize it rides on.
+func recordEtaCalibration(ctx context.Context, store *Store, jobID uuid.UUID) {
+	predicted, realized, err := store.RecordEtaCalibration(ctx, jobID)
+	if err != nil {
+		log.Printf("eta calibration for job %s: %v (finalize unaffected)", jobID, err)
+		return
+	}
+	if predicted > 0 && float64(realized) > 1.2*float64(predicted) {
+		metrics.watchdogNearMiss.Add(1)
+	}
 }
 
 // webhookPayload is the JSON body POSTed on job completion.
@@ -493,6 +700,8 @@ func (wk *Workers) sweepAndDeliver(ctx context.Context) error {
 		if serr := wk.store.SetJobActualUSD(ctx, j.ID); serr != nil {
 			log.Printf("workers: settling job %s actual_usd: %v", j.ID, serr)
 		}
+		// Feed the ETA calibration loop (predicted vs realized; best-effort).
+		recordEtaCalibration(ctx, wk.store, j.ID)
 	}
 
 	pending, err := wk.store.PendingWebhooks(ctx, sweepBatch)
@@ -541,8 +750,18 @@ func (wk *Workers) deliverWebhook(ctx context.Context, p PendingWebhook) error {
 			resultsURL = u
 		}
 	}
+	// Event mirrors the job's terminal status: "job.completed" stays verbatim for
+	// complete jobs (the value existing consumers already match on), while failed
+	// and stuck-cancelled jobs report themselves honestly as job.failed /
+	// job.cancelled instead of borrowing the completion event. A cancelled job
+	// still gets a results_url when any chunk completed (best-effort above) — and
+	// its checkpoint artifact sits at output_ref, merged before the watchdog cancels.
+	event := "job." + p.Status
+	if p.Status == "complete" {
+		event = "job.completed"
+	}
 	body, _ := json.Marshal(webhookPayload{
-		Event:      "job.completed",
+		Event:      event,
 		JobID:      p.JobID.String(),
 		Status:     p.Status,
 		ResultsURL: resultsURL,

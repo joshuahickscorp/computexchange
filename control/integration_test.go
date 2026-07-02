@@ -680,39 +680,100 @@ func TestStaleRequeue(t *testing.T) {
 	}
 }
 
-// --- 11. failed job: retries exhausted → fail + buyer refund ---
+// --- 11. failed job: retries exhausted → fail + partial settle ---
 
-func TestFailAndRefund(t *testing.T) {
+// TestFailPathPartialSettle proves the fail path's money semantics match the
+// watchdog's (partial-settle everywhere): a terminally-failed job with DELIVERED
+// chunks keeps their charges (the supplier earned them) and settles actual_usd at
+// exactly that completed work with NO refund row; a terminally-failed job with
+// ZERO delivered chunks was never charged in the first place, so it settles at $0
+// with — again — no refund row (there is nothing to refund).
+func TestFailPathPartialSettle(t *testing.T) {
 	reset(t)
 	ctx := context.Background()
-	jobID, taskID := uuid.New(), uuid.New()
-	mustJobTask(t, jobID, taskID, false, false, "jobs/y/tasks/0/input.jsonl")
-	// A prior buyer charge to refund.
+
+	// Job A: one chunk DELIVERED (complete + charged -0.01), one chunk stale with
+	// retries exhausted → the stale reaper fails the task + job.
+	jobA := uuid.New()
+	deliveredTask, dyingTask := uuid.New(), uuid.New()
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO jobs (id, buyer_id, status, job_type, input_ref, tier, task_count, tasks_done)
+		 VALUES ($1,$2,'running','embed','jobs/y/input.jsonl','batch',2,1)`, jobA, demoBuyerUUID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO tasks (id, job_id, status, input_ref, result_key, chunk_index, worker_id, claimed_by, completed_at)
+		 VALUES ($1,$2,'complete','jobs/y/tasks/0/input.jsonl','jobs/y/tasks/0/result.json',0,$3,$3, now())`,
+		deliveredTask, jobA, demoWorkerUUID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO tasks (id, job_id, status, input_ref, result_key, chunk_index,
+		                    worker_id, claimed_by, claimed_at, retry_count)
+		 VALUES ($1,$2,'running','jobs/y/tasks/1/input.jsonl','jobs/y/tasks/1/result.json',1,
+		         $3,$3, now()-interval '2 hours', 3)`,
+		dyingTask, jobA, demoWorkerUUID); err != nil {
+		t.Fatal(err)
+	}
+	// The delivered chunk's charge, settled at its commit (the real per-task split).
 	if err := itStore.InsertLedgerEntries(ctx, []LedgerEntry{{
-		Kind: KindBuyerCharge, BuyerID: &demoBuyerUUID, TaskID: &taskID, AmountUSD: -0.01, PayoutStatus: PayoutReleased,
+		Kind: KindBuyerCharge, BuyerID: &demoBuyerUUID, TaskID: &deliveredTask, AmountUSD: -0.01, PayoutStatus: PayoutReleased,
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	// Running, stale, retries already exhausted.
+
+	// Job B: ZERO delivered chunks — one stale task, retries exhausted, never charged.
+	jobB, bareTask := uuid.New(), uuid.New()
+	mustJobTask(t, jobB, bareTask, false, false, "jobs/z/tasks/0/input.jsonl")
 	if _, err := itPool.Exec(ctx,
 		`UPDATE tasks SET status='running', claimed_by=$2, claimed_at=now()-interval '2 hours', worker_id=$2, retry_count=3 WHERE id=$1`,
-		taskID, demoWorkerUUID); err != nil {
+		bareTask, demoWorkerUUID); err != nil {
 		t.Fatal(err)
 	}
+
 	wk := NewWorkers(itStore, itStorage, stubPayout{})
 	if err := wk.requeueStaleTasks(ctx); err != nil {
 		t.Fatalf("requeue: %v", err)
 	}
+
+	// Job A: failed, delivered chunk untouched, charge stands, settled at 0.01, no refund.
 	var tstatus, jstatus string
-	itPool.QueryRow(ctx, `SELECT status FROM tasks WHERE id=$1`, taskID).Scan(&tstatus)
-	itPool.QueryRow(ctx, `SELECT status FROM jobs WHERE id=$1`, jobID).Scan(&jstatus)
+	itPool.QueryRow(ctx, `SELECT status FROM tasks WHERE id=$1`, dyingTask).Scan(&tstatus)
+	itPool.QueryRow(ctx, `SELECT status FROM jobs WHERE id=$1`, jobA).Scan(&jstatus)
 	if tstatus != "failed" || jstatus != "failed" {
-		t.Fatalf("want failed task+job, got task=%q job=%q", tstatus, jstatus)
+		t.Fatalf("job A: want failed task+job, got task=%q job=%q", tstatus, jstatus)
 	}
+	itPool.QueryRow(ctx, `SELECT status FROM tasks WHERE id=$1`, deliveredTask).Scan(&tstatus)
+	if tstatus != "complete" {
+		t.Fatalf("job A: delivered chunk must stay complete, got %q", tstatus)
+	}
+	var actual float64
+	itPool.QueryRow(ctx, `SELECT actual_usd::float8 FROM jobs WHERE id=$1`, jobA).Scan(&actual)
+	if actual < 0.009 || actual > 0.011 {
+		t.Fatalf("job A: actual_usd should settle at 0.01 (completed work only), got %v", actual)
+	}
+	var charges int
+	itPool.QueryRow(ctx, `SELECT count(*) FROM ledger_entries WHERE kind='buyer_charge' AND task_id=$1`, deliveredTask).Scan(&charges)
+	if charges != 1 {
+		t.Fatalf("job A: the delivered chunk's charge must stand, got %d charge rows", charges)
+	}
+
+	// Job B: failed, settled at $0 (nothing was ever charged).
+	itPool.QueryRow(ctx, `SELECT status FROM jobs WHERE id=$1`, jobB).Scan(&jstatus)
+	if jstatus != "failed" {
+		t.Fatalf("job B: want failed, got %q", jstatus)
+	}
+	itPool.QueryRow(ctx, `SELECT actual_usd::float8 FROM jobs WHERE id=$1`, jobB).Scan(&actual)
+	if actual != 0 {
+		t.Fatalf("job B: actual_usd should settle at 0 (zero delivered chunks), got %v", actual)
+	}
+
+	// Nothing refunds on either job: completed work stays charged, undone work was
+	// never charged — there is no refund in the partial-settle model.
 	var refunds int
 	itPool.QueryRow(ctx, `SELECT count(*) FROM ledger_entries WHERE buyer_id=$1 AND kind='refund'`, demoBuyerUUID).Scan(&refunds)
-	if refunds != 1 {
-		t.Fatalf("want 1 refund row, got %d", refunds)
+	if refunds != 0 {
+		t.Fatalf("want 0 refund rows (partial settle, not refund), got %d", refunds)
 	}
 }
 
@@ -1186,9 +1247,11 @@ func TestFailEndpointOnlyClaimingWorker(t *testing.T) {
 	}
 }
 
-// When several tasks of one job fail terminally, the job must be flipped + refunded
-// EXACTLY once — never double-refunded (a money-correctness invariant).
-func TestFailEndpointRefundsJobOnce(t *testing.T) {
+// When several tasks of one job fail terminally, the job must be flipped + settled
+// EXACTLY once (one job_failed event), with NO refund row: under partial-settle,
+// committed charges stand and uncommitted work was never charged — a
+// money-correctness invariant.
+func TestFailEndpointSettlesJobOnce(t *testing.T) {
 	ctx := context.Background()
 	t.Cleanup(func() {
 		itPool.Exec(ctx, `TRUNCATE task_failures, job_events`)
@@ -1211,14 +1274,14 @@ func TestFailEndpointRefundsJobOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// A prior buyer_charge (debit) on task1, so there is something to refund.
+	// A prior buyer_charge (debit) on task1: committed money that must STAND.
 	if _, err := itPool.Exec(ctx,
 		`INSERT INTO ledger_entries (kind, buyer_id, task_id, amount_usd, payout_status)
 		 VALUES ('buyer_charge',$1,$2,-0.50,'pending')`, demoBuyerUUID, task1); err != nil {
 		t.Fatal(err)
 	}
 
-	// Fail BOTH tasks terminally (bad_input). The job is refunded ONCE.
+	// Fail BOTH tasks terminally (bad_input). The job is flipped + settled ONCE.
 	for _, tid := range []uuid.UUID{task1, task2} {
 		st, out := req(t, "POST", "/v1/worker/task/"+tid.String()+"/fail",
 			map[string]any{"class": "bad_input", "message": "x"}, workerTok(), jsonCT())
@@ -1226,12 +1289,17 @@ func TestFailEndpointRefundsJobOnce(t *testing.T) {
 			t.Fatalf("fail %s -> %d: %s", tid, st, out)
 		}
 	}
+	// Partial settle: NO refund row, and actual_usd settles at the charged work.
 	var nrefund int
-	var refundSum float64
-	itPool.QueryRow(ctx, `SELECT count(*), COALESCE(SUM(amount_usd),0) FROM ledger_entries WHERE kind='refund' AND buyer_id=$1`, demoBuyerUUID).
-		Scan(&nrefund, &refundSum)
-	if nrefund != 1 || refundSum < 0.49 || refundSum > 0.51 {
-		t.Fatalf("expected exactly one refund of ~0.50, got %d rows summing %.2f (double refund?)", nrefund, refundSum)
+	itPool.QueryRow(ctx, `SELECT count(*) FROM ledger_entries WHERE kind='refund' AND buyer_id=$1`, demoBuyerUUID).
+		Scan(&nrefund)
+	if nrefund != 0 {
+		t.Fatalf("terminal fail must not refund (charges stand under partial settle), got %d refund rows", nrefund)
+	}
+	var actual float64
+	itPool.QueryRow(ctx, `SELECT actual_usd::float8 FROM jobs WHERE id=$1`, jobID).Scan(&actual)
+	if actual < 0.49 || actual > 0.51 {
+		t.Fatalf("actual_usd should settle at the charged 0.50, got %v", actual)
 	}
 	var nJobFailed int
 	itPool.QueryRow(ctx, `SELECT count(*) FROM job_events WHERE job_id=$1 AND event='job_failed'`, jobID).Scan(&nJobFailed)
@@ -1288,7 +1356,7 @@ func TestBudgetCapPausesDispatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The real buyer_charge debit (-0.50) the projection reads (same ledger shape
-	// refundJobChargesTx sums). This is what makes the next dispatch breach the cap.
+	// failJobAndSettleOnce settles from). This is what makes the next dispatch breach the cap.
 	if _, err := itPool.Exec(ctx,
 		`INSERT INTO ledger_entries (kind, buyer_id, task_id, amount_usd, payout_status)
 		 VALUES ('buyer_charge',$1,$2,-0.50,'released')`, demoBuyerUUID, doneTask); err != nil {
@@ -3225,10 +3293,12 @@ func TestSignupPerIPDailyCapEnforced(t *testing.T) {
 
 // --- stuck-run watchdog (workers.go reapStuckJobs) ---
 
-// TestStuckJobReaperCancelsAndCheckpoints proves the watchdog's whole contract:
-// a running job past 1.5x its ETA with no task progress is cancelled with the
-// completed work CHECKPOINTED (partial merge at output_ref) and SETTLED (actual_usd
-// = completed tasks' charges only; no refund row — completed work stays charged,
+// TestStuckJobReaperCancelsAndCheckpoints proves the watchdog's KILL contract
+// (watchdog_strikes=1 seeds the job one rung up the ladder so the kill path runs
+// directly; the rescue rung is proven by TestWatchdogRescueThenKill): a running
+// job past its deadline with no task progress is cancelled with the completed
+// work CHECKPOINTED (partial merge at output_ref) and SETTLED (actual_usd =
+// completed tasks' charges only; no refund row — completed work stays charged,
 // un-run work was never charged), the unfinished task is cancelled, the buyer sees
 // a job_stuck_cancelled timeline event exactly once, and a job that is equally late
 // but still PROGRESSING is left alone.
@@ -3236,15 +3306,17 @@ func TestStuckJobReaperCancelsAndCheckpoints(t *testing.T) {
 	reset(t)
 	ctx := context.Background()
 
-	// STUCK job: eta 10s, created 60s ago (past 1.5x = 15s); task 0 completed 10
-	// minutes ago, task 1 claimed 10 minutes ago and never committed — no progress
-	// inside the grace window.
+	// STUCK job: eta 10s, created 10 minutes ago (past the floored deadline
+	// eta+120s = 130s), already on strike 1; task 0 completed 10 minutes ago,
+	// task 1 claimed 10 minutes ago and never committed — no progress (commit,
+	// claim, or retry visibility) inside the grace window.
 	jobID := uuid.New()
 	if _, err := itPool.Exec(ctx,
 		`INSERT INTO jobs (id, buyer_id, status, job_type, model_ref, input_ref, tier,
-		                   task_count, tasks_done, min_memory_gb, eta_secs, output_ref, created_at)
+		                   task_count, tasks_done, min_memory_gb, eta_secs, output_ref, created_at,
+		                   watchdog_strikes)
 		 VALUES ($1,$2,'running','embed','all-minilm-l6-v2','jobs/stuck/input.jsonl','batch',
-		         2,1,2,10,'jobs/stuck/output.jsonl', now() - interval '60 seconds')`,
+		         2,1,2,10,'jobs/stuck/output.jsonl', now() - interval '10 minutes', 1)`,
 		jobID, demoBuyerUUID); err != nil {
 		t.Fatal(err)
 	}
@@ -3255,16 +3327,17 @@ func TestStuckJobReaperCancelsAndCheckpoints(t *testing.T) {
 	}
 	if _, err := itPool.Exec(ctx,
 		`INSERT INTO tasks (id, job_id, status, input_ref, result_key, result_ref, chunk_index,
-		                    worker_id, claimed_by, completed_at)
-		 VALUES ($1,$2,'complete','jobs/stuck/tasks/0/input.jsonl',$3,$3,0,$4,$4, now() - interval '10 minutes')`,
+		                    worker_id, claimed_by, completed_at, visible_at)
+		 VALUES ($1,$2,'complete','jobs/stuck/tasks/0/input.jsonl',$3,$3,0,$4,$4,
+		         now() - interval '10 minutes', now() - interval '10 minutes')`,
 		doneTask, jobID, doneKey, demoWorkerUUID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := itPool.Exec(ctx,
 		`INSERT INTO tasks (id, job_id, status, input_ref, result_key, chunk_index,
-		                    worker_id, claimed_by, claimed_at, started_at)
+		                    worker_id, claimed_by, claimed_at, started_at, visible_at)
 		 VALUES ($1,$2,'running','jobs/stuck/tasks/1/input.jsonl','jobs/stuck/tasks/1/result.json',1,
-		         $3,$3, now() - interval '10 minutes', now() - interval '10 minutes')`,
+		         $3,$3, now() - interval '10 minutes', now() - interval '10 minutes', now() - interval '10 minutes')`,
 		stuckTask, jobID, demoWorkerUUID); err != nil {
 		t.Fatal(err)
 	}
@@ -3287,14 +3360,14 @@ func TestStuckJobReaperCancelsAndCheckpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// CONTROL job: equally past its ETA but a task completed 5 seconds ago —
+	// CONTROL job: equally past its deadline but a task completed 5 seconds ago —
 	// PROGRESSING, so the watchdog must not touch it.
 	ctlJob, ctlTask := uuid.New(), uuid.New()
 	if _, err := itPool.Exec(ctx,
 		`INSERT INTO jobs (id, buyer_id, status, job_type, model_ref, input_ref, tier,
-		                   task_count, tasks_done, min_memory_gb, eta_secs, created_at)
+		                   task_count, tasks_done, min_memory_gb, eta_secs, created_at, watchdog_strikes)
 		 VALUES ($1,$2,'running','embed','all-minilm-l6-v2','jobs/ctl/input.jsonl','batch',
-		         2,1,2,10, now() - interval '60 seconds')`,
+		         2,1,2,10, now() - interval '10 minutes', 1)`,
 		ctlJob, demoBuyerUUID); err != nil {
 		t.Fatal(err)
 	}
@@ -3378,6 +3451,359 @@ func TestStuckJobReaperCancelsAndCheckpoints(t *testing.T) {
 	}
 	if n := countEvents(); n != 1 {
 		t.Fatalf("reaper must be idempotent: want 1 event after re-sweep, got %d", n)
+	}
+}
+
+// TestWatchdogRescueThenKill proves the escalation ladder end to end: the FIRST
+// stuck verdict RESCUES (unfinished task requeued with the claim cleared and no
+// retry burned, watchdog_strikes 0 → 1, job_stuck_rescued event, job still
+// running — and the rescue's own visibility backoff counts as progress, so an
+// immediate re-sweep must NOT kill), and only a REPEAT stall after the rescue
+// KILLS: checkpoint merged, job + unfinished task cancelled, settled at completed
+// work, and the mid-chunk partial checkpoint the agent uploaded surfaced as a
+// presigned URL in the job_stuck_cancelled event detail.
+func TestWatchdogRescueThenKill(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+
+	// eta 10s, created 10 minutes ago (past the floored deadline eta+120s), strike 0.
+	jobID := uuid.New()
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO jobs (id, buyer_id, status, job_type, model_ref, input_ref, tier,
+		                   task_count, tasks_done, min_memory_gb, eta_secs, output_ref, created_at)
+		 VALUES ($1,$2,'running','embed','all-minilm-l6-v2','jobs/rtk/input.jsonl','batch',
+		         2,1,2,10,'jobs/rtk/output.jsonl', now() - interval '10 minutes')`,
+		jobID, demoBuyerUUID); err != nil {
+		t.Fatal(err)
+	}
+	doneTask, slowTask := uuid.New(), uuid.New()
+	doneKey := "jobs/rtk/tasks/0/result.json"
+	if err := itStorage.PutObject(ctx, doneKey, embedResultJSON(1), "application/json"); err != nil {
+		t.Fatalf("seed result object: %v", err)
+	}
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO tasks (id, job_id, status, input_ref, result_key, result_ref, chunk_index,
+		                    worker_id, claimed_by, completed_at, visible_at)
+		 VALUES ($1,$2,'complete','jobs/rtk/tasks/0/input.jsonl',$3,$3,0,$4,$4,
+		         now() - interval '10 minutes', now() - interval '10 minutes')`,
+		doneTask, jobID, doneKey, demoWorkerUUID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO tasks (id, job_id, status, input_ref, result_key, chunk_index,
+		                    worker_id, claimed_by, claimed_at, started_at, retry_count, visible_at)
+		 VALUES ($1,$2,'running','jobs/rtk/tasks/1/input.jsonl','jobs/rtk/tasks/1/result.json',1,
+		         $3,$3, now() - interval '10 minutes', now() - interval '10 minutes', 0, now() - interval '10 minutes')`,
+		slowTask, jobID, demoWorkerUUID); err != nil {
+		t.Fatal(err)
+	}
+	// The delivered chunk's charge, settled at its commit.
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO ledger_entries (kind, buyer_id, task_id, amount_usd, payout_status)
+		 VALUES ('buyer_charge', $1, $2, -0.10, 'released')`,
+		demoBuyerUUID, doneTask); err != nil {
+		t.Fatal(err)
+	}
+
+	wk := NewWorkers(itStore, itStorage, stubPayout{})
+
+	// SWEEP 1 → RESCUE: task requeued for a different machine, strike armed.
+	if err := wk.reapStuckJobs(ctx); err != nil {
+		t.Fatalf("reapStuckJobs (rescue): %v", err)
+	}
+	var jstatus string
+	var strikes int
+	if err := itPool.QueryRow(ctx,
+		`SELECT status, watchdog_strikes FROM jobs WHERE id=$1`, jobID).Scan(&jstatus, &strikes); err != nil {
+		t.Fatal(err)
+	}
+	if jstatus != "running" || strikes != 1 {
+		t.Fatalf("rescue: want running job at strike 1, got status=%q strikes=%d", jstatus, strikes)
+	}
+	var tstatus string
+	var claimedBy *uuid.UUID
+	var retry int16
+	if err := itPool.QueryRow(ctx,
+		`SELECT status, claimed_by, retry_count FROM tasks WHERE id=$1`, slowTask).Scan(&tstatus, &claimedBy, &retry); err != nil {
+		t.Fatal(err)
+	}
+	if tstatus != "queued" || claimedBy != nil || retry != 0 {
+		t.Fatalf("rescue must requeue with the claim cleared and NO retry burned: status=%q claimed=%v retry=%d",
+			tstatus, claimedBy, retry)
+	}
+	var nRescued int
+	itPool.QueryRow(ctx,
+		`SELECT count(*) FROM job_events WHERE job_id=$1 AND event='job_stuck_rescued'`, jobID).Scan(&nRescued)
+	if nRescued != 1 {
+		t.Fatalf("job_stuck_rescued events: want 1, got %d", nRescued)
+	}
+
+	// An immediate re-sweep must NOT kill: the rescue's visibility backoff is progress.
+	if err := wk.reapStuckJobs(ctx); err != nil {
+		t.Fatalf("reapStuckJobs (post-rescue): %v", err)
+	}
+	itPool.QueryRow(ctx, `SELECT status FROM jobs WHERE id=$1`, jobID).Scan(&jstatus)
+	if jstatus != "running" {
+		t.Fatalf("a just-rescued job must not be killed on the next sweep, got %q", jstatus)
+	}
+
+	// Age the claim again: a new machine picked the chunk up and stalled just as hard.
+	if _, err := itPool.Exec(ctx,
+		`UPDATE tasks SET status='running', claimed_by=$2, claimed_at=now()-interval '10 minutes',
+		        started_at=now()-interval '10 minutes', visible_at=now()-interval '10 minutes'
+		 WHERE id=$1`, slowTask, demoWorkerUUID); err != nil {
+		t.Fatal(err)
+	}
+	// A mid-chunk partial checkpoint the agent uploaded before wedging (wire
+	// contract: final-result shape + a top-level "partial": true marker).
+	partialKey := "jobs/rtk/tasks/1/result.json.partial"
+	if err := itStorage.PutObject(ctx, partialKey,
+		[]byte(`{"partial":true,"job_type":"embed","count":0,"vectors":[]}`), "application/json"); err != nil {
+		t.Fatalf("seed partial object: %v", err)
+	}
+
+	// SWEEP 2 → KILL: checkpoint + cancel + settle + partial URL surfaced.
+	if err := wk.reapStuckJobs(ctx); err != nil {
+		t.Fatalf("reapStuckJobs (kill): %v", err)
+	}
+	itPool.QueryRow(ctx, `SELECT status FROM jobs WHERE id=$1`, jobID).Scan(&jstatus)
+	if jstatus != "cancelled" {
+		t.Fatalf("second stall: want cancelled, got %q", jstatus)
+	}
+	itPool.QueryRow(ctx, `SELECT status FROM tasks WHERE id=$1`, slowTask).Scan(&tstatus)
+	if tstatus != "cancelled" {
+		t.Fatalf("unfinished task: want cancelled, got %q", tstatus)
+	}
+	var actual float64
+	itPool.QueryRow(ctx, `SELECT actual_usd::float8 FROM jobs WHERE id=$1`, jobID).Scan(&actual)
+	if actual < 0.099 || actual > 0.101 {
+		t.Fatalf("actual_usd: want 0.10 (completed work only), got %v", actual)
+	}
+	if _, err := itStorage.GetObject(ctx, "jobs/rtk/output.jsonl"); err != nil {
+		t.Fatalf("checkpoint artifact missing at output_ref: %v", err)
+	}
+	var nCancelled int
+	var detail string
+	if err := itPool.QueryRow(ctx,
+		`SELECT count(*), COALESCE(MAX(detail::text),'') FROM job_events
+		 WHERE job_id=$1 AND event='job_stuck_cancelled'`, jobID).Scan(&nCancelled, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if nCancelled != 1 {
+		t.Fatalf("job_stuck_cancelled events: want 1, got %d", nCancelled)
+	}
+	if !strings.Contains(detail, "partial_urls") {
+		t.Fatalf("kill event detail must carry the partial checkpoint URLs, got %q", detail)
+	}
+}
+
+// TestRescueDeadClaimRequeues proves the worker-liveness rescue: a running task
+// whose claiming worker last heartbeated 10 minutes ago is requeued immediately
+// (claim cleared, no retry burned), the buyer sees task_rescued_dead_worker, and
+// the wedged worker's supplier takes a small reputation dock — while a task whose
+// worker heartbeated 10 seconds ago is untouched.
+func TestRescueDeadClaimRequeues(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+
+	// A DEAD worker on the demo supplier: silent for 10 minutes.
+	deadWorker := uuid.New()
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO workers (id, supplier_id, hw_class, memory_gb, last_seen_at)
+		 VALUES ($1,$2,'apple_silicon_max',64, now() - interval '10 minutes')`,
+		deadWorker, demoSupplierUUID); err != nil {
+		t.Fatal(err)
+	}
+	deadJob, deadTask := uuid.New(), uuid.New()
+	mustJobTask(t, deadJob, deadTask, false, false, "jobs/dc/tasks/0/input.jsonl")
+	if _, err := itPool.Exec(ctx,
+		`UPDATE tasks SET claimed_by=$2, claimed_at=now()-interval '10 minutes',
+		        started_at=now()-interval '10 minutes', worker_id=$2 WHERE id=$1`,
+		deadTask, deadWorker); err != nil {
+		t.Fatal(err)
+	}
+
+	// CONTROL: an equally old claim held by a worker that heartbeated 10s ago.
+	liveJob, liveTask := uuid.New(), uuid.New()
+	mustJobTask(t, liveJob, liveTask, false, false, "jobs/dc2/tasks/0/input.jsonl")
+	if _, err := itPool.Exec(ctx,
+		`UPDATE tasks SET claimed_by=$2, claimed_at=now()-interval '10 minutes',
+		        started_at=now()-interval '10 minutes', worker_id=$2 WHERE id=$1`,
+		liveTask, demoWorkerUUID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := itPool.Exec(ctx,
+		`UPDATE workers SET last_seen_at = now() - interval '10 seconds' WHERE id=$1`,
+		demoWorkerUUID); err != nil {
+		t.Fatal(err)
+	}
+	repBefore := supplierRep(t) // 0.90 after reset
+
+	wk := NewWorkers(itStore, itStorage, stubPayout{})
+	if err := wk.rescueDeadClaims(ctx); err != nil {
+		t.Fatalf("rescueDeadClaims: %v", err)
+	}
+
+	// Dead-worker task: rescued (queued, unclaimed, no retry burned).
+	var status string
+	var claimedBy *uuid.UUID
+	var retry int16
+	if err := itPool.QueryRow(ctx,
+		`SELECT status, claimed_by, retry_count FROM tasks WHERE id=$1`, deadTask).Scan(&status, &claimedBy, &retry); err != nil {
+		t.Fatal(err)
+	}
+	if status != "queued" || claimedBy != nil || retry != 0 {
+		t.Fatalf("dead claim not rescued: status=%q claimed=%v retry=%d", status, claimedBy, retry)
+	}
+	// Live-worker task: untouched.
+	if err := itPool.QueryRow(ctx,
+		`SELECT status, claimed_by FROM tasks WHERE id=$1`, liveTask).Scan(&status, &claimedBy); err != nil {
+		t.Fatal(err)
+	}
+	if status != "running" || claimedBy == nil || *claimedBy != demoWorkerUUID {
+		t.Fatalf("live worker's claim must be untouched: status=%q claimed=%v", status, claimedBy)
+	}
+	// Buyer-visible attribution on the rescued job.
+	var nEvents int
+	itPool.QueryRow(ctx,
+		`SELECT count(*) FROM job_events WHERE job_id=$1 AND event='task_rescued_dead_worker'`, deadJob).Scan(&nEvents)
+	if nEvents != 1 {
+		t.Fatalf("task_rescued_dead_worker events: want 1, got %d", nEvents)
+	}
+	// The wedged worker's supplier is docked mildly (catalogue job type) — and
+	// only mildly: never near a quarantine from one dead claim.
+	if rep := supplierRep(t); rep >= repBefore || rep < repBefore-0.01 {
+		t.Fatalf("supplier reputation should dip slightly (mildest dock), was %v now %v", repBefore, rep)
+	}
+}
+
+// TestWatchdogDeadlineGeometry proves the deadline conditions one by one:
+// (a) the ETA floor — factor × a tiny ETA never beats eta+120s, so a 100s-old
+// job with eta 10s is NOT judged, while the same job at 200s is; (b) the 24h
+// wall-clock cap catches a job with NO ETA prediction; (c) deadline_secs = -1
+// opts out entirely — not even the 24h cap touches it.
+func TestWatchdogDeadlineGeometry(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+	wk := NewWorkers(itStore, itStorage, stubPayout{})
+
+	// One stalled running task per job (timestamps far outside the progress grace,
+	// so selection is decided purely by the deadline geometry).
+	mkJob := func(prefix string, etaSecs, deadlineSecs int, age string) uuid.UUID {
+		t.Helper()
+		jobID, taskID := uuid.New(), uuid.New()
+		var eta any
+		if etaSecs > 0 {
+			eta = etaSecs
+		}
+		var deadline any
+		if deadlineSecs != 0 {
+			deadline = deadlineSecs
+		}
+		if _, err := itPool.Exec(ctx,
+			`INSERT INTO jobs (id, buyer_id, status, job_type, model_ref, input_ref, tier,
+			                   task_count, tasks_done, min_memory_gb, eta_secs, deadline_secs, created_at)
+			 VALUES ($1,$2,'running','embed','all-minilm-l6-v2',$3,'batch',
+			         1,0,2,$4,$5, now() - $6::interval)`,
+			jobID, demoBuyerUUID, "jobs/"+prefix+"/input.jsonl", eta, deadline, age); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := itPool.Exec(ctx,
+			`INSERT INTO tasks (id, job_id, status, input_ref, result_key, chunk_index,
+			                    worker_id, claimed_by, claimed_at, started_at, visible_at)
+			 VALUES ($1,$2,'running',$3,$4,0,$5,$5,
+			         now() - interval '2 hours', now() - interval '2 hours', now() - interval '2 hours')`,
+			taskID, jobID, "jobs/"+prefix+"/tasks/0/input.jsonl", "jobs/"+prefix+"/tasks/0/result.json",
+			demoWorkerUUID); err != nil {
+			t.Fatal(err)
+		}
+		return jobID
+	}
+	rescued := func(jobID uuid.UUID) bool {
+		t.Helper()
+		var n int
+		if err := itPool.QueryRow(ctx,
+			`SELECT count(*) FROM job_events WHERE job_id=$1 AND event='job_stuck_rescued'`, jobID).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n > 0
+	}
+
+	floorJob := mkJob("geo-floor", 10, 0, "100 seconds") // (a) under the eta+120s floor
+	noEtaJob := mkJob("geo-noeta", 0, 0, "25 hours")     // (b) no prediction, past the 24h cap
+	optOutJob := mkJob("geo-optout", 10, -1, "25 hours") // (c) buyer opt-out
+
+	if err := wk.reapStuckJobs(ctx); err != nil {
+		t.Fatalf("reapStuckJobs: %v", err)
+	}
+	if rescued(floorJob) {
+		t.Fatal("eta floor: a 100s-old job with eta 10s must NOT be judged (floor eta+120s governs)")
+	}
+	if !rescued(noEtaJob) {
+		t.Fatal("24h cap: a 25h-old job with no ETA must be judged")
+	}
+	if rescued(optOutJob) {
+		t.Fatal("deadline_secs=-1: an opted-out job must NEVER be judged")
+	}
+
+	// The same floor job, 200s old, is past eta+120s → judged on the next sweep.
+	if _, err := itPool.Exec(ctx,
+		`UPDATE jobs SET created_at = now() - interval '200 seconds' WHERE id=$1`, floorJob); err != nil {
+		t.Fatal(err)
+	}
+	if err := wk.reapStuckJobs(ctx); err != nil {
+		t.Fatalf("second reap: %v", err)
+	}
+	if !rescued(floorJob) {
+		t.Fatal("eta floor: the same job at 200s (past eta+120s) must be judged")
+	}
+	if rescued(optOutJob) {
+		t.Fatal("deadline_secs=-1: an opted-out job must stay untouched on every sweep")
+	}
+}
+
+// TestWatchdogOptOutValidation proves the buyer policy knob's validation and
+// persistence: 17 (neither a sentinel nor within 60..604800) is a 400; -1 (opt
+// out) and 3600 (explicit deadline) are accepted and the jobs row carries the value.
+func TestWatchdogOptOutValidation(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+
+	submit := func(deadlineSecs int) (int, []byte) {
+		t.Helper()
+		body := map[string]any{
+			"job_type":      map[string]any{"type": "embed"},
+			"model":         map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+			"constraints":   map[string]any{"min_memory_gb": 2},
+			"verification":  map[string]any{},
+			"tier":          "batch",
+			"input":         `{"id":"r0","text":"record 0"}` + "\n",
+			"deadline_secs": deadlineSecs,
+		}
+		return req(t, "POST", "/v1/jobs", body, buyerKey(), jsonCT())
+	}
+
+	if code, out := submit(17); code != http.StatusBadRequest {
+		t.Fatalf("deadline_secs=17: want 400, got %d: %s", code, out)
+	}
+	if code, out := submit(-1); code != http.StatusAccepted {
+		t.Fatalf("deadline_secs=-1: want 202, got %d: %s", code, out)
+	}
+	code, out := submit(3600)
+	if code != http.StatusAccepted {
+		t.Fatalf("deadline_secs=3600: want 202, got %d: %s", code, out)
+	}
+	var r JobSubmitResponse
+	if err := json.Unmarshal(out, &r); err != nil {
+		t.Fatalf("submit decode: %v (%s)", err, out)
+	}
+	var persisted int
+	if err := itPool.QueryRow(ctx,
+		`SELECT deadline_secs FROM jobs WHERE id=$1`, r.JobID).Scan(&persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted != 3600 {
+		t.Fatalf("jobs.deadline_secs: want 3600, got %d", persisted)
 	}
 }
 

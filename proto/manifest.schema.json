@@ -327,6 +327,7 @@
         "manifest":   { "$ref": "#/$defs/JobManifest" },
         "input_url":  { "type": "string", "description": "Presigned S3 GET URL, ~1h expiry." },
         "output_url": { "type": "string", "description": "Presigned S3 PUT URL, ~1h expiry." },
+        "partial_put_url": { "type": "string", "description": "Presigned S3 PUT URL for result_key + \".partial\", same expiry as output_url — the optional intra-task checkpoint seam. Sent only for checkpointable job types (batch_infer, batch_classification, json_extraction); when present the worker MAY periodically PUT a partial result document there (the same JSON shape as the final result plus a top-level \"partial\": true marker). The final commit is UNCHANGED (full result to output_url; byte-determinism unaffected); partials are never merged into the verified artifact and never affect money. Optional: an older control plane never sends it, an older worker ignores it." },
         "result_key": { "type": "string", "description": "Bare S3 object key the worker's result lands at (the key behind output_url's presign). Optional: when present the worker echoes it back as TaskCommit.result_key; when absent the worker derives the key from output_url." },
         "deadline":   { "type": "integer", "minimum": 0, "description": "Unix timestamp (seconds): complete before this." }
       },
