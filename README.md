@@ -40,7 +40,7 @@ proto/manifest.schema.json   Canonical wire contract (JSON Schema, draft 2020-12
 cli/               `cx`, standalone Go CLI (submit / status / results / cancel / estimate)
                    control/openai.go, OpenAI-compatible Batch API (files + batches)
 sdk/python/        dep-free Python client (urllib) + OpenAI-shaped `embeddings()`
-web/dashboard.html Operator dashboard (served at `/`, same-origin)
+web/admin.html     Operator Control Room · passkey-gated console (served at `/admin`; `/` redirects here)
 macapp/            SwiftUI menu-bar app, `swift build` via Package.swift (signing external)
 docs/TURBO.md · docs/RUNBOOKS.md · docs/ALPHA_READINESS.md
                    Turbo scheduler pass · operator runbooks · alpha readiness (proven vs skeleton vs external)
@@ -67,10 +67,13 @@ LAN, offline, or air-gapped, with zero mandatory third-party SaaS.
 available memory and pauses claiming work before it would breach the operator's
 reserved headroom or swap the box), a **scheduler safety contract** (the claim
 filter refuses to dispatch to a throttled worker or one whose *effective* memory
-is below the job's need), and a **minimal role-based app skeleton** (`/app`:
-Supplier / Buyer / Admin / Workflows). Frontend is **skeleton-only by decision**; final design and the `Workflows`/IDE idea are deferred pending product input. See
-[docs/ALPHA_READINESS.md](docs/ALPHA_READINESS.md) (what's proven vs skeleton vs
-external) and [docs/PRODUCT_SHAPE.md](docs/PRODUCT_SHAPE.md) (app topology).
+is below the job's need), and the operator **Control Room** — a passkey-gated
+console at `/admin` (`/` redirects there) showing the birds-eye money split, fleet,
+runs, and the self-healing watchdog. The old role-tab skeleton at `/app` was
+retired into this one console; the supplier surface + workflows notes moved to
+[docs/SUPPLIER-SURFACE.md](docs/SUPPLIER-SURFACE.md). See
+[docs/ALPHA_READINESS.md](docs/ALPHA_READINESS.md) (proven vs external) and
+[docs/PRODUCT_SHAPE.md](docs/PRODUCT_SHAPE.md) (app topology).
 Configure headroom with `memory_headroom_gb` / `max_memory_pct` in `agent.toml`.
 
 There are no `utils/` or `helpers/` junk drawers; every file is load-bearing.

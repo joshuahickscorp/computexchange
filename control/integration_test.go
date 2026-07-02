@@ -3768,6 +3768,11 @@ func TestWatchdogDeadlineGeometry(t *testing.T) {
 func TestWatchdogOptOutValidation(t *testing.T) {
 	reset(t)
 	ctx := context.Background()
+	// This test exercises deadline_secs VALIDATION (400 vs 202), not the payment
+	// gate. Pin Stripe off so a submit is never intercepted by the 402 "no card /
+	// sandbox credit exhausted" path (which fires when a key is configured in the
+	// process env, e.g. under prove-local) before validation is even reached.
+	t.Setenv("STRIPE_SECRET_KEY", "")
 
 	submit := func(deadlineSecs int) (int, []byte) {
 		t.Helper()

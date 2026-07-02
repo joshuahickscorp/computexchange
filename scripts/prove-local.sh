@@ -58,6 +58,15 @@ export S3_SECRET_KEY="minioadmin"
 export S3_REGION="us-east-1"
 export LISTEN_ADDR=":$CONTROL_PORT"
 
+# Hermetic money: the local proof is a CORRECTNESS harness and must never touch a
+# live money rail. The Makefile loads .env (which in a deployed checkout carries a
+# LIVE STRIPE_SECRET_KEY), so unset every Stripe/live-payment credential here — the
+# matrix runs the ungated free lane, and the individual tests that need Stripe set
+# it themselves via t.Setenv. Without this, a real key activates the 402 payment
+# gate against the seeded demo buyer (0 sandbox credit) and every job-submit test
+# 402s, and worse, a proof run could hit the real Stripe account.
+unset STRIPE_SECRET_KEY STRIPE_PUBLISHABLE_KEY STRIPE_WEBHOOK_SECRET CX_CONNECT_WEBHOOK_SECRET
+
 # Demo credentials are fixed by control/seed.go.
 API_KEY="dev-api-key-0001"
 ADMIN_KEY="dev-admin-key-0001"
@@ -971,15 +980,21 @@ print("ok" if parked_ok and nowait_ok else "no")
     record FAIL claim-index "tasks_ready_unclaimed_idx missing or not valid (indisvalid/indisready != t)"
   fi
 
-  # Operator dashboard served at root (same-origin, no CORS).
-  curl -fsS "$CONTROL_URL/" 2>/dev/null | grep -qiE 'Computexchange|<html|dashboard' \
-    && record PASS dashboard "operator dashboard served at / (DASHBOARD_PATH=web/dashboard.html)" \
-    || record SKIP dashboard "dashboard not served (web/dashboard.html missing at control CWD)"
+  # Root redirects to the one operator surface, /admin (the old dashboard at / and
+  # the /app skeleton were retired). -o/dev/null -w keeps just the status line;
+  # --max-redirs 0 so we assert the 302 itself, not the followed target.
+  root_code="$(curl -fsS -o /dev/null -w '%{http_code}' --max-redirs 0 "$CONTROL_URL/" 2>/dev/null || true)"
+  if [ "$root_code" = "302" ]; then
+    record PASS root-redirect "/ redirects to /admin ($root_code)"
+  else
+    record FAIL root-redirect "/ did not redirect to /admin (got '$root_code', want 302)"
+  fi
 
-  # Role-based app skeleton served at /app (Supplier/Buyer/Admin/Workflows wiring).
-  curl -fsS "$CONTROL_URL/app" 2>/dev/null | grep -qiE 'Supplier|Buyer|Workflows|skeleton' \
-    && record PASS app-skeleton "role-based app skeleton served at /app (APP_PATH=web/skeleton.html)" \
-    || record SKIP app-skeleton "app skeleton not served (web/skeleton.html missing at control CWD)"
+  # The passkey-gated operator console (Control Room) is served at /admin. The HTML
+  # shell is public (the DATA routes enforce auth); ADMIN_PATH=web/admin.html.
+  curl -fsS "$CONTROL_URL/admin" 2>/dev/null | grep -qiE 'control room|passkey' \
+    && record PASS admin-console "Control Room served at /admin (ADMIN_PATH=web/admin.html)" \
+    || record SKIP admin-console "admin console not served (web/admin.html missing at control CWD)"
 fi
 
 # ── Phase 5: unit/fuzz tests (cheap, deterministic, no infra) ────────────────

@@ -80,14 +80,14 @@ run: **82/82 pass** (Computexchange **Turbo** — see [docs/TURBO.md](docs/TURBO
 | **Effective memory surfaced** | `status.json` carries total/available/reserved/effective memory + `throttled` + `throttle_reason` + `current_task_id`; `prove-local` asserts the block is present and coherent (`effective = available − headroom`) | `status-file`, `status.rs` tests |
 | **Scheduler safety contract** | the SKIP-LOCKED claim filters on the worker's live **effective memory** and **throttled** state (falling back to total memory only pre-heartbeat) — a throttled or under-provisioned worker can never claim unsafe work | `TestClaimHardFilter` (throttled + effective-memory cases), `TestMatchExcludesThrottledWorker` |
 | **Operator throttle visibility** | `GET /admin/workers` exposes `effective_memory_gb` + `throttled` per worker | `store.go ListWorkers`, `admin-views` |
-| **Role-based app skeleton** | `/app` serves Supplier/Buyer/Admin/Workflows tabs wired to the real APIs (skeleton-only, no design) | `app-skeleton`, `web/skeleton.html` |
+| **Operator Control Room** | passkey-gated console at `/admin` (`/` redirects there) · birds-eye money split, fleet, runs, self-healing watchdog · the role-tab skeleton was retired into this one console | `admin-console`, `web/admin.html` |
 
-### 🟡 Skeleton-only (intentional — design deferred)
+### 🟡 Design-deferred surfaces
 Not faked, not finished: **functional structure wired to real APIs**, final design
-pending product input. The menu-bar app (`macapp/`, buildable), the web app
-skeleton (`web/skeleton.html` at `/app`), and the `Workflows`/"IDE" placeholder
-(no code editor, no arbitrary execution). See
-[docs/PRODUCT_SHAPE.md](docs/PRODUCT_SHAPE.md) and
+pending product input. The menu-bar app (`macapp/`, buildable) and the
+`Workflows`/"IDE" placeholder (no code editor, no arbitrary execution; workflows
+are expressed through jobs — see [docs/SUPPLIER-SURFACE.md](docs/SUPPLIER-SURFACE.md)).
+See [docs/PRODUCT_SHAPE.md](docs/PRODUCT_SHAPE.md) and
 [docs/ALPHA_READINESS.md](docs/ALPHA_READINESS.md).
 
 ### The single intentional local stub

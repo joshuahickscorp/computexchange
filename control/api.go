@@ -85,9 +85,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
-	mux.HandleFunc("GET /{$}", s.handleDashboard) // operator dashboard at root (same-origin, no CORS)
-	mux.HandleFunc("GET /app", s.handleApp)       // role-based app skeleton (Supplier/Buyer/Admin/Workflows)
-	mux.HandleFunc("GET /demo", s.handleDemo)     // Launch/Earn product demo (monochrome, same-origin)
+	mux.HandleFunc("GET /{$}", s.handleRoot)  // → /admin (the one operator surface; the old dashboard + /app skeleton were retired)
+	mux.HandleFunc("GET /demo", s.handleDemo) // Launch/Earn product demo (monochrome, same-origin)
 
 	// Self-serve accounts (accounts.go) · unauthed: these MINT the credential.
 	mux.HandleFunc("POST /v1/signup", s.handleSignup)
@@ -1862,13 +1861,11 @@ func (s *Server) handleJobReceipt(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, assembleClearingReceipt(id, inv.Status, inv, verif, classes, tasks))
 }
 
-// handleDashboard serves the static operator dashboard at the root, same-origin
-// with the API so its fetches need no CORS. Path is web/dashboard.html, overridable
-// via DASHBOARD_PATH; a missing file is a clear 404, never a faked page.
 // secureHTMLHeaders sets defensive headers on same-origin HTML responses:
 // anti-MIME-sniff, anti-clickjacking (same-origin framing only), no referrer
-// leakage. Deliberately NO Content-Security-Policy — the demo and dashboard use
-// inline <script> and fetch presigned object-store URLs, which a strict CSP would break.
+// leakage. Deliberately NO Content-Security-Policy — the /admin console and /demo
+// use inline <script> and fetch presigned object-store URLs, which a strict CSP
+// would break.
 func secureHTMLHeaders(w http.ResponseWriter) {
 	h := w.Header()
 	h.Set("X-Content-Type-Options", "nosniff")
@@ -1876,19 +1873,13 @@ func secureHTMLHeaders(w http.ResponseWriter) {
 	h.Set("Referrer-Policy", "no-referrer")
 }
 
-func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
-	path := os.Getenv("DASHBOARD_PATH")
-	if path == "" {
-		path = "web/dashboard.html"
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		writeErr(w, http.StatusNotFound, "dashboard not found at "+path+" (set DASHBOARD_PATH)")
-		return
-	}
-	secureHTMLHeaders(w)
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write(b)
+// handleRoot redirects the bare domain to the one operator surface, /admin. The
+// old operator dashboard (web/dashboard.html at /) and the role-tab skeleton
+// (web/skeleton.html at /app) were retired: the passkey-gated Control Room at
+// /admin is the single console, and there is no public marketing site (the product
+// is delivered as apps). A buyer submits via the API/CLI/SDK, not a web root.
+func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/admin", http.StatusFound)
 }
 
 // handleAdminPage serves the passkey-gated operator panel at /admin. The HTML shell
@@ -1903,26 +1894,6 @@ func (s *Server) handleAdminPage(w http.ResponseWriter, r *http.Request) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "admin panel not found at "+path+" (set ADMIN_PATH)")
-		return
-	}
-	secureHTMLHeaders(w)
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write(b)
-}
-
-// handleApp serves the role-based app skeleton (Supplier / Buyer / Admin /
-// Workflows) at /app, same-origin with the API so its fetches need no CORS. Path
-// is web/skeleton.html, overridable via APP_PATH; a missing file is a clear 404,
-// never a faked page. This is skeleton structure + wiring only — final design is
-// deferred (see docs/PRODUCT_SHAPE.md).
-func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
-	path := os.Getenv("APP_PATH")
-	if path == "" {
-		path = "web/skeleton.html"
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		writeErr(w, http.StatusNotFound, "app skeleton not found at "+path+" (set APP_PATH)")
 		return
 	}
 	secureHTMLHeaders(w)
