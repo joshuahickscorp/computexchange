@@ -52,3 +52,34 @@ New: `render/build_scene.py`, `render/foam_maps.py`, `render/NOTES.md`, `render/
 Changed: `web/index.html` (live hero + compute copy), `control/api.go` (scoped asset handler),
 `control/control_test.go` (`TestSiteAssetType`), `docs/SITE-CLAIMS.md` (appendix rows), the
 `web/assets/site/*.png` finals.
+
+---
+
+## Pass 3 (multi-turn) · status by axis
+
+**Axis 1 · reproduction-grade models — DONE (shipped).** Overlay rig (`build_scene.py --verify`
++ `render/overlay.py`) verifies each device against official press imagery at 50% opacity.
+- Mac Studio front: silhouette +1.1% of Apple's 758px reference, ports/SD/LED/perforation all
+  coincident · reproduction-grade indistinguishable (NOTES loop 3). Base intake rebuilt to a fine
+  1.3mm perforation mesh.
+- DGX Spark: two-scale Voronoi foam (coarse + 1/3-scale) reading golden open-cell, matching the
+  StorageReview front (loops 1-2). The reference is a 3/4 desk photo so exact silhouette overlay
+  is not possible; verified on foam density, tone, and pill layout.
+- Finals re-rendered, glb re-exported, live.
+
+**Axis 3 · delivery — SHIPPED + measured (docs/PERF.md).** glb 2.3MB to 1.0MB, self-hosted
+subsetted fonts (Google Fonts dependency gone), brotli JS (three.js 1.27MB to 201KB wire), control
+plane serves .br + Accept-Ranges + immutable cache for hashed names + woff2/ktx2 whitelist.
+
+**Axis 2 · pinned scroll narrative — ENGINE BUILT, integration GATED.** The 5-beat scroll-scrub
+camera engine is in hero.js (keyframe table + smoothstep lerp, drag offset on top, reduced-motion
+snap, no per-frame allocation) and mechanically verified (camera scrubs on scroll). It is gated
+behind `opts.beats` (default off) because the pinned full-screen stage overlaps the centered
+scrolling text and the current 3-viewport content is too short for 5 distinct beats · shipping it
+rough would fail the brief's own "no beat feels like a slide" bar and degrade the live site. The
+remaining work is a layout design pass: device-to-one-side beat framing, text scrims for
+readability over the 3D, and per-beat viewport spacers. Deferred deliberately, not skipped.
+
+**Delivery tail remaining:** content-hash filenames (server-side immutable path already wired),
+still-first crossfade + LCP/waterfall measurement, KTX2 textures when toktx/gltfpack can be
+installed (server path pre-wired).

@@ -102,22 +102,79 @@ export function mountHero(canvas, opts) {
     frame();
   }, undefined, (err) => onFail(err));
 
-  // ---- camera rig -------------------------------------------------------------------
-  let yaw = REST_YAW, pitch = PITCH;
-  let targetYaw = REST_YAW, targetPitch = PITCH;
+  // ---- camera rig · scroll scrubs a 5-beat path, drag adds a temporary offset -------
+  // Each beat is a camera state: target point, distance, pitch, exposure. Scroll
+  // progress (0..1) lerps between adjacent beats with smoothstep. Drag adds a yaw and
+  // pitch offset on top that eases back to zero on release, so the two never fight.
+  const STUDIO_X = -0.135;               // device x positions in the yup glb (metres)
+  const SPARK_X = 0.159;
+  const BEATS = [
+    // p,   tx,        ty,    tz,   dist, pitch, exp   · what the viewer is on
+    [0.00, 0.012, 0.03, 0.0, 0.92, 0.63, 1.00], // 1 arrival · both, tabletop
+    [0.28, 0.012, 0.02, 0.0, 0.80, 0.50, 1.00], // 2 how · lower, closer two-shot
+    [0.52, 0.012, 0.11, 0.0, 0.98, 0.60, 0.42], // 3 monument · drift to void, devices dim
+    [0.76, STUDIO_X, 0.03, 0.0, 0.60, 0.48, 1.00], // 4 earn · dolly to the Mac Studio
+    [1.00, 0.012, 0.06, 0.0, 1.30, 0.72, 1.00], // 5 release · rise away, ease out
+  ];
+
+  let scrollP = 0;                       // set by the scroll listener (scalar only)
+  let dragYaw = 0, dragPitch = 0;        // drag target offsets, decay to 0 on release
+  let dispYaw = 0, dispPitch = 0;        // displayed offsets, eased toward the target
   let dragging = false, lastX = 0, lastY = 0, released = 0;
   let idlePhase = 0;
+  const camT = new THREE.Vector3();      // reused, no per-frame allocation
+
+  function smoothstep(t) { return t * t * (3 - 2 * t); }
+
+  function beatState(p) {
+    // find the segment and interpolate with smoothstep
+    let i = 0;
+    while (i < BEATS.length - 1 && p > BEATS[i + 1][0]) i++;
+    const a = BEATS[i], b = BEATS[Math.min(i + 1, BEATS.length - 1)];
+    const span = (b[0] - a[0]) || 1;
+    const s = smoothstep(Math.max(0, Math.min(1, (p - a[0]) / span)));
+    return {
+      tx: a[1] + (b[1] - a[1]) * s, ty: a[2] + (b[2] - a[2]) * s, tz: a[3] + (b[3] - a[3]) * s,
+      dist: a[4] + (b[4] - a[4]) * s, pitch: a[5] + (b[5] - a[5]) * s, exp: a[6] + (b[6] - a[6]) * s,
+    };
+  }
 
   function placeCamera() {
-    const cy = Math.max(PITCH - PITCH_RANGE, Math.min(PITCH + PITCH_RANGE, pitch));
-    const r = DIST;
+    // reduced-motion: snap scroll to the nearest beat centre (no continuous scrub)
+    let p = scrollP;
+    if (reduceMotion) {
+      let best = 0, bd = 1;
+      for (let i = 0; i < BEATS.length; i++) {
+        const d = Math.abs(scrollP - BEATS[i][0]);
+        if (d < bd) { bd = d; best = BEATS[i][0]; }
+      }
+      p = best;
+    }
+    const st = beatState(p);
+    const cy = st.pitch + dispPitch;
+    const yaw = dispYaw;
+    camT.set(st.tx, st.ty, st.tz);
     camera.position.set(
-      TARGET.x + r * Math.cos(cy) * Math.sin(yaw),
-      TARGET.y + r * Math.sin(cy),
-      TARGET.z + r * Math.cos(cy) * Math.cos(yaw)
+      camT.x + st.dist * Math.cos(cy) * Math.sin(yaw),
+      camT.y + st.dist * Math.sin(cy),
+      camT.z + st.dist * Math.cos(cy) * Math.cos(yaw)
     );
-    camera.lookAt(TARGET);
+    camera.lookAt(camT);
+    renderer.toneMappingExposure = st.exp;
   }
+
+  // scroll drives a single scalar; all interpolation happens in the rAF tick. The
+  // beat scrub is opt-in (opts.beats): the engine is built and mechanically verified,
+  // but the pinned-stage layout choreography (device-to-one-side framing, text scrims
+  // so nothing overlaps) needs a dedicated design pass to clear the "no beat feels
+  // like a slide" bar · until then the hero holds the arrival framing (beat 0) with
+  // drag-to-orbit, which is the shipped, clean behaviour.
+  function onScroll() {
+    const max = document.documentElement.scrollHeight - window.innerHeight;
+    scrollP = max > 0 ? Math.max(0, Math.min(1, window.scrollY / max)) : 0;
+    frame();
+  }
+  if (opts.beats) window.addEventListener('scroll', onScroll, { passive: true });
 
   function resize() {
     const w = canvas.clientWidth, h = canvas.clientHeight;
@@ -140,8 +197,8 @@ export function mountHero(canvas, opts) {
     if (dragging) {
       const dx = cx - lastX, dy = cy - lastY;
       lastX = cx; lastY = cy;
-      targetYaw = clamp(targetYaw - dx * 0.006, REST_YAW - YAW_RANGE, REST_YAW + YAW_RANGE);
-      targetPitch = clamp(targetPitch - dy * 0.003, PITCH - PITCH_RANGE, PITCH + PITCH_RANGE);
+      dragYaw = clamp(dragYaw - dx * 0.006, -YAW_RANGE, YAW_RANGE);
+      dragPitch = clamp(dragPitch - dy * 0.003, -PITCH_RANGE, PITCH_RANGE);
       frame();
     } else {
       hover(cx, cy);
@@ -197,26 +254,20 @@ export function mountHero(canvas, opts) {
   let pending = false;
   function frame() { if (!pending) { pending = true; requestAnimationFrame(tick); } }
 
-  function tick(t) {
+  function tick() {
     pending = false;
-    // ease targets toward rest when released
-    if (!dragging) {
-      const sinceUp = (t - released) / 1000;
-      if (sinceUp > 0.25) {
-        targetYaw += (REST_YAW - targetYaw) * 0.04;
-        targetPitch += (PITCH - targetPitch) * 0.04;
-      }
-    }
-    // idle drift (killed by reduced-motion)
+    // when released, the drag target decays to zero so the camera returns to the beat
+    if (!dragging) { dragYaw *= 0.9; dragPitch *= 0.9; }
+    // a sub-degree idle drift while at rest (killed by reduced-motion)
     let idle = 0;
-    if (!reduceMotion && !dragging) { idlePhase += 0.0015; idle = Math.sin(idlePhase) * 0.008; }
-    yaw += (targetYaw + idle - yaw) * 0.12;
-    pitch += (targetPitch - pitch) * 0.12;
+    if (!reduceMotion && !dragging) { idlePhase += 0.0015; idle = Math.sin(idlePhase) * 0.006; }
+    // ease the displayed offset toward the drag target
+    dispYaw += (dragYaw + idle - dispYaw) * 0.14;
+    dispPitch += (dragPitch - dispPitch) * 0.14;
     placeCamera();
     if (loaded) renderer.render(scene, camera);
 
-    // keep animating while settling or idling
-    const settling = Math.abs(yaw - targetYaw) > 1e-4 || Math.abs(pitch - targetPitch) > 1e-4;
+    const settling = Math.abs(dispYaw - dragYaw) > 1e-4 || Math.abs(dispPitch - dragPitch) > 1e-4;
     if (settling || (!reduceMotion && !dragging)) frame();
   }
 
