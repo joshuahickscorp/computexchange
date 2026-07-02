@@ -112,3 +112,11 @@ gradient · render/verify/dgx-spark-compare.png (ref left, render right).
   to (0.92,0.74,0.42), web area up (element1 pos 0.52 to 0.62), ridges glossier (rough 0.30 to
   0.22) for the gold catch, cells slightly larger (1.8 to 2.0mm). Foam now reads as golden
   open-cell metal matching the reference. Verified in the hero lighting too (preview iterr1).
+
+## MODEL REFINEMENT · Mac Studio aluminium tone (per-device verify lighting)
+The dim directional verify hid a real gap: aluminium base 0.58 read as dark anodized gunmetal,
+not Apple's bright silver. Metals show their surround, so the verify now lights each device to
+match ITS reference: Studio under a bright high-key white studio (Apple product shot), Spark under
+the dim directional desk key (StorageReview). Fix: aluminium base 0.58 to 0.86 (real ~0.9 alu
+reflectance) · the Studio now reads as bright Apple silver in both the verify compare and the hero
+(preview iterr2). Both devices confirmed accurate in the hero lighting.

@@ -227,7 +227,7 @@ def principled(name, base, rough, metallic=1.0, coat=0.0, coat_rough=0.1):
 def blasted_aluminum():
     """Bead-blasted (NOT brushed) light aluminum: fine isotropic roughness variation
     plus a whisper of bump for the micro-sparkle."""
-    m = principled("mac-blasted-alu", (0.58, 0.60, 0.63), 0.36, coat=0.0)
+    m = principled("mac-blasted-alu", (0.86, 0.87, 0.89), 0.38, coat=0.0)
     nt = m.node_tree
     b = nt.nodes["Principled BSDF"]
     tc = nt.nodes.new("ShaderNodeTexCoord")
@@ -729,23 +729,27 @@ def scene_solo(which):
 
 
 # ---- verify mode · orthographic reference-match renders (overlay against press imagery) ----
-def verify_rig_front(subject_w, subject_h, res):
+def verify_rig_front(subject_w, subject_h, res, bright=False):
     """Neutral even front-elevation light: a flat product-catalogue look so silhouette
     and feature positions read against the reference, not a dramatic hero light."""
     sc = bpy.context.scene
     sc.render.film_transparent = True
-    w = bpy.data.worlds.new("dim")
+    w = bpy.data.worlds.new("vfworld")
     w.use_nodes = True
-    w.node_tree.nodes["Background"].inputs[0].default_value = (0.05, 0.05, 0.055, 1)
+    # bright high-key white surround (Apple product studio) for aluminium so it reads
+    # as bright silver · dim directional (StorageReview desk) for the Spark champagne
+    w.node_tree.nodes["Background"].inputs[0].default_value = (0.62, 0.62, 0.64, 1) if bright else (0.05, 0.05, 0.055, 1)
     sc.world = w
-    sc.view_settings.exposure = -0.1
+    sc.view_settings.exposure = 0.0 if bright else -0.1
     aim = bpy.data.objects.new("Aim", None)
     aim.location = (0, 0, subject_h * 0.5)
     bpy.context.collection.objects.link(aim)
-    # a soft key high and front (the reference's studio key) + a low fill · directional
-    # so metal reads as a champagne gradient, not a flat blown-white reflection
-    add_area("vf-key", (-0.4, -1.2, subject_h * 0.5 + 0.9), 1.1, 40, (1.0, 0.99, 0.96), aim=aim)
-    add_area("vf-fill", (0.7, -1.3, subject_h * 0.5), 1.4, 8, (0.96, 0.98, 1.0), aim=aim)
+    if bright:
+        add_area("vf-key", (-0.4, -1.3, subject_h * 0.5 + 0.6), 2.0, 30, (1, 1, 1), aim=aim)
+        add_area("vf-fill", (0.7, -1.3, subject_h * 0.5), 2.0, 22, (1, 1, 1), aim=aim)
+    else:
+        add_area("vf-key", (-0.4, -1.2, subject_h * 0.5 + 0.9), 1.1, 40, (1.0, 0.99, 0.96), aim=aim)
+        add_area("vf-fill", (0.7, -1.3, subject_h * 0.5), 1.4, 8, (0.96, 0.98, 1.0), aim=aim)
     # orthographic front elevation: look along +Y at the -Y face
     cd = bpy.data.cameras.new("vcam")
     cd.type = "ORTHO"
@@ -771,7 +775,7 @@ def verify_device(which):
         sw, sh = mm(150), mm(50.5)
     # frame at the reference aspect so the overlay lines up: pad to a fixed height
     res = (900, int(900 * sh / sw)) if sw >= sh else (int(900 * sw / sh), 900)
-    verify_rig_front(sw, sh, res)
+    verify_rig_front(sw, sh, res, bright=(which == "studio"))
     name = "mac-studio" if which == "studio" else "dgx-spark"
     render_to("render/verify/" + name + "-front.png")
 
