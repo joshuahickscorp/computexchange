@@ -30,10 +30,11 @@ source line contains one it is transcribed as `·`. Line numbers are exact as of
 | 11 | payout rail is a stub | KILLED as stale · corrected | real Stripe Connect transfers when configured |
 | 12 | pricing constants | verified | $0.001 per 1k embeddings · the page's one serif number |
 
-## 1 · prove-local-count · corrected, number pending the parser fix
+## 1 · prove-local-count · corrected, parser fixed, number re-pinned
 
-**Line the page prints:** `make prove-local · N pass · 0 skip · 0 fail` with N taken from a fresh
-run made after the parser fix below, in the same shift that ships the page.
+**Line the page prints:** `make prove-local · 168 pass · 0 skip · 0 fail · a matrix-only run,
+tallied by grep over its own ledger`. 168 is from a fresh SKIP_LIVE=1 run on 2026-07-02, AFTER
+the parser fix below, and equals the 162 top-level matrix tests plus 6 capability lines.
 
 **Receipts:**
 - `scripts/prove-local.sh:92` · `printf '%s\t%s\t%s\n' "$status" "$cap" "$*" >>"$LEDGER_FILE"` · every check appends one ledger line
@@ -42,13 +43,14 @@ run made after the parser fix below, in the same shift that ships the page.
 - `scripts/prove-local.sh:1030` · `die "$failc capability check(s) FAILED · not release-candidate clean"` · any FAIL aborts
 - `scripts/prove-local.sh:209` · `grep -E '^--- (PASS|FAIL): Test[A-Za-z]+ '` · THE FLAW: `[A-Za-z]+` drops digit-named tests
 
-**Notes:** the adversarial checker refuted the naive count. The matrix parser regex silently drops
-any top-level test with a digit in its name: `TestPerTaskSecsFromP90FallbackAndConversion` ran and
-passed in the 2026-07-01 run but produced zero ledger lines, so the printed `167 pass` was one
-short of the 168 checks that actually passed (162 matrix + 6 capability). The regex is fixed to
-`Test[A-Za-z0-9_]+` in the site shift and the page prints the post-fix number from a fresh run.
-The count is ledger capability lines, not raw test cases (the whole Go unit suite and the whole
-cargo suite are one line each), and a `SKIP_LIVE=1` run is matrix-only · the page says which.
+**Notes:** the adversarial checker refuted the naive count. The matrix parser regex silently
+dropped any top-level test with a digit in its name: `TestPerTaskSecsFromP90FallbackAndConversion`
+ran and passed in the 2026-07-01 run but produced zero ledger lines, so the printed `167 pass` was
+one short of the 168 checks that actually passed. FIXED in this shift: the regex is now
+`Test[A-Za-z0-9_]+` (`scripts/prove-local.sh:209`) and the re-run records 168 pass · 0 skip ·
+0 fail with the recovered test present in the ledger. The count is ledger capability lines, not
+raw test cases (the whole Go unit suite and the whole cargo suite are one line each), and a
+`SKIP_LIVE=1` run is matrix-only · the page says which.
 
 ## 2 · queue-postgres · verified
 
@@ -247,3 +249,22 @@ platform take defaults to 3%.
 
 **Notes:** prices are served from the models table, not a Go constant (`control/api.go:1145`).
 The one serif monument on the page is $0.001 per 1,000 embeddings (`db/schema.sql:299`).
+
+## Appendix · composite page lines
+
+Three page lines compose multiple ledger claims rather than quoting one; their constituent
+receipts, so the ctrl-F contract holds:
+
+- **Hero thesis** `a verified spot market for batch inference · Metal by default, CUDA as a
+  build flag`: verified = claim 6 · market with seeded prices and settlement = claims 12 and 8 ·
+  batch inference = claims 4 and 10 · Metal default / CUDA flag = claim 4
+  (`agent/Cargo.toml:47`, `:53`).
+- **Drop row** `drop your data · the pipeline is detected · ...`: detection is the quote scan
+  (`control/quote.go:57` `DetectedFields ... top-level keys in the sample`,
+  `control/quote.go:561` "handlePipelineQuote prices a detected MULTI-STAGE pipeline"); the
+  model list is claim 4.
+- **Earn row** `flip your Mac online and it earns while it idles · ...`: supplier earnings are
+  the held supplier_credit ledger entries written per verified task (claim 8,
+  `control/payment.go:108` `Kind: KindSupplierCredit`) · quiet-hours and battery eligibility on
+  the device is claim 5 (`agent/src/config.rs:328`) · the 3% take is claim 12
+  (`control/payment.go:63`).

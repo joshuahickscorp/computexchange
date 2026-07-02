@@ -1153,3 +1153,25 @@ func TestPollDispatchManifestShape(t *testing.T) {
 		t.Errorf("inputs must marshal as empty array, got: %s", s)
 	}
 }
+
+// The public-site asset handler is deliberately NOT a file server: one flat
+// directory and a strict name whitelist. This pins the whitelist against
+// traversal and junk.
+func TestSiteAssetName(t *testing.T) {
+	ok := []string{"oracles-pair@3x.png", "mac-studio@1x.png", "og-image.png", "knob-off@3x.png", "cx-mark-white.png"}
+	for _, n := range ok {
+		if !siteAssetName(n) {
+			t.Errorf("siteAssetName(%q) = false, want true", n)
+		}
+	}
+	bad := []string{
+		"../secrets.png", "a/b.png", "a\\b.png", "UPPER.png", "space name.png",
+		"pic.jpg", "pic.png.txt", ".png", "", "a..b.png", "a.b.png",
+		"unicode·dot.png", "verylongname-verylongname-verylongname-verylongname-verylongname.png",
+	}
+	for _, n := range bad {
+		if siteAssetName(n) {
+			t.Errorf("siteAssetName(%q) = true, want false", n)
+		}
+	}
+}

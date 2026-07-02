@@ -76,9 +76,10 @@ alpha checklist is in one place:
 
 ## 🚫 Deferred by decision
 
-- **Design** — no design system, no polished dashboards, no marketing site in
-  alpha. The skeletons above are intentionally plain. See
-  [PRODUCT_SHAPE.md](PRODUCT_SHAPE.md).
+- **Design** — no design system in alpha; the skeletons above are intentionally
+  plain. (Since superseded in part: the Control Room console ships at /admin and
+  the public informational page at / · web/index.html, receipts in
+  docs/SITE-CLAIMS.md.) See [PRODUCT_SHAPE.md](PRODUCT_SHAPE.md).
 - **CUDA / RunPod / DGX / TOPLOC** — Computexchange is Apple-Silicon-first for
   launch. Any thin CPU/CUDA rail is left intact but **not widened** in this pass.
   There is no external-cloud supply class.

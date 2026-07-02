@@ -85,7 +85,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
-	mux.HandleFunc("GET /{$}", s.handleRoot)  // → /admin (the one operator surface; the old dashboard + /app skeleton were retired)
+	mux.HandleFunc("GET /{$}", s.handleRoot)                    // the public site (web/index.html) · the operator surface stays at /admin
+	mux.HandleFunc("GET /assets/site/{file}", s.handleSiteAsset) // whitelisted site images (the oracle renders + srcset variants)
+	mux.HandleFunc("GET /favicon.ico", s.handleFavicon)
 	mux.HandleFunc("GET /demo", s.handleDemo) // Launch/Earn product demo (monochrome, same-origin)
 
 	// Self-serve accounts (accounts.go) · unauthed: these MINT the credential.
@@ -1873,13 +1875,82 @@ func secureHTMLHeaders(w http.ResponseWriter) {
 	h.Set("Referrer-Policy", "no-referrer")
 }
 
-// handleRoot redirects the bare domain to the one operator surface, /admin. The
-// old operator dashboard (web/dashboard.html at /) and the role-tab skeleton
-// (web/skeleton.html at /app) were retired: the passkey-gated Control Room at
-// /admin is the single console, and there is no public marketing site (the product
-// is delivered as apps). A buyer submits via the API/CLI/SDK, not a web root.
+// handleRoot serves the public informational site at the bare domain. One page,
+// no signup, no email capture · every claim on it is receipted in
+// docs/SITE-CLAIMS.md. Path is web/index.html, overridable via SITE_PATH; a
+// missing file is a clear 404, never a faked page. The operator surface stays at
+// /admin; buyers still submit via the API/CLI/SDK, the page only informs.
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
-	http.Redirect(w, r, "/admin", http.StatusFound)
+	path := os.Getenv("SITE_PATH")
+	if path == "" {
+		path = "web/index.html"
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "site not found at "+path+" (set SITE_PATH)")
+		return
+	}
+	secureHTMLHeaders(w)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(b)
+}
+
+// handleSiteAsset serves the handful of images the public site references
+// (the oracle renders and their 1x/2x srcset downsizes). It is deliberately NOT
+// a file server: one flat directory (web/assets/site, overridable via
+// SITE_ASSETS_PATH), a strict name whitelist, PNG only. Anything else is 404.
+func (s *Server) handleSiteAsset(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("file")
+	if !siteAssetName(name) {
+		writeErr(w, http.StatusNotFound, "no such site asset")
+		return
+	}
+	dir := os.Getenv("SITE_ASSETS_PATH")
+	if dir == "" {
+		dir = "web/assets/site"
+	}
+	b, err := os.ReadFile(dir + "/" + name)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "no such site asset")
+		return
+	}
+	h := w.Header()
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Content-Type", "image/png")
+	h.Set("Cache-Control", "public, max-age=86400")
+	_, _ = w.Write(b)
+}
+
+// siteAssetName allows lowercase kebab names with the retina @Nx convention and a
+// .png suffix, nothing else: no slashes, no dots beyond the extension, no traversal.
+func siteAssetName(name string) bool {
+	if !strings.HasSuffix(name, ".png") || len(name) > 64 {
+		return false
+	}
+	stem := strings.TrimSuffix(name, ".png")
+	if stem == "" {
+		return false
+	}
+	for _, c := range stem {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' && c != '@' && c != 'x' {
+			return false
+		}
+	}
+	return true
+}
+
+// handleFavicon serves the existing favicon so the site and console do not 404
+// the browser's automatic request. Same read-from-disk mechanism as the pages.
+func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
+	b, err := os.ReadFile("web/favicon.ico")
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "no favicon")
+		return
+	}
+	h := w.Header()
+	h.Set("Content-Type", "image/x-icon")
+	h.Set("Cache-Control", "public, max-age=86400")
+	_, _ = w.Write(b)
 }
 
 // handleAdminPage serves the passkey-gated operator panel at /admin. The HTML shell

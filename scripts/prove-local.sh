@@ -206,7 +206,7 @@ while IFS= read -r line; do
     "--- PASS: Test"*) t="${line#--- PASS: }"; record PASS "matrix:${t%% *}" "deterministic check" ;;
     "--- FAIL: Test"*) t="${line#--- FAIL: }"; record FAIL "matrix:${t%% *}" "see $MATRIX_LOG" ;;
   esac
-done < <(grep -E '^--- (PASS|FAIL): Test[A-Za-z]+ ' "$MATRIX_LOG" || true)
+done < <(grep -E '^--- (PASS|FAIL): Test[A-Za-z0-9_]+ ' "$MATRIX_LOG" || true)
 [ "$matrix_ok" = "1" ] || die "integration matrix failed — see $MATRIX_LOG"
 
 # binary-embeddings (PLANE_D D5/D15): the compact float32 artifact must be smaller
@@ -980,21 +980,29 @@ print("ok" if parked_ok and nowait_ok else "no")
     record FAIL claim-index "tasks_ready_unclaimed_idx missing or not valid (indisvalid/indisready != t)"
   fi
 
-  # Root redirects to the one operator surface, /admin (the old dashboard at / and
-  # the /app skeleton were retired). -o/dev/null -w keeps just the status line;
-  # --max-redirs 0 so we assert the 302 itself, not the followed target.
-  root_code="$(curl -fsS -o /dev/null -w '%{http_code}' --max-redirs 0 "$CONTROL_URL/" 2>/dev/null || true)"
-  if [ "$root_code" = "302" ]; then
-    record PASS root-redirect "/ redirects to /admin ($root_code)"
+  # The public site is served at the bare root (SITE_PATH=web/index.html): a 200
+  # whose body carries the receipts-ledger footnote. The operator surface stays at
+  # /admin (checked below). A missing file is an honest 404, so this can SKIP when
+  # web/index.html is absent at the control CWD, mirroring the admin-console check.
+  root_body="$(curl -fsS "$CONTROL_URL/" 2>/dev/null || true)"
+  if printf '%s' "$root_body" | grep -qi 'SITE-CLAIMS'; then
+    record PASS root-site "public site served at / (SITE_PATH=web/index.html)"
+  elif [ -z "$root_body" ] && [ ! -f web/index.html ]; then
+    record SKIP root-site "site not served (web/index.html missing at control CWD)"
   else
-    record FAIL root-redirect "/ did not redirect to /admin (got '$root_code', want 302)"
+    record FAIL root-site "/ did not serve the site (empty or missing the SITE-CLAIMS footnote)"
   fi
 
   # The passkey-gated operator console (Control Room) is served at /admin. The HTML
   # shell is public (the DATA routes enforce auth); ADMIN_PATH=web/admin.html.
-  curl -fsS "$CONTROL_URL/admin" 2>/dev/null | grep -qiE 'control room|passkey' \
-    && record PASS admin-console "Control Room served at /admin (ADMIN_PATH=web/admin.html)" \
-    || record SKIP admin-console "admin console not served (web/admin.html missing at control CWD)"
+  # Buffered (no curl|grep pipe): grep -q exiting early SIGPIPEs curl under
+  # pipefail, which mis-reported the multi-MB console page as not served.
+  admin_body="$(curl -fsS "$CONTROL_URL/admin" 2>/dev/null || true)"
+  if printf '%s' "$admin_body" | grep -qiE 'control room|passkey'; then
+    record PASS admin-console "Control Room served at /admin (ADMIN_PATH=web/admin.html)"
+  else
+    record SKIP admin-console "admin console not served (web/admin.html missing at control CWD)"
+  fi
 fi
 
 # ── Phase 5: unit/fuzz tests (cheap, deterministic, no infra) ────────────────
