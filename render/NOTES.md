@@ -78,3 +78,10 @@ verification, not a strict silhouette overlay. Loops:
 Note: under the flat verify light the metallic pill tubs read cream (they reflect the bright
 neutral world); in the dark-world hero they render as recessed dark champagne, verified in the
 tabletop finals. Champagne shell tone confirmed muted/warm, not jewelry.
+
+## PASS 3 · Phase 3-4 delivery (docs/PERF.md)
+Shipped + live-verified: glb 2.3MB to 1.0MB (foam maps 512px+crush), fonts self-hosted +
+subset (Geist 10KB + Cormorant 18KB, 0 Google requests), brotli JS (three.js 1.27MB to 201KB
+wire), control-plane .br serving + Accept-Ranges on the glb + immutable cache for hashed names +
+woff2/ktx2 whitelist. gltfpack/toktx uninstallable here (documented); KTX2 server path pre-wired.
+Remaining Phase 4: content-hash filenames, still-first crossfade, LCP/waterfall measurement, SW.
