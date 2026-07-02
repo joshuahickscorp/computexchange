@@ -20,9 +20,16 @@
 <meta property="og:description" content="a verified spot market for compute · priced before you spend, verified before you pay">
 <meta property="og:image" content="https://computexchange.net/assets/site/og-image.png">
 <meta property="og:type" content="website">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="preload" href="/assets/site/fonts/geist-mono.woff2" as="font" type="font/woff2" crossorigin>
+<style>
+  /* self-hosted, subsetted to the page's glyphs · no Google Fonts, no third-party
+     request, no render-blocking stylesheet. Geist Mono is one variable file (400 to
+     600); Cormorant is the single serif monument. */
+  @font-face{font-family:'Geist Mono';font-style:normal;font-weight:400 600;font-display:swap;
+    src:url(/assets/site/fonts/geist-mono.woff2) format('woff2')}
+  @font-face{font-family:'Cormorant Garamond';font-style:normal;font-weight:600;font-display:swap;
+    src:url(/assets/site/fonts/cormorant-600.woff2) format('woff2')}
+</style>
 <script type="importmap">
 { "imports": {
   "three": "/assets/site/vendor/three.module.js",

@@ -1922,16 +1922,70 @@ func (s *Server) handleSiteAsset(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "no such site asset")
 		return
 	}
+	h := w.Header()
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Content-Type", ctype)
+	// Content-hashed asset names (name-<8+ hex>.ext) never change · cache them a year,
+	// immutable. Everything else gets a modest day so an unhashed swap propagates.
+	if siteAssetHashed(rel) {
+		h.Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		h.Set("Cache-Control", "public, max-age=86400")
+	}
+	// Serve a brotli-precompressed sibling (built by render/site/precompress.sh) when
+	// the client accepts it and the .br exists · text assets shrink a lot, and the glb
+	// is already entropy-dense so it is left uncompressed (measured, not assumed).
+	if brotliOK(r) {
+		if bz, err := os.ReadFile(absFull + ".br"); err == nil {
+			h.Set("Content-Encoding", "br")
+			h.Set("Vary", "Accept-Encoding")
+			_, _ = w.Write(bz)
+			return
+		}
+	}
 	b, err := os.ReadFile(absFull)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "no such site asset")
 		return
 	}
-	h := w.Header()
-	h.Set("X-Content-Type-Options", "nosniff")
-	h.Set("Content-Type", ctype)
-	h.Set("Cache-Control", "public, max-age=86400")
+	if strings.HasSuffix(rel, ".glb") {
+		h.Set("Accept-Ranges", "bytes") // let the loader range-request the glb
+	}
 	_, _ = w.Write(b)
+}
+
+// brotliOK reports whether the client accepts brotli.
+func brotliOK(r *http.Request) bool {
+	for _, tok := range strings.Split(r.Header.Get("Accept-Encoding"), ",") {
+		if strings.TrimSpace(strings.SplitN(tok, ";", 2)[0]) == "br" {
+			return true
+		}
+	}
+	return false
+}
+
+// siteAssetHashed reports whether a filename carries a content hash (stem ends in
+// -<8 or more hex digits>), so it can be cached immutably for a year.
+func siteAssetHashed(rel string) bool {
+	base := rel
+	if i := strings.LastIndex(base, "/"); i >= 0 {
+		base = base[i+1:]
+	}
+	dot := strings.LastIndex(base, ".")
+	if dot <= 0 {
+		return false
+	}
+	stem := base[:dot]
+	dash := strings.LastIndex(stem, "-")
+	if dash < 0 || len(stem)-dash-1 < 8 {
+		return false
+	}
+	for _, c := range stem[dash+1:] {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // siteAssetType validates a site-asset request path and returns its content type.
@@ -1958,6 +2012,10 @@ func siteAssetType(rel string) (string, bool) {
 		return "application/wasm", true
 	case strings.HasSuffix(rel, ".json"):
 		return "application/json", true
+	case strings.HasSuffix(rel, ".woff2"):
+		return "font/woff2", true
+	case strings.HasSuffix(rel, ".ktx2"):
+		return "image/ktx2", true
 	}
 	return "", false
 }

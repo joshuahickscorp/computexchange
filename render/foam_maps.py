@@ -11,7 +11,7 @@ import numpy as np
 from PIL import Image
 import os
 
-SIZE = 1024
+SIZE = 512
 CELLS = 18          # coarse Voronoi cells across the tile (finer, denser foam)
 CELLS_FINE = 32     # the overlapping second scale, per the reproduction checklist
 SEED = 7            # fixed so the maps are reproducible

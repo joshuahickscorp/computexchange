@@ -1166,6 +1166,8 @@ func TestSiteAssetType(t *testing.T) {
 		"vendor/three.module.js":              "text/javascript; charset=utf-8",
 		"vendor/addons/loaders/GLTFLoader.js": "text/javascript; charset=utf-8",
 		"vendor/draco/draco_decoder.wasm":     "application/wasm",
+		"fonts/geist-mono.woff2":              "font/woff2",
+		"tex/foam-3f9c2a1b.ktx2":              "image/ktx2",
 	}
 	for n, want := range ok {
 		if ct, valid := siteAssetType(n); !valid || ct != want {
