@@ -38,6 +38,8 @@ type metricsState struct {
 	quotes           atomic.Int64 // POST /v1/quote priced + persisted (every quote the Brain issued)
 	budgetStops      atomic.Int64 // capped jobs paused before breach (Budget Governor stop, §14 D8)
 	longPollTimeouts atomic.Int64 // worker long-poll waits that returned empty on timeout (§7 D1; 0 until the long-poll slice lands)
+	// Stuck-run watchdog:
+	stuckCancels atomic.Int64 // runs auto-cancelled at stuckEtaFactor × ETA with no progress (checkpointed + partially settled)
 }
 
 var metrics metricsState
@@ -61,6 +63,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(w, "cx_quotes_total", "Quotes priced and persisted via POST /v1/quote.", metrics.quotes.Load())
 	writeCounter(w, "cx_budget_stops_total", "Capped jobs paused before breach by the Budget Governor.", metrics.budgetStops.Load())
 	writeCounter(w, "cx_long_poll_timeouts_total", "Worker long-poll waits that returned empty on timeout.", metrics.longPollTimeouts.Load())
+	writeCounter(w, "cx_stuck_cancelled_total", "Stuck runs auto-cancelled by the watchdog (past 1.5x ETA, no progress; checkpointed + settled at completed work).", metrics.stuckCancels.Load())
 
 	// Bound the metric DB queries; widened to 10s so a slow scrape under load still
 	// completes rather than truncating the exposition.

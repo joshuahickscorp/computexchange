@@ -3222,3 +3222,249 @@ func TestSignupPerIPDailyCapEnforced(t *testing.T) {
 		t.Fatalf("signup from a different, uncapped IP: want 201, got %d: %s", code, out)
 	}
 }
+
+// --- stuck-run watchdog (workers.go reapStuckJobs) ---
+
+// TestStuckJobReaperCancelsAndCheckpoints proves the watchdog's whole contract:
+// a running job past 1.5x its ETA with no task progress is cancelled with the
+// completed work CHECKPOINTED (partial merge at output_ref) and SETTLED (actual_usd
+// = completed tasks' charges only; no refund row — completed work stays charged,
+// un-run work was never charged), the unfinished task is cancelled, the buyer sees
+// a job_stuck_cancelled timeline event exactly once, and a job that is equally late
+// but still PROGRESSING is left alone.
+func TestStuckJobReaperCancelsAndCheckpoints(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+
+	// STUCK job: eta 10s, created 60s ago (past 1.5x = 15s); task 0 completed 10
+	// minutes ago, task 1 claimed 10 minutes ago and never committed — no progress
+	// inside the grace window.
+	jobID := uuid.New()
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO jobs (id, buyer_id, status, job_type, model_ref, input_ref, tier,
+		                   task_count, tasks_done, min_memory_gb, eta_secs, output_ref, created_at)
+		 VALUES ($1,$2,'running','embed','all-minilm-l6-v2','jobs/stuck/input.jsonl','batch',
+		         2,1,2,10,'jobs/stuck/output.jsonl', now() - interval '60 seconds')`,
+		jobID, demoBuyerUUID); err != nil {
+		t.Fatal(err)
+	}
+	doneTask, stuckTask := uuid.New(), uuid.New()
+	doneKey := "jobs/stuck/tasks/0/result.json"
+	if err := itStorage.PutObject(ctx, doneKey, embedResultJSON(1), "application/json"); err != nil {
+		t.Fatalf("seed result object: %v", err)
+	}
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO tasks (id, job_id, status, input_ref, result_key, result_ref, chunk_index,
+		                    worker_id, claimed_by, completed_at)
+		 VALUES ($1,$2,'complete','jobs/stuck/tasks/0/input.jsonl',$3,$3,0,$4,$4, now() - interval '10 minutes')`,
+		doneTask, jobID, doneKey, demoWorkerUUID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO tasks (id, job_id, status, input_ref, result_key, chunk_index,
+		                    worker_id, claimed_by, claimed_at, started_at)
+		 VALUES ($1,$2,'running','jobs/stuck/tasks/1/input.jsonl','jobs/stuck/tasks/1/result.json',1,
+		         $3,$3, now() - interval '10 minutes', now() - interval '10 minutes')`,
+		stuckTask, jobID, demoWorkerUUID); err != nil {
+		t.Fatal(err)
+	}
+	// The completed task's charge already settled at commit (the real per-task split).
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO ledger_entries (kind, buyer_id, task_id, amount_usd, payout_status)
+		 VALUES ('buyer_charge', $1, $2, -0.10, 'released')`,
+		demoBuyerUUID, doneTask); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO ledger_entries (kind, supplier_id, task_id, amount_usd, payout_status)
+		 VALUES ('supplier_credit', $1, $2, 0.09, 'held')`,
+		demoSupplierUUID, doneTask); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO ledger_entries (kind, task_id, amount_usd, payout_status)
+		 VALUES ('platform_take', $1, 0.01, 'released')`, doneTask); err != nil {
+		t.Fatal(err)
+	}
+
+	// CONTROL job: equally past its ETA but a task completed 5 seconds ago —
+	// PROGRESSING, so the watchdog must not touch it.
+	ctlJob, ctlTask := uuid.New(), uuid.New()
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO jobs (id, buyer_id, status, job_type, model_ref, input_ref, tier,
+		                   task_count, tasks_done, min_memory_gb, eta_secs, created_at)
+		 VALUES ($1,$2,'running','embed','all-minilm-l6-v2','jobs/ctl/input.jsonl','batch',
+		         2,1,2,10, now() - interval '60 seconds')`,
+		ctlJob, demoBuyerUUID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO tasks (id, job_id, status, input_ref, result_key, chunk_index,
+		                    worker_id, claimed_by, completed_at)
+		 VALUES ($1,$2,'complete','jobs/ctl/tasks/0/input.jsonl','jobs/ctl/tasks/0/result.json',0,
+		         $3,$3, now() - interval '5 seconds')`,
+		ctlTask, ctlJob, demoWorkerUUID); err != nil {
+		t.Fatal(err)
+	}
+
+	wk := NewWorkers(itStore, itStorage, stubPayout{})
+	if err := wk.reapStuckJobs(ctx); err != nil {
+		t.Fatalf("reapStuckJobs: %v", err)
+	}
+
+	var status string
+	if err := itPool.QueryRow(ctx, `SELECT status FROM jobs WHERE id=$1`, jobID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "cancelled" {
+		t.Fatalf("stuck job: want cancelled, got %q", status)
+	}
+	if err := itPool.QueryRow(ctx, `SELECT status FROM jobs WHERE id=$1`, ctlJob).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "running" {
+		t.Fatalf("progressing job must be untouched: want running, got %q", status)
+	}
+	if err := itPool.QueryRow(ctx, `SELECT status FROM tasks WHERE id=$1`, stuckTask).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "cancelled" {
+		t.Fatalf("unfinished task: want cancelled, got %q", status)
+	}
+	if err := itPool.QueryRow(ctx, `SELECT status FROM tasks WHERE id=$1`, doneTask).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "complete" {
+		t.Fatalf("completed task must be untouched: want complete, got %q", status)
+	}
+
+	// Settled at completed work only, and NO refund row: the buyer keeps the 0.10
+	// charge for the delivered chunk and was never charged for the cancelled one.
+	var actual float64
+	if err := itPool.QueryRow(ctx, `SELECT actual_usd::float8 FROM jobs WHERE id=$1`, jobID).Scan(&actual); err != nil {
+		t.Fatal(err)
+	}
+	if actual < 0.099 || actual > 0.101 {
+		t.Fatalf("actual_usd: want 0.10 (completed work only), got %v", actual)
+	}
+	var refunds int
+	if err := itPool.QueryRow(ctx,
+		`SELECT count(*) FROM ledger_entries WHERE kind='refund' AND buyer_id=$1`, demoBuyerUUID).Scan(&refunds); err != nil {
+		t.Fatal(err)
+	}
+	if refunds != 0 {
+		t.Fatalf("stuck cancel must NOT full-refund (completed work stays charged), got %d refund rows", refunds)
+	}
+
+	// Checkpoint: the partial merged artifact exists at output_ref.
+	if _, err := itStorage.GetObject(ctx, "jobs/stuck/output.jsonl"); err != nil {
+		t.Fatalf("checkpoint artifact missing at output_ref: %v", err)
+	}
+
+	// Buyer-visible timeline event, exactly once — including after a second sweep.
+	countEvents := func() int {
+		var n int
+		if err := itPool.QueryRow(ctx,
+			`SELECT count(*) FROM job_events WHERE job_id=$1 AND event='job_stuck_cancelled'`, jobID).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if n := countEvents(); n != 1 {
+		t.Fatalf("job_stuck_cancelled events: want 1, got %d", n)
+	}
+	if err := wk.reapStuckJobs(ctx); err != nil {
+		t.Fatalf("second reap: %v", err)
+	}
+	if n := countEvents(); n != 1 {
+		t.Fatalf("reaper must be idempotent: want 1 event after re-sweep, got %d", n)
+	}
+}
+
+// --- birds-eye summary (GET /admin/summary, summary.go) ---
+
+// TestAdminSummary proves the roll-up: ledger sums sign-normalized per kind (take
+// vs flow-through owed), runs by status, supplier credit by payout status, and that
+// the endpoint is admin-gated.
+func TestAdminSummary(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+
+	// A real job + task to hang the ledger rows on (ledger_entries.task_id is a
+	// genuine FK), then one settled charge (1.00 → 0.90 supplier held + 0.10 take)
+	// and one clawback.
+	sumJob, taskID := uuid.New(), uuid.New()
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO jobs (id, buyer_id, status, job_type, model_ref, input_ref, tier, task_count, tasks_done, min_memory_gb)
+		 VALUES ($1,$2,'complete','embed','all-minilm-l6-v2','jobs/s/input.jsonl','batch',1,1,2)`,
+		sumJob, demoBuyerUUID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO tasks (id, job_id, status, input_ref, result_key, chunk_index, worker_id, claimed_by, completed_at)
+		 VALUES ($1,$2,'complete','jobs/s/tasks/0/input.jsonl','jobs/s/tasks/0/result.json',0,$3,$3, now())`,
+		taskID, sumJob, demoWorkerUUID); err != nil {
+		t.Fatal(err)
+	}
+	seed := []struct {
+		q    string
+		args []any
+	}{
+		{`INSERT INTO ledger_entries (kind, buyer_id, task_id, amount_usd, payout_status)
+		  VALUES ('buyer_charge', $1, $2, -1.00, 'released')`, []any{demoBuyerUUID, taskID}},
+		{`INSERT INTO ledger_entries (kind, supplier_id, task_id, amount_usd, payout_status)
+		  VALUES ('supplier_credit', $1, $2, 0.90, 'held')`, []any{demoSupplierUUID, taskID}},
+		{`INSERT INTO ledger_entries (kind, task_id, amount_usd, payout_status)
+		  VALUES ('platform_take', $1, 0.10, 'released')`, []any{taskID}},
+		{`INSERT INTO ledger_entries (kind, supplier_id, task_id, amount_usd, payout_status)
+		  VALUES ('clawback', $1, $2, -0.05, 'clawed_back')`, []any{demoSupplierUUID, taskID}},
+	}
+	for _, s := range seed {
+		if _, err := itPool.Exec(ctx, s.q, s.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A second job in a distinct state for the by-status counts (sumJob above is
+	// the 'complete' one).
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO jobs (id, buyer_id, status, job_type, model_ref, input_ref, tier, task_count, tasks_done, min_memory_gb)
+		 VALUES ($1,$2,'running','embed','all-minilm-l6-v2','jobs/s2/input.jsonl','batch',1,0,2)`,
+		uuid.New(), demoBuyerUUID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Gated: no credential → 401.
+	if code, _ := req(t, "GET", "/admin/summary", nil); code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated /admin/summary: want 401, got %d", code)
+	}
+
+	code, out := req(t, "GET", "/admin/summary", nil, hdr{"Authorization", "Bearer dev-admin-key-0001"})
+	if code != http.StatusOK {
+		t.Fatalf("/admin/summary: want 200, got %d: %s", code, out)
+	}
+	var sum AdminSummary
+	if err := json.Unmarshal(out, &sum); err != nil {
+		t.Fatalf("decode summary: %v (%s)", err, out)
+	}
+	near := func(got, want float64, name string) {
+		if got < want-0.001 || got > want+0.001 {
+			t.Fatalf("%s: want %v, got %v", name, want, got)
+		}
+	}
+	near(sum.Money.ChargedUSD, 1.00, "charged_usd")
+	near(sum.Money.SupplierCreditUSD, 0.90, "supplier_credit_usd")
+	near(sum.Money.PlatformTakeUSD, 0.10, "platform_take_usd")
+	near(sum.Money.ClawedBackUSD, 0.05, "clawed_back_usd")
+	near(sum.Money.FlowOwedUSD, 0.90, "flow_owed_usd (held+pending)")
+	if sum.JobsByStatus["running"] != 1 || sum.JobsByStatus["complete"] != 1 {
+		t.Fatalf("jobs_by_status: want running=1 complete=1, got %v", sum.JobsByStatus)
+	}
+	held, ok := sum.PayoutsByStatus["held"]
+	if !ok || held.Count != 1 {
+		t.Fatalf("payouts_by_status[held]: want count 1, got %v", sum.PayoutsByStatus)
+	}
+	near(held.USD, 0.90, "payouts_by_status[held].usd")
+	if sum.Workers.Total < 1 {
+		t.Fatalf("workers.total: want >=1 (the demo worker), got %d", sum.Workers.Total)
+	}
+}

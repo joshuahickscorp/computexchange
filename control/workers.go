@@ -80,6 +80,15 @@ const (
 	hedgeAfter       = 90 * time.Second // 2 × ~45s target per-task time
 	hedgeMaxInFlight = 4                // concurrent hedges per job
 	hedgeBatch       = 20               // max new hedges per tick
+	// Stuck-run watchdog: a running job past stuckEtaFactor × its predicted eta_secs
+	// (the machine-throughput-derived prediction persisted at submit) with NO task
+	// progress — no commit and no fresh claim — within stuckProgressGrace is judged
+	// STUCK, not slow: completed chunks are checkpointed (partial merge), the rest is
+	// cancelled, and the job settles at what actually ran. Grace is 2 × hedgeAfter so
+	// hedging always gets its chance to rescue a straggler before the reaper rules.
+	stuckInterval      = 30 * time.Second
+	stuckEtaFactor     = 1.5
+	stuckProgressGrace = 2 * hedgeAfter
 )
 
 // --- ticker liveness guard ---
@@ -196,6 +205,7 @@ func (wk *Workers) Run(ctx context.Context) {
 		{staleInterval, "stale-requeue", wk.requeueStaleTasks},
 		{webhookInterval, "webhook-sweep", wk.sweepAndDeliver},
 		{hedgeInterval, "straggler-hedge", wk.hedgeStragglers},
+		{stuckInterval, "stuck-reaper", wk.reapStuckJobs},
 		{reconcileInterval, "ledger-reconcile", wk.reconcileLedger},
 		{disputeInterval, "dispute-resolve", wk.resolveDisputes},
 	}
@@ -392,6 +402,56 @@ func (wk *Workers) hedgeStragglers(ctx context.Context) error {
 		}
 		metrics.hedges.Add(1)
 		log.Printf("workers: hedged straggler task %s (chunk %d of job %s) to peer %s", s.TaskID, s.ChunkIndex, s.JobID, peer)
+	}
+	return nil
+}
+
+// reapStuckJobs is the stuck-run watchdog: a running job past stuckEtaFactor × its
+// predicted ETA with no task progress within stuckProgressGrace is cancelled — with
+// the buyer made whole for what did not run and NOT refunded for what did:
+//
+//  1. CHECKPOINT first (merge-before-mark, same discipline as completion): the
+//     completed chunks are folded into the buyer-ready artifact at output_ref, so a
+//     buyer whose own code has no checkpointing still keeps every finished chunk.
+//     A failed merge leaves the job untouched for retry — never cancel-then-lose.
+//  2. Cancel the job + its unfinished tasks (CancelStuckJob). Charges settle per
+//     task at commit, so the un-run remainder was never charged; completed tasks
+//     stay charged — the suppliers earned them (users owe each other).
+//  3. Settle actual_usd to the completed work and tell the buyer on the job
+//     timeline exactly what happened and what they owe.
+func (wk *Workers) reapStuckJobs(ctx context.Context) error {
+	stuck, err := wk.store.StuckRunningJobs(ctx, stuckEtaFactor, stuckProgressGrace, sweepBatch)
+	if err != nil {
+		return err
+	}
+	for _, j := range stuck {
+		if j.OutputRef != "" && j.TasksDone > 0 {
+			if _, merr := mergeJobResults(ctx, wk.store, wk.storage, j.ID); merr != nil {
+				log.Printf("workers: stuck job %s: checkpoint merge failed: %v (left running for retry)", j.ID, merr)
+				continue // do NOT cancel work we could not checkpoint
+			}
+		}
+		flipped, cerr := wk.store.CancelStuckJob(ctx, j.ID)
+		if cerr != nil {
+			log.Printf("workers: cancelling stuck job %s: %v", j.ID, cerr)
+			continue
+		}
+		if !flipped {
+			continue // progressed or went terminal since selection — leave it alone
+		}
+		// Settle at what actually ran (sum of per-task charges on completed tasks).
+		if serr := wk.store.SetJobActualUSD(ctx, j.ID); serr != nil {
+			log.Printf("workers: settling stuck job %s actual_usd: %v", j.ID, serr)
+		}
+		msg := fmt.Sprintf(
+			"Run stuck · exceeded %.1fx its predicted ETA with no progress and was cancelled automatically. "+
+				"You are charged only for the %d of %d tasks that completed; the rest was never charged. "+
+				"Completed results are checkpointed and downloadable.",
+			stuckEtaFactor, j.TasksDone, j.TaskCount)
+		_ = wk.store.InsertJobEvent(ctx, j.ID, nil, "job_stuck_cancelled", msg, nil)
+		metrics.stuckCancels.Add(1)
+		log.Printf("workers: stuck job %s cancelled (%d/%d tasks done · eta %ds exceeded %.1fx · grace %s)",
+			j.ID, j.TasksDone, j.TaskCount, j.EtaSecs, stuckEtaFactor, stuckProgressGrace)
 	}
 	return nil
 }

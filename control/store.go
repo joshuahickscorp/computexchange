@@ -2652,6 +2652,82 @@ func failJobAndRefundOnce(ctx context.Context, tx pgx.Tx, jobID uuid.UUID) (flip
 	return true, nil
 }
 
+// StuckJob is a running job the watchdog judged stuck: past its ETA multiple with
+// no task progress. Carries what the reaper needs to checkpoint + cancel + settle.
+type StuckJob struct {
+	ID        uuid.UUID
+	BuyerID   uuid.UUID
+	OutputRef string
+	EtaSecs   int
+	TasksDone int
+	TaskCount int
+}
+
+// StuckRunningJobs returns running jobs past factor × their predicted eta_secs with
+// NO task progress (no commit AND no fresh claim) within grace. Progress within
+// grace — even slow progress — exempts a job: the watchdog kills stuck runs, never
+// merely slow ones (hedging already covers slow). Jobs with no ETA prediction are
+// never judged (no honest deadline exists to hold them to).
+func (s *Store) StuckRunningJobs(ctx context.Context, factor float64, grace time.Duration, limit int) ([]StuckJob, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT j.id, j.buyer_id, COALESCE(j.output_ref,''), COALESCE(j.eta_secs,0),
+		        j.tasks_done, j.task_count
+		 FROM jobs j
+		 WHERE j.status = 'running'
+		   AND COALESCE(j.eta_secs,0) > 0
+		   AND now() > j.created_at + make_interval(secs => j.eta_secs::float8 * $1)
+		   AND NOT EXISTS (
+		     SELECT 1 FROM tasks t
+		     WHERE t.job_id = j.id
+		       AND (t.completed_at > now() - make_interval(secs => $2::float8)
+		         OR t.claimed_at   > now() - make_interval(secs => $2::float8))
+		   )
+		 ORDER BY j.created_at ASC
+		 LIMIT $3`,
+		factor, grace.Seconds(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []StuckJob
+	for rows.Next() {
+		var j StuckJob
+		if err := rows.Scan(&j.ID, &j.BuyerID, &j.OutputRef, &j.EtaSecs, &j.TasksDone, &j.TaskCount); err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
+// CancelStuckJob flips a stuck job to 'cancelled' and cancels its unfinished tasks.
+// Deliberately NOT the full-refund fail path: buyer charges settle per task at
+// commit, so completed work stays charged (the supplier earned it — users owe each
+// other) and the un-run remainder was never charged. flipped=false when the job
+// went terminal (or progressed) between selection and here, in which case nothing
+// is touched.
+func (s *Store) CancelStuckJob(ctx context.Context, jobID uuid.UUID) (flipped bool, err error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	ct, err := tx.Exec(ctx,
+		`UPDATE jobs SET status = 'cancelled' WHERE id = $1 AND status = 'running'`, jobID)
+	if err != nil {
+		return false, err
+	}
+	if ct.RowsAffected() == 0 {
+		return false, nil
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE tasks SET status = 'cancelled'
+		 WHERE job_id = $1 AND status NOT IN ('complete','failed','cancelled')`, jobID); err != nil {
+		return false, err
+	}
+	return true, tx.Commit(ctx)
+}
+
 // CompletableJob is a job ready to finalize: all tasks done, status not yet
 // terminal. Carries its buyer + output ref for the merge + webhook payload.
 type CompletableJob struct {

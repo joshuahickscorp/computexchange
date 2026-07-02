@@ -179,6 +179,7 @@ func (s *Server) Routes() http.Handler {
 
 	// Admin data (authAdmin: a valid cx_admin_ passkey session cookie OR the admin
 	// bearer key — see authAdmin in this file).
+	mux.Handle("GET /admin/summary", s.authAdmin(http.HandlerFunc(s.handleAdminSummary))) // birds-eye roll-up (summary.go)
 	mux.Handle("GET /admin/workers", s.authAdmin(http.HandlerFunc(s.handleAdminWorkers)))
 	mux.Handle("GET /admin/jobs", s.authAdmin(http.HandlerFunc(s.handleAdminJobs)))
 	mux.Handle("GET /admin/payouts", s.authAdmin(http.HandlerFunc(s.handleAdminPayouts)))
