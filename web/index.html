@@ -40,6 +40,7 @@
     --bone-hi:#e7e3dc;
     --green:#4c9d6e; --green-core:#69c096;
     --gold:#bf9a4e;  --gold-core:#e2c178;
+    --red:#c0554b;   --red-core:#dc8079;
     --mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
     --serif:"Cormorant Garamond",serif;
     --r:14px; --r-sm:10px;
@@ -98,15 +99,20 @@
   section.wrap{margin-top:160px}
   .sec-label{font-size:11px;letter-spacing:.38em;color:var(--ash);text-transform:uppercase;margin:0 0 34px;text-align:center}
 
-  .how .row{display:flex;gap:22px;align-items:baseline;padding:22px 4px;box-shadow:0 1px 0 var(--hair);font-size:14.5px}
+  /* the how rows carry the app's JOB-STATUS light · the turned-metal ring
+     (dot-ring@3x, flat + black rim) with a CSS colour lens inside, exactly as the
+     console renders run status. Traffic-light lenses: yellow, red, green. */
+  .how .row{display:flex;gap:22px;align-items:center;padding:20px 4px;box-shadow:0 1px 0 var(--hair);font-size:14.5px}
   .how .row:first-of-type{box-shadow:0 1px 0 var(--hair),0 -1px 0 var(--hair)}
-  .dot{flex:none;width:7px;height:7px;border-radius:999px;align-self:center}
-  .d-ash{background:var(--ash)}
-  .d-gold{background:var(--gold);box-shadow:0 0 6px rgba(226,193,120,.25)}
-  .d-green{background:var(--green);box-shadow:0 0 6px rgba(105,192,150,.25)}
+  .status-dot{position:relative;width:22px;height:22px;flex:none;
+    background:url(/assets/site/dot-ring@3x.png) center/contain no-repeat}
+  .status-dot::before{content:"";position:absolute;inset:24%;border-radius:50%}
+  .status-dot.gold::before{background:radial-gradient(circle at 50% 40%,var(--gold-core),var(--gold) 74%);box-shadow:0 0 6px 0 rgba(226,193,120,.5)}
+  .status-dot.red::before{background:radial-gradient(circle at 50% 40%,var(--red-core),var(--red) 74%);box-shadow:0 0 6px 0 rgba(192,85,75,.5)}
+  .status-dot.green::before{background:radial-gradient(circle at 50% 40%,var(--green-core),var(--green) 74%);box-shadow:0 0 6px 0 rgba(76,157,110,.5)}
   @media (prefers-reduced-motion: no-preference){
-    .d-green{animation:breathe 3.4s ease-in-out infinite}
-    @keyframes breathe{50%{box-shadow:0 0 10px rgba(105,192,150,.45)}}
+    .status-dot.green::before{animation:breathe 2.4s ease-in-out infinite}
+    @keyframes breathe{50%{box-shadow:0 0 10px 0 rgba(105,192,150,.75)}}
   }
   .how .k{flex:none;width:72px;color:var(--mute);font-size:11px;letter-spacing:.2em;text-transform:uppercase}
   .receipts-line{text-align:center;margin-top:38px}
@@ -204,11 +210,11 @@
   <section class="wrap">
     <h2 class="sec-label">how it works</h2>
     <div class="how measure">
-      <div class="row"><span class="dot d-ash" aria-hidden="true"></span><span class="k">drop</span>
+      <div class="row"><span class="status-dot gold" aria-hidden="true"></span><span class="k">drop</span>
         <span>drop a workload · the pipeline is detected</span></div>
-      <div class="row"><span class="dot d-gold" aria-hidden="true"></span><span class="k">cap</span>
+      <div class="row"><span class="status-dot red" aria-hidden="true"></span><span class="k">cap</span>
         <span>priced before you spend · the cap you set binds at dispatch</span></div>
-      <div class="row"><span class="dot d-green" aria-hidden="true"></span><span class="k">proof</span>
+      <div class="row"><span class="status-dot green" aria-hidden="true"></span><span class="k">proof</span>
         <span>results come back verified · every run ends in a receipt</span></div>
     </div>
     <div class="receipts-line">
