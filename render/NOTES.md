@@ -43,3 +43,24 @@ the pills read, the champagne is anodized-matte. PASS.
 The two machines sit on a matte desk at a standing eye line looking down ~36 degrees, size contrast
 exact, contact shadows real, void black behind. This is the "walked up to a table" brief. Finals
 render at 1024 spp / 3200 px from this locked scene.
+
+## PASS 3 · reproduction grade (overlay verification)
+
+### Mac Studio · overlay loop 1 (render/verify/mac-studio-front-overlay.png)
+Measured: reference device AR 2.047 · render AR 2.075 (+1.4%), height delta -4px after
+width-match. Silhouette and top corner radii agree. Defects from the 50% overlay:
+- PORT ROW too low by ~15px · the two USB-C + SD slot sit nearer the bottom edge than the
+  reference row. Fix (geometry): raise the port z.
+- BASE PERFORATION wrong · sparse random dots on a flat band vs the reference's fine dense
+  mesh following the circular base. Fix (material): a real perforation pattern, denser + finer,
+  not scattered geometry.
+- Port tongue detail is CORRECT (checklist wants the internal tongue visible).
+Order: geometry (port z) then material (perforation), re-overlay after each.
+
+### Mac Studio · overlay loop 2 (perforation fix)
+Base intake rebuilt: Voronoi F1 at ~1.3 mm pitch (was 2.4 mm sparse), sharp ramp for small
+round holes, Bump 0.35 to sink them · reads as a fine dense perforated mesh, matching the
+reference at the base. Re-overlay: ports + SD slot now coincide with Apple's row (ghosting
+gone), silhouette 2.075 vs 2.047 (+1.4%), perforation character matched. Remaining nitpick:
+the circular base arc reads a touch flatter than the reference · candidate for loop 3.
+Mac Studio front: reproduction-grade close. Pushing the improved base into the live finals.

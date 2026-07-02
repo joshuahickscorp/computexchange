@@ -38,6 +38,7 @@ def arg(name, default=None):
 
 
 EXPORT = arg("--export", None)
+VERIFY = arg("--verify", None)   # "studio" | "spark" | "all" · orthographic reference-match renders
 PREVIEW = bool(arg("--preview", False))
 SAMPLES = int(arg("--samples", 128 if PREVIEW else 2048))
 OUT = str(arg("--out", "render/previews/" if PREVIEW else "web/assets/site/"))
@@ -284,24 +285,32 @@ def foam_field(nt):
 
 
 def perforated_band():
-    """The Mac Studio base band: near-black metal speckled with the perforation
-    holes that show in the 8 mm float gap (Voronoi F1 dots as darker pits)."""
-    m = principled("mac-base-band", (0.16, 0.165, 0.175), 0.45)
+    """The Mac Studio base intake: a FINE DENSE regular hole mesh (reference is ~1.3 mm
+    pitch), not sparse speckle. A high-frequency Voronoi F1 gives one round pit per cell;
+    a sharp ramp keeps the metal web bright and the holes small + dark, and a Bump sinks
+    them so they read as recessed perforations, not painted dots (checklist: map domain,
+    not geometry)."""
+    m = principled("mac-base-band", (0.19, 0.195, 0.205), 0.5)
     nt = m.node_tree
     b = nt.nodes["Principled BSDF"]
     tc = nt.nodes.new("ShaderNodeTexCoord")
     v = nt.nodes.new("ShaderNodeTexVoronoi")
     v.voronoi_dimensions = "3D"
     v.feature = "F1"
-    v.inputs["Scale"].default_value = 1.0 / mm(2.4)
+    v.inputs["Scale"].default_value = 1.0 / mm(1.3)   # ~1.3 mm pitch · dense fine mesh
     nt.links.new(tc.outputs["Object"], v.inputs["Vector"])
     ramp = nt.nodes.new("ShaderNodeValToRGB")
-    ramp.color_ramp.elements[0].position = 0.28
-    ramp.color_ramp.elements[0].color = (0.015, 0.015, 0.018, 1)
-    ramp.color_ramp.elements[1].position = 0.42
-    ramp.color_ramp.elements[1].color = (0.16, 0.165, 0.175, 1)
+    ramp.color_ramp.elements[0].position = 0.10       # small round holes
+    ramp.color_ramp.elements[0].color = (0.01, 0.01, 0.012, 1)
+    ramp.color_ramp.elements[1].position = 0.24
+    ramp.color_ramp.elements[1].color = (0.19, 0.195, 0.205, 1)
     nt.links.new(v.outputs["Distance"], ramp.inputs["Fac"])
     nt.links.new(ramp.outputs["Color"], b.inputs["Base Color"])
+    bump = nt.nodes.new("ShaderNodeBump")
+    bump.inputs["Strength"].default_value = 0.35
+    bump.inputs["Distance"].default_value = mm(0.4)
+    nt.links.new(v.outputs["Distance"], bump.inputs["Height"])
+    nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
     return m
 
 
@@ -693,12 +702,63 @@ def scene_solo(which):
     render_to(OUT + f"{name}{suffix}@3x.png")
 
 
-if EXPORT:
+# ---- verify mode · orthographic reference-match renders (overlay against press imagery) ----
+def verify_rig_front(subject_w, subject_h, res):
+    """Neutral even front-elevation light: a flat product-catalogue look so silhouette
+    and feature positions read against the reference, not a dramatic hero light."""
+    sc = bpy.context.scene
+    sc.render.film_transparent = True
+    w = bpy.data.worlds.new("flat")
+    w.use_nodes = True
+    w.node_tree.nodes["Background"].inputs[0].default_value = (0.5, 0.5, 0.52, 1)
+    sc.world = w
+    sc.view_settings.exposure = 0.0
+    aim = bpy.data.objects.new("Aim", None)
+    aim.location = (0, 0, subject_h * 0.5)
+    bpy.context.collection.objects.link(aim)
+    add_area("vf-key", (-0.5, -1.4, subject_h * 0.5 + 0.3), 1.6, 26, (1, 1, 1), aim=aim)
+    add_area("vf-fill", (0.5, -1.4, subject_h * 0.5), 1.6, 18, (1, 1, 1), aim=aim)
+    # orthographic front elevation: look along +Y at the -Y face
+    cd = bpy.data.cameras.new("vcam")
+    cd.type = "ORTHO"
+    cd.ortho_scale = max(subject_w, subject_h) * 1.12
+    cam = bpy.data.objects.new("vcam", cd)
+    cam.location = (0, -2.0, subject_h * 0.5)
+    cam.rotation_euler = (math.radians(90), 0, 0)
+    bpy.context.collection.objects.link(cam)
+    sc.camera = cam
+    sc.render.resolution_x, sc.render.resolution_y = res
+
+
+def verify_device(which):
+    sc = reset_scene()
+    enable_gpu(sc)
+    sc.cycles.samples = 384
+    if which == "studio":
+        build_mac_studio(0.0, yaw_deg=0.0)
+        sw, sh = mm(197), mm(95)
+    else:
+        build_dgx_spark(0.0, yaw_deg=0.0)
+        sw, sh = mm(150), mm(50.5)
+    # frame at the reference aspect so the overlay lines up: pad to a fixed height
+    res = (900, int(900 * sh / sw)) if sw >= sh else (int(900 * sw / sh), 900)
+    verify_rig_front(sw, sh, res)
+    name = "mac-studio" if which == "studio" else "dgx-spark"
+    render_to("render/verify/" + name + "-front.png")
+
+
+if VERIFY:
+    if VERIFY in ("all", "studio"):
+        verify_device("studio")
+    if VERIFY in ("all", "spark"):
+        verify_device("spark")
+    print("verify renders done.")
+elif EXPORT:
     scene_pair()  # export path returns early after building + exporting
 elif ONLY in ("all", "pair"):
     scene_pair()
-if not EXPORT and ONLY in ("all", "studio"):
+if not VERIFY and not EXPORT and ONLY in ("all", "studio"):
     scene_solo("studio")
-if not EXPORT and ONLY in ("all", "spark"):
+if not VERIFY and not EXPORT and ONLY in ("all", "spark"):
     scene_solo("spark")
 print("build_scene done.")
