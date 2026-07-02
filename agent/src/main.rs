@@ -553,6 +553,7 @@ async fn execute_task(
     runners: &[Box<dyn JobRunner>],
     pool: &ModelPool,
     s3: &reqwest::Client,
+    checkpoint_secs: u64,
 ) -> Result<TaskCommit, RunError> {
     let manifest = &task.manifest;
     let runner = dispatch(manifest, cap, runners).await?;
@@ -566,8 +567,16 @@ async fn execute_task(
             msg: format!("fetching input_url: {e:#}"),
         })?;
 
+    // Intra-task checkpointing (additive contract delta): when the dispatch
+    // carries `partial_put_url` and the operator's cadence is on, the generative
+    // runners may periodically PUT the rows completed so far to it, so the
+    // stuck-run watchdog can hand the buyer mid-chunk progress if it kills the
+    // job. Absent URL or cadence 0 → inert; every other runner ignores it via
+    // the trait default. The final result PUT below is byte-for-byte unchanged.
+    let ckpt = runners::Checkpointer::new(task.partial_put_url.clone(), checkpoint_secs, s3.clone());
+
     // 2. Run the model through the WARM pool. On failure, still wipe input first.
-    let output = match runner.run(manifest, &input, pool).await {
+    let output = match runner.run_with_checkpoints(manifest, &input, pool, &ckpt).await {
         Ok(o) => o,
         Err(e) => {
             wipe(&mut input);
@@ -740,6 +749,9 @@ struct WorkCtx {
     /// Operator's reserved memory headroom (GB), for the memory snapshot attached
     /// to a typed failure report (Plane C/D D0).
     memory_headroom_gb: f32,
+    /// Seconds between intra-task partial-result checkpoint flushes (0 = off);
+    /// combined per task with the dispatch's `partial_put_url`.
+    checkpoint_secs: u64,
     status: Arc<StatusWriter>,
 }
 
@@ -818,6 +830,7 @@ async fn run_agent(cfg: AgentConfig) -> Result<()> {
         s3,
         min_payout_usd_per_hr: cfg.min_payout_usd_per_hr,
         memory_headroom_gb: cfg.memory_headroom_gb,
+        checkpoint_secs: cfg.checkpoint_secs,
         status: status.clone(),
     };
     let sem = Arc::new(Semaphore::new(permits));
@@ -988,7 +1001,16 @@ async fn poll_and_spawn(
         let _permit = permit;
         let task_id = task.task_id;
         let started = std::time::Instant::now();
-        match execute_task(&task, &ctx.cap, &ctx.runners, &ctx.pool, &ctx.s3).await {
+        match execute_task(
+            &task,
+            &ctx.cap,
+            &ctx.runners,
+            &ctx.pool,
+            &ctx.s3,
+            ctx.checkpoint_secs,
+        )
+        .await
+        {
             Ok(commit) => {
                 match ctx.client.commit_task(task_id, &commit).await {
                     Ok(()) => tracing::info!(task = %task_id, "committed result"),

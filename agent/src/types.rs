@@ -303,6 +303,18 @@ pub struct TaskDispatch {
     /// that don't send it yet (we then derive a key from the job/task ids).
     #[serde(default)]
     pub result_key: String,
+    /// Presigned PUT URL for the intra-task partial checkpoint object — the
+    /// task's `result_key` + ".partial", same expiry as `output_url`. The control
+    /// plane sends it ONLY for the generative job types (batch_infer,
+    /// batch_classification, json_extraction); `None` from an older control plane
+    /// or for any other job. When present the agent MAY periodically PUT the
+    /// final result shape plus a top-level `"partial": true` marker to it, so a
+    /// killed stuck job still yields mid-chunk progress. Partial objects are
+    /// NEVER merged into the verified artifact and NEVER affect payment
+    /// (unverified work is not paid). Additive contract delta; `default` keeps
+    /// the dispatch decodable against a control plane that never sends it.
+    #[serde(default)]
+    pub partial_put_url: Option<String>,
     pub deadline: u64,
     /// Pay rate the control plane is offering for this task (USD/hr). Contract
     /// delta; `default` (0.0) means "not advertised" → the min-payout gate treats
@@ -449,6 +461,46 @@ mod tests {
         assert_eq!(d.manifest.model.model_ref, "all-minilm-l6-v2");
         assert!(d.manifest.inputs.is_empty());
         assert_eq!(d.result_key, "jobs/x/tasks/0/result.json");
+        // No `partial_put_url` on the wire (older control plane) → None, never an
+        // error (the intra-task checkpointing delta is strictly additive).
+        assert!(d.partial_put_url.is_none());
+    }
+
+    /// Intra-task checkpointing contract delta: a dispatch CARRYING
+    /// `partial_put_url` decodes it, and the same dispatch without the field (an
+    /// older control plane) still decodes to `None` — additive both ways.
+    #[test]
+    fn dispatch_partial_put_url_decodes_present_and_absent() {
+        let base = r#"{
+            "task_id":"00000000-0000-0000-0000-000000000001",
+            "job_id":"00000000-0000-0000-0000-000000000002",
+            "manifest":{
+                "id":"00000000-0000-0000-0000-000000000002",
+                "job_type":{"type":"batch_infer"},
+                "model":{"kind":"gguf","ref":"llama-3.2-1b-instruct-q4"},
+                "inputs":[],
+                "output":{"url":""},
+                "params":null,
+                "constraints":{"min_memory_gb":0.0,"hw_classes":null,"max_duration_secs":0,"data_residency":null},
+                "verification":{"redundancy_frac":0.0,"honeypot_frac":0.0,"payout_hold_secs":5},
+                "tier":"batch"
+            },
+            "input_url":"http://example/in",
+            "output_url":"http://example/out",
+            "result_key":"jobs/x/tasks/0/result.json",
+            "deadline":0"#;
+        let with = format!(
+            "{base},\n\"partial_put_url\":\"http://example/out.partial?sig=abc\"}}"
+        );
+        let d: TaskDispatch = serde_json::from_str(&with).expect("dispatch with partial URL");
+        assert_eq!(
+            d.partial_put_url.as_deref(),
+            Some("http://example/out.partial?sig=abc")
+        );
+
+        let without = format!("{base}}}");
+        let d: TaskDispatch = serde_json::from_str(&without).expect("dispatch without partial URL");
+        assert!(d.partial_put_url.is_none());
     }
 
     /// A job_type carrying only its discriminant must decode (hint fields default).

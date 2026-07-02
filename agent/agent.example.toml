@@ -25,5 +25,12 @@ max_memory_pct = 85.0       # pause new work once physical memory use hits this 
 #   omit either field to take the conservative built-in default (8.0 GB / 85%).
 #   set BOTH to 0 to turn the memory governor OFF (dedicated box, run flat out).
 
+# Intra-task checkpointing: at most every N seconds, PUT the rows completed so
+# far (marked "partial": true) to the control plane's presigned ".partial" URL —
+# generative jobs only — so a killed stuck job still yields mid-chunk progress.
+# Partial output is never verified and never paid; the final result upload is
+# unchanged. 0 turns checkpointing off. CX_CHECKPOINT_SECS overrides.
+checkpoint_secs = 30
+
 # Optional quiet-hours window on a 24h clock; wraps past midnight if start > end.
 # quiet_hours = [22, 6]     # no work 22:00–05:59

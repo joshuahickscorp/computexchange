@@ -26,6 +26,12 @@ fn default_max_memory_pct() -> f32 {
     85.0
 }
 
+/// Default seconds between intra-task partial-result checkpoint flushes. Used
+/// when `agent.toml` omits `checkpoint_secs`; 0 disables checkpointing.
+fn default_checkpoint_secs() -> u64 {
+    30
+}
+
 /// User-facing operator policy for this machine. Deserialized straight from TOML.
 ///
 /// Some fields (`max_cpu_pct`, `min_payout_usd_per_hr`, `data_dir`) are part of
@@ -113,6 +119,15 @@ pub struct AgentConfig {
     /// `mlx` to route them to the MLX serving-lane seam). See `InferenceBackend`.
     #[serde(default)]
     pub inference_backend: InferenceBackend,
+    /// Seconds between intra-task partial-result checkpoint flushes for the
+    /// generative runners (batch_infer / batch_classification / json_extraction).
+    /// When the control plane's dispatch carries a presigned partial PUT URL, the
+    /// agent uploads the rows completed so far at most this often, so a killed
+    /// stuck job still yields mid-chunk progress to the buyer. 0 disables
+    /// checkpointing; the final result upload is unchanged either way. Defaults
+    /// via `default_checkpoint_secs` (30) when omitted from the TOML.
+    #[serde(default = "default_checkpoint_secs")]
+    pub checkpoint_secs: u64,
 }
 
 /// Operator-preferences overlay (Atlas F7 / backlog item 25). A PARTIAL TOML the
@@ -235,6 +250,17 @@ impl AgentConfig {
                 cfg.worker_token = token;
             }
         }
+        // CX_CHECKPOINT_SECS overrides the intra-task checkpoint cadence (0
+        // disables), following the same env-override pattern as URL/token. A
+        // non-numeric value is a real config error and surfaces verbatim —
+        // never silently ignored or defaulted over.
+        if let Ok(secs) = std::env::var("CX_CHECKPOINT_SECS") {
+            if !secs.is_empty() {
+                cfg.checkpoint_secs = secs
+                    .parse()
+                    .with_context(|| format!("parsing CX_CHECKPOINT_SECS {secs:?}"))?;
+            }
+        }
 
         // Operator-prefs overlay (Atlas F7 / item 25). Source, in precedence order:
         //   1. CX_AGENT_PREFS — an explicit path (the app sets it on launch), else
@@ -347,6 +373,7 @@ mod tests {
             data_dir: PathBuf::from("/tmp"),
             max_concurrent_tasks: None,
             inference_backend: InferenceBackend::default(),
+            checkpoint_secs: default_checkpoint_secs(),
         }
     }
 
@@ -485,6 +512,28 @@ mod tests {
         assert_eq!(c.concurrency(8.0), 8);
         c.max_concurrent_tasks = Some(0);
         assert_eq!(c.concurrency(8.0), 1);
+    }
+
+    /// `checkpoint_secs` defaults to 30 when the TOML omits it, honors an
+    /// explicit value, and honors an explicit 0 (checkpointing off). Parsed the
+    /// same way `AgentConfig::load` parses the file (env overrides aside).
+    #[test]
+    fn checkpoint_secs_defaults_and_zero_disables() {
+        let base = r#"
+            control_url = "http://localhost:8080"
+            worker_token = "t"
+            supplier_id = "00000000-0000-0000-0000-000000000000"
+            max_cpu_pct = 90.0
+            power_only = false
+            min_payout_usd_per_hr = 0.0
+            data_dir = "/tmp/cx-agent"
+        "#;
+        let c: AgentConfig = toml::from_str(base).unwrap();
+        assert_eq!(c.checkpoint_secs, 30, "omitted → the 30s default");
+        let c: AgentConfig = toml::from_str(&format!("{base}\ncheckpoint_secs = 7")).unwrap();
+        assert_eq!(c.checkpoint_secs, 7);
+        let c: AgentConfig = toml::from_str(&format!("{base}\ncheckpoint_secs = 0")).unwrap();
+        assert_eq!(c.checkpoint_secs, 0, "explicit 0 disables, not defaulted over");
     }
 
     #[test]

@@ -84,6 +84,167 @@ fn infer_err<E: std::fmt::Display>(backend: &'static str) -> impl Fn(E) -> RunEr
     }
 }
 
+// ---------------------------------------------------------------------------
+// Intra-task checkpointing (partial results)
+// ---------------------------------------------------------------------------
+//
+// Additive contract delta with the control plane: the dispatch may carry a
+// presigned PUT URL for `result_key + ".partial"` (generative job types only).
+// While a long batch runs, the agent periodically PUTs the rows completed SO FAR
+// — the final result's exact JSON shape plus a top-level `"partial": true`
+// marker — so the stuck-run watchdog can hand the buyer mid-chunk progress when
+// it kills a job. Partial objects are best-effort progress signals: never merged
+// into the verified artifact, never paid, and a flush failure never fails the
+// task. The FINAL result upload/commit path is byte-for-byte unchanged.
+
+/// Records per generation slice between checkpoint-cadence checks, when
+/// checkpointing is active. Small enough that a flush opportunity comes up
+/// regularly even on slow hardware; large enough that bucketed batching within a
+/// slice still pays. Inactive checkpointing runs the whole set as ONE slice —
+/// exactly today's one-shot batch.
+pub const CHECKPOINT_RECORD_BATCH: usize = 32;
+
+/// Bounded timeout for a single partial-checkpoint PUT. A slow or dead presigned
+/// endpoint must never stall the runner for long — the flush is best-effort.
+const CHECKPOINT_PUT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// PURE flush-cadence decision: given the time since the last flush and the
+/// operator's cadence, should a partial checkpoint flush now? `checkpoint_secs`
+/// of 0 disables checkpointing entirely; otherwise flush exactly at/after the
+/// threshold. No I/O, no clock — unit-tested without a network.
+pub fn should_flush(elapsed: std::time::Duration, checkpoint_secs: u64) -> bool {
+    checkpoint_secs > 0 && elapsed >= std::time::Duration::from_secs(checkpoint_secs)
+}
+
+/// Serialize a runner result as its PARTIAL checkpoint document: the SAME JSON
+/// shape as the final result plus a top-level `"partial": true` marker (the wire
+/// contract the control plane's stuck-run watchdog relies on). Pure — the caller
+/// PUTs the bytes. Errors if `result` does not serialize to a JSON object (every
+/// runner result does; we never mislabel a non-object as a partial result).
+pub fn partial_document<T: Serialize>(result: &T) -> Result<Vec<u8>, serde_json::Error> {
+    let mut v = serde_json::to_value(result)?;
+    match v {
+        serde_json::Value::Object(ref mut map) => {
+            map.insert("partial".to_string(), serde_json::Value::Bool(true));
+        }
+        _ => {
+            use serde::ser::Error;
+            return Err(serde_json::Error::custom(
+                "partial document must serialize to a JSON object",
+            ));
+        }
+    }
+    serde_json::to_vec(&v)
+}
+
+/// Intra-task checkpoint context, built per task from the dispatch + operator
+/// config and handed to `JobRunner::run_with_checkpoints`. Carries the presigned
+/// partial PUT URL (sent by the control plane only for the generative job
+/// types), the operator's flush cadence, and the reqwest client the agent
+/// already uses for presigned object I/O.
+#[derive(Clone)]
+pub struct Checkpointer {
+    /// Presigned PUT URL for the partial object (`result_key + ".partial"`);
+    /// `None` when the control plane did not offer one (older control planes,
+    /// non-generative jobs). Everything works when it is absent.
+    pub partial_put_url: Option<String>,
+    /// Seconds between flushes; 0 disables checkpointing.
+    pub checkpoint_secs: u64,
+    /// HTTP client for the PUT (the same crate/client family the agent already
+    /// uses for presigned S3 I/O; no auth header — the signature is in the URL).
+    pub http: reqwest::Client,
+    /// True while a spawned flush is in flight. Flushes are fire-and-forget so
+    /// they never stall the inference loop, but at most ONE runs at a time — so
+    /// an older snapshot can never land AFTER a newer one. A slow flush makes
+    /// the next cadence tick SKIP (each snapshot is cumulative; the following
+    /// one supersedes it), never queue.
+    in_flight: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Checkpointer {
+    /// Build a checkpointer for a task from the dispatch's partial URL and the
+    /// operator's cadence, sharing the agent's existing HTTP client.
+    pub fn new(partial_put_url: Option<String>, checkpoint_secs: u64, http: reqwest::Client) -> Self {
+        Self {
+            partial_put_url,
+            checkpoint_secs,
+            http,
+            in_flight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// A checkpointer that never flushes — the plain `run` path and tests.
+    pub fn disabled() -> Self {
+        Self::new(None, 0, reqwest::Client::new())
+    }
+
+    /// True when checkpointing can actually happen: the control plane offered a
+    /// partial URL AND the operator's cadence is on.
+    pub fn active(&self) -> bool {
+        self.partial_put_url.is_some() && self.checkpoint_secs > 0
+    }
+
+    /// Serialize `result` as the partial document and PUT it to the partial URL —
+    /// SPAWNED, not awaited: the inference loop must never stall on a slow or
+    /// black-holed endpoint (a 60s-bounded upload happens in the background). At
+    /// most one flush is in flight; when the previous one has not finished, this
+    /// tick is skipped — the next cumulative snapshot supersedes it, and skipping
+    /// preserves snapshot ORDER (two concurrent PUTs to one key could land the
+    /// older body last). A flush failure is LOGGED and swallowed — a checkpoint
+    /// hiccup must never fail the task (the final result upload is the commit
+    /// path; this is only a best-effort progress signal). No-op when the dispatch
+    /// carried no partial URL.
+    pub async fn flush_partial<T: Serialize>(&self, result: &T) {
+        let Some(url) = self.partial_put_url.clone() else {
+            return;
+        };
+        let body = match partial_document(result) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(error = %e, "checkpoint: partial document did not serialize; skipping this flush");
+                return;
+            }
+        };
+        use std::sync::atomic::Ordering;
+        if self.in_flight.swap(true, Ordering::AcqRel) {
+            tracing::debug!("checkpoint: previous flush still in flight; skipping this tick");
+            return;
+        }
+        let http = self.http.clone();
+        let flag = self.in_flight.clone();
+        tokio::spawn(async move {
+            let sent = http
+                .put(&url)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .timeout(CHECKPOINT_PUT_TIMEOUT)
+                .body(body)
+                .send()
+                .await
+                .and_then(|r| r.error_for_status());
+            match sent {
+                Ok(_) => tracing::debug!("checkpoint: partial result flushed"),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "checkpoint: partial flush failed; continuing (a checkpoint hiccup never fails the task)"
+                ),
+            }
+            flag.store(false, Ordering::Release);
+        });
+    }
+}
+
+/// How many records to run per generation slice: `CHECKPOINT_RECORD_BATCH` when
+/// checkpointing is active (so flush opportunities come up between slices), else
+/// the full set as ONE slice — which reproduces today's one-shot batching
+/// exactly. Never 0 (`chunks` would panic), even for a defensive empty set.
+fn checkpoint_slice(total: usize, ckpt: &Checkpointer) -> usize {
+    if ckpt.active() {
+        CHECKPOINT_RECORD_BATCH.min(total.max(1))
+    } else {
+        total.max(1)
+    }
+}
+
 #[async_trait]
 pub trait JobRunner: Send + Sync {
     /// Can this backend execute `manifest` on a worker with `cap`? REAL logic.
@@ -97,6 +258,24 @@ pub trait JobRunner: Send + Sync {
         input: &[u8],
         pool: &ModelPool,
     ) -> Result<JobOutput, RunError>;
+    /// Execute like `run`, with intra-task checkpointing available: when `ckpt`
+    /// is active the runner MAY periodically PUT the rows completed so far (the
+    /// final result shape plus `"partial": true`) to the dispatch's partial URL.
+    /// Default: ignore the checkpointer and run normally — only the generative
+    /// runners (batch_infer / batch_classification / json_extraction) override
+    /// this, matching the job types the control plane presigns a partial URL
+    /// for. An overriding runner's FINAL result is byte-for-byte what `run`
+    /// produces; checkpointing changes what may exist mid-run, never the commit.
+    async fn run_with_checkpoints(
+        &self,
+        manifest: &JobManifest,
+        input: &[u8],
+        pool: &ModelPool,
+        ckpt: &Checkpointer,
+    ) -> Result<JobOutput, RunError> {
+        let _ = ckpt; // the default lane has no intra-task checkpoints
+        self.run(manifest, input, pool).await
+    }
     fn backend_name(&self) -> &'static str;
 }
 
@@ -286,7 +465,10 @@ pub fn decode_embeddings_binary(bytes: &[u8]) -> Result<(usize, Vec<Vec<f32>>), 
     Ok((dim, rows))
 }
 
-#[derive(Debug, Serialize)]
+// `Completion`, `LabelAssignment`, and `ExtractedItem` derive `Clone` so the
+// intra-task checkpointer can snapshot the rows completed so far for a partial
+// flush without disturbing the vec the final result is built from.
+#[derive(Debug, Clone, Serialize)]
 pub struct Completion {
     pub index: usize,
     pub text: String,
@@ -315,7 +497,7 @@ pub struct TranscribeResult {
     pub segments: Vec<Segment>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LabelAssignment {
     pub index: usize,
     pub label: String,
@@ -329,7 +511,7 @@ pub struct ClassificationResult {
     pub labels: Vec<LabelAssignment>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ExtractedItem {
     pub index: usize,
     pub json: serde_json::Value,
@@ -1376,6 +1558,17 @@ impl JobRunner for BatchInferRunner {
         input: &[u8],
         pool: &ModelPool,
     ) -> Result<JobOutput, RunError> {
+        self.run_with_checkpoints(manifest, input, pool, &Checkpointer::disabled())
+            .await
+    }
+
+    async fn run_with_checkpoints(
+        &self,
+        manifest: &JobManifest,
+        input: &[u8],
+        pool: &ModelPool,
+        ckpt: &Checkpointer,
+    ) -> Result<JobOutput, RunError> {
         let started = std::time::Instant::now();
         let max_tokens = match manifest.job_type {
             JobType::BatchInfer { max_tokens, .. } => max_tokens,
@@ -1388,28 +1581,51 @@ impl JobRunner for BatchInferRunner {
             .collect();
 
         // Warm Llama backend (loaded once). `generate` is `&mut self`; lock the
-        // per-model mutex inside the blocking thread for the whole batch.
+        // per-model mutex inside the blocking thread per slice. With
+        // checkpointing INACTIVE the one slice covers the whole set — exactly the
+        // previous one-shot batch; ACTIVE, we run record slices so the rows
+        // completed so far can flush between them. Per-row output is identical
+        // either way (bucketing is within-slice and generation is per-sequence
+        // deterministic — batched == serial, see generate_batch), so the FINAL
+        // result bytes never depend on the checkpoint cadence.
         let model = pool.llama(&manifest.model.model_ref).await?;
-        let (completions, total_tokens) =
-            tokio::task::spawn_blocking(move || -> Result<_, RunError> {
+        let slice = checkpoint_slice(prompts.len(), ckpt);
+        let mut completions: Vec<Completion> = Vec::with_capacity(prompts.len());
+        let mut total_tokens: usize = 0;
+        let mut last_flush = std::time::Instant::now();
+        for chunk in prompts.chunks(slice) {
+            let model = model.clone();
+            let chunk_prompts: Vec<String> = chunk.to_vec();
+            let results = tokio::task::spawn_blocking(move || -> Result<_, RunError> {
                 let mut backend = model.blocking_lock();
                 // Batched: prompts are bucketed by length and run B-per-forward-pass
                 // (see generate_batch) — the GPU-saturation win over serial decode.
-                let results = backend.generate_batch(&prompts, max_tokens)?;
-                let total: usize = results.iter().map(|(_, n)| *n).sum();
-                let completions: Vec<Completion> = results
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, (text, tokens))| Completion {
-                        index,
-                        text,
-                        tokens,
-                    })
-                    .collect();
-                Ok((completions, total))
+                backend.generate_batch(&chunk_prompts, max_tokens)
             })
             .await
             .map_err(infer_err("batch_infer"))??;
+            for (text, tokens) in results {
+                total_tokens += tokens;
+                completions.push(Completion {
+                    index: completions.len(),
+                    text,
+                    tokens,
+                });
+            }
+            // Flush the rows completed so far when the cadence says so. Skipped
+            // once every row is done — the final upload supersedes any partial.
+            if completions.len() < prompts.len()
+                && should_flush(last_flush.elapsed(), ckpt.checkpoint_secs)
+            {
+                let partial = BatchInferResult {
+                    job_type: "batch_infer",
+                    model: short_model_id(&manifest.model.model_ref, "llama-3.2-1b-instruct-q4"),
+                    completions: completions.clone(),
+                };
+                ckpt.flush_partial(&partial).await;
+                last_flush = std::time::Instant::now();
+            }
+        }
 
         let result = BatchInferResult {
             job_type: "batch_infer",
@@ -1531,6 +1747,17 @@ impl JobRunner for BatchClassificationRunner {
         input: &[u8],
         pool: &ModelPool,
     ) -> Result<JobOutput, RunError> {
+        self.run_with_checkpoints(manifest, input, pool, &Checkpointer::disabled())
+            .await
+    }
+
+    async fn run_with_checkpoints(
+        &self,
+        manifest: &JobManifest,
+        input: &[u8],
+        pool: &ModelPool,
+        ckpt: &Checkpointer,
+    ) -> Result<JobOutput, RunError> {
         let started = std::time::Instant::now();
         let labels = match &manifest.job_type {
             JobType::BatchClassification { labels } => labels.clone(),
@@ -1548,44 +1775,64 @@ impl JobRunner for BatchClassificationRunner {
             .map(|it| it.body().unwrap_or("").to_string())
             .collect();
 
+        // Batched: classify B-per-forward-pass (short generations, many items —
+        // exactly where bucketed batching pays off). Checkpointing INACTIVE runs
+        // one full-set slice (the previous one-shot batch, byte-for-byte);
+        // ACTIVE runs record slices and flushes the labels assigned so far
+        // between them. Per-row output is identical either way.
         let model = pool.llama(&manifest.model.model_ref).await?;
-        let (assignments, total) = {
-            let labels = labels.clone();
-            tokio::task::spawn_blocking(move || -> Result<_, RunError> {
+        let slice = checkpoint_slice(texts.len(), ckpt);
+        let mut assignments: Vec<LabelAssignment> = Vec::with_capacity(texts.len());
+        let mut total: usize = 0;
+        let mut last_flush = std::time::Instant::now();
+        for chunk in texts.chunks(slice) {
+            let model = model.clone();
+            let prompts: Vec<String> = chunk
+                .iter()
+                .map(|t| classification_prompt(t, &labels))
+                .collect();
+            let results = tokio::task::spawn_blocking(move || -> Result<_, RunError> {
                 let mut backend = model.blocking_lock();
-                // Batched: classify all texts B-per-forward-pass (short generations,
-                // many items — exactly where bucketed batching pays off). The shared
-                // instruction + label list is a long contiguous token prefix on every
-                // prompt, so prefix-KV sharing prefills it ONCE for the whole batch
-                // (PERF_AND_CAPABILITY_AUDIT Wave 1 B). Output stays token-identical to
-                // the per-item path (shared prefix is the items' longest common token
-                // prefix), so classificationAgree is unaffected.
-                let prompts: Vec<String> = texts
-                    .iter()
-                    .map(|t| classification_prompt(t, &labels))
-                    .collect();
-                let results = backend.generate_batch_shared_prefix(&prompts, 12)?;
-                let total: usize = results.iter().map(|(_, n)| *n).sum();
-                let out: Vec<LabelAssignment> = results
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, (gen, _))| {
-                        let (label, matched) = closest_label(&gen, &labels);
-                        if !matched {
-                            tracing::warn!(
-                                index,
-                                generation = %gen,
-                                "classification: no label matched generation; defaulting to first label (low confidence)"
-                            );
-                        }
-                        LabelAssignment { index, label }
-                    })
-                    .collect();
-                Ok((out, total))
+                // Batched classification with prefix-KV sharing WITHIN the slice: the
+                // shared instruction + label list is a long contiguous token prefix on
+                // every prompt, prefilled once per slice (PERF_AND_CAPABILITY_AUDIT
+                // Wave 1 B). With checkpointing inactive the slice is the whole set, so
+                // this is byte-for-byte the previous one-shot shared-prefix path; when
+                // active, slicing trades some cross-slice prefix reuse for flushability
+                // — per-row output is identical either way (the shared prefix is the
+                // items' longest common token prefix; generation is per-sequence).
+                backend.generate_batch_shared_prefix(&prompts, 12)
             })
             .await
-            .map_err(infer_err("batch_classification"))??
-        };
+            .map_err(infer_err("batch_classification"))??;
+            for (gen, n) in results {
+                total += n;
+                let index = assignments.len();
+                let (label, matched) = closest_label(&gen, &labels);
+                if !matched {
+                    tracing::warn!(
+                        index,
+                        generation = %gen,
+                        "classification: no label matched generation; defaulting to first label (low confidence)"
+                    );
+                }
+                assignments.push(LabelAssignment { index, label });
+            }
+            // Flush the rows completed so far when the cadence says so. Skipped
+            // once every row is done — the final upload supersedes any partial.
+            if assignments.len() < texts.len()
+                && should_flush(last_flush.elapsed(), ckpt.checkpoint_secs)
+            {
+                let partial = ClassificationResult {
+                    job_type: "batch_classification",
+                    model: short_model_id(&manifest.model.model_ref, "llama-3.2-1b-instruct-q4"),
+                    count: assignments.len(),
+                    labels: assignments.clone(),
+                };
+                ckpt.flush_partial(&partial).await;
+                last_flush = std::time::Instant::now();
+            }
+        }
 
         let result = ClassificationResult {
             job_type: "batch_classification",
@@ -1673,6 +1920,17 @@ impl JobRunner for JsonExtractionRunner {
         input: &[u8],
         pool: &ModelPool,
     ) -> Result<JobOutput, RunError> {
+        self.run_with_checkpoints(manifest, input, pool, &Checkpointer::disabled())
+            .await
+    }
+
+    async fn run_with_checkpoints(
+        &self,
+        manifest: &JobManifest,
+        input: &[u8],
+        pool: &ModelPool,
+        ckpt: &Checkpointer,
+    ) -> Result<JobOutput, RunError> {
         let started = std::time::Instant::now();
         let schema = match &manifest.job_type {
             JobType::JsonExtraction { schema } => schema.clone(),
@@ -1684,46 +1942,67 @@ impl JobRunner for JsonExtractionRunner {
             .map(|it| it.body().unwrap_or("").to_string())
             .collect();
 
+        // Batched: extract B-per-forward-pass. Checkpointing INACTIVE runs one
+        // full-set slice (the previous one-shot batch, byte-for-byte); ACTIVE
+        // runs record slices and flushes the items extracted so far between
+        // them. Per-row output is identical either way.
         let model = pool.llama(&manifest.model.model_ref).await?;
-        let (extracted, total) = tokio::task::spawn_blocking(move || -> Result<_, RunError> {
-            let mut backend = model.blocking_lock();
-            // Batched: extract from all texts B-per-forward-pass. The fixed
-            // instruction + schema is a long shared token prefix on every prompt, so
-            // prefix-KV sharing prefills it ONCE for the batch (PERF_AND_CAPABILITY_AUDIT
-            // Wave 1 B). Output stays token-identical to the per-item path (shared
-            // prefix is the items' longest common token prefix), so the canonical-JSON
-            // jsonExtractionAgree check is unaffected.
-            let prompts: Vec<String> = texts
+        let slice = checkpoint_slice(texts.len(), ckpt);
+        let mut extracted: Vec<ExtractedItem> = Vec::with_capacity(texts.len());
+        let mut total: usize = 0;
+        let mut last_flush = std::time::Instant::now();
+        for chunk in texts.chunks(slice) {
+            let model = model.clone();
+            let prompts: Vec<String> = chunk
                 .iter()
                 .map(|t| extraction_prompt(t, &schema))
                 .collect();
-            let results = backend.generate_batch_shared_prefix(&prompts, 256)?;
-            let total: usize = results.iter().map(|(_, n)| *n).sum();
+            let results = tokio::task::spawn_blocking(move || -> Result<_, RunError> {
+                let mut backend = model.blocking_lock();
+                // Batched extraction with prefix-KV sharing WITHIN the slice: the
+                // fixed instruction + schema is a long shared token prefix on every
+                // prompt, prefilled once per slice (PERF_AND_CAPABILITY_AUDIT Wave 1
+                // B). Inactive checkpointing = one full-set slice = the previous
+                // one-shot shared-prefix path byte-for-byte; per-row output is
+                // identical either way, so jsonExtractionAgree is unaffected.
+                backend.generate_batch_shared_prefix(&prompts, 256)
+            })
+            .await
+            .map_err(infer_err("json_extraction"))??;
             // Validate each parses to a JSON object; on failure surface an empty
             // object with an `_error` so the row is accounted for, never faked as a
             // clean extraction.
-            let out: Vec<ExtractedItem> = results
-                .into_iter()
-                .enumerate()
-                .map(|(index, (gen, _))| {
-                    let json = match extract_json_object(&gen) {
-                        Some(v) => v,
-                        None => {
-                            tracing::warn!(
-                                index,
-                                generation = %gen,
-                                "json_extraction: generation had no parseable JSON object"
-                            );
-                            serde_json::json!({ "_error": "no_parseable_json", "_raw": gen })
-                        }
-                    };
-                    ExtractedItem { index, json }
-                })
-                .collect();
-            Ok((out, total))
-        })
-        .await
-        .map_err(infer_err("json_extraction"))??;
+            for (gen, n) in results {
+                total += n;
+                let index = extracted.len();
+                let json = match extract_json_object(&gen) {
+                    Some(v) => v,
+                    None => {
+                        tracing::warn!(
+                            index,
+                            generation = %gen,
+                            "json_extraction: generation had no parseable JSON object"
+                        );
+                        serde_json::json!({ "_error": "no_parseable_json", "_raw": gen })
+                    }
+                };
+                extracted.push(ExtractedItem { index, json });
+            }
+            // Flush the rows completed so far when the cadence says so. Skipped
+            // once every row is done — the final upload supersedes any partial.
+            if extracted.len() < texts.len()
+                && should_flush(last_flush.elapsed(), ckpt.checkpoint_secs)
+            {
+                let partial = ExtractionResult {
+                    job_type: "json_extraction",
+                    model: short_model_id(&manifest.model.model_ref, "llama-3.2-1b-instruct-q4"),
+                    count: extracted.len(),
+                    items: extracted.clone(),
+                };
+                ckpt.flush_partial(&partial).await;
+                last_flush = std::time::Instant::now();
+            }
+        }
 
         let result = ExtractionResult {
             job_type: "json_extraction",
@@ -2568,6 +2847,135 @@ mod tests {
         });
         m.params = serde_json::json!({ "split_size": 4 });
         assert!(!wants_binary(&m));
+    }
+
+    // --- intra-task checkpointing (pure, network-free) ---
+
+    // The flush-cadence decision is PURE: 0 disables outright (no elapsed time
+    // ever flushes), below-threshold holds, and exactly-at-threshold flushes.
+    #[test]
+    fn should_flush_zero_disables_and_threshold_flushes() {
+        use std::time::Duration;
+        // 0 disables, regardless of how long it has been.
+        assert!(!should_flush(Duration::from_secs(0), 0));
+        assert!(!should_flush(Duration::from_secs(10_000), 0));
+        // Below the threshold: hold.
+        assert!(!should_flush(Duration::from_secs(29), 30));
+        assert!(!should_flush(Duration::from_millis(29_999), 30));
+        // Exactly at the threshold flushes; beyond it too.
+        assert!(should_flush(Duration::from_secs(30), 30));
+        assert!(should_flush(Duration::from_secs(31), 30));
+        // A different cadence behaves the same at its own boundary.
+        assert!(!should_flush(Duration::from_millis(999), 1));
+        assert!(should_flush(Duration::from_secs(1), 1));
+    }
+
+    // Slice sizing: inactive checkpointing (no URL, or cadence 0) runs the whole
+    // set as ONE slice — exactly the previous one-shot batch — and only URL AND
+    // cadence together switch to record slices.
+    #[test]
+    fn checkpoint_slice_is_full_set_unless_active() {
+        let off = Checkpointer::disabled();
+        assert!(!off.active());
+        assert_eq!(checkpoint_slice(100, &off), 100);
+        // Cadence without a URL: still inactive (older control plane).
+        let mut c = Checkpointer::disabled();
+        c.checkpoint_secs = 30;
+        assert!(!c.active());
+        assert_eq!(checkpoint_slice(100, &c), 100);
+        // URL without a cadence: still inactive (operator disabled it).
+        let mut c = Checkpointer::disabled();
+        c.partial_put_url = Some("http://example/out.partial".into());
+        assert!(!c.active());
+        assert_eq!(checkpoint_slice(100, &c), 100);
+        // Both → active record slices, capped at the set size.
+        c.checkpoint_secs = 30;
+        assert!(c.active());
+        assert_eq!(checkpoint_slice(100, &c), CHECKPOINT_RECORD_BATCH);
+        assert_eq!(checkpoint_slice(3, &c), 3);
+        // Defensive: never 0 (chunks(0) would panic).
+        assert_eq!(checkpoint_slice(0, &off), 1);
+        assert_eq!(checkpoint_slice(0, &c), 1);
+    }
+
+    // The partial document is the final result's EXACT JSON shape plus a
+    // top-level `"partial": true` — nothing else added, nothing removed — for
+    // all three generative result types. Pure construction, no model, no network.
+    #[test]
+    fn partial_document_is_final_shape_plus_marker() {
+        // Serialize a result both ways and demand: partial == final + marker.
+        fn assert_partial_shape<T: Serialize>(result: &T) {
+            let final_v: serde_json::Value =
+                serde_json::from_slice(&serde_json::to_vec(result).unwrap()).unwrap();
+            assert!(
+                final_v.get("partial").is_none(),
+                "the FINAL result must never carry the partial marker"
+            );
+            let partial_v: serde_json::Value =
+                serde_json::from_slice(&partial_document(result).unwrap()).unwrap();
+            assert_eq!(partial_v["partial"], true);
+            let mut expected = final_v.clone();
+            expected
+                .as_object_mut()
+                .unwrap()
+                .insert("partial".to_string(), serde_json::Value::Bool(true));
+            assert_eq!(partial_v, expected, "partial must be final shape + marker");
+        }
+
+        assert_partial_shape(&BatchInferResult {
+            job_type: "batch_infer",
+            model: "llama-3.2-1b-instruct-q4".into(),
+            completions: vec![
+                Completion {
+                    index: 0,
+                    text: "a".into(),
+                    tokens: 1,
+                },
+                Completion {
+                    index: 1,
+                    text: "b".into(),
+                    tokens: 2,
+                },
+            ],
+        });
+        assert_partial_shape(&ClassificationResult {
+            job_type: "batch_classification",
+            model: "llama-3.2-1b-instruct-q4".into(),
+            count: 1,
+            labels: vec![LabelAssignment {
+                index: 0,
+                label: "pos".into(),
+            }],
+        });
+        assert_partial_shape(&ExtractionResult {
+            job_type: "json_extraction",
+            model: "llama-3.2-1b-instruct-q4".into(),
+            count: 1,
+            items: vec![ExtractedItem {
+                index: 0,
+                json: serde_json::json!({"name": "x"}),
+            }],
+        });
+
+        // Row shape spot-check: the partial rows are the runner's normal rows.
+        let r = BatchInferResult {
+            job_type: "batch_infer",
+            model: "m".into(),
+            completions: vec![Completion {
+                index: 0,
+                text: "hi".into(),
+                tokens: 1,
+            }],
+        };
+        let v: serde_json::Value =
+            serde_json::from_slice(&partial_document(&r).unwrap()).unwrap();
+        assert_eq!(v["job_type"], "batch_infer");
+        assert_eq!(v["completions"][0]["index"], 0);
+        assert_eq!(v["completions"][0]["text"], "hi");
+        assert_eq!(v["completions"][0]["tokens"], 1);
+
+        // A non-object result is refused, never mislabeled as a partial result.
+        assert!(partial_document(&vec![1, 2, 3]).is_err());
     }
 
     #[test]
