@@ -227,7 +227,7 @@ def principled(name, base, rough, metallic=1.0, coat=0.0, coat_rough=0.1):
 def blasted_aluminum():
     """Bead-blasted (NOT brushed) light aluminum: fine isotropic roughness variation
     plus a whisper of bump for the micro-sparkle."""
-    m = principled("mac-blasted-alu", (0.58, 0.60, 0.63), 0.36, coat=0.0)
+    m = principled("mac-blasted-alu", (0.86, 0.87, 0.89), 0.38, coat=0.0)
     nt = m.node_tree
     b = nt.nodes["Principled BSDF"]
     tc = nt.nodes.new("ShaderNodeTexCoord")
@@ -257,7 +257,7 @@ def led_glass():
     return principled("led-glass", (0.02, 0.022, 0.025), 0.08, metallic=0.0, coat=1.0, coat_rough=0.05)
 
 
-FOAM_CELL = 1.8       # coarse pore pitch in true mm (reference is a fine dense foam)
+FOAM_CELL = 2.0       # coarse pore pitch in true mm (reference is a fine dense foam)
 FOAM_FINE = FOAM_CELL / 3.0   # the overlapping second scale (checklist: ~1/3)
 
 
@@ -358,7 +358,7 @@ def foam_flat_material():
     ao = img("foam-ao.png"); ao.image.colorspace_settings.name = "Non-Color"
     tint = nt.nodes.new("ShaderNodeMixRGB")
     tint.blend_type = "MULTIPLY"; tint.inputs["Fac"].default_value = 1.0
-    tint.inputs["Color1"].default_value = (0.55, 0.42, 0.22, 1)
+    tint.inputs["Color1"].default_value = (0.72, 0.56, 0.30, 1)
     nt.links.new(ao.outputs["Color"], tint.inputs["Color2"])
     nt.links.new(tint.outputs["Color"], b.inputs["Base Color"])
     # roughness
@@ -374,7 +374,7 @@ def foam_flat_material():
 
 def champagne_gold(rough=0.28, pore_darken=False):
     m = principled("spark-gold" + ("-foam" if pore_darken else ""),
-                   (0.44, 0.33, 0.16), rough)
+                   (0.60, 0.47, 0.25), rough)
     if pore_darken:
         nt = m.node_tree
         b = nt.nodes["Principled BSDF"]
@@ -383,14 +383,14 @@ def champagne_gold(rough=0.28, pore_darken=False):
         # The champagne web dominates (reference reads golden, not black); only the
         # deepest pore centers fall dark, and even they stay a dark champagne, not soot.
         ramp.color_ramp.elements[0].position = 0.08
-        ramp.color_ramp.elements[0].color = (0.70, 0.55, 0.32, 1)
-        ramp.color_ramp.elements[1].position = 0.56
+        ramp.color_ramp.elements[0].color = (0.92, 0.74, 0.42, 1)
+        ramp.color_ramp.elements[1].position = 0.62
         ramp.color_ramp.elements[1].color = (0.11, 0.08, 0.05, 1)
         nt.links.new(field, ramp.inputs["Fac"])
         nt.links.new(ramp.outputs["Color"], b.inputs["Base Color"])
         rramp = nt.nodes.new("ShaderNodeMapRange")
-        rramp.inputs["To Min"].default_value = 0.30
-        rramp.inputs["To Max"].default_value = 0.6
+        rramp.inputs["To Min"].default_value = 0.22
+        rramp.inputs["To Max"].default_value = 0.55
         nt.links.new(field, rramp.inputs["Value"])
         nt.links.new(rramp.outputs["Result"], b.inputs["Roughness"])
     return m
@@ -484,7 +484,7 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
 
     # Full-face pocket between the rails: 136 wide x 44.5 tall, 4 mm deep.
     front_y = -mm(150) / 2.0
-    fw, fh = mm(136), mm(44.5)
+    fw, fh = mm(124), mm(38.0)
     zc = mm(50.5 / 2.0)
     pocket = cutter_box(fw, mm(24), fh, mm(6), (0, front_y + mm(4.0), zc), seg=12)
     boxes = apply_boolean(body, [pocket])
@@ -533,8 +533,8 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
             bpy.data.objects.remove(h, do_unlink=True)
         # TWO displacement scales for real two-scale foam geometry (checklist): the
         # coarse pores carry the depth, a finer pass at ~1/3 scale adds sub-structure.
-        for nm, cell, strength, mid in (("pores", FOAM_CELL, mm(3.2), 0.42),
-                                        ("pores-fine", FOAM_FINE, mm(1.0), 0.5)):
+        for nm, cell, strength, mid in (("pores", FOAM_CELL, mm(4.2), 0.42),
+                                        ("pores-fine", FOAM_FINE, mm(1.2), 0.5)):
             tex = bpy.data.textures.new("foam-voronoi-" + nm, "VORONOI")
             tex.distance_metric = "DISTANCE"
             tex.weight_1 = -1.0
@@ -554,9 +554,9 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
     # The two smooth tubs, recessed 1.5 mm behind the foam face, blank.
     tubs = []
     for sx in (-1, 1):
-        tub = stadium("tub", mm(19), mm(33), mm(3), mm(9.2),
-                      (sx * mm(47), front_y + mm(2.2), zc))
-        tub.data.materials.append(principled("tub-gold", (0.36, 0.28, 0.16), 0.5))
+        tub = stadium("tub", mm(18), mm(33), mm(3), mm(8.8),
+                      (sx * mm(47), front_y + mm(4.0), zc))
+        tub.data.materials.append(principled("tub-gold", (0.52, 0.40, 0.21), 0.34))
         smooth(tub, 50)
         tubs.append(tub)
 
@@ -729,28 +729,35 @@ def scene_solo(which):
 
 
 # ---- verify mode · orthographic reference-match renders (overlay against press imagery) ----
-def verify_rig_front(subject_w, subject_h, res):
+def verify_rig_front(subject_w, subject_h, res, bright=False):
     """Neutral even front-elevation light: a flat product-catalogue look so silhouette
     and feature positions read against the reference, not a dramatic hero light."""
     sc = bpy.context.scene
     sc.render.film_transparent = True
-    w = bpy.data.worlds.new("flat")
+    w = bpy.data.worlds.new("vfworld")
     w.use_nodes = True
-    w.node_tree.nodes["Background"].inputs[0].default_value = (0.5, 0.5, 0.52, 1)
+    # bright high-key white surround (Apple product studio) for aluminium so it reads
+    # as bright silver · dim directional (StorageReview desk) for the Spark champagne
+    w.node_tree.nodes["Background"].inputs[0].default_value = (0.62, 0.62, 0.64, 1) if bright else (0.05, 0.05, 0.055, 1)
     sc.world = w
-    sc.view_settings.exposure = 0.0
+    sc.view_settings.exposure = 0.0 if bright else -0.1
     aim = bpy.data.objects.new("Aim", None)
     aim.location = (0, 0, subject_h * 0.5)
     bpy.context.collection.objects.link(aim)
-    add_area("vf-key", (-0.5, -1.4, subject_h * 0.5 + 0.3), 1.6, 26, (1, 1, 1), aim=aim)
-    add_area("vf-fill", (0.5, -1.4, subject_h * 0.5), 1.6, 18, (1, 1, 1), aim=aim)
+    if bright:
+        add_area("vf-key", (-0.4, -1.3, subject_h * 0.5 + 0.6), 2.0, 30, (1, 1, 1), aim=aim)
+        add_area("vf-fill", (0.7, -1.3, subject_h * 0.5), 2.0, 22, (1, 1, 1), aim=aim)
+    else:
+        add_area("vf-key", (-0.4, -1.2, subject_h * 0.5 + 0.9), 1.1, 40, (1.0, 0.99, 0.96), aim=aim)
+        add_area("vf-fill", (0.7, -1.3, subject_h * 0.5), 1.4, 8, (0.96, 0.98, 1.0), aim=aim)
     # orthographic front elevation: look along +Y at the -Y face
     cd = bpy.data.cameras.new("vcam")
     cd.type = "ORTHO"
     cd.ortho_scale = max(subject_w, subject_h) * 1.12
     cam = bpy.data.objects.new("vcam", cd)
-    cam.location = (0, -2.0, subject_h * 0.5)
-    cam.rotation_euler = (math.radians(90), 0, 0)
+    tilt = math.radians(8)  # match the reference's slight downward look (top sliver visible)
+    cam.location = (0, -2.0, subject_h * 0.5 + 2.0 * math.tan(tilt))
+    cam.rotation_euler = (math.radians(90) - tilt, 0, 0)
     bpy.context.collection.objects.link(cam)
     sc.camera = cam
     sc.render.resolution_x, sc.render.resolution_y = res
@@ -768,7 +775,7 @@ def verify_device(which):
         sw, sh = mm(150), mm(50.5)
     # frame at the reference aspect so the overlay lines up: pad to a fixed height
     res = (900, int(900 * sh / sw)) if sw >= sh else (int(900 * sw / sh), 900)
-    verify_rig_front(sw, sh, res)
+    verify_rig_front(sw, sh, res, bright=(which == "studio"))
     name = "mac-studio" if which == "studio" else "dgx-spark"
     render_to("render/verify/" + name + "-front.png")
 
