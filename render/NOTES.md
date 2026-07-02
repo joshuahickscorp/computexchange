@@ -100,3 +100,15 @@ possible. The Spark is verified reference-FAITHFUL on the measurable signatures:
 open-cell foam density + tone, the two recessed pill cutouts and their placement, the muted
 champagne shell, the flat-square proportion against the taller Studio. This is the reproduction
 ceiling the references permit.
+
+## MODEL REFINEMENT worktree · DGX Spark accuracy loops (side-by-side vs StorageReview front)
+The flat verify light blew champagne metal to white (misleading); relit the verify with a soft
+directional key + dark world (like the reference studio light) so metal reads as a champagne
+gradient · render/verify/dgx-spark-compare.png (ref left, render right).
+- pass 1 (geometry+material): brighter champagne body base 0.44 to 0.60, wider champagne rails
+  (pocket 136 to 124mm, lips 44.5 to 38mm), deeper foam displacement 3.2 to 4.2mm, recessed
+  champagne pill tubs (set 2.2 to 4.0mm, tub 0.36 to 0.52 champagne not cream).
+- pass 2 (foam tone): the reference foam is bright GOLD, mine was dark brown · web ramp element0
+  to (0.92,0.74,0.42), web area up (element1 pos 0.52 to 0.62), ridges glossier (rough 0.30 to
+  0.22) for the gold catch, cells slightly larger (1.8 to 2.0mm). Foam now reads as golden
+  open-cell metal matching the reference. Verified in the hero lighting too (preview iterr1).
