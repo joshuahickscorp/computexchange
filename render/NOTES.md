@@ -85,3 +85,10 @@ subset (Geist 10KB + Cormorant 18KB, 0 Google requests), brotli JS (three.js 1.2
 wire), control-plane .br serving + Accept-Ranges on the glb + immutable cache for hashed names +
 woff2/ktx2 whitelist. gltfpack/toktx uninstallable here (documented); KTX2 server path pre-wired.
 Remaining Phase 4: content-hash filenames, still-first crossfade, LCP/waterfall measurement, SW.
+
+### Mac Studio · overlay loop 3 (high-res 758px reference)
+Silhouette +1.1% aspect (753x367 ref vs 803x387 render). Top edge, corner radii, both USB-C
+tongues, SD slot, LED, and the perforation band all coincide in the 50% overlay · the front is
+reproduction-grade indistinguishable. Sole residual: the circular-base arc reads a hair flatter
+than the reference foot (sub-pixel at hero distance). Bead-blast micro-roughness is carried by
+the shader noise (0.34 to 0.42) in the still. Front angle: DONE.
