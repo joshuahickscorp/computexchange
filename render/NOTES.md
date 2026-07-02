@@ -92,3 +92,11 @@ tongues, SD slot, LED, and the perforation band all coincide in the 50% overlay 
 reproduction-grade indistinguishable. Sole residual: the circular-base arc reads a hair flatter
 than the reference foot (sub-pixel at hero distance). Bead-blast micro-roughness is carried by
 the shader noise (0.34 to 0.42) in the still. Front angle: DONE.
+
+### DGX Spark · reference ceiling
+All available Spark press imagery is 3/4 on a wooden desk (StorageReview) · no clean
+front-orthographic exists for this new device, so a pixel overlay like the Studio's is not
+possible. The Spark is verified reference-FAITHFUL on the measurable signatures: two-scale golden
+open-cell foam density + tone, the two recessed pill cutouts and their placement, the muted
+champagne shell, the flat-square proportion against the taller Studio. This is the reproduction
+ceiling the references permit.
