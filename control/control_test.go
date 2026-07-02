@@ -1157,21 +1157,29 @@ func TestPollDispatchManifestShape(t *testing.T) {
 // The public-site asset handler is deliberately NOT a file server: one flat
 // directory and a strict name whitelist. This pins the whitelist against
 // traversal and junk.
-func TestSiteAssetName(t *testing.T) {
-	ok := []string{"oracles-pair@3x.png", "mac-studio@1x.png", "og-image.png", "knob-off@3x.png", "cx-mark-white.png"}
-	for _, n := range ok {
-		if !siteAssetName(n) {
-			t.Errorf("siteAssetName(%q) = false, want true", n)
+func TestSiteAssetType(t *testing.T) {
+	ok := map[string]string{
+		"oracles-pair@3x.png":                 "image/png",
+		"mac-studio@1x.png":                   "image/png",
+		"tex/foam-normal.png":                 "image/png",
+		"oracles.glb":                         "model/gltf-binary",
+		"vendor/three.module.js":              "text/javascript; charset=utf-8",
+		"vendor/addons/loaders/GLTFLoader.js": "text/javascript; charset=utf-8",
+		"vendor/draco/draco_decoder.wasm":     "application/wasm",
+	}
+	for n, want := range ok {
+		if ct, valid := siteAssetType(n); !valid || ct != want {
+			t.Errorf("siteAssetType(%q) = (%q,%v), want (%q,true)", n, ct, valid, want)
 		}
 	}
 	bad := []string{
-		"../secrets.png", "a/b.png", "a\\b.png", "UPPER.png", "space name.png",
-		"pic.jpg", "pic.png.txt", ".png", "", "a..b.png", "a.b.png",
-		"unicode·dot.png", "verylongname-verylongname-verylongname-verylongname-verylongname.png",
+		"../secrets.png", "/etc/passwd", "a\\b.js", "space name.png",
+		"pic.jpg", "pic.txt", "", "../../x.png", "vendor/../../../x.js",
+		"unicode·dot.png", "a/b/c/d/e/f/g/h.png.exe",
 	}
 	for _, n := range bad {
-		if siteAssetName(n) {
-			t.Errorf("siteAssetName(%q) = true, want false", n)
+		if _, valid := siteAssetType(n); valid {
+			t.Errorf("siteAssetType(%q) = valid, want invalid", n)
 		}
 	}
 }

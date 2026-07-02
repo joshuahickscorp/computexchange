@@ -1,34 +1,36 @@
 <!doctype html>
-<!-- computexchange · the public page · one page, one download, no signup, no email capture.
-     Every factual sentence here traces to a path:line receipt in docs/SITE-CLAIMS.md.
-     DESKTOP-ONLY by design: under 900px the page becomes a hand-off screen that sends
-     the link to a Mac (share sheet / AirDrop, email, copy) instead of cramming the
-     site onto a phone. Served by control at GET / (handleRoot, SITE_PATH); images via
-     the whitelisted /assets/site/ handler. Inline CSS + a few lines of JS for the
-     receipts dialog and the hand-off controls. Dash gate: no U+2014, no U+2013
-     anywhere in this file · the separator is the middot. -->
+<!-- computexchange · the public page · a verified spot market for compute.
+     Every factual sentence traces to a path:line receipt in docs/SITE-CLAIMS.md
+     (scope audit: docs/SITE-REBUILD-T0.md). DESKTOP-ONLY: under 900px the page is a
+     hand-off screen that sends the link to a Mac. The hero is a LIVE Three.js scene
+     of the two devices (oracles.glb, built by render/build_scene.py, same geometry as
+     the Cycles stills); on WebGL failure it swaps to the Cycles still, which is the
+     same scene, so the fallback is honest. Three is self-hosted under /assets/site/
+     vendor · no CDN at runtime. Dash gate: no U+2014, no U+2013 · separator is the
+     middot. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>computexchange</title>
-<meta name="description" content="a verified spot market for batch inference · priced before you spend, verified before you pay · closed alpha">
+<meta name="description" content="a verified spot market for compute · priced before you spend, verified before you pay · closed alpha">
 <meta name="theme-color" content="#060606">
 <link rel="icon" href="/favicon.ico" sizes="any">
 <meta property="og:title" content="computexchange">
-<meta property="og:description" content="a verified spot market for batch inference · priced before you spend, verified before you pay">
+<meta property="og:description" content="a verified spot market for compute · priced before you spend, verified before you pay">
 <meta property="og:image" content="https://computexchange.net/assets/site/og-image.png">
 <meta property="og:type" content="website">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="preload" as="image" media="(min-width: 900px)"
-      imagesrcset="/assets/site/oracles-pair@1x.png 1200w, /assets/site/oracles-pair@2x.png 2400w, /assets/site/oracles-pair@3x.png 3600w"
-      imagesizes="(max-width: 1240px) 92vw, 1140px">
+<script type="importmap">
+{ "imports": {
+  "three": "/assets/site/vendor/three.module.js",
+  "three/addons/": "/assets/site/vendor/addons/"
+}}
+</script>
 <style>
   :root{
-    /* material tokens shared with the product (web/demo.html :root) · the page
-       differentiates by SCALE and VOID, not by palette */
     --bg:#060606;
     --panel:#101012;
     --hair:rgba(255,255,255,.05);
@@ -62,19 +64,40 @@
   .site{display:none}
   @media (min-width:900px){.site{display:block}}
 
-  .hero{min-height:min(100vh,980px);display:flex;flex-direction:column;padding-top:34px}
+  .hero{min-height:min(100vh,1000px);display:flex;flex-direction:column;padding-top:34px}
   .masthead{display:flex;align-items:center;gap:14px}
   .masthead img{width:28px;height:28px;opacity:.92}
   .eyebrow{font-size:11px;letter-spacing:.38em;color:var(--ash);text-transform:uppercase}
-  .oracles{flex:1;display:flex;align-items:center;justify-content:center;padding:40px 0 0}
-  .oracles img{width:100%;max-width:1140px;height:auto}
-  .thesis{color:var(--bone-hi);font-size:20px;line-height:1.5;text-align:center;margin:0 0 12px;letter-spacing:.01em}
-  .ash-line{color:var(--ash);font-size:12.5px;text-align:center;margin:0 0 64px}
 
-  section.wrap{margin-top:110px}
+  /* the live stage · canvas fills the void, labels float over it */
+  .stage{position:relative;flex:1;min-height:520px;margin:8px 0 0}
+  #hero-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:grab;touch-action:none}
+  #hero-canvas:active{cursor:grabbing}
+  .hero-still{position:absolute;inset:0;display:none;align-items:center;justify-content:center}
+  .hero-still img{width:100%;max-width:1140px;height:auto}
+  .stage.fallback #hero-canvas{display:none}
+  .stage.fallback .hero-still{display:flex}
+  .hint{position:absolute;left:50%;bottom:6px;transform:translateX(-50%);
+    font-size:10px;letter-spacing:.28em;text-transform:uppercase;color:var(--ash);opacity:.55;
+    transition:opacity var(--dur) var(--ease)}
+  .stage.fallback .hint{display:none}
+
+  /* hover spec annotations · Geist Mono small caps, one hairline leader */
+  .anno{position:absolute;pointer-events:none;opacity:0;transition:opacity var(--dur) var(--ease);
+    font-size:10.5px;letter-spacing:.24em;text-transform:uppercase;color:var(--mute)}
+  .anno.on{opacity:1}
+  .anno .lead{display:block;height:1px;background:var(--hair);margin-bottom:8px}
+  .anno.left{left:7%;bottom:20%;text-align:left}
+  .anno.left .lead{width:56px}
+  .anno.right{right:9%;bottom:30%;text-align:right}
+  .anno.right .lead{width:56px;margin-left:auto}
+
+  .thesis{color:var(--bone-hi);font-size:20px;line-height:1.5;text-align:center;margin:14px 0 12px;letter-spacing:.01em}
+  .ash-line{color:var(--ash);font-size:12.5px;text-align:center;margin:0 0 8px}
+
+  section.wrap{margin-top:160px}
   .sec-label{font-size:11px;letter-spacing:.38em;color:var(--ash);text-transform:uppercase;margin:0 0 34px;text-align:center}
 
-  /* how · three hairline rows, anodized dots the only ornament */
   .how .row{display:flex;gap:22px;align-items:baseline;padding:22px 4px;box-shadow:0 1px 0 var(--hair);font-size:14.5px}
   .how .row:first-of-type{box-shadow:0 1px 0 var(--hair),0 -1px 0 var(--hair)}
   .dot{flex:none;width:7px;height:7px;border-radius:999px;align-self:center}
@@ -86,32 +109,29 @@
     @keyframes breathe{50%{box-shadow:0 0 10px rgba(105,192,150,.45)}}
   }
   .how .k{flex:none;width:72px;color:var(--mute);font-size:11px;letter-spacing:.2em;text-transform:uppercase}
-  .receipts-line{text-align:center;margin-top:34px}
+  .receipts-line{text-align:center;margin-top:38px}
   .receipts-btn{color:var(--mute);font-size:12px;letter-spacing:.14em;text-transform:uppercase;
     padding:10px 22px;border-radius:999px;background:var(--panel);transition:color var(--dur) var(--ease)}
   .receipts-btn:hover{color:var(--bone-hi)}
 
-  /* the one serif monument */
   .monument{text-align:center}
   .monument .fig{font:600 96px/1 var(--serif);color:var(--bone-hi);letter-spacing:.01em}
   .monument .lab{color:var(--ash);font-size:11px;letter-spacing:.34em;text-transform:uppercase;margin-top:14px}
 
-  /* earn · one row, the resting knob */
   .earn{display:flex;align-items:center;justify-content:center;gap:38px}
   .earn img{width:132px;height:132px;flex:none}
   .earn p{margin:0;max-width:440px}
 
-  /* download · the honest state, no control */
   .download{text-align:center;padding-bottom:20px}
   .download .state{display:inline-block;background:var(--panel);border-radius:999px;
     padding:8px 20px;color:var(--gold-core);font-size:11px;letter-spacing:.28em;
     text-transform:uppercase;margin-bottom:22px}
-  .download p{color:var(--bone);max-width:620px;margin:0 auto}
+  .download p{color:var(--bone);max-width:640px;margin:0 auto}
+  .download .road{color:var(--ash);font-size:12px;margin-top:16px}
 
-  footer{padding:110px 0 44px;display:flex;align-items:center;justify-content:center;gap:12px;color:var(--ash);font-size:11.5px}
+  footer{padding:160px 0 44px;display:flex;align-items:center;justify-content:center;gap:12px;color:var(--ash);font-size:11.5px}
   footer img{width:18px;height:18px;opacity:.8}
 
-  /* receipts dialog · the claims live here, off the page */
   dialog{background:var(--panel);color:var(--bone);border:0;border-radius:var(--r);
     max-width:760px;width:92vw;max-height:82vh;padding:34px 36px;font:inherit}
   dialog::backdrop{background:rgba(6,6,6,.82)}
@@ -141,7 +161,6 @@
 </head>
 <body>
 
-<!-- phones get a hand-off, not a cramped site -->
 <div class="handoff">
   <img src="/assets/site/cx-mark-white.png" alt="Cx" width="44" height="44">
   <span class="eyebrow">computexchange</span>
@@ -160,17 +179,24 @@
     <img src="/assets/site/cx-mark-white.png" alt="Cx" width="28" height="28">
     <span class="eyebrow">computexchange</span>
   </div>
-  <div class="oracles">
-    <picture>
-      <source media="(min-width: 900px)"
-              srcset="/assets/site/oracles-pair@1x.png 1200w, /assets/site/oracles-pair@2x.png 2400w, /assets/site/oracles-pair@3x.png 3600w"
-              sizes="(max-width: 1240px) 92vw, 1140px">
-      <img src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw=="
-           width="1200" height="750" fetchpriority="high"
-           alt="A Mac Studio and an NVIDIA DGX Spark side by side in studio light">
-    </picture>
+
+  <div class="stage" id="stage">
+    <canvas id="hero-canvas"></canvas>
+    <div class="hero-still">
+      <picture>
+        <source srcset="/assets/site/oracles-pair@1x.png 1200w, /assets/site/oracles-pair@2x.png 2400w, /assets/site/oracles-pair@3x.png 3600w"
+                sizes="(max-width: 1240px) 92vw, 1140px">
+        <img src="/assets/site/oracles-pair@1x.png" width="1200" height="750"
+             alt="A Mac Studio and an NVIDIA DGX Spark on a desk in studio light">
+      </picture>
+    </div>
+    <div class="anno left" id="anno-studio"><span class="lead"></span>apple silicon · metal · supplier</div>
+    <div class="anno right" id="anno-spark"><span class="lead"></span>grace blackwell · cuda · supplier</div>
+    <div class="hint" id="hint">drag to look</div>
   </div>
-  <p class="thesis">a verified spot market for batch inference</p>
+
+  <p class="thesis">a verified spot market for compute</p>
+  <p class="ash-line">inference · embeddings · transcription · priced before you spend, verified before you pay</p>
   <p class="ash-line">no sign-in screen · the device provisions itself · a payment method is the only credential you connect</p>
 </header>
 
@@ -179,7 +205,7 @@
     <h2 class="sec-label">how it works</h2>
     <div class="how measure">
       <div class="row"><span class="dot d-ash" aria-hidden="true"></span><span class="k">drop</span>
-        <span>drop your data · the pipeline is detected</span></div>
+        <span>drop a workload · the pipeline is detected</span></div>
       <div class="row"><span class="dot d-gold" aria-hidden="true"></span><span class="k">cap</span>
         <span>priced before you spend · the cap you set binds at dispatch</span></div>
       <div class="row"><span class="dot d-green" aria-hidden="true"></span><span class="k">proof</span>
@@ -209,6 +235,7 @@
     <h2 class="sec-label">download</h2>
     <span class="state">closed alpha</span>
     <p>There is no public download yet. The supplier agent installs with one command from the alpha build · the macOS menu bar app builds today, and the notarized public release is the next step. Ask for alpha access to run it now.</p>
+    <p class="road">the verified catalogue ships today · a metered general-compute lane for opaque GPU-second work like simulation and rendering runs your own container in a sandbox, and is the road ahead</p>
   </section>
 </main>
 
@@ -225,7 +252,8 @@
   <div class="claim"><span class="k">proof</span>make prove-local · 168 pass · 0 skip · 0 fail · a matrix-only run, tallied by grep over its own ledger</div>
   <div class="claim"><span class="k">queue</span>the job queue is a plain Postgres table claimed with FOR UPDATE SKIP LOCKED · no Kafka, RabbitMQ, NATS, or Redis in the dependency tree</div>
   <div class="claim"><span class="k">binaries</span>two binaries at the core · a Rust supplier agent and a Go control plane · the buyer CLI and macOS menu bar app are optional layers on top</div>
-  <div class="claim"><span class="k">inference</span>real inference through Candle in pure Rust · MiniLM and bge-small embeddings, Whisper tiny and base, quantized Llama 3.2 1B · Metal by default on Apple Silicon, CUDA as a build flag</div>
+  <div class="claim"><span class="k">executors</span>six verified executors ship today · embeddings, batch inference, transcription, classification, extraction, rerank · real Candle in pure Rust, Metal by default on Apple Silicon, CUDA as a build flag</div>
+  <div class="claim"><span class="k">general compute</span>a general-compute lane runs your own container in a locked-down GPU sandbox · metered per GPU-second and reputation-trusted, not output-verified · Linux with Docker and the NVIDIA Container Toolkit</div>
   <div class="claim"><span class="k">scheduler</span>tasks are sized for a 45 second runtime target · five hard filters gate every claim · quiet hours are enforced by the agent on the device itself</div>
   <div class="claim"><span class="k">verification</span>honeypot known-answer tasks, within-class redundancy, N-way majority votes · a 0.25 audit floor, so even the most trusted supplier is spot-checked about one task in four · a failed honeypot docks reputation, claws back the credit, and quarantines the supplier</div>
   <div class="claim"><span class="k">quote</span>a quote before any spend at POST /v1/quote · the max_usd cap set at submission is enforced at dispatch, pausing the job before the cap is breached · $0.002 per 1,000 units of Llama 3.2 1B, from $0.004 per audio minute of Whisper</div>
@@ -237,14 +265,37 @@
 </dialog>
 </div>
 
+<script type="module">
+  // Dynamic import so any vendor/WebGL gap degrades to the Cycles still (the same
+  // scene) rather than a blank hero · the fallback is honest.
+  const stage = document.getElementById('stage');
+  const canvas = document.getElementById('hero-canvas');
+  const fallback = () => stage.classList.add('fallback');
+  const coarse = window.matchMedia('(pointer: coarse)').matches;
+  import('/assets/site/hero.js').then(({ mountHero }) => {
+    const h = mountHero(canvas, {
+      onFail: fallback,
+      labels: {
+        'mac-studio': document.getElementById('anno-studio'),
+        'dgx-spark': document.getElementById('anno-spark'),
+      },
+    });
+    if (!h) { fallback(); return; }
+    window.__hero = h;
+    if (coarse) {
+      document.getElementById('anno-studio').classList.add('on');
+      document.getElementById('anno-spark').classList.add('on');
+      document.getElementById('hint').textContent = 'a mac studio and an nvidia dgx spark';
+    }
+  }).catch(fallback);
+</script>
+
 <script>
-  // receipts dialog
   var dlg = document.getElementById('receipts');
   document.getElementById('open-receipts').addEventListener('click', function () { dlg.showModal(); });
   document.getElementById('close-receipts').addEventListener('click', function () { dlg.close(); });
   dlg.addEventListener('click', function (e) { if (e.target === dlg) dlg.close(); });
 
-  // phone hand-off · the share key appears only where the share sheet exists
   var URL_SELF = 'https://computexchange.net/';
   var shareBtn = document.getElementById('hand-share');
   if (navigator.share) {

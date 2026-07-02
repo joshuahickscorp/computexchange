@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -86,7 +87,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("GET /{$}", s.handleRoot)                    // the public site (web/index.html) · the operator surface stays at /admin
-	mux.HandleFunc("GET /assets/site/{file}", s.handleSiteAsset) // whitelisted site images (the oracle renders + srcset variants)
+	mux.HandleFunc("GET /assets/site/{path...}", s.handleSiteAsset) // whitelisted site static tree (renders, foam maps, glb, self-hosted Three.js)
 	mux.HandleFunc("GET /favicon.ico", s.handleFavicon)
 	mux.HandleFunc("GET /demo", s.handleDemo) // Launch/Earn product demo (monochrome, same-origin)
 
@@ -1895,48 +1896,70 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(b)
 }
 
-// handleSiteAsset serves the handful of images the public site references
-// (the oracle renders and their 1x/2x srcset downsizes). It is deliberately NOT
-// a file server: one flat directory (web/assets/site, overridable via
-// SITE_ASSETS_PATH), a strict name whitelist, PNG only. Anything else is 404.
+// handleSiteAsset serves the static assets the public site references: the oracle
+// renders and their srcset variants, the foam maps, the glb of the two devices, and
+// the self-hosted Three.js vendor bundle. It is deliberately NOT a general file
+// server: it is scoped to one directory tree (web/assets/site, overridable via
+// SITE_ASSETS_PATH), rejects any traversal, and only serves a fixed extension
+// whitelist. Anything else is 404.
 func (s *Server) handleSiteAsset(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("file")
-	if !siteAssetName(name) {
+	rel := r.PathValue("path")
+	ctype, ok := siteAssetType(rel)
+	if !ok {
 		writeErr(w, http.StatusNotFound, "no such site asset")
 		return
 	}
-	dir := os.Getenv("SITE_ASSETS_PATH")
-	if dir == "" {
-		dir = "web/assets/site"
+	root := os.Getenv("SITE_ASSETS_PATH")
+	if root == "" {
+		root = "web/assets/site"
 	}
-	b, err := os.ReadFile(dir + "/" + name)
+	// Resolve inside root and confirm the cleaned absolute path stays within it,
+	// so a crafted `path` can never escape the asset tree.
+	full := filepath.Join(root, filepath.FromSlash(rel))
+	absRoot, err1 := filepath.Abs(root)
+	absFull, err2 := filepath.Abs(full)
+	if err1 != nil || err2 != nil || !strings.HasPrefix(absFull, absRoot+string(os.PathSeparator)) {
+		writeErr(w, http.StatusNotFound, "no such site asset")
+		return
+	}
+	b, err := os.ReadFile(absFull)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "no such site asset")
 		return
 	}
 	h := w.Header()
 	h.Set("X-Content-Type-Options", "nosniff")
-	h.Set("Content-Type", "image/png")
+	h.Set("Content-Type", ctype)
 	h.Set("Cache-Control", "public, max-age=86400")
 	_, _ = w.Write(b)
 }
 
-// siteAssetName allows lowercase kebab names with the retina @Nx convention and a
-// .png suffix, nothing else: no slashes, no dots beyond the extension, no traversal.
-func siteAssetName(name string) bool {
-	if !strings.HasSuffix(name, ".png") || len(name) > 64 {
-		return false
+// siteAssetType validates a site-asset request path and returns its content type.
+// The path may contain forward-slash subdirs (vendor/addons/...), letters (the
+// vendored GLTFLoader.js has capitals), digits, dash, underscore, @, dot, and slash · no "..", no leading slash, no
+// backslash, no other characters. Only the listed extensions are served.
+func siteAssetType(rel string) (string, bool) {
+	if rel == "" || len(rel) > 128 || strings.HasPrefix(rel, "/") || strings.Contains(rel, "..") || strings.Contains(rel, "\\") {
+		return "", false
 	}
-	stem := strings.TrimSuffix(name, ".png")
-	if stem == "" {
-		return false
-	}
-	for _, c := range stem {
-		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' && c != '@' && c != 'x' {
-			return false
+	for _, c := range rel {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' && c != '_' && c != '@' && c != '.' && c != '/' {
+			return "", false
 		}
 	}
-	return true
+	switch {
+	case strings.HasSuffix(rel, ".png"):
+		return "image/png", true
+	case strings.HasSuffix(rel, ".js"):
+		return "text/javascript; charset=utf-8", true
+	case strings.HasSuffix(rel, ".glb"):
+		return "model/gltf-binary", true
+	case strings.HasSuffix(rel, ".wasm"):
+		return "application/wasm", true
+	case strings.HasSuffix(rel, ".json"):
+		return "application/json", true
+	}
+	return "", false
 }
 
 // handleFavicon serves the existing favicon so the site and console do not 404
