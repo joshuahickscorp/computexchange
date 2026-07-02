@@ -191,21 +191,34 @@
     <div class="card" style="margin-bottom:16px">
       <div class="mon">
         <span class="fig" id="take-fig">·</span>
-        <span class="meta"><span class="k">Take home</span><span class="s">platform take · the exact complement of the supplier share</span></span>
+        <span class="meta"><span class="k" id="mon-label">Take home</span><span class="s" id="mon-sub">platform take · the exact complement of the supplier share</span></span>
         <span class="sp"></span>
         <span class="flow">
-          <span class="k">Flow-through owed</span>
+          <span class="k" id="flow-label">Flow-through owed</span>
           <span class="v num" id="flow-fig">·</span>
-          <span class="s">users owe each other · held + pending · CX is the conduit</span>
+          <span class="s" id="flow-sub">users owe each other · held + pending · CX is the conduit</span>
         </span>
       </div>
 
+      <!-- YOURS · what the exchange keeps -->
       <div class="facts" id="money-facts">
         <div class="fact"><div class="k">Charged</div><div class="v na" id="f-charged">n/a</div></div>
-        <div class="fact"><div class="k">Supplier paid</div><div class="v na" id="f-supplier">n/a</div></div>
+        <div class="fact"><div class="k">Collected</div><div class="v na" id="f-collected">n/a</div></div>
+        <div class="fact"><div class="k">Uncollected</div><div class="v na" id="f-uncollected">n/a</div></div>
+        <div class="fact"><div class="k">Stripe fees</div><div class="v na" id="f-fees">n/a</div></div>
+      </div>
+      <div class="facts" style="margin-top:12px">
+        <div class="fact"><div class="k">Take gross</div><div class="v na" id="f-take">n/a</div></div>
+        <div class="fact"><div class="k">Supplier credit</div><div class="v na" id="f-supplier">n/a</div></div>
         <div class="fact"><div class="k">Refunded</div><div class="v na" id="f-refunded">n/a</div></div>
         <div class="fact"><div class="k">Clawed back</div><div class="v na" id="f-clawed">n/a</div></div>
       </div>
+
+      <!-- the paramount split · money you can spend vs money passing through. Each line
+           renders ONLY from a successful fetch of its real figures; absence renders
+           nothing (never a fabricated zero). -->
+      <div class="line" id="l-stripe-row" hidden><span class="k">In Stripe</span><span class="v" id="l-stripe"></span></div>
+      <div class="line" id="l-conduit-row" hidden><span class="k">Not yours</span><span class="v" id="l-conduit"></span></div>
 
       <div class="line"><span class="k">Throughput</span><span class="v" id="l-throughput"><span class="muted">…</span></span></div>
       <div class="line"><span class="k">Runs</span><span class="v" id="l-runs"><span class="muted">…</span></span></div>
@@ -326,28 +339,76 @@ async function loadMetrics(){
       fig(mval(txt,'cx_verification_mismatch_total'))+' mismatches <span class="sep">·</span> '+
       fig(mval(txt,'cx_quarantines_total'))+' quarantined';
     const stuck = mval(txt,'cx_stuck_cancelled_total');
+    const rescued = mval(txt,'cx_stuck_rescued_total');
     const hedges = mval(txt,'cx_hedges_total');
     $('l-watchdog').innerHTML =
-      'auto-manager armed · past 1.5× ETA with no progress → checkpoint, cancel, settle at completed work <span class="sep">·</span> '+
-      fig(stuck)+' stuck runs cancelled <span class="sep">·</span> '+fig(hedges)+' slow tails hedged';
+      'auto-manager armed · stall → rescue to another machine · stall again → checkpoint, cancel, settle at completed work <span class="sep">·</span> '+
+      fig(rescued)+' rescued <span class="sep">·</span> '+fig(stuck)+' cancelled <span class="sep">·</span> '+fig(hedges)+' hedged';
   }catch(e){ $('m-err').textContent=e.message; }
 }
 
 // ── birds-eye summary ──
+// setMoney only ever renders a REAL fetched number; a missing field stays n/a
+// (the backend for a figure may not be deployed yet · absence is never a zero).
 function setMoney(id, v){
+  if(typeof v !== 'number') return;
   const el=$(id); el.textContent=usd(v); el.classList.remove('na');
 }
 async function loadSummary(){
   let s;
   try{ s=await api('/admin/summary'); $('sum-err').textContent=''; }
   catch(e){ $('sum-err').textContent=e.message; return; }
-  const m=s.money||{};
-  $('take-fig').textContent=usd(m.platform_take_usd);
-  $('flow-fig').textContent=usd(m.flow_owed_usd);
+  const m=s.money||{}, acc=s.accessible||null, stripe=s.stripe||null;
+
+  // The monument · the paramount split. When the accessible figures exist, the
+  // serif number is YOURS NET (take on collected charges minus Stripe fees) ·
+  // the money you can actually call your own. Until then, the honest fallback
+  // is the gross ledger take, labeled as such.
+  if(acc && typeof acc.yours_net_usd === 'number'){
+    $('take-fig').textContent=usd(acc.yours_net_usd);
+    $('mon-label').textContent='Yours · net';
+    $('mon-sub').textContent='take on collected charges · net of Stripe fees';
+  }else{
+    $('take-fig').textContent=usd(m.platform_take_usd);
+    $('mon-label').textContent='Take home · gross';
+    $('mon-sub').textContent='ledger take · fees and collection not yet netted';
+  }
+  // Right column: SPENDABLE when the live Stripe balance is known, else the
+  // flow-through owed (what sits in the balance but belongs to suppliers).
+  if(stripe && acc && typeof acc.spendable_estimate_usd === 'number'){
+    $('flow-label').textContent='Spendable now (approx)';
+    $('flow-fig').textContent=usd(acc.spendable_estimate_usd);
+    $('flow-sub').textContent='Stripe available minus owed to suppliers';
+  }else{
+    $('flow-label').textContent='Flow-through owed';
+    $('flow-fig').textContent=usd(m.flow_owed_usd);
+    $('flow-sub').textContent='users owe each other · held + pending · CX is the conduit';
+  }
+
   setMoney('f-charged', m.charged_usd);
+  setMoney('f-collected', m.collected_usd);
+  setMoney('f-uncollected', m.uncollected_usd);
+  setMoney('f-fees', m.stripe_fees_usd);
+  setMoney('f-take', m.platform_take_usd);
   setMoney('f-supplier', m.supplier_credit_usd);
   setMoney('f-refunded', m.refunded_usd);
   setMoney('f-clawed', m.clawed_back_usd);
+
+  // In-Stripe line · the literal account truth, only from a live balance fetch.
+  if(stripe && typeof stripe.available_usd === 'number'){
+    $('l-stripe').innerHTML =
+      '<span class="dot green"></span> available <b>'+usd(stripe.available_usd)+'</b>'+
+      ' <span class="sep">·</span> <span class="dot gold"></span> pending <b>'+usd(stripe.pending_usd)+'</b>'+
+      ' <span class="sep">·</span> most of this is conduit money, not yours';
+    show('l-stripe-row', true);
+  }else{ show('l-stripe-row', false); }
+  // Not-yours line · money passing through you to suppliers.
+  if(typeof m.transferred_usd === 'number'){
+    $('l-conduit').innerHTML =
+      '<span class="dot gold"></span> owed through <b>'+usd(m.flow_owed_usd)+'</b>'+
+      ' <span class="sep">·</span> <span class="dot green"></span> already transferred out <b>'+usd(m.transferred_usd)+'</b>';
+    show('l-conduit-row', true);
+  }else{ show('l-conduit-row', false); }
 
   const js=s.jobs_by_status||{};
   const order=['queued','running','verifying','complete','failed','cancelled'];
