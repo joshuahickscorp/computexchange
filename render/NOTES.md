@@ -64,3 +64,17 @@ reference at the base. Re-overlay: ports + SD slot now coincide with Apple's row
 gone), silhouette 2.075 vs 2.047 (+1.4%), perforation character matched. Remaining nitpick:
 the circular base arc reads a touch flatter than the reference · candidate for loop 3.
 Mac Studio front: reproduction-grade close. Pushing the improved base into the live finals.
+
+### DGX Spark · overlay loops 1-2 (ref render/ref/dgx-spark-front-ref.jpg, StorageReview front)
+The reference is a near-front desk photo (busy background), so this is feature/material
+verification, not a strict silhouette overlay. Loops:
+- L1: foam too coarse + too regular vs the reference's fine dense foam. Fix (geometry+shader):
+  two overlapping Voronoi scales · coarse FOAM_CELL 2.2 to 1.8 mm + a finer field at 1/3 scale,
+  and a second displace modifier at 1/3 scale for real two-scale geometry pores.
+- L2: foam read near-BLACK (pores dominated) where the reference reads golden-brown. Fix
+  (material): champagne web now dominates (ramp element0 at 0.08, element1 pushed to 0.56 so
+  only deep pore centers darken, and even they stay dark champagne 0.11/0.08/0.05, not soot).
+  Re-render: the face now reads as golden two-scale open-cell foam, matching the reference.
+Note: under the flat verify light the metallic pill tubs read cream (they reflect the bright
+neutral world); in the dark-world hero they render as recessed dark champagne, verified in the
+tabletop finals. Champagne shell tone confirmed muted/warm, not jewelry.

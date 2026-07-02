@@ -257,19 +257,18 @@ def led_glass():
     return principled("led-glass", (0.02, 0.022, 0.025), 0.08, metallic=0.0, coat=1.0, coat_rough=0.05)
 
 
-FOAM_CELL = 2.2  # pore pitch in true mm, shared by displacement and shading
+FOAM_CELL = 1.8       # coarse pore pitch in true mm (reference is a fine dense foam)
+FOAM_FINE = FOAM_CELL / 3.0   # the overlapping second scale (checklist: ~1/3)
 
 
-def foam_field(nt):
-    """The F2-F1 Voronoi the foam uses for BOTH displacement and shading: 0 on
-    the ridge web, rising toward 1 at pore centers. Local/object coords so the
-    displaced geometry and the color mask stay in register."""
-    tc = nt.nodes.new("ShaderNodeTexCoord")
+def _voronoi_ridge(nt, tc, cell):
+    """One F2-F1 Voronoi ridge field at a given cell size · 0 on the web, ~1 at
+    pore centers."""
     v1 = nt.nodes.new("ShaderNodeTexVoronoi")
     v2 = nt.nodes.new("ShaderNodeTexVoronoi")
     for v in (v1, v2):
         v.voronoi_dimensions = "3D"
-        v.inputs["Scale"].default_value = 1.0 / mm(FOAM_CELL)
+        v.inputs["Scale"].default_value = 1.0 / mm(cell)
         nt.links.new(tc.outputs["Object"], v.inputs["Vector"])
     v1.feature = "F1"
     v2.feature = "F2"
@@ -279,9 +278,31 @@ def foam_field(nt):
     nt.links.new(v1.outputs["Distance"], sub.inputs[1])
     mul = nt.nodes.new("ShaderNodeMath")
     mul.operation = "MULTIPLY"
-    mul.inputs[1].default_value = 1.0 / mm(FOAM_CELL)  # normalize to ~0..1
+    mul.inputs[1].default_value = 1.0 / mm(cell)
     nt.links.new(sub.outputs["Value"], mul.inputs[0])
     return mul.outputs["Value"]
+
+
+def foam_field(nt):
+    """TWO overlapping Voronoi scales (checklist): the coarse cell defines the big
+    open pores, a finer field at ~1/3 scale adds the sub-structure real open-cell
+    metal foam shows. Local/object coords so it stays in register with the
+    displaced geometry."""
+    tc = nt.nodes.new("ShaderNodeTexCoord")
+    coarse = _voronoi_ridge(nt, tc, FOAM_CELL)
+    fine = _voronoi_ridge(nt, tc, FOAM_FINE)
+    mix = nt.nodes.new("ShaderNodeMath")
+    mix.operation = "MULTIPLY_ADD"       # coarse + 0.4*fine
+    fine_scaled = nt.nodes.new("ShaderNodeMath")
+    fine_scaled.operation = "MULTIPLY"
+    fine_scaled.inputs[1].default_value = 0.4
+    nt.links.new(fine, fine_scaled.inputs[0])
+    add = nt.nodes.new("ShaderNodeMath")
+    add.operation = "ADD"
+    add.use_clamp = True
+    nt.links.new(coarse, add.inputs[0])
+    nt.links.new(fine_scaled.outputs["Value"], add.inputs[1])
+    return add.outputs["Value"]
 
 
 def perforated_band():
@@ -359,11 +380,12 @@ def champagne_gold(rough=0.28, pore_darken=False):
         b = nt.nodes["Principled BSDF"]
         field = foam_field(nt)
         ramp = nt.nodes.new("ShaderNodeValToRGB")
-        # Ridge web stays champagne; pore floors fall 3+ stops dark.
-        ramp.color_ramp.elements[0].position = 0.13
-        ramp.color_ramp.elements[0].color = (0.66, 0.52, 0.30, 1)
-        ramp.color_ramp.elements[1].position = 0.38
-        ramp.color_ramp.elements[1].color = (0.035, 0.026, 0.017, 1)
+        # The champagne web dominates (reference reads golden, not black); only the
+        # deepest pore centers fall dark, and even they stay a dark champagne, not soot.
+        ramp.color_ramp.elements[0].position = 0.08
+        ramp.color_ramp.elements[0].color = (0.70, 0.55, 0.32, 1)
+        ramp.color_ramp.elements[1].position = 0.56
+        ramp.color_ramp.elements[1].color = (0.11, 0.08, 0.05, 1)
         nt.links.new(field, ramp.inputs["Fac"])
         nt.links.new(ramp.outputs["Color"], b.inputs["Base Color"])
         rramp = nt.nodes.new("ShaderNodeMapRange")
@@ -509,19 +531,23 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
             mod.object = h
             bpy.ops.object.modifier_apply(modifier=mod.name)
             bpy.data.objects.remove(h, do_unlink=True)
-        tex = bpy.data.textures.new("foam-voronoi", "VORONOI")
-        tex.distance_metric = "DISTANCE"
-        tex.weight_1 = -1.0
-        tex.weight_2 = 1.0
-        tex.noise_scale = mm(FOAM_CELL)
-        tex.noise_intensity = 1.0
-        disp = foam.modifiers.new("pores", "DISPLACE")
-        disp.texture = tex
-        disp.texture_coords = "LOCAL"
-        disp.direction = "Y"
-        disp.mid_level = 0.42
-        disp.strength = mm(3.2)
-        bpy.ops.object.modifier_apply(modifier=disp.name)
+        # TWO displacement scales for real two-scale foam geometry (checklist): the
+        # coarse pores carry the depth, a finer pass at ~1/3 scale adds sub-structure.
+        for nm, cell, strength, mid in (("pores", FOAM_CELL, mm(3.2), 0.42),
+                                        ("pores-fine", FOAM_FINE, mm(1.0), 0.5)):
+            tex = bpy.data.textures.new("foam-voronoi-" + nm, "VORONOI")
+            tex.distance_metric = "DISTANCE"
+            tex.weight_1 = -1.0
+            tex.weight_2 = 1.0
+            tex.noise_scale = mm(cell)
+            tex.noise_intensity = 1.0
+            disp = foam.modifiers.new(nm, "DISPLACE")
+            disp.texture = tex
+            disp.texture_coords = "LOCAL"
+            disp.direction = "Y"
+            disp.mid_level = mid
+            disp.strength = strength
+            bpy.ops.object.modifier_apply(modifier=disp.name)
         foam.data.materials.append(champagne_gold(pore_darken=True))
         smooth(foam, 70)
 

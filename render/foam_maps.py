@@ -12,7 +12,8 @@ from PIL import Image
 import os
 
 SIZE = 1024
-CELLS = 14          # Voronoi cells across the tile · matches the foam pore density
+CELLS = 18          # coarse Voronoi cells across the tile (finer, denser foam)
+CELLS_FINE = 32     # the overlapping second scale, per the reproduction checklist
 SEED = 7            # fixed so the maps are reproducible
 DEPTH = 1.0         # height contrast of the pores
 OUT = "web/assets/site/tex"
@@ -44,8 +45,12 @@ def voronoi_f1f2(size, cells, seed):
 def main():
     os.makedirs(OUT, exist_ok=True)
     f1, f2 = voronoi_f1f2(SIZE, CELLS, SEED)
-    web = f2 - f1                              # ridge network
+    web = f2 - f1                              # coarse ridge network
     web = (web - web.min()) / (web.max() - web.min() + 1e-9)
+    g1, g2 = voronoi_f1f2(SIZE, CELLS_FINE, SEED + 1)   # fine sub-structure
+    fine = g2 - g1
+    fine = (fine - fine.min()) / (fine.max() - fine.min() + 1e-9)
+    web = np.clip(web + 0.4 * fine, 0, 1)      # two overlapping scales
     # height: ridges high (bright web), pore floors low (dark cavities)
     height = np.clip(web ** 0.8, 0, 1)
 
