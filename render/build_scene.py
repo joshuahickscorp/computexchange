@@ -624,7 +624,26 @@ def champagne_gold(rough=0.28, pore_darken=False):
         aomix.inputs["Fac"].default_value = 0.70
         nt.links.new(mixc.outputs["Color"], aomix.inputs["Color1"])
         nt.links.new(ao.outputs["Color"], aomix.inputs["Color2"])
-        nt.links.new(aomix.outputs["Color"], b.inputs["Base Color"])
+        # photoreal (L6 foam tell · "uniform cell scale / tiling") · a LARGE low-freq tonal variation
+        # multiplied over the whole foam field · some regions read a touch dirtier/darker, breaking
+        # the single-brightness "procedural" read. Foam is inherently irregular, so this reads as real
+        # grime/casting variance (NOT the fake-smudge that added imperfection to the SMOOTH metal).
+        fvar = nt.nodes.new("ShaderNodeTexNoise"); fvar.inputs["Scale"].default_value = 1000.0 / (55.0 * S)
+        fvar.inputs["Detail"].default_value = 3.0; fvar.inputs["Roughness"].default_value = 0.6
+        fvmul = nt.nodes.new("ShaderNodeMixRGB"); fvmul.blend_type = "MULTIPLY"
+        fvmul.inputs["Fac"].default_value = 1.0
+        nt.links.new(aomix.outputs["Color"], fvmul.inputs["Color1"])
+        # noise 0..1 -> multiplier 0.80..1.06 (dirtier lows, a few brighter glints)
+        fvcol = nt.nodes.new("ShaderNodeMapRange")
+        fvcol.inputs["From Min"].default_value = 0.25; fvcol.inputs["From Max"].default_value = 0.75
+        fvcol.inputs["To Min"].default_value = 0.80; fvcol.inputs["To Max"].default_value = 1.06
+        nt.links.new(fvar.outputs["Fac"], fvcol.inputs["Value"])
+        fvrgb = nt.nodes.new("ShaderNodeCombineXYZ")
+        nt.links.new(fvcol.outputs["Result"], fvrgb.inputs["X"])
+        nt.links.new(fvcol.outputs["Result"], fvrgb.inputs["Y"])
+        nt.links.new(fvcol.outputs["Result"], fvrgb.inputs["Z"])
+        nt.links.new(fvrgb.outputs["Vector"], fvmul.inputs["Color2"])
+        nt.links.new(fvmul.outputs["Color"], b.inputs["Base Color"])
         # struts glossier (catch the gold), pores matte
         nt.links.new(mr(webmask, 0.0, 1.0, 0.50, 0.22), b.inputs["Roughness"])
     # photoreal: bevel edges (T7) on all champagne; anodize batch mottle (T8) on the SMOOTH shell
@@ -1079,6 +1098,43 @@ def scene_solo(which):
     render_to(OUT + f"{name}{suffix}@3x.png")
 
 
+def _reflection_world(black=(0.006, 0.006, 0.007), env_strength=0.5, horizon=(0.46, 0.47, 0.52)):
+    # photoreal (L1 reflect tell · loops 1-6 named "empty/synthetic reflection" on nearly every
+    # frame) · a studio environment visible ONLY to GLOSSY reflection rays. Camera rays (the
+    # background) and DIFFUSE GI rays (which set the measured tone patches) still see void-black, so
+    # the deliberate site-match black bg AND the measurement lock are both untouched · only the
+    # metals gain a real studio to reflect. A vertical gradient (dark floor, bright horizon softbox
+    # band, mid ceiling) driven by the incoming ray Z reads as a lit room in the reflection.
+    w = bpy.data.worlds.new("pref"); w.use_nodes = True
+    nt = w.node_tree; nt.nodes.clear()
+    out = nt.nodes.new("ShaderNodeOutputWorld")
+    black_bg = nt.nodes.new("ShaderNodeBackground")
+    black_bg.inputs["Color"].default_value = (*black, 1)
+    geo = nt.nodes.new("ShaderNodeNewGeometry")
+    sep = nt.nodes.new("ShaderNodeSeparateXYZ")
+    nt.links.new(geo.outputs["Incoming"], sep.inputs["Vector"])
+    mr = nt.nodes.new("ShaderNodeMapRange")
+    mr.inputs["From Min"].default_value = -1.0; mr.inputs["From Max"].default_value = 1.0
+    mr.inputs["To Min"].default_value = 0.0; mr.inputs["To Max"].default_value = 1.0
+    nt.links.new(sep.outputs["Z"], mr.inputs["Value"])
+    ramp = nt.nodes.new("ShaderNodeValToRGB")
+    nt.links.new(mr.outputs["Result"], ramp.inputs["Fac"])
+    e = ramp.color_ramp.elements
+    e[0].position = 0.0; e[0].color = (0.02, 0.02, 0.025, 1)      # floor (down)
+    e[1].position = 0.46; e[1].color = (*horizon, 1)             # horizon softbox band (bright)
+    c = ramp.color_ramp.elements.new(0.78); c.color = (0.12, 0.12, 0.15, 1)  # ceiling (mid)
+    env_bg = nt.nodes.new("ShaderNodeBackground")
+    nt.links.new(ramp.outputs["Color"], env_bg.inputs["Color"])
+    env_bg.inputs["Strength"].default_value = env_strength
+    lp = nt.nodes.new("ShaderNodeLightPath")
+    mix = nt.nodes.new("ShaderNodeMixShader")
+    nt.links.new(lp.outputs["Is Glossy Ray"], mix.inputs["Fac"])
+    nt.links.new(black_bg.outputs["Background"], mix.inputs[1])
+    nt.links.new(env_bg.outputs["Background"], mix.inputs[2])
+    nt.links.new(mix.outputs["Shader"], out.inputs["Surface"])
+    return w
+
+
 # ---- Phase 4 · portrait rig · lighting composed PER SHOT on void black (not inherited) ----
 def portrait_rig(subject_h, warm=False, key_e=55, key_sz=1.5, rim_e=26, fill_e=9, fill_sz=1.4,
                  expo=-0.55, ground=True):
@@ -1088,9 +1144,8 @@ def portrait_rig(subject_h, warm=False, key_e=55, key_sz=1.5, rim_e=26, fill_e=9
     grounds the object with a real contact shadow."""
     sc = bpy.context.scene
     sc.render.film_transparent = False
-    w = bpy.data.worlds.new("pvoid"); w.use_nodes = True
-    w.node_tree.nodes["Background"].inputs[0].default_value = (0.006, 0.006, 0.007, 1)
-    sc.world = w
+    # photoreal: glossy-only studio reflection world (background + diffuse tone stay void-black)
+    sc.world = _reflection_world(env_strength=0.5)
     sc.view_settings.exposure = expo
     aim = bpy.data.objects.new("Aim", None); aim.location = (0, 0, subject_h * 0.5)
     bpy.context.collection.objects.link(aim)
