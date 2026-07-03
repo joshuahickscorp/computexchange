@@ -11,7 +11,7 @@ import numpy as np
 from PIL import Image, ImageFilter
 
 PARAMS = dict(roll=0.3, ca_r=1.0018, ca_b=0.9982, bloom_thr=0.88, bloom_blur=7,
-              bloom_str=0.30, vig_amp=0.10, vig_floor=0.87, grain=0.008)
+              bloom_str=0.30, vig_amp=0.10, vig_floor=0.87, grain=0.011)
 
 def _scale_channel(ch, factor):
     w, h = ch.size

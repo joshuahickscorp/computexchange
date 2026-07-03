@@ -388,7 +388,22 @@ def blasted_aluminum():
     bump = nt.nodes.new("ShaderNodeBump")
     bump.inputs["Strength"].default_value = 0.009  # wave 7: halve the micro-bump (bead-blast, not sandpaper)
     nt.links.new(n.outputs["Fac"], bump.inputs["Height"])
-    nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
+    # photoreal T1 (spec line 84 · loop-9 studio "clean/texture" tell) · GRAZING-ANGLE micro-sparkle:
+    # a fine sparse facet-normal whose strength is gated by Fresnel, so individual bead-blast crater
+    # facets catch the key ONLY near grazing (real blasted metal sparkles at grazing) and it stays
+    # sub-perceptual head-on · this is texture that reads at angle without the flat "marble" that the
+    # head-on grunge produced (L5 autopsy). Chains the coarse bump into the sparkle bump.
+    spk = nt.nodes.new("ShaderNodeTexNoise"); spk.inputs["Scale"].default_value = 9000.0 / S
+    spk.inputs["Detail"].default_value = 2.0
+    nt.links.new(tc.outputs["Object"], spk.inputs["Vector"])
+    lw = nt.nodes.new("ShaderNodeLayerWeight"); lw.inputs["Blend"].default_value = 0.30
+    gmul = nt.nodes.new("ShaderNodeMath"); gmul.operation = "MULTIPLY"; gmul.inputs[1].default_value = 0.05
+    nt.links.new(lw.outputs["Fresnel"], gmul.inputs[0])
+    sbump = nt.nodes.new("ShaderNodeBump")
+    nt.links.new(spk.outputs["Fac"], sbump.inputs["Height"])
+    nt.links.new(gmul.outputs["Value"], sbump.inputs["Strength"])
+    nt.links.new(bump.outputs["Normal"], sbump.inputs["Normal"])
+    nt.links.new(sbump.outputs["Normal"], b.inputs["Normal"])
     # photoreal T7 hairline edge only · L5 ANTI-DRIFT REVERT: the T1 "wear/grunge" experiment
     # BACKFIRED on the large reflective aluminium top · Voronoi smudge -> grid of dimples, then
     # organic noise -> "fake procedural marble/smudge" (panel 88-95 conf). Real Mac Studio tops ARE
