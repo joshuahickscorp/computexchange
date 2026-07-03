@@ -468,3 +468,17 @@ geometry change. Verified the corner fillets are the only curvature.
 Rendered front silhouette W:H 1.899 = 197 / (95 body + 8.55 intake band) · the body is spec
 197:95 by construction; the earlier squat read was the pillowy fillet eating apparent height,
 now recovered. Ports read at true aspect (USB-C 3.23:1, SD long-thin). Wave 1 geometry complete.
+
+## WAVE 2 · cavity depth · class GEOMETRY (Studio; Spark slots deferred to wave 3 per grader)
+
+The openings read as flat black decals. Gave them depth cues:
+- port_plastic -> port-cavity: dark GREY (0.060, not black) + an AmbientOcclusion multiply
+  (dist 3.2mm, fac 0.75) so the pocket self-shadows and the wall gradient reads.
+- port_tongue (new): lighter mid grey (0.26) blade. The USB-C tongue moved forward to
+  front_y+2.2mm so it catches light and reads as a distinct blade inside the dark pocket.
+- SD slot: a thin lighter lower lip (rounded bar, tongue material) inside the bottom of the
+  slot · a minimal interior cue that kills the decal read.
+Macro (wave2-ports-macro.png): each USB-C reads as a recessed stadium pocket with a lighter
+tongue centred inside; the SD reads as a recessed slot with a lit lower lip. Before = the flat
+black ports in wave1-stadium-ports.png. Standard met: a depth CUE at crop distance, not a
+datasheet. Spark owed nothing this wave (finger-slots rebuild in wave 3).

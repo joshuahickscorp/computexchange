@@ -314,7 +314,25 @@ def blasted_aluminum():
 
 
 def port_plastic():
-    return principled("port-plastic", (0.03, 0.03, 0.033), 0.7, metallic=0.0)
+    # wave 2 · dark GREY (not black) recessed cavity wall + AO so the pocket depth self-shadows
+    # and the wall gradient reads · a flat black fill read as a decal. The mouth stays lighter,
+    # the depths darken via AO.
+    m = principled("port-cavity", (0.060, 0.060, 0.066), 0.62, metallic=0.0)
+    nt = m.node_tree; b = nt.nodes["Principled BSDF"]
+    ao = nt.nodes.new("ShaderNodeAmbientOcclusion")
+    ao.inputs["Distance"].default_value = mm(3.2); ao.samples = 6
+    aomix = nt.nodes.new("ShaderNodeMixRGB"); aomix.blend_type = "MULTIPLY"
+    aomix.inputs["Fac"].default_value = 0.75
+    aomix.inputs["Color1"].default_value = (0.060, 0.060, 0.066, 1)
+    nt.links.new(ao.outputs["Color"], aomix.inputs["Color2"])
+    nt.links.new(aomix.outputs["Color"], b.inputs["Base Color"])
+    return m
+
+
+def port_tongue():
+    # wave 2 · the USB-C insert tongue / SD lower lip · a lighter mid grey so it reads as a
+    # distinct blade inside the dark pocket.
+    return principled("port-tongue", (0.26, 0.26, 0.275), 0.42, metallic=0.15)
 
 
 def led_glass():
@@ -563,14 +581,23 @@ def build_mac_studio(loc_x=0.0, yaw_deg=0.0):
 
     # USB-C tongue blades: a slim VERTICAL blade centered + recessed in each pocket
     tongues = []
+    tongue_mat = port_tongue()
     for _, x in usbc:
         # rounded blade (wave 1): a sharp cube read wrong inside a stadium pocket · round its
-        # visible edges to match the pill opening.
+        # visible edges to match the pill opening. Lighter tongue material (wave 2) so it reads
+        # as a distinct blade inside the dark pocket.
         t = rounded_box("usbc-tongue", mm(1.0), mm(2.2), mm(5.6), mm(0.42), mm(0.42), mm(0.42),
                         seg_corner=8, seg_fillet=3)
-        t.location = (mm(x), front_y + mm(3.0), pz - mm(5.6) / 2.0)
-        t.data.materials.append(cavity)
+        t.location = (mm(x), front_y + mm(2.2), pz - mm(5.6) / 2.0)
+        t.data.materials.append(tongue_mat)
         tongues.append(t)
+    # SD slot lower lip (wave 2): a thin lighter bar at the bottom of the slot interior · a
+    # minimal depth cue that kills the flat-black decal read.
+    lip = rounded_box("sd-lip", mm(STUDIO["sd_w"] - 3.0), mm(1.4), mm(0.6),
+                      mm(0.3), mm(0.2), mm(0.2), seg_corner=6, seg_fillet=2)
+    lip.location = (mm(STUDIO["sd_x"]), front_y + mm(2.4), pz - mm(STUDIO["sd_h"] / 2.0))
+    lip.data.materials.append(tongue_mat)
+    tongues.append(lip)
 
     # power LED: a small darker glass dot, emission OFF (doctrine: nothing glows)
     bpy.ops.mesh.primitive_cylinder_add(radius=mm(STUDIO["led_d"] / 2.0), depth=mm(0.5), vertices=24,
