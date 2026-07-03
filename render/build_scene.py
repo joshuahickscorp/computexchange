@@ -492,10 +492,10 @@ def champagne_gold(rough=0.28, pore_darken=False):
     # Anodized champagne is a COLOURED oxide, not a pure mirror · metallic ~0.5 so the gold
     # diffuse shows (b*~40), otherwise a neutral key reflects off pure metal and reads cream.
     m = principled("spark-gold" + ("-foam" if pore_darken else ""),
-                   (0.670, 0.575, 0.370), rough, metallic=0.28)  # pale warm gold ·
-    # wave 4: pulled OFF brass toward a pale champagne (renders b~12, between cl_side-profile's
-    # neutral border b5.56 and its brighter rims b14 / the audit's pale-champagne b~15). Less
-    # golden than the old (0.68,0.55,0.29). Muted titanium, not jewelry. Foam struts override this.
+                   (0.755, 0.575, 0.170), rough, metallic=0.30)  # metallic anodized GOLD champagne ·
+    # FINAL WAVE (commit C): the device had DE-GOLDED to bone (wave-4 re-pin + 5c overshot). Pinned
+    # to sth_front-1 (b29): visibly gold, calmer than the storagereview brass (b42.8). Foam struts
+    # override this in the pore_darken branch.
     if pore_darken:
         nt = m.node_tree
         b = nt.nodes["Principled BSDF"]
@@ -529,14 +529,17 @@ def champagne_gold(rough=0.28, pore_darken=False):
         # toward grey-champagne · the gold impression now comes from the metallic specular glints,
         # not a saturated diffuse (the audit's fix). No threaded micro-normal (that was the old
         # uniform Voronoi, gone with the 5b geometry).
-        mixc.inputs["Color1"].default_value = (0.050, 0.044, 0.034, 1)  # soft dark grey-champagne pore
-        mixc.inputs["Color2"].default_value = (0.400, 0.375, 0.290, 1)  # desaturated grey-champagne strut
+        # FINAL WAVE (commit C): re-gold the foam to the sth_front-1 pins (web b19.6, pore warm
+        # b12.3). The 5c grey was the de-gold; struts back to a GOLDEN web (calmer than the old
+        # brass), pores warm-dark (not neutral charcoal).
+        mixc.inputs["Color1"].default_value = (0.140, 0.100, 0.044, 1)  # warm dark pore (gold-tinted)
+        mixc.inputs["Color2"].default_value = (0.800, 0.620, 0.255, 1)  # golden strut web
         nt.links.new(webmask, mixc.inputs["Fac"])
         # AO carries the pore depth the shallow displacement cannot: deep cavity self-shadow
         ao = nt.nodes.new("ShaderNodeAmbientOcclusion"); ao.inputs["Distance"].default_value = mm(1.3)
         ao.samples = 4   # cheap AO (OIDN denoise carries the rest); 16 was the render bottleneck
         aomix = nt.nodes.new("ShaderNodeMixRGB"); aomix.blend_type = "MULTIPLY"
-        aomix.inputs["Fac"].default_value = 0.85
+        aomix.inputs["Fac"].default_value = 0.50
         nt.links.new(mixc.outputs["Color"], aomix.inputs["Color1"])
         nt.links.new(ao.outputs["Color"], aomix.inputs["Color2"])
         nt.links.new(aomix.outputs["Color"], b.inputs["Base Color"])

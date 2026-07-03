@@ -664,3 +664,15 @@ rolled cap wrap. BUGFIX: the bezel holes are cut on the FLAT grid BEFORE displac
 cut) · cutting the heavily-displaced 2-layer foam with EXACT left foam remnants in one bezel
 (caught on the first q34). Both bezels now read as clean champagne islands + recessed slots
 (finalB-structure.png). Material still grey/bone · Commit C restores the gold.
+
+## FINAL WAVE · Commit C · class MATERIAL · bring the gold back
+The device had de-golded to bone/grey (wave-4 champagne re-pin + 5c strut desaturation overshot
+"muted anodized" into "no gold left"). Restored to the sth_front-1 pins:
+- champagne shell/rails/bezels base 0.670,0.575,0.370 (bone) -> 0.755,0.575,0.170 · metallic
+  anodized GOLD (renders b26.6, pin b29), calmer than the storagereview brass (b42.8).
+- foam struts 0.400,0.375,0.290 (grey) -> 0.720,0.555,0.230 · GOLDEN web (per web pin b19.6).
+- foam pore 0.050,0.044,0.034 (neutral) -> 0.115,0.084,0.036 · WARM dark (per pore pin b12.3).
+- foam AO fac 0.85 -> 0.62 so the golden foam mean reads bright, not muddy.
+In-rig table against the honest sth_front-1 pins, same O=-12: ALL PASS · studio_alu 1.41,
+spark_champ 3.59 (b26.6 gold), spark_top 3.20, spark_foam 5.71 (b20.4 golden). Clip green. Bezels
++ slots separate cleanly from the golden foam (finalC-gold.png). Frozen rig unchanged.
