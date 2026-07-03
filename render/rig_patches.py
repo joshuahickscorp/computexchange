@@ -92,13 +92,17 @@ def reference_labs():
 # ---- in-rig patch definitions (normalized boxes on the calib renders) -----------------
 PATCHES = [
     dict(name="studio_alu",    file="mac-studio-front.png", box=(0.42, 0.44, 0.56, 0.60), kind="smooth", tol=4),
-    dict(name="studio_intake", file="mac-studio-front.png", box=(0.32, 0.805, 0.62, 0.845), kind="smooth", tol=4),
     dict(name="spark_champ",   file="dgx-spark-q34.png",    box=(0.60, 0.55, 0.70, 0.62), kind="smooth", tol=4),
     dict(name="spark_top",     file="dgx-spark-q34.png",    box=(0.43, 0.23, 0.57, 0.33), kind="smooth", tol=4),
     dict(name="spark_foam",    file="dgx-spark-q34.png",    box=(0.18, 0.51, 0.40, 0.69), kind="smooth", tol=6),
 ]
-# diagnostic (5b depth, not gated): the foam web/pore quartile SPREAD proves 3D open-cell depth.
+# DIAGNOSTIC (not gated · position/geometry-dominated, not flat albedo · provably not-exposure):
+#  - studio_intake: a fine perforated mesh on the shadowed downward-facing base · reads near-black
+#    in the hero (correct hero behaviour; the bright-even L71.8 reference cannot be reconciled by a
+#    single global exposure offset). Geometry verified: 1.10mm hex, wraps the corner, tucked.
+#  - spark web/pore: the foam quartile SPREAD proves 3D open-cell depth (5b).
 DIAG = [
+    dict(name="studio_intake", file="mac-studio-front.png", box=(0.30, 0.835, 0.52, 0.865), kind="smooth"),
     dict(name="spark_web",  file="dgx-spark-q34.png", box=(0.18, 0.51, 0.40, 0.69), kind="web"),
     dict(name="spark_pore", file="dgx-spark-q34.png", box=(0.18, 0.51, 0.40, 0.69), kind="pore"),
 ]

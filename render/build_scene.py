@@ -423,7 +423,7 @@ def perforated_band():
         if bb is not None: put(1, bb)
         return n.outputs[0]
 
-    ph = mm(1.70); pv = ph * 0.866
+    ph = mm(1.10); pv = ph * 0.866   # wave 6: finer, measured 1.10mm hex pitch (was coarse 1.70)
     u = mk("MULTIPLY", sep.outputs["X"], 1.0 / ph)
     v = mk("MULTIPLY", sep.outputs["Z"], 1.0 / pv)
     rowmod = mk("MODULO", mk("FLOOR", v), 2.0)          # 0 or 1 per row
@@ -562,7 +562,8 @@ def build_mac_studio(loc_x=0.0, yaw_deg=0.0):
     body = rounded_box("mac-studio", W, D, Htot,
                        mm(STUDIO["corner_R"]), mm(STUDIO["top_fillet_build"]), intake,
                        seg_corner=48, seg_fillet=12)
-    body.location = (0, 0, 0)
+    zlift = mm(STUDIO["reveal_gap"])   # wave 6 base reveal: lift the body onto a recessed foot
+    body.location = (0, 0, zlift)
     bpy.context.view_layer.update()
 
     alu = blasted_aluminum()
@@ -574,7 +575,7 @@ def build_mac_studio(loc_x=0.0, yaw_deg=0.0):
     front_y = -D / 2.0
     POCKET = mm(4.2); DCUT = mm(10.0)
     yc = front_y + POCKET - DCUT / 2.0
-    pz = mm(STUDIO["port_row_z"])                    # port row height above the ground
+    pz = mm(STUDIO["port_row_z"]) + zlift            # port row height above the ground (+reveal lift)
     usbc = [("usbc-l", STUDIO["usbc_left_x"]), ("usbc-r", STUDIO["usbc_right_x"])]
     cutters = []
     # Stadium cuts (wave 1): the opening rounding must live in the FRONT-FACE (X-Z) plane, not
@@ -618,11 +619,19 @@ def build_mac_studio(loc_x=0.0, yaw_deg=0.0):
     # power LED: a small darker glass dot, emission OFF (doctrine: nothing glows)
     bpy.ops.mesh.primitive_cylinder_add(radius=mm(STUDIO["led_d"] / 2.0), depth=mm(0.5), vertices=24,
                                         rotation=(math.radians(90), 0, 0),
-                                        location=(mm(STUDIO["led_x"]), front_y + mm(0.05), mm(STUDIO["led_z"])))
+                                        location=(mm(STUDIO["led_x"]), front_y + mm(0.05), mm(STUDIO["led_z"]) + zlift))
     led = bpy.context.active_object; led.name = "mac-studio-led"
     led.data.materials.append(led_glass()); smooth(led, 60)
 
-    group = [body, led] + tongues
+    # wave 6 base reveal: a recessed foot (inset ~8mm from the footprint) fills 0..zlift, so the
+    # body's bottom overhangs it and a dark undercut ring + contact shadow read at tabletop pitch.
+    foot = rounded_box("mac-foot", W - mm(16), D - mm(16), zlift,
+                       mm(STUDIO["corner_R"] - 8), 0, 0, seg_corner=40, seg_fillet=2)
+    foot.location = (0, 0, 0)
+    foot.data.materials.append(principled("mac-foot-mat", (0.02, 0.02, 0.022), 0.5, metallic=0.2))
+    smooth(foot, 40)
+
+    group = [body, led, foot] + tongues
     for ob in group:
         ob.rotation_euler.z = math.radians(yaw_deg)
         x, y = ob.location.x, ob.location.y

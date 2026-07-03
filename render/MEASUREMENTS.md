@@ -30,6 +30,8 @@ under `render/measure_evidence/`. Dash gate: middot only.
 | led_from_base | 27.50 | mm | med | apple_front.jpg | mac_ports.png | LED height above device base |
 | led_x_from_center | 87.70 | mm | med | apple_front.jpg | mac_ports.png | feature position: far right |
 | intake_band_height | 8.55 | mm | high | apple_front.jpg | mac_intake_band.png | perforated hex mesh, front-face bottom edge to silhouette bottom (NOT the ground gap) |
+| intake_hole_pitch | 1.10 | mm | med | apple_front.jpg | wave6-intake-pitch.png | wave-6 remeasure at verified scale (12.27 px/mm, 1cm bar): ~9-10 holes/cm -> ~1.1mm hex pitch, hole dia ~0.8mm. The old builder 1.70mm was too coarse (audit right). |
+| intake_corner_wrap | wraps | axis | high | apple_front.jpg | wave6-intake-corner.png | wave-6: the perforation CONTINUES around the rounded vertical corner (does NOT stop at solid aluminium). Resolves the audit split (detail-audit right, front-audit wrong); the render already wraps (mesh on the bottom fillet) |
 | front_height_spec | 95.00 | mm | spec | apple_front.jpg | mac_front_silhouette.png | absolute from Apple spec; image measures 96.20 (+1.3%) = intake-band inclusion, not scale error |
 | alu_Lab_L | 84.32 | L* | high | apple_front.jpg | mac_alu_patch.png | diffuse mid-face patch |
 | alu_Lab_a | 0.03 | a* | high | apple_front.jpg | mac_alu_patch.png |  |

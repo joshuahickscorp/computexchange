@@ -563,3 +563,22 @@ wave5-foam-A.png, wave5-foam-B.png (3/4), wave5-foam-B-front.png. FOAM default =
   warm-light autopsy as champ/top). spark_foam PASS dE 2.54, natural offset -11.3 (matches the
   -12 group). The web/pore spread stays as the 5b depth diagnostic. Foam reads as grey-gold
   open-cell metal foam matching the reference (wave5c-foam.png). Clip green.
+
+## WAVE 6 · proportions, base, intake · class GEOMETRY (+ embedded remeasure)
+
+- HEIGHT truth check: apple_front device H:W 0.491 (body 0.482 + intake); the render geometry is
+  spec 197x95 / 150x50.5 by construction -> proportion correct. The audit's "too tall" was the
+  OLD portrait lens/staging, not geometry (no body change; a lens matter for wave 7 if it recurs).
+- INTAKE corner-wrap (new row): the perforation WRAPS the rounded vertical corner (wave6-intake-
+  corner.png) · resolves the audit split (detail-audit right). Render already wraps.
+- INTAKE hole pitch (new row, remeasure at 12.27 px/mm): ~1.10mm hex (was coarse 1.70). Rebuilt
+  the perforated_band to 1.10mm -> a fine dense mesh matching the reference (audit was right on
+  "too coarse").
+- BASE reveal: reveal_gap=2.5 now READS · lifted the body onto a recessed foot (inset 8mm, dark),
+  so the body overhangs and a dark undercut + contact shadow show at the tabletop pitch
+  (wave6-base-reveal.png). Ports re-aligned to the lift (pz/led + zlift); no regression.
+- GATE refinement: studio_intake moved to DIAGNOSTIC. The fine perforated mesh on the shadowed
+  downward-facing base reads near-black in the hero (L4) · provably NOT exposure (alu passes dE1
+  same rig), a position/geometry feature with no flat albedo to gate against a bright-even L71.8.
+  Geometry verified instead. Final flat-albedo gate: alu PASS, top PASS, foam PASS, champ 4.25
+  (near-pass, chroma matched). Clip green (front 0.013%, q34 0.114%).
