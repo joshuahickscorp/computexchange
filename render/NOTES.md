@@ -516,3 +516,12 @@ Studio charcoal. Per the grader's rule, the measurement wins.
   and desaturated the shell base 0.68,0.55,0.29 -> 0.67,0.575,0.37 (pale warm gold, not brass,
   not greige). spark_champ now dE 4.20 (chroma matched b10.6 vs 12; residual +3.8 L is the
   key-facing end-cap orientation, not the rig · alu passes dE1). Clip green (0.000%).
+
+### 4b · class GEOMETRY
+Replaced the smooth central tray with the measured vent: a fine ~45deg diagonal ribbed WEAVE
+normal (TexWave rotated 45deg, ~4.6mm pitch, bump 0.55) on the recessed panel + tighter border
+radius (12 -> 8mm). Panel stays CENTERED (measurement overrides the audit's edge-aligned). The
+recess wall + floor now read as a diagonal weave matching cl_side-profile (wave4-top-compare.png).
+spark_top still gates PASS dE 3.19. Panel reads darker than the reference under the hero (bright
+champagne border raises the contrast) but the tone gate holds and the weave character matches.
+Minor: the thin exhaust slot at the panel's front edge is deferred to the wave-8 polish pass.

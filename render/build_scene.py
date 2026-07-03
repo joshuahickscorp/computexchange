@@ -639,11 +639,29 @@ def stadium(name, w, h, d, r, loc):
 
 
 def spark_top_vent():
-    # wave 4a · the recessed diagonal-weave vent panel on the top. Distinctly DARKER than the
+    # wave 4a/4b · the recessed diagonal-weave vent panel on the top. Distinctly DARKER than the
     # champagne border (measured L46.9 vs 77.8, cl_side-profile), satin, low saturation. NOT
-    # dark slate: the measurement overrides the audit's #2b2c2e. The diagonal weave normal is
-    # added in 4b. Base tuned so the panel gates in-rig near spark_top_vent_Lab (L46.9) + O.
-    return principled("spark-top-vent", (0.165, 0.140, 0.100), 0.50, metallic=0.30)
+    # dark slate: the measurement overrides the audit's #2b2c2e. 4b adds the fine ~45deg diagonal
+    # ribbed WEAVE via a normal map (measured: diagonal ribbed weave, not a hex mesh).
+    m = principled("spark-top-vent", (0.165, 0.140, 0.100), 0.50, metallic=0.30)
+    nt = m.node_tree; b = nt.nodes["Principled BSDF"]
+    tc = nt.nodes.new("ShaderNodeTexCoord")
+    mapp = nt.nodes.new("ShaderNodeMapping")
+    mapp.inputs["Rotation"].default_value[2] = math.radians(45.0)     # diagonal weave
+    nt.links.new(tc.outputs["Object"], mapp.inputs["Vector"])
+    wave = nt.nodes.new("ShaderNodeTexWave"); wave.wave_type = "BANDS"; wave.bands_direction = "X"
+    wave.inputs["Scale"].default_value = 1.0
+    wave.inputs["Distortion"].default_value = 0.0
+    try: wave.inputs["Detail"].default_value = 0.0
+    except KeyError: pass
+    # ~3mm rib pitch: object space is metres, panel ~0.114m; use a Value node scale via Mapping
+    mapp.inputs["Scale"].default_value = (215.0, 215.0, 215.0)     # ~4.6mm rib pitch (coarser)
+    nt.links.new(mapp.outputs["Vector"], wave.inputs["Vector"])
+    bump = nt.nodes.new("ShaderNodeBump"); bump.inputs["Strength"].default_value = 0.55
+    bump.inputs["Distance"].default_value = mm(0.5)
+    nt.links.new(wave.outputs["Fac"], bump.inputs["Height"])
+    nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
+    return m
 
 
 def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
@@ -679,8 +697,8 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
     smooth(body, 40)
 
     # top recessed vent panel (seen in 3/4 + top): a shallow rounded-rect pocket in the top face
-    tp = cutter_box(mm(SPARK["top_panel_w"]), mm(SPARK["top_panel_h"]), mm(3.0), mm(12),
-                    (0, 0, H + mm(1.5) - mm(3.0) / 2.0), seg=16)
+    tp = cutter_box(mm(SPARK["top_panel_w"]), mm(SPARK["top_panel_h"]), mm(3.0), mm(8.0),
+                    (0, 0, H + mm(1.5) - mm(3.0) / 2.0), seg=16)  # wave 4b tighter border radius
     # (cut from the top; cutter_box origin logic handles the z placement)
     tbox = apply_boolean(body, [tp])
     assign_interior(body, tbox, 2)      # top recessed panel -> dedicated dark vent material
