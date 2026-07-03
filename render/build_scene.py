@@ -297,7 +297,7 @@ def principled(name, base, rough, metallic=1.0, coat=0.0, coat_rough=0.1):
     return m
 
 
-def add_bevel(m, radius=0.42, samples=4):
+def add_bevel(m, radius=0.24, samples=4):
     # photoreal T7: a shader BEVEL rounds every edge at micron scale so no silhouette is
     # mathematically sharp · each edge catches a hairline highlight, killing the CAD look. Chains
     # any existing Normal (micro-bump) into the bevel so both survive.
@@ -386,7 +386,8 @@ def blasted_aluminum():
     nt.links.new(n.outputs["Fac"], bump.inputs["Height"])
     nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
     # photoreal T7 hairline edge + T1 grunge (smudge/dust) on the aluminium (roughness already 3-octave)
-    return add_bevel(add_grunge(m, smudge_amp=0.06, dust_amp=0.05))
+    # L2: the panel still read "flat clay / too clean" · push the smudge+dust one notch (still tasteful)
+    return add_bevel(add_grunge(m, smudge_amp=0.10, dust_amp=0.08))
 
 
 def port_plastic():
@@ -881,7 +882,9 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
             return f
         foam = _foam_layer("dgx-spark-foam", 0.0,
                            [("warpXZ", 5.5, mm(1.05), 0.5),
-                            ("vor", 2.15, mm(2.25), 0.42), ("clouds", 0.85, mm(0.55), 0.5),
+                            ("vor", 3.35, mm(1.35), 0.42),   # BIG cells (L2 · breaks uniform-size tessellation)
+                            ("vor", 2.15, mm(1.95), 0.42),   # medium cells (primary open pores)
+                            ("clouds", 0.85, mm(0.55), 0.5),
                             ("clouds", 8.0, mm(0.95), 0.5)])
         foam.data.materials.append(champagne_gold(pore_darken=True))
         foam_layers = [foam]

@@ -19,3 +19,19 @@ Calibrated against the real controls' render-call rate. Two CONSECUTIVE clean pa
   frame) · **reflect** (empty/too-clean metal + too-symmetric floor, strongest on the SILVER studio)
   · **uniform/dust/clean** (surfaces too perfect) · **edge/bevel** (idealized) · **shadow** (contact/
   floating) · **grain** (image-formation still reads synthetic on q34).
+
+## Loop 2 (2026-07-03) · NOT CLEAN · after pass-1 (foam warp+deeper+contrast, overhead reflector, grunge, bevel 0.42, floor)
+- MINE render-call rate **0.90** (was 0.97) vs REAL **0.06** (was 0.14). My frames improved slightly;
+  the panel also grew MORE confident on the reals, so the discrimination gap held (~0.84).
+- Gate frames: pair 5/5 (foam5, uniform2, clean2); studio-front 5/5 (reflect5, edge2, perfect2);
+  spark-detail 4/5 (foam4, bevel2); spark-front 4/5 (foam4, reflect2); [secondary] studio-q34 5/5
+  (edge3, bevel2, perfect2, reflect2); spark-q34 4/5 (foam5, clean2, reflect2, edge3).
+- Reals: spark-side 0/5(!, was 4/5 · a real photo now correctly read), studio-3q 0, spark-foam 0,
+  studio-apple 0, studio-wiki 1, spark-srv 1, spark-sth2 0.
+- Learnings: (a) foam still reads procedural at MACRO scale (uniform cell SIZE, not lattice) despite
+  the warp; (b) the bevel BACKFIRED · bumping to 0.42 made a "razor-thin CG bevel line" (edge/bevel
+  named) · anti-drift: dial it back past the original; (c) reflection still reads "synthetic gradient"
+  and surfaces "too clean/clay" · the grunge is too subtle to register.
+
+## Loop 3 pending · after pass-3 (bevel reverted to 0.24, foam macro cell-size variation
+## [3.35 + 2.15 mm non-harmonic], aluminium wear pushed to smudge 0.10 / dust 0.08). Tone gate ALL PASS.

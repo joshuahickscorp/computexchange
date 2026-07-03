@@ -35,7 +35,9 @@ items = [(l, p, m) for (l, p, m) in items if os.path.exists(p)]
 
 # two fixed permutations (no RNG in this env) · loop1 and loop2 shuffle differently
 PERM = {1: [7, 0, 11, 3, 9, 1, 5, 12, 2, 8, 4, 10, 6],
-        2: [2, 9, 4, 12, 0, 7, 10, 3, 11, 1, 8, 5, 6]}
+        2: [2, 9, 4, 12, 0, 7, 10, 3, 11, 1, 8, 5, 6],
+        3: [10, 4, 1, 8, 12, 5, 0, 9, 3, 11, 6, 2, 7],
+        4: [5, 11, 8, 2, 6, 10, 1, 12, 0, 4, 9, 7, 3]}
 order = PERM.get(LOOP, list(range(len(items))))
 order = [i for i in order if i < len(items)]
 
