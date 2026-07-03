@@ -109,10 +109,15 @@ call it render, or one tell is named by >=2. Calibrated against the real control
 | 2 | foam warp+deeper+contrast, reflector, grunge, bevel 0.42 | 0.90 | 0.06 | 0.84 | NOT CLEAN |
 | 3 | bevel 0.24, foam macro cell-size variation, wear up | 0.87 | 0.14 | 0.73 | NOT CLEAN |
 | 4 | un-distort cutouts, bevel 0.16, reflector broadened | 0.83 | 0.29 | 0.54 | NOT CLEAN |
-| 5 | grunge Voronoi->organic noise (kill dimple grid), 4K frames | _pending_ | _pending_ | _pending_ | _pending_ |
+| 5 | grunge organic-noise, 4K frames | 0.97 | 0.03 | 0.94 | NOT CLEAN |
+| 6 | grunge REMOVED (clean surfaces), 4K frames · FINAL | 0.87 | 0.20 | 0.67 | NOT CLEAN |
 
-The gap is closing (0.83 -> 0.54): as the renders improve the panel increasingly mistakes REAL
-photos for renders (real rate rose 0.06 -> 0.29). But the renders are still distinguished.
+**The panel has large loop-to-loop variance** (fresh agents + fresh shuffle each loop): the REAL
+control rate alone swung 0.03 to 0.29 across loops, so a single 5-agent loop is a noisy estimate.
+The stable signal across all loops: MINE 0.83-0.97 vs REAL 0.03-0.29 · the renders are consistently
+distinguished from real photos, and no loop came close to clean. Loop 4's apparent gap-collapse
+(0.54) was partly a soft-panel draw; loop 5 (harsh draw) + the marble-top regression put it at 0.94.
+Loop 5 also delivered the decisive lesson (below) that set the FINAL clean-surface state.
 
 **What the panel taught (and what it changed):**
 - **Foam** was the #1 tell every loop. The domain-warp + deeper cells + strut contrast + macro
@@ -143,6 +148,13 @@ photos for renders (real rate rose 0.06 -> 0.29). But the renders are still dist
   bezel/port cutouts ("warped L and O"). Reduced until the cutouts read clean and the de-tile held.
 - **Foam mean drift.** Deeper + bigger cells darkened the foam patch (L41 -> L36.8); held inside dE6
   by lifting the strut albedo a hair. The geometry now carries the darkness, not the albedo.
+- **Grunge REMOVED entirely (L5) · the anti-drift capstone.** The whole T1 "surface wear" line was a
+  mistake on these devices. The Voronoi smudge gridded the top (dimples); the organic-noise
+  replacement read as fake marble/smudge (panel 88-95 conf). The controlling evidence: every REAL
+  Studio photo scored 0/5 render DESPITE being immaculate. Real premium hardware IS clean, so ADDING
+  imperfection is itself the tell. Grunge dialed to zero on both metals; the clean bead-blast/anodize
+  (never named) stays. This is the spec's "imperfection is seasoning · dial back when named," followed
+  to its conclusion.
 
 ---
 
@@ -153,7 +165,36 @@ See `render/PHOTOREAL-LEDGER.md`. Summary: T2/O1 (foam) much improved, leading r
 landed; T1 (surface) fixed after the grunge autopsy; T5 (reflections) tone-limited on the champagne
 (FALSE-TELL) and improved on the silver.
 
-## 10. Deliverables
+## 10. Final verdict (honest)
+
+Six genuine panel loops. The renders were driven materially closer to photographic (the pill relief
+fixed, foam de-tiled and deepened, physical camera + post + reflections added, two self-inflicted
+regressions found and killed by autopsy) while the measurement tone gate stayed senior and green at
+every commit. **They did not reach "two consecutive clean panels," and this report says so plainly
+rather than faking it.** Across the run: MINE 0.83-0.97 render-call vs REAL controls 0.03-0.29 · the
+cold hardware-expert panel still separates them, with large loop-to-loop draw variance.
+
+The residual is understood, not mysterious:
+- **Foam is a technique ceiling.** A displaced heightfield, however warped/deepened/size-varied,
+  cannot render true open-cell topology (struts seen behind struts, light passing through the lattice).
+  It is the single most-cited, most device-specific tell. Closing it needs real 3D foam geometry
+  (voxel or photogrammetry), a different pipeline than this scene.
+- **Edge-highlight uniformity** is structural to a shader bevel plus the frozen-rig rim on the fillet.
+- **Reflect / ground / contact-shadow** are FALSE-TELLs under the SENIOR constraints: the void-black
+  background is a deliberate public-site match (matte metal on black has little to reflect), and the
+  soft contact shadow sits on the intentional seamless plane. Chasing them would break the site
+  integration or the measured tone, both of which outrank the panel.
+- **Added surface wear backfired** (the anti-drift capstone): every REAL premium-hardware control read
+  as a photograph while immaculate, so imperfection is the tell, not its absence.
+
+Conclusion, per the authority hierarchy (measurement > grader > panel > eye): within the two senior
+constraints this project locked in from the start (the measured tone pins and the void-black site
+match), a procedural heightfield pipeline reaches a real ceiling short of fooling a cold expert panel.
+The delivered frames are the most photographic state that respects those constraints. Breaking the
+ceiling is a scoped, nameable next step (3D foam + HDRI studio env + a champagne-albedo-compensated
+reflection), not more tuning of the current scene.
+
+## 11. Deliverables
 
 - Gate frames (4K, post): `render/portraits/` · Studio + Spark front/q34/side/top, pair, details.
 - Collages: `render/collages/` (gate frames, settlement pairs, microrealism evidence, loop history).

@@ -80,3 +80,31 @@ Calibrated against the real controls' render-call rate. Two CONSECUTIVE clean pa
   shadow (site-match FALSE-TELL).
 
 ## Loop 6 pending · FINAL · clean surfaces (grunge removed), 4K delivery frames.
+
+## Loop 6 (2026-07-03) · FINAL · NOT CLEAN · clean surfaces (grunge removed), 4K delivery frames
+- MINE **0.87**, REAL **0.20**. The clean-surface revert WORKED on the studio: studio-front 5/5 -> 3/5,
+  the marble tell gone, remaining tells all mild (clean2/reflect2/edge2/shadow2). Foam still 5-6/5 on
+  every spark frame; edge-uniformity persists.
+- STOP DECISION. Six genuine loops. MINE 0.83-0.97 vs REAL 0.03-0.29 across the run · consistently
+  distinguished, never near clean, with large panel-draw variance. The residual is structural:
+  * FOAM (dominant, most-cited, device-specific) is a TECHNIQUE CEILING · heightfield displacement,
+    however warped/deepened/size-varied, cannot make true open-cell topology (struts visible BEHIND
+    struts, light passing through). Reads procedural to expert cold agents. Would need actual 3D foam
+    geometry (voxel/scanned), a different pipeline.
+  * EDGE/BEVEL uniform highlight · structural to a shader bevel + the frozen-rig rim on the fillet.
+  * REFLECT + SHADOW/GROUND · FALSE-TELLs under the SENIOR constraints (void-black = deliberate
+    site-match; soft contact on a seamless plane). Chasing them breaks the site integration or the tone.
+- Per the authority hierarchy (measurement > grader > panel > eye) and the restraint doctrine
+  ("dial back when named", "FALSE-TELLs not chased", "post rescues nothing"), the loop stops here and
+  the result is reported honestly. Two-consecutive-clean is not reachable within the senior
+  constraints (measurement tone-lock + void-black site-match) on a procedural heightfield pipeline.
+
+## Summary trajectory
+| loop | MINE | REAL | note |
+|---|---|---|---|
+| 1 | 0.97 | 0.14 | baseline |
+| 2 | 0.90 | 0.06 | foam warp+deeper, reflector, grunge, bevel 0.42 |
+| 3 | 0.87 | 0.14 | bevel 0.24, foam macro variation |
+| 4 | 0.83 | 0.29 | un-distort cutouts, bevel 0.16 (soft-panel draw) |
+| 5 | 0.97 | 0.03 | grunge->marble regression + harsh-panel draw |
+| 6 | 0.87 | 0.20 | grunge removed (clean) · FINAL |
