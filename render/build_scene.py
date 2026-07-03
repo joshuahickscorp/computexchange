@@ -448,7 +448,7 @@ def champagne_gold(rough=0.28, pore_darken=False):
     # Anodized champagne is a COLOURED oxide, not a pure mirror · metallic ~0.5 so the gold
     # diffuse shows (b*~40), otherwise a neutral key reflects off pure metal and reads cream.
     m = principled("spark-gold" + ("-foam" if pore_darken else ""),
-                   (0.78, 0.53, 0.14), rough, metallic=0.28)
+                   (0.68, 0.55, 0.29), rough, metallic=0.28)  # muted warm titanium, not jewelry (doctrine)
     if pore_darken:
         nt = m.node_tree
         b = nt.nodes["Principled BSDF"]
@@ -474,13 +474,15 @@ def champagne_gold(rough=0.28, pore_darken=False):
         webmask = web.outputs[0]
 
         mixc = nt.nodes.new("ShaderNodeMixRGB")
-        mixc.inputs["Color1"].default_value = (0.028, 0.019, 0.010, 1)  # deep dark open pore
-        mixc.inputs["Color2"].default_value = (0.72, 0.54, 0.24, 1)     # gold strut
+        # pinned to sth_front-1 clean foam (mean L47): the web/pore split showed pores +11 L too
+        # bright (ref 16, ren 27) and web +6 (ref 74, ren 79) · darken both, pores hardest.
+        mixc.inputs["Color1"].default_value = (0.012, 0.008, 0.004, 1)  # near-black open pore
+        mixc.inputs["Color2"].default_value = (0.585, 0.44, 0.155, 1)   # gold strut, darkened to pull the mean to target
         nt.links.new(webmask, mixc.inputs["Fac"])
         # AO carries the pore depth the shallow displacement cannot: deep cavity self-shadow
-        ao = nt.nodes.new("ShaderNodeAmbientOcclusion"); ao.inputs["Distance"].default_value = mm(0.8)
+        ao = nt.nodes.new("ShaderNodeAmbientOcclusion"); ao.inputs["Distance"].default_value = mm(1.3)
         aomix = nt.nodes.new("ShaderNodeMixRGB"); aomix.blend_type = "MULTIPLY"
-        aomix.inputs["Fac"].default_value = 0.45
+        aomix.inputs["Fac"].default_value = 0.85
         nt.links.new(mixc.outputs["Color"], aomix.inputs["Color1"])
         nt.links.new(ao.outputs["Color"], aomix.inputs["Color2"])
         nt.links.new(aomix.outputs["Color"], b.inputs["Base Color"])

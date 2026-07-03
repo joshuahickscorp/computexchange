@@ -198,6 +198,26 @@ floors slightly bright; the champagne is a touch saturated vs the muted referenc
 panel is smooth where the reference has a fine weave; pills stay blank (trademark gate). Foam
 density was corrected mid-loop (storagereview scale was desk-corrupted; sth_front-1 clean).
 
+## SPARK · foam-tone loop (gated re-grade)
+
+Change class: MATERIAL. TARGET PINNED first: the three references give L38 (storagereview),
+L32 (cl_front-foam), L47 (sth_front-1) for the SAME foam · all three patches VERIFIED clean
+foam (no desk, no bg, no specular · crops pin_*.png). So L38 did NOT die from contamination ·
+they differ only by the reference's lighting (cl_front-foam dim, sth_front-1 best-lit + most
+gold). Pinned target = sth_front-1 L47 (cleanest, best-lit, the studio condition my verify
+light approximates). Evidence spark_foam_regrade.png.
+Web/pore SPLIT (target vs render): the miss was localised to the PORES · ref web L74 / pore
+L16, render was web L79 (+5) / pore L27 (+11). One material loop: pores to near-black
+(0.012) + AO to 0.85, strut darkened (0.585). Result · web dE 2.5 (L74/74, LANDED), mean dE
+3.8 (L47/49, +2 · stopped reading brighter), pore dE 9.0 (L16/23, +7). The pore +7 is the
+displaced-plane depth limit: shallow pores do not self-occlude so ambient lights the near-black
+floor · a material knob cannot deepen them, which is exactly what the phase-4 3/4 rider tests
+(if the plane reads flat there, the Spark reopens for GEOMETRY / deeper pores).
+CHAMPAGNE (separate, signed): render lip vs sth pill was dL +25 (brighter, lighting-driven)
+db -6.9 (already LESS gold than sth's b25). Per the muted-titanium doctrine (not jewelry) the
+champagne base was pulled toward warm-neutral (0.68/0.55/0.29) · lip now L*72 a*1 b*14, a warm
+titanium, not jewelry gold. clip 0.00% PASS.
+
 ## Combined scene · tabletop hero
 
 ### iter 1 (128 spp, 25% preview)
