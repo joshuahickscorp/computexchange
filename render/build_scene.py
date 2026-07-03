@@ -337,7 +337,7 @@ def perforated_band():
     a sharp ramp keeps the metal web bright and the holes small + dark, and a Bump sinks
     them so they read as recessed perforations, not painted dots (checklist: map domain,
     not geometry)."""
-    m = principled("mac-base-band", (0.19, 0.195, 0.205), 0.5)
+    m = principled("mac-base-band", (0.8, 0.81, 0.83), 0.5)
     nt = m.node_tree
     b = nt.nodes["Principled BSDF"]
     tc = nt.nodes.new("ShaderNodeTexCoord")
@@ -347,10 +347,12 @@ def perforated_band():
     v.inputs["Scale"].default_value = 1.0 / mm(1.3)   # ~1.3 mm pitch · dense fine mesh
     nt.links.new(tc.outputs["Object"], v.inputs["Vector"])
     ramp = nt.nodes.new("ShaderNodeValToRGB")
+    # The mesh WEB is bright bead-blast aluminium (like the body); only the pit centers go
+    # dark. Reference intake band reads L*~52 mid-grey, not a near-black stripe.
     ramp.color_ramp.elements[0].position = 0.10       # small round holes
-    ramp.color_ramp.elements[0].color = (0.01, 0.01, 0.012, 1)
+    ramp.color_ramp.elements[0].color = (0.03, 0.03, 0.035, 1)
     ramp.color_ramp.elements[1].position = 0.24
-    ramp.color_ramp.elements[1].color = (0.19, 0.195, 0.205, 1)
+    ramp.color_ramp.elements[1].color = (0.60, 0.61, 0.63, 1)
     nt.links.new(v.outputs["Distance"], ramp.inputs["Fac"])
     nt.links.new(ramp.outputs["Color"], b.inputs["Base Color"])
     bump = nt.nodes.new("ShaderNodeBump")

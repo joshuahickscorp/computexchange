@@ -107,6 +107,16 @@ verify is clip 0.000% peak 0.859 PASS. verify_sheet now reports the alu patch dE
 Open residual for the next loops: the perforated intake band reads darker than the reference
 mid-grey (material), and XOR-area 4.6% at the bottom corners (geometry).
 
+## ACCURACY GRIND v2 · PHASE 2 · material loop · Studio intake band tone
+
+Change class: MATERIAL (no geometry/light touched). The perforated intake read L*28.4 vs the
+reference L*52.7 (dE 24.2) · a near-black stripe where the reference is a bright mid-grey mesh.
+Raised the mesh WEB from 0.19 to 0.60 (bead-blast aluminium, like the body) keeping the pit
+centers dark (0.03). Intake now L*52.8 / a*0.1 / b*-1.8 vs reference L*52.7 · dE 0.6 (PASS).
+Both device materials now tone-matched (alu dE 1.6, intake dE 0.6), clip 0.00% PASS. Remaining
+front residual: XOR-area 4.6% at the bottom corners · measured ref bottom corner 16.7mm looks
+inflated by the ragged mesh edge; verifying before any r_bottom change.
+
 ## Combined scene · tabletop hero
 
 ### iter 1 (128 spp, 25% preview)
