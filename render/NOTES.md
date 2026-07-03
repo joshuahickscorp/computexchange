@@ -702,3 +702,34 @@ the original audit); the champagne HUE at the sth_front-1 gold pin (finding 2 sa
 not desaturate to bone); the 6.09mm measured front edge radius. Remaining realism nits: foam cell
 regularity + a faint strut threading. Top-panel vent reads darker than the reference weave (a
 wave-4 tone residual, out of this wave's scope).
+
+# PHOTOREAL FRONTIER · Commit 1 · pill relief inversion · class GEOMETRY (last geometry commit)
+
+Z-TABLE AUDIT (signed mm relief vs the champagne body face; + proud toward camera, - recessed):
+  element            BEFORE (defect)     AFTER (fixed)
+  body/bezel face    0.00                0.00
+  foam (crest..pore) +1.62 .. +0.40      +0.82 .. -0.54  (mean +0.14, now FLUSH in the face)
+  foam-back          -0.15 .. -1.16      embedded, narrowed to the centre field only
+  tub / pocket floor +2.20 .. -2.80      -2.50 .. -4.90  (RECESSED · concave pocket)
+The element PROUD that the reference shows recessed: the TUB-PLUG (proud_face +2.20) · a plug
+meant to blind the pocket ended proud of the bezel face, reading as a capsule BUTTON. (It went
+proud in the previous wave's move-tub-forward fix that blocked back-foam show-through.)
+
+RELIEF MEASUREMENT (sth_front-1, commit1-bezel-relief.png): bezel sits ~flush (a hair proud) of
+the foam · shadow ~0.7mm at the bezel inboard edge, key elevation ~40deg -> relief ~0.6mm. Row
+bezel_foam_relief added (low conf).
+
+REBUILD: tub recessed to the pocket back (-2.50 to -4.90, never proud). Foam LOWERED to sit flush
+in the face (grid front_y-0.4 -> front_y+0.4, foam mean +0.14). Back foam layer NARROWED to the
+centre field (width 90mm) so it never reaches the pills · this cleared the back-foam-in-pocket
+show-through that a bezel hole alone could not (bake note: hole_pad 12 and 30 both failed; the
+narrow-layer fix worked · single-layer FOAM=A was clean, isolating the back layer as the cause).
+Bezel footprint held (30x40, ~5mm border); slot rides toward the outer end per pill_center_from_end.
+
+ACCEPT: raking-light diagnostic (commit1-raking.png, strip ~12deg elevation, camera near-normal):
+both pockets throw a long INTERIOR shadow (upper wall dark, floor lit) · the concave signature,
+not an external button shadow. Tools added: --zaudit (z-table), --raking (acceptance render).
+
+FREEZE: the DGX Spark geometry is now FROZEN, equal in status to the closed Studio. Not one vertex
+or constant changes from here. The only geometry-adjacent surface that may still change is the foam
+displacement MAP (part 4), a texture contract, not a mesh contract.

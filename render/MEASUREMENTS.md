@@ -65,6 +65,7 @@ under `render/measure_evidence/`. Dash gate: middot only.
 | pill_bezel_border | 5.00 | mm | med | sth_front-1.jpg | finalA-sth-pill.png | champagne margin slot-edge to foam (blank D2 bezel uses a symmetric ~5mm; the reference's ~8mm side margin carried the logo) |
 | end_rail_width | 1.00 | mm | med | cl_front-foam.jpg | finalA-clfoam-pill.png | thin champagne rail at each 150-axis end (RECONCILES with + credits the phase-0 foam_end_band 0.99, which was nearer the truth than the wave-3 correction) |
 | slot_recess_depth | 4.20 | mm | low | cl_front-foam.jpg | wave3-spark-front-struct.png | pill finger-slot pocket depth (accepted; the slot relocates into the bezel, geometry unchanged) |
+| bezel_foam_relief | 0.60 | mm | low | sth_front-1.jpg | commit1-bezel-relief.png | photoreal commit 1: champagne bezel sits ~FLUSH (a hair proud) of the foam plane. Shadow width ~0.7mm at the bezel inboard edge, key elevation ~40deg -> relief ~0.7*tan40 ~ 0.6mm. Foam lowered to sit flush in the face; bezel (body face 0) flush with foam mean (+0.14). |
 | foam_border_margin | 2.53 | mm | med | cl_front-foam.jpg | dgx_border.png | champagne lip, long edge (thin) |
 | foam_end_band | 0.99 | mm | med | cl_front-foam.jpg | dgx_border.png | champagne band at short/pill ends (phase-0; = end_rail_width, credited) |
 | top_width_anchor | 150.00 | mm | anchor | cl_side-profile.jpg | dgx_top_silhouette.png | NVIDIA spec 150 mm; the one absolute this image scales from |

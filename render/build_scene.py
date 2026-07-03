@@ -41,6 +41,8 @@ EXPORT = arg("--export", None)
 VERIFY = arg("--verify", None)   # "studio" | "spark" | "all" · orthographic reference-match renders
 TURN = arg("--turnaround", None) # "studio" | "spark" · Gate 1 wireframe+shaded turntable
 PORTRAIT = arg("--portrait", None)  # "studio" | "spark" · phase-4 max-quality portraits
+ZAUDIT = arg("--zaudit", None)      # photoreal commit 1 · print the pill-relief z-table
+RAKING = arg("--raking", None)      # photoreal commit 1 · raking-light acceptance render
 SHOT = str(arg("--shot", "all"))    # front | q34 | detail | all
 PREVIEW = bool(arg("--preview", False))
 SAMPLES = int(arg("--samples", 128 if PREVIEW else 2048))
@@ -731,8 +733,8 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
     # champagne tub floors sitting recessed at the back of each pocket, blank
     tubs = []
     for sx in (-1, 1):
-        tub = stadium("tub", pw - mm(0.8), phz - mm(0.8), mm(5.0), (pw - mm(0.8)) / 2.0,
-                      (sx * px, front_y + mm(0.3), zc))  # deep plug forward · blocks back-foam show-through
+        tub = stadium("tub", pw - mm(0.8), phz - mm(0.8), mm(2.4), (pw - mm(0.8)) / 2.0,
+                      (sx * px, front_y + mm(3.7), zc))  # RECESSED floor at the pocket back (concave, never proud)
         tub.data.materials.append(principled("spark-tub", (0.46, 0.32, 0.11), 0.6, metallic=0.2))
         smooth(tub, 50); tubs.append(tub)
 
@@ -740,7 +742,7 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
     ffx = mm(SPARK["foam_field_long"]); ffz = mm(SPARK["foam_field_short"])
     if EXPORT:
         bpy.ops.mesh.primitive_grid_add(x_subdivisions=2, y_subdivisions=2, size=1.0,
-                                        location=(0, front_y - mm(0.4), zc),
+                                        location=(0, front_y + mm(0.4), zc),
                                         rotation=(math.radians(90), 0, 0))
         foam = bpy.context.active_object; foam.name = "dgx-spark-foam"
         foam.scale = (ffx, ffz, 1.0); bpy.ops.object.transform_apply(scale=True)
@@ -752,18 +754,18 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
         # real DEPTH via a bake-off: A = single deeper plane, B = A + a stacked shell offset
         # 1.6mm behind at DIFFERENT cell scales so its struts fall between the front pores and
         # peek through -> overlapping open-cell depth. Displacement budgeted below cell pitch.
-        def _foam_layer(name, yoff, cells_strengths):
+        def _foam_layer(name, yoff, cells_strengths, hole_pad=0.0, width=None):
             bpy.ops.mesh.primitive_grid_add(x_subdivisions=900, y_subdivisions=320, size=1.0,
-                                            location=(0, front_y - mm(0.4) + yoff, zc),
+                                            location=(0, front_y + mm(0.4) + yoff, zc),
                                             rotation=(math.radians(90), 0, 0))
             f = bpy.context.active_object; f.name = name
-            f.scale = (ffx, ffz, 1.0); bpy.ops.object.transform_apply(scale=True)
+            f.scale = (width or ffx, ffz, 1.0); bpy.ops.object.transform_apply(scale=True)
             bpy.context.view_layer.objects.active = f
             # final wave: cut the BEZEL holes on the FLAT grid, BEFORE displacement · a clean 2D
             # cut, not a fragile EXACT boolean on heavily-displaced geo (which left foam remnants
             # in one bezel). The champagne body then shows through as the pill-bezel islands.
             for sx in (-1, 1):
-                bez = stadium("bezelhole", mm(SPARK["bezel_w"]), mm(SPARK["bezel_h"]), mm(20),
+                bez = stadium("bezelhole", mm(SPARK["bezel_w"] + hole_pad), mm(SPARK["bezel_h"] + hole_pad), mm(20),
                               mm(6.0), (sx * px, front_y - mm(9), zc))
                 mb = f.modifiers.new("bez", "BOOLEAN"); mb.operation = "DIFFERENCE"
                 mb.solver = "EXACT"; mb.object = bez
@@ -783,7 +785,7 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
         foam.data.materials.append(champagne_gold(pore_darken=True))
         foam_layers = [foam]
         if FOAM == "B":
-            back = _foam_layer("dgx-spark-foam-back", mm(1.6), [(1.80, mm(1.6)), (1.05, mm(0.9))])
+            back = _foam_layer("dgx-spark-foam-back", mm(1.6), [(1.80, mm(1.6)), (1.05, mm(0.9))], hole_pad=6.0, width=mm(90))  # center-only · never reaches the pills
             back.data.materials.append(champagne_gold(pore_darken=True))
             foam_layers.append(back)
 
@@ -1156,7 +1158,42 @@ def verify_device(which):
     render_to("render/verify/" + name + "-front.png")
 
 
-if PORTRAIT:
+if RAKING:
+    # photoreal commit 1 acceptance · a single strip light at ~12deg elevation raking ACROSS the
+    # front plane, camera near-normal. A concave POCKET throws a long interior shadow; a proud
+    # BUTTON throws an external one. This image is the acceptance evidence.
+    import os as _os
+    sc = reset_scene(); enable_gpu(sc); sc.cycles.samples = 320
+    build_dgx_spark(0.0, yaw_deg=0.0)
+    sw, sh = mm(150), mm(50.5)
+    w = bpy.data.worlds.new("rk"); w.use_nodes = True
+    w.node_tree.nodes["Background"].inputs[0].default_value = (0.003, 0.003, 0.004, 1); sc.world = w
+    sc.view_settings.exposure = -1.1
+    aim = bpy.data.objects.new("Aim", None); aim.location = (0, 0, mm(20))
+    bpy.context.collection.objects.link(aim)
+    # thin horizontal strip just above the top-front edge, a hair in front of the face, grazing
+    # DOWN across the front plane at a shallow (~12deg) angle so pockets throw long interior shadows
+    add_area("rk-strip", (0, -mm(80), mm(60)), mm(4), 14, (1, 1, 1), sx=mm(150), aim=aim)
+    portrait_camera(aim, sw, sh, "front", (2200, 1400), margin=1.18)
+    _os.makedirs("render/measure_evidence", exist_ok=True)
+    render_to("render/measure_evidence/commit1-raking.png")
+elif ZAUDIT:
+    # photoreal commit 1 · z-table: signed mm relief of each element vs the champagne body face.
+    # Convention: PROUD toward the camera (-y) is POSITIVE, RECESSED (+y) is NEGATIVE.
+    reset_scene(); objs = build_dgx_spark(0.0, yaw_deg=0.0)
+    front_y = -mm(SPARK["depth"]) / 2.0
+    def relief_mm(y): return -(y - front_y) / S * 1000.0  # -y proud -> positive mm
+    print("# PILL-RELIEF Z-TABLE (mm relief vs champagne body face; + proud toward camera, - recessed)")
+    import numpy as _np
+    for ob in objs:
+        if ob.type != "MESH": continue
+        n = len(ob.data.vertices)
+        co = _np.empty(n * 3); ob.data.vertices.foreach_get("co", co); co = co.reshape(n, 3)
+        M = _np.array(ob.matrix_world)                     # full 4x4 (rotation + translation)
+        yw = co @ M[1, :3] + M[1, 3]                       # world y = row-1 of the matrix dotted
+        print(f"#   {ob.name:22} proud_face {relief_mm(yw.min()):+7.2f}   back {relief_mm(yw.max()):+7.2f}  ({n} v)")
+    print("# body face = 0.00 by definition. Foam proud>0; a pill/tub with proud_face>0 is a BUTTON (defect).")
+elif PORTRAIT:
     import os as _os
     _os.makedirs("render/portraits", exist_ok=True)
     shots = ["front", "q34", "detail"] if SHOT == "all" else [SHOT]
@@ -1178,8 +1215,8 @@ elif EXPORT:
     scene_pair()  # export path returns early after building + exporting
 elif ONLY in ("all", "pair"):
     scene_pair()
-if not PORTRAIT and not TURN and not VERIFY and not EXPORT and ONLY in ("all", "studio"):
+if not PORTRAIT and not TURN and not VERIFY and not EXPORT and not RAKING and not ZAUDIT and ONLY in ("all", "studio"):
     scene_solo("studio")
-if not PORTRAIT and not TURN and not VERIFY and not EXPORT and ONLY in ("all", "spark"):
+if not PORTRAIT and not TURN and not VERIFY and not EXPORT and not RAKING and not ZAUDIT and ONLY in ("all", "spark"):
     scene_solo("spark")
 print("build_scene done.")
