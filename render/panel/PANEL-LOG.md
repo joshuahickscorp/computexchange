@@ -33,5 +33,18 @@ Calibrated against the real controls' render-call rate. Two CONSECUTIVE clean pa
   named) · anti-drift: dial it back past the original; (c) reflection still reads "synthetic gradient"
   and surfaces "too clean/clay" · the grunge is too subtle to register.
 
-## Loop 3 pending · after pass-3 (bevel reverted to 0.24, foam macro cell-size variation
-## [3.35 + 2.15 mm non-harmonic], aluminium wear pushed to smudge 0.10 / dust 0.08). Tone gate ALL PASS.
+## Loop 3 (2026-07-03) · NOT CLEAN · after pass-3 (bevel 0.24, foam macro cell-size variation, wear up)
+- MINE render-call rate **0.87** (0.97 -> 0.90 -> 0.87) vs REAL **0.14**. Slow asymptotic gain.
+- Gate frames: spark-front 5/5 (bevel3, foam5, reflect2); studio-front 5/5 (reflect5, perfect3,
+  grain2); spark-detail 4/5 (foam4, bevel4); pair 3/5 (shadow2, foam2); [secondary] studio-q34 5/5
+  (reflect5, bevel3); spark-q34 4/5 (bevel3, shadow3, foam3).
+- Reals now drawing a few false render-calls too: spark-sth2 2/5 (foam2), spark-foam 1/5 (foam2) ·
+  the agents are primed on "foam == procedural", so even REAL foam photos take foam tells (the tell
+  is becoming a panel bias, not purely a render defect).
+- Loop 3 exposed TWO self-inflicted regressions to fix: (a) the overhead reflector cast circular
+  "ghost AO blob" artefacts on the silver top; (b) the foam warpXZ distorted the bezel/port cutouts
+  ("warped L and O"). Also the shader bevel highlight reads as a "uniform CG specular line" at ANY
+  size (its UNIFORMITY along the whole edge is the tell, not its radius).
+
+## Loop 4 pending · L3 cleanup (warpXZ 1.05->0.6 [un-distort cutouts], bevel 0.24->0.16, reflector
+## broadened+raised+dimmed [kill the blobs]). Tone gate ALL PASS.

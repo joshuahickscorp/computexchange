@@ -297,7 +297,7 @@ def principled(name, base, rough, metallic=1.0, coat=0.0, coat_rough=0.1):
     return m
 
 
-def add_bevel(m, radius=0.24, samples=4):
+def add_bevel(m, radius=0.16, samples=4):
     # photoreal T7: a shader BEVEL rounds every edge at micron scale so no silhouette is
     # mathematically sharp · each edge catches a hairline highlight, killing the CAD look. Chains
     # any existing Normal (micro-bump) into the bevel so both survive.
@@ -881,7 +881,7 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
             smooth(f, 70)
             return f
         foam = _foam_layer("dgx-spark-foam", 0.0,
-                           [("warpXZ", 5.5, mm(1.05), 0.5),
+                           [("warpXZ", 5.5, mm(0.6), 0.5),   # L3 · reduced · was distorting the bezel cutouts
                             ("vor", 3.35, mm(1.35), 0.42),   # BIG cells (L2 · breaks uniform-size tessellation)
                             ("vor", 2.15, mm(1.95), 0.42),   # medium cells (primary open pores)
                             ("clouds", 0.85, mm(0.55), 0.5),
@@ -890,7 +890,7 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
         foam_layers = [foam]
         if FOAM == "B":
             back = _foam_layer("dgx-spark-foam-back", mm(1.6),
-                               [("warpXZ", 5.0, mm(0.9), 0.5),
+                               [("warpXZ", 5.0, mm(0.55), 0.5),
                                 ("vor", 1.80, mm(1.7), 0.42), ("clouds", 0.75, mm(0.45), 0.5)],
                                hole_pad=6.0, width=mm(90))  # center-only · never reaches the pills
             back.data.materials.append(champagne_gold(pore_darken=True))
@@ -1096,7 +1096,9 @@ def portrait_rig(subject_h, warm=False, key_e=55, key_sz=1.5, rim_e=26, fill_e=9
     # above + a hair camera-side so it reflects in the tops and upper fillets, NOT the near-vertical
     # front faces (the spark_champ / studio_alu front patches). Energy gate-tuned; if spark_top
     # (the one top patch, tight) drifts, this dims first · tone SENIOR.
-    add_area("p-refl", (0.15, -0.35, subject_h * 0.5 + 2.05), 2.6, 2.4, (1.0, 0.985, 0.95), aim=None)
+    # L3 · broadened + raised + dimmed · the tighter/brighter version cast circular "ghost AO blob"
+    # artefacts on the silver top that read as CG. A larger, higher, softer source is a smooth smear.
+    add_area("p-refl", (0.15, -0.35, subject_h * 0.5 + 2.7), 3.8, 1.5, (1.0, 0.985, 0.95), aim=None)
     # photoreal T5: a defined SOFTBOX reflection on the matte champagne top desaturated its gold
     # below the pin at every energy that read (tone gate is SENIOR, and the champagne is already
     # borderline). Kept OFF · the STRIP RIM draws the readable-edge line on the fillets, and the
