@@ -435,3 +435,15 @@ AUTOPSY · intake tone reference: the mac_intake_band.png crop is ~60% bright fr
 ABOVE the perforated mesh (the red measurement line splits them), so a full-crop mean gave a
 body-contaminated L77.68. Superseded: intake reference now measured from the mesh-only region
 (y 0.60-0.93) = L71.81, the mesh's own apparent tone.
+
+## WAVE 1 · Studio geometry · class GEOMETRY
+
+### item 1 · stadium port cuts (grader-confirmed #1)
+cutter_box rounded only the vertical edges (rounded_box(w,d,h,r,0,0), r_top=r_bottom=0) so the
+USB-C/SD slot ENDS were dead sharp and the rounding curved back into the hole depth, invisible.
+Replaced both USB-C and the SD cutter with stadium() so the rounding lives in the front-face
+X-Z plane. Radii geometric, not guessed: USB-C r = usbc_w/2 = 1.31mm (full stadium ends), SD
+r = sd_h/2 = 1.25mm. Positions/sizes unchanged. Tongue blade changed from a sharp cube to a
+rounded_box (r 0.42) so it matches the pill opening. Render: the two USB-C read as tall pills
+with semicircular caps and the SD as a long thin rounded slot (evidence wave1-stadium-ports.png).
+USB-C aspect 2.62 x 8.47 = 3.23:1 confirmed. Cavity depth is wave 2.
