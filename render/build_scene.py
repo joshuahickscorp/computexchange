@@ -121,6 +121,31 @@ def enable_gpu(sc):
     return chosen
 
 
+# ---- measured constants · every value traces to a render/MEASUREMENTS.md row ----------
+# Spec-anchor doctrine: spec supplies absolute dimensions; the reference images supply the
+# radii, feature sizes and positions. INFERRED values are flagged; nothing is guessed.
+STUDIO = {
+    "width":        197.0,   # front_width_anchor (Apple spec)
+    "depth":        197.0,   # spec (square footprint)
+    "height":        95.0,   # front_height_spec
+    "corner_R":      31.4,   # plan_corner_R · footprint / vertical-edge radius
+    "top_fillet_R":   8.27,  # top_edge_fillet_R (MEASURED target for the rendered corner)
+    "top_fillet_build": 8.9, # builder knob, tuned so the RENDERED front corner = 8.3 above
+    "intake_band":    8.55,  # intake_band_height · perforated hex mesh on the bottom fillet
+    "reveal_gap":     2.5,   # base_reveal_gap · INFERRED design parameter (not measured)
+    "usbc_w":         2.62,  # usbc_short_axis_horiz
+    "usbc_h":         8.47,  # usbc_long_axis_vert · VERTICAL (settled, two photographers)
+    "usbc_left_x":  -66.16,  # usbc_left_x_from_center
+    "usbc_right_x": -51.36,  # usbc_right_x_from_center
+    "sd_w":          26.85,  # sd_slot_width · horizontal
+    "sd_h":           2.50,  # sd_slot_height
+    "sd_x":         -24.41,  # sd_center_x_from_center
+    "led_x":         87.70,  # led_x_from_center
+    "led_d":          2.94,  # led_diameter (approx, glow-inclusive)
+    "port_row_z":    24.36,  # port_row_center_from_base (above the device bottom)
+    "led_z":         27.50,  # led_from_base
+}
+
 # ---- geometry helpers ----------------------------------------------------------------
 def rounded_box(name, w, d, h, r_corner, r_top, r_bottom, seg_corner=24, seg_fillet=6):
     """A racetrack-profile body: box (w x d x h), vertical corner radius r_corner,
@@ -398,53 +423,66 @@ def champagne_gold(rough=0.28, pore_darken=False):
 
 # ---- the devices ---------------------------------------------------------------------
 def build_mac_studio(loc_x=0.0, yaw_deg=0.0):
-    """197 x 197 x 95 mm, matched to Apple's front product photo: racetrack body
-    (corner radius ~36 mm) floating 8 mm on the inset base whose visible band is
-    the speckled perforation ring; front, left to right: two USB-C at -68/-52 mm,
-    SD slot left of center at -24 mm, power LED far right at +68 mm, all in the
-    lower third. Rear perforation field SKIPPED: not visible at the hero camera,
-    and the doctrine is skip rather than fake."""
-    body_h = mm(87.0)
-    body = rounded_box("mac-studio", mm(197), mm(197), body_h,
-                       mm(36), mm(3), mm(2), seg_corner=32, seg_fillet=7)
-    body.location = (0, 0, mm(8.0))
+    """197 x 197 x 95 mm · every dimension from STUDIO (traces to MEASUREMENTS.md).
+    Racetrack body: footprint corner 31.4 mm, a TIGHT 8.27 mm top-edge fillet (top dead-flat,
+    sides near-vertical), an 8.55 mm perforated intake band on the bottom fillet, floating on a
+    2.5 mm reveal gap over a circular foot. Front row from the measured x/z: two VERTICAL USB-C
+    pockets (2.62 x 8.47) with dark interiors and a centered tongue blade, a horizontal beveled
+    SD slot (26.85 x 2.50), and a dark power LED dot (no emission). Rear field skipped."""
+    # apple_front is a floating product shot: bottom = the intake mesh curving under, no
+    # foot. The 2.5 mm reveal + foot is a tabletop feature (added in the phase-4 portrait),
+    # so the default body floats at z=0 with the intake band on its bottom fillet.
+    W = mm(STUDIO["width"]); D = mm(STUDIO["depth"]); Htot = mm(STUDIO["height"])
+    intake = mm(STUDIO["intake_band"])
+    body = rounded_box("mac-studio", W, D, Htot,
+                       mm(STUDIO["corner_R"]), mm(STUDIO["top_fillet_build"]), intake,
+                       seg_corner=48, seg_fillet=12)
+    body.location = (0, 0, 0)
     bpy.context.view_layer.update()
 
     alu = blasted_aluminum()
-    plastic = port_plastic()
-    body.data.materials.append(alu)
-    body.data.materials.append(plastic)
+    cavity = port_plastic()
+    body.data.materials.append(alu)                 # 0
+    body.data.materials.append(cavity)              # 1
+    body.data.materials.append(perforated_band())   # 2
 
-    front_y = -mm(197) / 2.0
-    zc = mm(8.0 + 16.0)
-    cutters = [
-        cutter_box(mm(9), mm(7), mm(3.5), mm(1.6), (-mm(68), front_y + mm(1.5), zc)),
-        cutter_box(mm(9), mm(7), mm(3.5), mm(1.6), (-mm(52), front_y + mm(1.5), zc)),
-        cutter_box(mm(26), mm(7), mm(2.8), mm(1.2), (-mm(24), front_y + mm(1.5), zc)),
-    ]
+    front_y = -D / 2.0
+    POCKET = mm(4.2); DCUT = mm(10.0)
+    yc = front_y + POCKET - DCUT / 2.0
+    pz = mm(STUDIO["port_row_z"])                    # port row height above the ground
+    usbc = [("usbc-l", STUDIO["usbc_left_x"]), ("usbc-r", STUDIO["usbc_right_x"])]
+    cutters = []
+    for _, x in usbc:                                # VERTICAL slots: w x h = 2.62 x 8.47
+        cutters.append(cutter_box(mm(STUDIO["usbc_w"]), DCUT, mm(STUDIO["usbc_h"]), mm(1.1),
+                                  (mm(x), yc, pz), seg=10))
+    cutters.append(cutter_box(mm(STUDIO["sd_w"]), DCUT, mm(STUDIO["sd_h"]), mm(0.9),
+                              (mm(STUDIO["sd_x"]), yc, pz), seg=8))   # horizontal beveled slot
     boxes = apply_boolean(body, cutters)
-    assign_interior(body, boxes, 1, ymin=front_y + mm(0.4))
+    assign_interior(body, boxes, 1, ymin=front_y + mm(0.3))
+    # intake band = the lower `intake` mm (bottom fillet) carries the perforated mesh
+    for poly in body.data.polygons:
+        if (body.matrix_world @ poly.center).z < intake + mm(0.3):
+            poly.material_index = 2
     smooth(body, 40)
 
-    # Base: the floating ring. Its side band reads as the dark perforated mesh in
-    # the 8 mm shadow gap, exactly what Apple's front photo shows.
-    bpy.ops.mesh.primitive_cylinder_add(radius=mm(72), depth=mm(9.5),
-                                        location=(0, 0, mm(4.75)), vertices=128)
-    base = bpy.context.active_object
-    base.name = "mac-studio-base"
-    base.data.materials.append(perforated_band())
-    smooth(base, 40)
+    # USB-C tongue blades: a slim VERTICAL blade centered + recessed in each pocket
+    tongues = []
+    for _, x in usbc:
+        bpy.ops.mesh.primitive_cube_add(size=1.0, location=(mm(x), front_y + mm(3.0), pz))
+        t = bpy.context.active_object; t.name = "usbc-tongue"
+        t.scale = (mm(1.0) / 2, mm(2.2) / 2, mm(5.6) / 2)
+        bpy.ops.object.transform_apply(scale=True)
+        t.data.materials.append(cavity)
+        tongues.append(t)
 
-    # Power LED: a 2 mm darker glass dot, no emission.
-    bpy.ops.mesh.primitive_cylinder_add(radius=mm(1.0), depth=mm(0.6), vertices=24,
+    # power LED: a small darker glass dot, emission OFF (doctrine: nothing glows)
+    bpy.ops.mesh.primitive_cylinder_add(radius=mm(STUDIO["led_d"] / 2.0), depth=mm(0.5), vertices=24,
                                         rotation=(math.radians(90), 0, 0),
-                                        location=(mm(68), front_y + mm(0.05), zc))
-    led = bpy.context.active_object
-    led.name = "mac-studio-led"
-    led.data.materials.append(led_glass())
-    smooth(led, 60)
+                                        location=(mm(STUDIO["led_x"]), front_y + mm(0.05), mm(STUDIO["led_z"])))
+    led = bpy.context.active_object; led.name = "mac-studio-led"
+    led.data.materials.append(led_glass()); smooth(led, 60)
 
-    group = [body, base, led]
+    group = [body, led] + tongues
     for ob in group:
         ob.rotation_euler.z = math.radians(yaw_deg)
         x, y = ob.location.x, ob.location.y
@@ -755,7 +793,10 @@ def verify_rig_front(subject_w, subject_h, res, bright=False):
     cd.type = "ORTHO"
     cd.ortho_scale = max(subject_w, subject_h) * 1.12
     cam = bpy.data.objects.new("vcam", cd)
-    tilt = math.radians(8)  # match the reference's slight downward look (top sliver visible)
+    # apple_front is a LEVEL front elevation (its +1.3% height is the intake band, not tilt).
+    # On a 197 mm-deep body even 1.5 deg projects ~5 mm of false height, so the verify cam is
+    # exactly level · the top fillet reads as an edge, no top face.
+    tilt = math.radians(0.0)
     cam.location = (0, -2.0, subject_h * 0.5 + 2.0 * math.tan(tilt))
     cam.rotation_euler = (math.radians(90) - tilt, 0, 0)
     bpy.context.collection.objects.link(cam)

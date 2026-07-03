@@ -80,6 +80,22 @@ measured x/z; beveled SD slot 26.85x2.50 horizontal; circular pedestal with the 
 perforated intake band on the bottom fillet + a 2.5 mm reveal gap. No material/light change
 this loop.
 
+Self-grade (render/verify/loop-studio.png, front ortho vs apple_front, level camera):
+- aspect ren 2.072 vs ref 2.048 (d +0.024; ren = spec 2.074, ref carries the ~1mm intake
+  sliver) · top corner ren 8.17 vs ref 8.35 mm (d -0.18; top_fillet_build knob tuned to 8.9
+  so the RENDERED corner hits the 8.27 mm table value) · mean contour dev 0.7% of width ·
+  silhouette XOR-area 4.6% · clip 0.00% PASS.
+- Features all land: USB-C x -66.3/-51.5 (ref -66.3/-51.4), 2.5x8.1 vertical (ref 2.7x8.5);
+  SD x -24.5, 26.7x2.2 horizontal (ref 27.1x2.7); LED far right. Ports orientation corrected
+  horizontal -> vertical confirmed in the render.
+- Lying metric named: contour MAX dev read 10.7%@y0 (a single top row where bright silver
+  sits within threshold of the near-white ground and segments ragged). Skipping the extreme
+  2% edge rows moves it to 8.9%@y96 · the true residual is the BOTTOM corners, not the top.
+- Residual (XOR 4.6%): bottom-corner / intake-fillet shape + faint upper-side strips (partly
+  apple_front not being a perfect orthographic). Verify camera calibrated to level (0 deg):
+  on a 197mm-deep body even 1.5 deg projected ~5mm of false height. Next: geometry loop 2 on
+  the bottom fillet, then phase 2 (material tone + light + clipcheck).
+
 ## Combined scene · tabletop hero
 
 ### iter 1 (128 spp, 25% preview)
