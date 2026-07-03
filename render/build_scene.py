@@ -585,7 +585,7 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
     body = rounded_box("dgx-spark", W, D, H, r, r, r, seg_corner=24, seg_fillet=8)
     bpy.context.view_layer.update()
     body.data.materials.append(champagne_gold(0.50))                       # 0 shell
-    body.data.materials.append(principled("spark-pill-wall", (0.40, 0.27, 0.085), 0.72, metallic=0.1))  # 1 inner wall (rough anodized, no hotspot)
+    body.data.materials.append(principled("spark-pill-wall", (0.40, 0.27, 0.085), 0.72, metallic=0.1))  # 1 inner wall
 
     front_y = -D / 2.0
     zc = H / 2.0
@@ -593,11 +593,13 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
     pw = mm(SPARK["pill_short"]); phz = mm(SPARK["pill_long"])
 
     # recessed pill pockets with real inner-wall depth (stadium prisms cut into the front)
+    # stadium() places its front edge at loc.y+DCUT/2 and extends back in -y, so to cut a
+    # POCK-deep pocket into the body (front face at front_y) the front edge sits at front_y+POCK.
     POCK = mm(4.2); DCUT = mm(10.0)
     cutters = []
     for sx in (-1, 1):
         cutters.append(stadium("pillcut", pw, phz, DCUT, pw / 2.0,
-                               (sx * px, front_y + POCK - DCUT, zc)))
+                               (sx * px, front_y + POCK - DCUT / 2.0, zc)))
     boxes = apply_boolean(body, cutters)
     assign_interior(body, boxes, 1, ymin=front_y + mm(0.3))
     smooth(body, 40)
