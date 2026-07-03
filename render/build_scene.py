@@ -53,6 +53,8 @@ PW = int(arg("--pw", 0))            # portrait width override (fast wave-0 tone 
 PSAMP = arg("--psamples", None)     # portrait sample override (calibration speed)
 PDIR = str(arg("--pdir", "render/portraits/"))  # portrait output dir (calib to a scratch dir)
 FOAM = str(arg("--foam", "B"))      # wave-5b foam depth technique: "A" single / "B" stacked shells
+FOAM3D = arg("--foam2d", None) is None and not EXPORT   # L9 · REAL 3D open-cell foam geometry
+# (technique-class switch · grader line 149). --foam2d forces the legacy displaced heightfield.
 if not PDIR.endswith("/"):
     PDIR += "/"
 if not OUT.endswith("/"):
@@ -788,6 +790,69 @@ def spark_top_vent():
     return add_bevel(m)   # photoreal T7 · hairline edge (chains the weave bump into the bevel)
 
 
+def foam3d_material(base=(0.560, 0.470, 0.300), ao_fac=0.54, ao_dist=1.2, rough=0.40):
+    # material for the REAL 3D foam · the deep pores go dark on their OWN (geometry self-shadow), so
+    # unlike the displaced-heightfield material this needs BRIGHT struts + GENTLE AO to bring the
+    # patch mean back up to the spark_foam pin (the gate is senior · tuned via rig_patches).
+    m = principled("spark-foam3d", base, rough, metallic=0.32)
+    nt = m.node_tree; b = nt.nodes["Principled BSDF"]
+    geo = nt.nodes.new("ShaderNodeNewGeometry")
+    # convex strut crests read a touch brighter/glossier (curvature), concave junctions a touch matte
+    mr = nt.nodes.new("ShaderNodeMapRange"); mr.inputs["From Min"].default_value = 0.42
+    mr.inputs["From Max"].default_value = 0.58; mr.inputs["To Min"].default_value = rough + 0.06
+    mr.inputs["To Max"].default_value = rough - 0.10
+    nt.links.new(geo.outputs["Pointiness"], mr.inputs["Value"]); nt.links.new(mr.outputs["Result"], b.inputs["Roughness"])
+    ao = nt.nodes.new("ShaderNodeAmbientOcclusion"); ao.inputs["Distance"].default_value = mm(ao_dist); ao.samples = 8
+    aom = nt.nodes.new("ShaderNodeMixRGB"); aom.blend_type = "MULTIPLY"; aom.inputs["Fac"].default_value = ao_fac
+    aom.inputs["Color1"].default_value = (*base, 1)
+    nt.links.new(ao.outputs["Color"], aom.inputs["Color2"]); nt.links.new(aom.outputs["Color"], b.inputs["Base Color"])
+    return add_bevel(m)
+
+
+def foam3d_field(name, cx, cz, w, h, depth, front_face_y, pitch, voxel, seed=11):
+    # REAL 3D open-cell foam geometry (technique-class switch · grader line 149; the displaced
+    # heightfield could not produce struts-behind-struts self-shadow, named 5/5 every loop). A slab
+    # is carved by a jittered 3D grid of icospheres UNIONED via voxel remesh (fixes the self-
+    # intersecting-cutter boolean failure) then subtracted · leaving a connected strut network with
+    # true depth and pores that go fully dark against the recess behind. Slab front at front_face_y,
+    # extends +y (into the body) by depth.
+    import random as _r
+    from mathutils import Matrix
+    _r.seed(seed)
+    slab_cy = front_face_y + depth / 2.0
+    bpy.ops.mesh.primitive_cube_add(size=1.0, location=(cx, slab_cy, cz))
+    slab = bpy.context.active_object; slab.name = name
+    slab.scale = (w, depth, h)   # size=1.0 cube spans +/-0.5, so scale by full dim
+    bpy.ops.object.transform_apply(scale=True)
+    rad = pitch * 0.57; jit = pitch * 0.24
+    nx = int(w / pitch) + 2; nz = int(h / pitch) + 2; ny = max(2, int(depth / pitch) + 1)
+    bm = bmesh.new()
+    for iy in range(ny):
+        for iz in range(nz):
+            for ix in range(nx):
+                x = cx + (ix - (nx - 1) / 2.0) * pitch + _r.uniform(-jit, jit)
+                z = cz + (iz - (nz - 1) / 2.0) * pitch + _r.uniform(-jit, jit)
+                y = slab_cy + (iy - (ny - 1) / 2.0) * pitch + _r.uniform(-jit, jit)
+                bmesh.ops.create_icosphere(bm, subdivisions=2, radius=rad * _r.uniform(0.82, 1.18),
+                                           matrix=Matrix.Translation((x, y, z)))
+    cmesh = bpy.data.meshes.new(name + "-cut"); bm.to_mesh(cmesh); bm.free()
+    cutter = bpy.data.objects.new(name + "-cut", cmesh); bpy.context.collection.objects.link(cutter)
+    rm = cutter.modifiers.new("rm", "REMESH"); rm.mode = "VOXEL"; rm.voxel_size = voxel
+    bpy.ops.object.select_all(action="DESELECT"); cutter.select_set(True)
+    bpy.context.view_layer.objects.active = cutter
+    bpy.ops.object.modifier_apply(modifier="rm")
+    mb = slab.modifiers.new("foam", "BOOLEAN"); mb.operation = "DIFFERENCE"
+    mb.solver = "EXACT"; mb.object = cutter
+    bpy.context.view_layer.objects.active = slab
+    bpy.ops.object.modifier_apply(modifier="foam")
+    bpy.data.objects.remove(cutter, do_unlink=True)
+    for p in slab.data.polygons: p.use_smooth = True
+    bb = [slab.matrix_world @ __import__("mathutils").Vector(c) for c in slab.bound_box]
+    xs = [v.x for v in bb]; zs = [v.z for v in bb]
+    print(f"[foam3d] {name}: {len(slab.data.polygons)} tris  x[{min(xs)*1000:.0f},{max(xs)*1000:.0f}]mm  z[{min(zs)*1000:.0f},{max(zs)*1000:.0f}]mm")
+    return slab
+
+
 def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
     """150 x 150 x 50.5 mm, sitting flat · every value from SPARK (traces to MEASUREMENTS.md).
     The FRONT is the 150 x 50.5 STRIP: solid champagne END-CAPS (31.5mm each) at both 150-axis
@@ -851,6 +916,20 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
         foam = bpy.context.active_object; foam.name = "dgx-spark-foam"
         foam.scale = (ffx, ffz, 1.0); bpy.ops.object.transform_apply(scale=True)
         foam.data.materials.append(foam_flat_material())
+        foam_layers = [foam]
+    elif FOAM3D:
+        # L9 · REAL 3D open-cell foam geometry (technique-class switch). A dark RECESS is carved into
+        # the champagne body over the bounded center field (bezel-to-bezel), backed by a near-black
+        # material so the deep foam pores read fully dark · then the 3D strut network fills it.
+        fw = mm(SPARK["pill_pitch"] - SPARK["bezel_w"])   # center field bezel-to-bezel ~= 82.9 mm
+        fh = mm(SPARK["foam_field_short"])                # 46.34 mm
+        rec = cutter_box(fw, mm(5.4), fh, mm(3.0), (0, front_y + mm(2.7), zc), seg=10)
+        rbox = apply_boolean(body, [rec])
+        body.data.materials.append(principled("spark-foam-recess", (0.045, 0.035, 0.018), 0.82, metallic=0.1))  # 3
+        assign_interior(body, rbox, 3, ymin=front_y - mm(0.5))
+        foam = foam3d_field("dgx-spark-foam", 0, zc, fw - mm(1.6), fh - mm(1.6), mm(5.0),
+                            front_y + mm(0.2), pitch=mm(2.15), voxel=mm(0.27))
+        foam.data.materials.append(foam3d_material())
         foam_layers = [foam]
     else:
         # wave 5b · two-scale displacement for size VARIANCE (coarse 2.15mm cells subdivided by

@@ -785,3 +785,17 @@ jointly transformative (dgx-spark-q34-post.png). T4 -> FIXED-UNCONFIRMED, T9-rol
   on the fillets, and the key gives the soft top reflection that bead-blast/anodize matte metal
   physically shows. T5 stays OPEN (tone-blocked) · revisit with a champagne-albedo compensation only
   if the panel names it the top tell (authority hierarchy: measurement/tone beats the tell).
+
+## PHOTOREAL · Commit L9 · class FOAM-GEO-MAP · TECHNIQUE-CLASS SWITCH (grader line 149)
+- The displaced-heightfield foam EXHAUSTED against the panel's #1 tell ("procedural displacement,
+  no true self-shadowing depth of open-cell metal foam"), named 5/5 every Spark frame across loops
+  1-8 with every part-4 recipe applied (depth hierarchy, torn cells, de-thread, warp, contrast).
+  Per line 149, switched technique class: REAL 3D open-cell geometry.
+- BAKE-OFF evidence: render/measure_evidence/foam3d-tile.png (test tile · struts-behind-struts, pores
+  fully dark) vs the prior heightfield. Method: a champagne slab in a dark recess (bezel-to-bezel
+  center field), carved by a jittered 3D grid of icospheres UNIONED via voxel remesh (0.27mm) then
+  boolean-subtracted (EXACT). ~2600 spheres -> ~340k strut tris. Build ~70s, render normal.
+- Dedicated foam3d_material (bright struts + gentle AO · the geometry self-shadows the pores now):
+  tuned to the spark_foam pin via the gate · base (0.560,0.470,0.300), ao_fac 0.54. Gate: spark_foam
+  dE 4.20 PASS (L43.8, b17.1), ALL PASS. The pill relief (concave finger-slots in the caps) holds.
+- Toggle: default FOAM3D on for portraits; --foam2d forces the legacy heightfield (kept for glb EXPORT).
