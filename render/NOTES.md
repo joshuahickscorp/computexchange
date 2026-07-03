@@ -395,3 +395,43 @@ the near-black foam pores (0.012,0.008,0.004), and the foam cell scale are genui
 punch list, exact file:line fixes, verification gaps, and 3 decisions (D1 lighting, D2 NVIDIA
 logo, D3 scope) are in render/CONCERNS.md. Neither device closed · both reopen. No self-grade.
 Exported all 7 angles + sheets + report to ~/Downloads/cx-render-grader-2026-07-02/ for upload.
+
+## WAVE 0 · rig calibration · class LIGHTING (grader D1 · in-rig tone gate)
+
+Change: unified the two per-device portrait rigs (which was per-material fudging: studio
+expo-1.15 vs spark expo-0.55) into ONE frozen shared rig, and added a LARGE frontal
+camera-axis fill · the soft source the silver MIRROR reflects so void-black still reads true
+silver. New calib tooling: render/rig_patches.py (in-rig patch sampler + dE gate),
+build_scene --pw/--psamples/--pdir fast-calib flags, key_sz/fill_sz rig knobs. No geometry or
+material changed.
+
+FROZEN RIG (single source of truth · build_scene PORTRAIT_RIG · every later wave renders with
+this; a rig change is its own lighting-class commit with all patches re-verified):
+  warm=False, key_e=64, key_sz=2.2, rim_e=16, fill_e=28, fill_sz=2.7, expo=-0.70
+  world background (0.006,0.006,0.007) void black · neutral key · frontal fill at (0,-1.75,+0.1)
+  floor matte near-black (0.004) · 768 samples + OIDN at final, 220 for calib.
+
+GLOBAL OFFSET O = -12.0 L (justification): a void-black hero legitimately sits below the
+bright-reference-studio pins. Under the unified rig the two CLEAN albedo patches · Studio silver
+and Spark champagne · agree on their natural in-rig offset (alu -11.1, champ -12.5); their
+midpoint sets O = -12, applied identically to every patch's reference L. Not per-material tuned.
+
+IN-RIG PATCH TABLE (dE76 vs (ref_L+O, ref_a, ref_b); tol 4, foam pore 6; clip GREEN
+studio 0.039% / spark 0.000%):
+| patch          | refL | tgtL | measL | dE   | verdict | note |
+|----------------|------|------|-------|------|---------|------|
+| studio_alu     | 84.3 | 72.3 | 73.3  | 1.07 | PASS    | silver reads silver (was -61 before wave 0) |
+| studio_intake  | 71.8 | 59.8 | 42.8  |17.06 | DEFER 6 | shadowed base + coarse perforation; NOT exposure (alu lands at same expo). Mesh rebuilt in wave 6, re-gate then |
+| spark_champ    | 72.5 | 60.5 | 60.0  | 7.44 | DEFER 4 | L lands (0.5 off); the whole dE is CHROMA (a4.1/b36.3 vs 7.78/42.78) · albedo, lighting cannot fix. Champagne re-pinned in wave 4 |
+| spark_web      | 68.0 | 56.0 | 69.8  |14.05 | DEFER 5 | L BRIGHTER than target · adding light worsens it · strut albedo too high. Wave 5c |
+| spark_pore     | 10.7 | -1.3 |  5.6  |10.30 | DEFER 5 | b* neutral (3.5 vs 11.1) · pore albedo. Wave 5c |
+
+All four non-passing patches are provably NOT global-exposure (the rig): alu proves the exposure
+is correct; each failure is chroma/albedo (champ, web, pore) or local shadow+geometry (intake).
+Per D1 "iterate lighting only until pass or the failure is provably albedo" · satisfied. Each
+deferral is re-gated in its owning wave against this frozen rig + O.
+
+AUTOPSY · intake tone reference: the mac_intake_band.png crop is ~60% bright front-face silver
+ABOVE the perforated mesh (the red measurement line splits them), so a full-crop mean gave a
+body-contaminated L77.68. Superseded: intake reference now measured from the mesh-only region
+(y 0.60-0.93) = L71.81, the mesh's own apparent tone.

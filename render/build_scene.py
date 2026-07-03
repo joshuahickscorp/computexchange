@@ -47,8 +47,22 @@ SAMPLES = int(arg("--samples", 128 if PREVIEW else 2048))
 OUT = str(arg("--out", "render/previews/" if PREVIEW else "web/assets/site/"))
 ITER = str(arg("--iter", "0"))
 ONLY = str(arg("--only", "all"))
+PW = int(arg("--pw", 0))            # portrait width override (fast wave-0 tone calibration)
+PSAMP = arg("--psamples", None)     # portrait sample override (calibration speed)
+PDIR = str(arg("--pdir", "render/portraits/"))  # portrait output dir (calib to a scratch dir)
+if not PDIR.endswith("/"):
+    PDIR += "/"
 if not OUT.endswith("/"):
     OUT += "/"
+
+# ---- FROZEN PORTRAIT RIG (wave 0 · D1 in-rig tone gate) -------------------------------
+# ONE shared rig for both devices (no per-material fudge). The hero rig composes shadows
+# freely, but every pinned material patch must land within dE 4 of its Lab target measured IN
+# this rig (ref_L shifted by ONE global offset). The frontal camera-axis fill is the soft
+# source the silver MIRROR reflects, so void-black still reads true silver ("tone lives in the
+# key"). Single source of truth; recorded in NOTES.md. A later wave that needs a rig change is
+# its own lighting-class commit with all patches re-verified.
+PORTRAIT_RIG = dict(warm=False, key_e=64, key_sz=2.2, rim_e=16, fill_e=28, fill_sz=2.7, expo=-0.70)
 
 # ---- scale ---------------------------------------------------------------------------
 # True metric scale: 1 Blender unit = 1 metre, so every dimension is real and the
@@ -831,10 +845,12 @@ def scene_solo(which):
 
 
 # ---- Phase 4 · portrait rig · lighting composed PER SHOT on void black (not inherited) ----
-def portrait_rig(subject_h, warm=False, key_e=55, rim_e=26, fill_e=9, expo=-0.55, ground=True):
+def portrait_rig(subject_h, warm=False, key_e=55, key_sz=1.5, rim_e=26, fill_e=9, fill_sz=1.4,
+                 expo=-0.55, ground=True):
     """A product-photographer key/rim/fill on void black. Key high and camera-left, a narrow
-    rim strip behind+above to draw the top/edges, a low fill so the shadow side keeps detail.
-    A matte near-black floor grounds the object with a real contact shadow."""
+    rim strip behind+above to draw the top/edges, and a LARGE frontal camera-axis fill that
+    the silver mirror reflects so it reads as metal on black (D1). A matte near-black floor
+    grounds the object with a real contact shadow."""
     sc = bpy.context.scene
     sc.render.film_transparent = False
     w = bpy.data.worlds.new("pvoid"); w.use_nodes = True
@@ -844,9 +860,11 @@ def portrait_rig(subject_h, warm=False, key_e=55, rim_e=26, fill_e=9, expo=-0.55
     aim = bpy.data.objects.new("Aim", None); aim.location = (0, 0, subject_h * 0.5)
     bpy.context.collection.objects.link(aim)
     kcol = (1.0, 0.97, 0.92) if warm else (1.0, 0.99, 0.98)
-    add_area("p-key", (-0.85, -0.75, subject_h * 0.5 + 0.9), 1.5, key_e, kcol, aim=aim)
+    add_area("p-key", (-0.85, -0.75, subject_h * 0.5 + 0.9), key_sz, key_e, kcol, aim=aim)
     add_area("p-rim", (0.6, 1.05, subject_h * 0.5 + 0.85), 0.5, rim_e, (0.93, 0.96, 1.0), sx=0.05, aim=aim)
-    add_area("p-fill", (1.05, -0.8, subject_h * 0.5), 1.4, fill_e, (0.97, 0.98, 1.0), aim=aim)
+    # frontal camera-axis softbox: the bright source the silver front face reflects toward
+    # camera, so it reads silver instead of void black. Slightly above the aim, on axis.
+    add_area("p-fill", (0.0, -1.75, subject_h * 0.5 + 0.1), fill_sz, fill_e, (0.98, 0.99, 1.0), aim=aim)
     if ground:
         bpy.ops.mesh.primitive_plane_add(size=6.0, location=(0, 0, 0))
         fl = bpy.context.active_object; fl.name = "p-floor"
@@ -876,12 +894,11 @@ def portrait_device(device, shot, res=(3840, 2400), samples=None):
     sc = reset_scene(); enable_gpu(sc)
     # noise-floor with OIDN denoise (grader-permitted alternative to 2048): the foam AO makes
     # high raw sample counts impractical, so denoise 768 to the floor.
-    sc.cycles.samples = samples or (128 if PREVIEW else 768)
-    warm = (device == "spark")
-    # per-device light: the bright bead-blast silver clips easily (verify found this), so the
-    # Studio gets a dimmer/softer key + lower exposure · the champagne Spark can take more.
-    rig = (dict(warm=False, key_e=34, rim_e=14, fill_e=6, expo=-1.15) if device == "studio"
-           else dict(warm=True, key_e=55, rim_e=26, fill_e=9, expo=-0.55))
+    sc.cycles.samples = samples or (int(PSAMP) if PSAMP else (128 if PREVIEW else 768))
+    if PW:                                   # fast wave-0 calibration res override
+        res = (PW, int(PW * res[1] / res[0]))
+    # ONE shared frozen rig for both devices (wave 0 · D1 · no per-material fudge).
+    rig = PORTRAIT_RIG
     if device == "studio":
         build_mac_studio(0.0, yaw_deg=0.0); sw, sh = mm(197), mm(95)
     else:
@@ -897,7 +914,9 @@ def portrait_device(device, shot, res=(3840, 2400), samples=None):
         # tighter crop on the feature (Studio front ports · Spark foam+pill corner)
         portrait_camera(aim, sw * 0.42, sh * 0.9, "q34", res, yaw=20.0, elev=14.0, margin=1.05)
     name = "mac-studio" if device == "studio" else "dgx-spark"
-    render_to(f"render/portraits/{name}-{shot}.png")
+    import os as _os
+    _os.makedirs(PDIR, exist_ok=True)
+    render_to(f"{PDIR}{name}-{shot}.png")
 
 # ---- Gate 1 · flat-lit wireframe-plus-shaded turnaround (proves the geometry is real) ----
 def flat_turn_rig():

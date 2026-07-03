@@ -34,6 +34,7 @@ under `render/measure_evidence/`. Dash gate: middot only.
 | alu_Lab_L | 84.32 | L* | high | apple_front.jpg | mac_alu_patch.png | diffuse mid-face patch |
 | alu_Lab_a | 0.03 | a* | high | apple_front.jpg | mac_alu_patch.png |  |
 | alu_Lab_b | -1.12 | b* | high | apple_front.jpg | mac_alu_patch.png |  |
+| intake_mesh_Lab_L | 71.81 | L* | med | apple_front.jpg | mac_intake_band.png | wave-0 tone gate; PERFORATED-MESH-ONLY region (y 0.60-0.93 of crop). SUPERSEDES full-crop L77.68 which was ~60% bright front-face silver above the mesh (autopsy) |
 | plan_corner_R | 31.40 | mm | high | dim_top-front.svg.png | mac_plan_corner.png | footprint / vertical-edge radius (distinct from 7.6mm top fillet); vector arc rms=0.040mm |
 | base_reveal_gap | 2.5 (INFERRED) | mm | inferred | apple_desk-setup.jpg | mac_reveal_gap.png | declared design parameter, NOT measured; recess conflates with cast shadow (~23mm). Tune in phase 3 vs the 3/4 blend |
 
@@ -71,4 +72,6 @@ under `render/measure_evidence/`. Dash gate: middot only.
 | foam_mean_Lab_L | 38.09 | L* | med | storagereview_front.jpg | dgx_foam_patch.png | mean over foam patch |
 | foam_mean_Lab_a | 1.19 | a* | med | storagereview_front.jpg | dgx_foam_patch.png |  |
 | foam_mean_Lab_b | 20.50 | b* | med | storagereview_front.jpg | dgx_foam_patch.png |  |
+| foam_web_Lab_L | 67.98 | L* | med | storagereview_front.jpg | dgx_foam_patch.png | wave-0 tone gate; top-quartile L of the foam patch (strut web) |
+| foam_pore_Lab_L | 10.66 | L* | med | storagereview_front.jpg | dgx_foam_patch.png | wave-0 tone gate; bottom-quartile L (pore); a*0.03 b*11.13 (warm, vs render neutral · wave-5c albedo) |
 | side_thickness_persp_check | 48.63 | mm | med | sth_side-1-vertical.jpg | dgx_side_silhouette.png | smooth side reads 48.6 vs spec 50.5 (-3.7%); a per-source perspective indicator, NOT the absolute (spec 50.5 governs) |
