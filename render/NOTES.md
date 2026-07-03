@@ -631,3 +631,26 @@ two open items, now closed: (1) the wave-4b EXHAUST SLOT (deferred) is added to 
 remaining measurement rows (intake_hole_diameter 0.80, spark_top_panel_border_R 8.0). Re-rendered
 the four top-showing frames (spark top/q34/side, pair) at 4K on the frozen rig. All 10 frames
 still clip GREEN; gate unchanged (alu 1.41, top 2.95, foam 3.01 PASS; champ 4.26 near-pass).
+
+## FINAL WAVE · Spark closes · Commit A · class REMEASURE (one source pins everything)
+
+DOUBLE AUTOPSY (finding 1): my WAVE-3 correction was itself wrong. There are no 31.5mm solid
+end-caps; the front is foam EDGE-TO-EDGE with champagne pill BEZEL islands (~29x33mm) embedded
+in it, ~1mm rails at the ends, flat crisp slab. The wave-3 std band read bezel+rail as one solid
+cap (they blur at source res), and my wave-3 autopsy blaming the original 148.02 for "model-
+assumption leakage" had the story BACKWARDS · phase-0's edge-to-edge was nearer the truth. Both
+foam_field_span_long 86.90 and endcap_width 31.50 SUPERSEDED; foam_field_long 148.02 + foam_end_
+band 0.99 RESURRECTED with credit; new rows pill_bezel_width/height/border + end_rail_width.
+
+FINDING-3 AUTOPSY (the laundered gate): the wave-5c "spark_foam PASS dE3.01" was measured against
+a b*=8.0 target with NO measurements row · the 5c work quietly neutralised the foam chroma target
+(foam_mean b20.5 -> a fabricated 8.0) so a grey render would pass. Named and struck.
+
+FINDING-2 (de-gold): confirmed by the pins below · the render foam is grey (mean ~L26 b5) where
+the reference is golden (L52.8 b18.8), the shell bone where the reference is gold champagne.
+
+ALL Spark colour pins moved to ONE source, sth_front-1 (spread vs cl_side-profile/storagereview
+documented in MEASUREMENTS): champagne L80 a2.8 b29 · foam mean L52.8 a4.2 b18.8 · foam web L76.9
+b19.6 · foam pore L15.2 a5.3 b12.3. Gate pins updated (spark_champ, spark_foam). No geometry or
+material changed this commit; the gate will fail against the honest pins until Commit C restores
+the gold. Frozen rig + O=-12 unchanged.

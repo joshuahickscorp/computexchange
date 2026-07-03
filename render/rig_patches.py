@@ -77,15 +77,15 @@ def reference_labs():
     return {
         "studio_alu":   np.array([84.32, 0.03, -1.12]),   # MEASUREMENTS row (apple_front)
         "studio_intake": intake,                          # from mac_intake_band.png
-        "spark_champ":  np.array([77.75, 1.00, 12.00]),   # wave 4 RE-PIN · cl_side-profile pale
-        # champagne (representative: border b5.56, rims b14, audit pale-champagne b~15 -> b12).
-        # Supersedes storagereview L72.52 b42.78, which was WARM-light-inflated brass.
+        "spark_champ":  np.array([80.00, 2.80, 29.00]),   # FINAL PIN · sth_front-1 (one source).
+        # Bright metallic anodized champagne, visibly GOLD (b29). Supersedes the wave-4 pale
+        # re-pin (b12) and the storagereview brass (b42.8). The device de-golded; this restores it.
         "spark_web":    web,                              # diagnostic only (5b depth spread)
         "spark_pore":   pore,                             # diagnostic only (5b depth spread)
-        "spark_foam":   np.array([38.09, 1.00, 8.00]),    # wave 5c TONE gate · foam MEAN, b*
-        # de-warmed from foam_mean b20.5 (same warm-light autopsy as champ/top). The web/pore
-        # QUARTILES don't fit the additive offset (web = exposure-robust specular glints, pore =
-        # near-black extreme with a negative target); the MEAN is the reliable foam tone gate.
+        "spark_foam":   np.array([52.80, 4.20, 18.80]),   # FINAL PIN · sth_front-1 foam MEAN.
+        # GOLDEN (b18.8), brighter than the render carried. Supersedes the LAUNDERED wave-5c
+        # target b8.0 (a fabricated chroma with no measurements row, set to pass a grey render ·
+        # finding-3 autopsy). Honest pin now; the material restores the gold to meet it.
         "spark_top":    np.array([46.92, 3.55, 11.33]),   # wave 4 · cl_side-profile vent panel
     }
 
