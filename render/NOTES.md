@@ -382,3 +382,16 @@ contrasty than the reference · pores L2 vs L41 (39 too dark), web L37 vs L63 (2
 grazing key I used to deepen pores overshot the reference's soft-lit gold. The depth gate the
 grader bound this to passes on geometry; the dark-pore residual is the pre-accepted
 displaced-plane limit, now quantified. NOT declaring closure · presenting for the grade.
+
+## PHASE 4 · GRADER REOPEN + full accuracy audit (see render/CONCERNS.md)
+
+The grader reopened the Studio on geometry (port corner radii too square; top-edge fillet too
+round · top should read flat) and said "there is more to it but we are close." Ran an exhaustive
+per-angle audit (7 vision agents vs references + synthesis, 73 raw discrepancies · 26 ranked
+concerns) and reconciled every finding against the real shader/geometry constants. Key
+reconciliation: the "charcoal Studio" read is the void-black rig (base alu IS silver 0.86), a
+lighting-direction call · but the Spark top sharing the champagne shader (should be dark slate),
+the near-black foam pores (0.012,0.008,0.004), and the foam cell scale are genuine bugs. Full
+punch list, exact file:line fixes, verification gaps, and 3 decisions (D1 lighting, D2 NVIDIA
+logo, D3 scope) are in render/CONCERNS.md. Neither device closed · both reopen. No self-grade.
+Exported all 7 angles + sheets + report to ~/Downloads/cx-render-grader-2026-07-02/ for upload.
