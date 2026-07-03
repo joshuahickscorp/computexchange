@@ -591,3 +591,15 @@ Studio bead-blast calmed: roughness noise band 0.34-0.42 -> 0.375-0.405 and micr
 studio_alu still gates PASS (dE 1.41). Champagne shell is already satin (rough 0.50) and the foam
 lip is bounded/thin since wave 3; the LED reads as a clean small dot post-rebuild (the audit's
 "smudge/wide lip" were old-render artifacts, resolved by the waves 3-6 rebuild).
+
+### staging · class STAGING
+The pair failed as a composition (Spark tilted, non-coplanar, mismatched light/shadow). Fixes:
+- MATCHED camera-relative yaw (Studio -9 / Spark +16 -> both -14) so the fronts are parallel and
+  the two share one eye line · they read as a deliberate pair, not two unrelated tilts.
+- Spark brought INWARD (pair gap 120 -> 70mm) for balanced negative space.
+- ONE shared light: the pair now uses the FROZEN portrait rig (single key + rim + frontal fill +
+  void-black floor) instead of the old separate tabletop rig, so both objects are lit by one key
+  and the Spark's contact shadow agrees with the Studio's. Both coplanar on z=0.
+Result (wave7-pair-staging.png): coplanar, consistent lighting/shadow, legible ~2:1 height delta
+(Studio clearly the larger). Ortho height check (wave 6) already cleared the lens, so no focal
+change needed. Wave 8 re-shoots this at full res on the frozen rig.

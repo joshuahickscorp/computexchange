@@ -69,7 +69,7 @@ PORTRAIT_RIG = dict(warm=False, key_e=64, key_sz=2.2, rim_e=16, fill_e=28, fill_
 # True metric scale: 1 Blender unit = 1 metre, so every dimension is real and the
 # Studio (197 x 197 x 95 mm) genuinely dwarfs the Spark (150 x 150 x 50.5 mm).
 # Ground truth per docs/SITE-REBUILD-T0.md.
-PAIR_SPAN_MM = 197.0 + 120.0 + 150.0
+PAIR_SPAN_MM = 197.0 + 70.0 + 150.0   # wave 7: Spark brought inward (gap 120 -> 70)
 S = 1.0  # unit scale factor kept so material feature sizes stay expressed in 1/S
 
 
@@ -905,8 +905,10 @@ SPARK_CX = mm(PAIR_SPAN_MM / 2.0 - 150.0 / 2.0)
 
 
 def build_pair():
-    build_mac_studio(STUDIO_CX, yaw_deg=-9.0)
-    build_dgx_spark(SPARK_CX, yaw_deg=16.0)
+    # wave 7: MATCHED camera-relative yaw so both devices share the same eye line with parallel
+    # front edges (was -9 / +16, which read as two unrelated tilts). Both on z=0 (coplanar).
+    build_mac_studio(STUDIO_CX, yaw_deg=-14.0)
+    build_dgx_spark(SPARK_CX, yaw_deg=-14.0)
 
 
 def scene_pair():
@@ -916,7 +918,10 @@ def scene_pair():
     if EXPORT:
         export_gltf(EXPORT)
         return
-    aim = tabletop_rig(aim_loc=(0.0, 0.0, mm(28)))
+    # wave 7: drive the pair with the FROZEN portrait rig (one shared key + rim + frontal fill +
+    # void-black floor with a real contact shadow), not the old separate tabletop rig · so both
+    # objects are lit by one light and the Spark's shadow agrees with the Studio's.
+    aim = portrait_rig(mm(56), **PORTRAIT_RIG)
     tabletop_camera(aim, subject_w=mm(PAIR_SPAN_MM), res=(3200, 2000))
     suffix = f"-iter{ITER}" if PREVIEW else ""
     render_to(OUT + f"oracles-pair{suffix}@3x.png")
