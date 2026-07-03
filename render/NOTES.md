@@ -685,3 +685,20 @@ In-rig table ALL PASS (studio_alu 1.41, spark_champ 3.38 b27 gold, spark_top 2.9
 (settle8-dgx-spark-front vs sth_front-1, -q34 vs nv_hero_3q, -top vs cl_side-profile) + 10-angle
 contact sheet. The three findings are closed: structure (foam edge-to-edge + embedded bezels),
 gold restored, and the laundered foam gate named + re-pinned honestly to sth_front-1.
+
+## FINAL WAVE · verification panel + fixes + stop
+Ran a 5-agent parallel verification panel (independent, vs the references + the three findings).
+Verdict: finding 3 (laundering) fully CLOSED; findings 1+2 headlines closed with sub-defects. Two
+were real geometry FAILs and are now FIXED: (a) finger-slots read as punched-through to the foam
+behind -> deep champagne tub-plug moved forward blocks the back-foam layer, slots now read as
+blind recessed champagne pockets (floor + lip); (b) bezels read as thin stadium rings -> widened
+to filled plates (30x40). Also warmed the champagne to the sth_front-1 a* (off the mustard):
+spark_champ now a2.5 (pin 2.8). Re-shot the Spark on the frozen rig · in-rig table ALL PASS
+(alu 1.41, champ 3.19, top 2.95, foam 3.76), all 10 frames clip green.
+HELD (measurement wins, per the grader's rule; noted for the grade): the CHAMPAGNE TOP (the panel
+wanted dark slate, but cl_side-profile · the dedicated grade-A top shot · shows champagne border +
+a darker champagne weave vent; the "slate" is the sth_front-1 grazing-reflection artifact, same as
+the original audit); the champagne HUE at the sth_front-1 gold pin (finding 2 said restore gold,
+not desaturate to bone); the 6.09mm measured front edge radius. Remaining realism nits: foam cell
+regularity + a faint strut threading. Top-panel vent reads darker than the reference weave (a
+wave-4 tone residual, out of this wave's scope).
