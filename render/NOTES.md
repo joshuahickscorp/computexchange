@@ -482,3 +482,19 @@ Macro (wave2-ports-macro.png): each USB-C reads as a recessed stadium pocket wit
 tongue centred inside; the SD reads as a recessed slot with a lit lower lip. Before = the flat
 black ports in wave1-stadium-ports.png. Standard met: a depth CUE at crop distance, not a
 datasheet. Spark owed nothing this wave (finger-slots rebuild in wave 3).
+
+## WAVE 3 · Spark front structure · class GEOMETRY (the biggest single miss)
+
+New measurement rows first (render/measure_spark_front.py, per-row/col median-std band on the
+dead-on cl_front-foam): endcap_width 31.5mm (top 30.4/bottom 32.6), foam_field_span_long 86.9mm
+(SUPERSEDES edge-to-edge 148.02 · AUTOPSY: the full-width-foam model assumption leaked into the
+old window), foam_field_short 45.7mm, slot_recess_depth ~4.2mm (approx). Check: 2x31.5 + 86.9 =
+149.9 ~ 150. Evidence wave3-spark-front-struct.png (red=cap/foam bounds landed on the boundaries).
+
+Rebuild: bounding the foam field to the measured 86.9mm center span EXPOSES the champagne body
+at both ends = solid end-caps (the pills at +/-56.45mm already sit inside the 31.5mm caps, so no
+change to pill geometry). Removed the now-needless foam pill-holes. Result (wave3-spark-front-
+compare.png vs sth_front-1): solid champagne end-caps at both ends, each holding a recessed pill
+finger-slot, framing the bounded center foam · matches the reference structure. Left cap BLANK
+(D2 · no logo). Pills read as recesses in solid champagne, not ovals on foam. Champagne tone
+(bright/glossy), top tray, and fine foam remain for waves 4/5.

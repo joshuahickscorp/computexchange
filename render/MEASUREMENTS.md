@@ -53,8 +53,10 @@ under `render/measure_evidence/`. Dash gate: middot only.
 | pill_short | 12.96 | mm | high | cl_front-foam.jpg | dgx_pills.png | pill width along the 150mm long axis |
 | pill_center_from_end | 15.21 | mm | high | cl_front-foam.jpg | dgx_pills.png | near 50mm-end -> first pill center, along the 150mm axis |
 | pill_pitch | 112.90 | mm | high | cl_front-foam.jpg | dgx_pills.png | center-to-center along the 150mm long axis |
-| foam_field_long | 148.02 | mm | med | cl_front-foam.jpg | dgx_border.png | textured foam field, long axis |
-| foam_field_short | 46.34 | mm | med | cl_front-foam.jpg | dgx_border.png | textured foam field, short axis |
+| foam_field_span_long | 86.90 | mm | med | cl_front-foam.jpg | wave3-spark-front-struct.png | foam CENTER span between the two end-caps (per-row median-std band). ~SUPERSEDES foam_field_long 148.02~ AUTOPSY: the old value measured the foam as EDGE-TO-EDGE because the model assumption (full-width foam) leaked into the measurement window; the real foam is bounded by solid champagne end-caps. Check: 2x31.5 caps + 86.9 = 149.9 ~ 150 |
+| endcap_width | 31.50 | mm | med | cl_front-foam.jpg | wave3-spark-front-struct.png | solid champagne end-cap at each 150-axis end (top 30.4 / bottom 32.6). Houses the recessed pill (pill center 15.2mm from end, inside the cap) |
+| slot_recess_depth | 4.20 | mm | low | cl_front-foam.jpg | wave3-spark-front-struct.png | pill finger-slot pocket depth, APPROX from pill shadow extent; = builder POCK |
+| foam_field_short | 45.70 | mm | med | cl_front-foam.jpg | wave3-spark-front-struct.png | foam field short axis (per-col median-std band); ~2.4mm champagne side lip each |
 | foam_border_margin | 2.53 | mm | med | cl_front-foam.jpg | dgx_border.png | champagne lip, long edge (thin) |
 | foam_end_band | 0.99 | mm | med | cl_front-foam.jpg | dgx_border.png | champagne band at short/pill ends |
 | top_width_anchor | 150.00 | mm | anchor | cl_side-profile.jpg | dgx_top_silhouette.png | NVIDIA spec 150 mm; the one absolute this image scales from |

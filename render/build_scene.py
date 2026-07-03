@@ -175,8 +175,14 @@ SPARK = {
     "pill_long":    31.41,  # pill along the 50.5 short/depth (z) axis
     "pill_short":   12.96,  # pill along the 150 long (x) axis
     "pill_pitch":  112.90,  # center-to-center along the 150 x-axis (pills at +/- pitch/2)
-    "foam_field_long":  148.02,  # foam extent along x
-    "foam_field_short":  46.34,  # foam extent along z
+    "foam_field_long":   86.90,  # foam extent along x · BOUNDED center span (wave 3 remeasure;
+                                 # SUPERSEDES edge-to-edge 148.02 · the model assumption leaked
+                                 # into the old window). Foam sits between the two end-caps.
+    "endcap_width":      31.50,  # solid champagne end-cap at each 150-axis end (wave 3; top 30.4
+                                 # bottom 32.6). 2x31.5 + 86.9 foam = 149.9 ~ 150. Pills recess
+                                 # into these solid caps (pill center 15.2mm from each end).
+    "foam_field_short":  45.70,  # foam extent along z (measured; ~2.4mm champagne side lip each)
+    "slot_recess_depth":  4.20,  # pill finger-slot pocket depth (approx, from pill shadow) = POCK
     "foam_lip":      2.53,  # champagne lip on the long (top/bottom) edges
     "foam_cell_cm": 13.75,  # foam_cells_per_cm mean (13.0 / 14.5) -> ~0.73mm cell pitch
     "top_panel_w": 114.15,  # recessed top vent panel
@@ -631,11 +637,11 @@ def stadium(name, w, h, d, r, loc):
 
 def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
     """150 x 150 x 50.5 mm, sitting flat · every value from SPARK (traces to MEASUREMENTS.md).
-    The FRONT is the 150 x 50.5 face, a ~3:1 STRIP (not a square): a two-scale open-cell metal
-    foam field (148 x 46) framed by thin ~2.5 mm champagne lips, with two recessed champagne
-    pill hand-holds (12.96 wide x 31.4 tall, arrayed along the 150 axis) that have real
-    inner-wall depth. Champagne anodized shell; smooth sides; the top (150 x 150) carries a
-    recessed vent panel. Rear foam/ports skipped. Trademark gate: pills stay blank."""
+    The FRONT is the 150 x 50.5 STRIP: solid champagne END-CAPS (31.5mm each) at both 150-axis
+    ends, each holding a recessed pill finger-slot, framing a BOUNDED center open-cell foam field
+    (86.9 x 45.7, wave 3) with ~2.4mm champagne side lips. The pills recess into the SOLID caps
+    (not resting on foam). Champagne anodized shell; smooth sides; the top (150 x 150) carries a
+    recessed vent panel. Rear skipped. Trademark gate: caps stay blank (D2 · no logo, ever)."""
     W = mm(SPARK["width"]); D = mm(SPARK["depth"]); H = mm(SPARK["height"])
     r = mm(SPARK["edge_R"])
     body = rounded_box("dgx-spark", W, D, H, r, r, r, seg_corner=24, seg_fillet=8)
@@ -691,13 +697,9 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
         foam = bpy.context.active_object; foam.name = "dgx-spark-foam"
         foam.scale = (ffx, ffz, 1.0); bpy.ops.object.transform_apply(scale=True)
         bpy.context.view_layer.objects.active = foam
-        for sx in (-1, 1):                       # holes where the pills are
-            h = stadium("fhole", pw + mm(1.0), phz + mm(1.0), mm(20), (pw + mm(1.0)) / 2.0,
-                        (sx * px, front_y - mm(9), zc))
-            md = foam.modifiers.new("hole", "BOOLEAN"); md.operation = "DIFFERENCE"
-            md.solver = "EXACT"; md.object = h
-            bpy.ops.object.modifier_apply(modifier=md.name)
-            bpy.data.objects.remove(h, do_unlink=True)
+        # wave 3: the foam field is now BOUNDED to the center span (86.9mm), so the pills at
+        # +/- 56.45mm sit in the solid champagne END-CAPS, outside the foam. No foam pill-holes
+        # needed (the old fhole cutters are gone).
         # coarse displacement only · the ~1.5mm pores must read distinct, not sandpaper. The
         # fine sub-structure lives in the shader (color/roughness), not the geometry.
         for nm, cell, strength, mid in (("pores", FOAM_CELL, mm(1.4), 0.42),):
