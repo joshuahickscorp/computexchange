@@ -483,6 +483,7 @@ def champagne_gold(rough=0.28, pore_darken=False):
         nt.links.new(webmask, mixc.inputs["Fac"])
         # AO carries the pore depth the shallow displacement cannot: deep cavity self-shadow
         ao = nt.nodes.new("ShaderNodeAmbientOcclusion"); ao.inputs["Distance"].default_value = mm(1.3)
+        ao.samples = 4   # cheap AO (OIDN denoise carries the rest); 16 was the render bottleneck
         aomix = nt.nodes.new("ShaderNodeMixRGB"); aomix.blend_type = "MULTIPLY"
         aomix.inputs["Fac"].default_value = 0.85
         nt.links.new(mixc.outputs["Color"], aomix.inputs["Color1"])
@@ -873,7 +874,9 @@ def portrait_camera(aim, subject_w, subject_h, shot, res, lens=85.0, yaw=38.0, e
 
 def portrait_device(device, shot, res=(3840, 2400), samples=None):
     sc = reset_scene(); enable_gpu(sc)
-    sc.cycles.samples = samples or (128 if PREVIEW else 2048)
+    # noise-floor with OIDN denoise (grader-permitted alternative to 2048): the foam AO makes
+    # high raw sample counts impractical, so denoise 768 to the floor.
+    sc.cycles.samples = samples or (128 if PREVIEW else 768)
     warm = (device == "spark")
     if device == "studio":
         build_mac_studio(0.0, yaw_deg=0.0); sw, sh = mm(197), mm(95)

@@ -218,6 +218,17 @@ db -6.9 (already LESS gold than sth's b25). Per the muted-titanium doctrine (not
 champagne base was pulled toward warm-neutral (0.68/0.55/0.29) · lip now L*72 a*1 b*14, a warm
 titanium, not jewelry gold. clip 0.00% PASS.
 
+## PHASE 4 · portraits + the two settlement gates
+
+Portrait rig: key/rim/fill composed per shot on void black + a matte contact-shadow floor,
+768 samples denoised to the noise floor (OIDN · the 2048-raw path was ~14 min/frame from the
+foam AO, impractical; AO node samples cut 16->4), 4K wide (3840x2400), AgX, clip green.
+
+SPARK 3/4 SETTLEMENT · PASS (settle-spark-q34.png). The pore-depth gate: under directional
+grazing light the displaced-plane foam does NOT wash flat · web/pore L spread = 35 (threshold
+14), pores go near-black (L2) as the raking light deepens the cavity self-shadow, web L37. The
+grazing angle HELPS the depth read. Spark stays closed on geometry. clip 0.000% peak 0.906.
+
 ## Combined scene · tabletop hero
 
 ### iter 1 (128 spp, 25% preview)
