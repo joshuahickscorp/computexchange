@@ -329,12 +329,13 @@ def anodize_mottle(m, scale=60.0, rough_amp=0.03):
     return m
 
 
-def add_grunge(m, smudge_amp=0.06, dust_amp=0.05):
-    # photoreal (L1 uniform/dust/clean tell) · break single-band surface perfection with real-world
-    # contamination on ROUGHNESS only (albedo/tone untouched, so the gate holds): soft irregular
-    # SMUDGE blotches (fingerprint-scale ~45 mm Voronoi) drop roughness a touch = glossier oily
-    # zones; sparse DUST speck tips (~2.5 mm noise, only the brightest peaks) nudge roughness up =
-    # matte flecks. Both edge-of-notice · dialed back if a panel names them by name.
+def add_grunge(m, smudge_amp=0.035, dust_amp=0.03):
+    # photoreal (L1 uniform/clean tell) · break single-band surface perfection with real-world
+    # contamination on ROUGHNESS only (albedo/tone untouched, so the gate holds). L4 FIX: the old
+    # smudge used a 45 mm VORONOI, which tiled the 197 mm studio top into a ~4x4 grid of roughness
+    # cells that read on the reflective surface as a REGULAR GRID OF DARK DIMPLES (the panel hammered
+    # it as "AO blobs / identical dimples"). Replaced with a large multi-octave ORGANIC NOISE
+    # (non-cellular, non-repeating) at a low amplitude, plus sparse fine dust. Edge-of-notice.
     nt = m.node_tree; b = nt.nodes["Principled BSDF"]
     tc = nt.nodes.new("ShaderNodeTexCoord")
     r = b.inputs["Roughness"]
@@ -343,12 +344,13 @@ def add_grunge(m, smudge_amp=0.06, dust_amp=0.05):
     else:
         val = nt.nodes.new("ShaderNodeValue"); val.outputs[0].default_value = r.default_value
         cur = val.outputs[0]
-    sv = nt.nodes.new("ShaderNodeTexVoronoi"); sv.inputs["Scale"].default_value = 1000.0 / (45.0 * S)
+    sv = nt.nodes.new("ShaderNodeTexNoise"); sv.inputs["Scale"].default_value = 1000.0 / (85.0 * S)
+    sv.inputs["Detail"].default_value = 4.0; sv.inputs["Roughness"].default_value = 0.7
     nt.links.new(tc.outputs["Object"], sv.inputs["Vector"])
     sm = nt.nodes.new("ShaderNodeMapRange")
-    sm.inputs["From Min"].default_value = 0.0; sm.inputs["From Max"].default_value = 0.35
-    sm.inputs["To Min"].default_value = -smudge_amp; sm.inputs["To Max"].default_value = 0.0
-    nt.links.new(sv.outputs["Distance"], sm.inputs["Value"])
+    sm.inputs["From Min"].default_value = 0.30; sm.inputs["From Max"].default_value = 0.62
+    sm.inputs["To Min"].default_value = -smudge_amp; sm.inputs["To Max"].default_value = smudge_amp
+    nt.links.new(sv.outputs["Fac"], sm.inputs["Value"])
     dn = nt.nodes.new("ShaderNodeTexNoise"); dn.inputs["Scale"].default_value = 1000.0 / (2.5 * S)
     dn.inputs["Detail"].default_value = 2.0
     nt.links.new(tc.outputs["Object"], dn.inputs["Vector"])
@@ -385,9 +387,10 @@ def blasted_aluminum():
     bump.inputs["Strength"].default_value = 0.009  # wave 7: halve the micro-bump (bead-blast, not sandpaper)
     nt.links.new(n.outputs["Fac"], bump.inputs["Height"])
     nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
-    # photoreal T7 hairline edge + T1 grunge (smudge/dust) on the aluminium (roughness already 3-octave)
-    # L2: the panel still read "flat clay / too clean" · push the smudge+dust one notch (still tasteful)
-    return add_bevel(add_grunge(m, smudge_amp=0.10, dust_amp=0.08))
+    # photoreal T7 hairline edge + T1 grunge (organic-noise smudge/dust) on the aluminium
+    # L4: amplitude pulled back hard · the reflective top shows roughness variation strongly, so this
+    # stays subtle (the grid-dimple regression taught the lesson: on a mirror, less is more)
+    return add_bevel(add_grunge(m, smudge_amp=0.035, dust_amp=0.03))
 
 
 def port_plastic():
