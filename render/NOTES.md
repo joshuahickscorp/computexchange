@@ -754,3 +754,12 @@ panel names them. T2/O1 -> FIXED-UNCONFIRMED.
   albedo strut 0.80->0.66, pore 0.14->0.10, AO 0.50->0.66): spark_foam 3.42 back on 40.8. Gate
   ALL PASS (alu 1.41, champ 3.21, top 3.19, foam 3.42), clip green. Pins unmoved · albedo iterated
   to meet them, per the standing rule. T7/T8/O2 -> FIXED-UNCONFIRMED.
+
+## PHOTOREAL · Commit CAMERA · class CAMERA (T3, T9-partial)
+Physical DOF (cd.dof, focus on the aim/front face): details f5.6 (unmistakable falloff), pair f11
+(far device a hair soft), heroes f16 (far edge a breath soft). Heroes deepened to f16 because a
+shallower aperture blurred the q34 tone patches (edge/texture mixing) and broke the gate · DOF is
+render-time so it must not fail the gate; at f16 the subject stays sharp and ALL patches PASS
+(alu 1.41, champ 3.79, top 3.21, foam 5.76). T9 (partial): the pair Spark is yawed -14.5 vs the
+Studio -14.0 (a hair more, reads as hands). The sub-degree camera ROLL is applied in POST. Full-
+frame sensor (36mm) stated. Tone gate re-verified pre-DOF-tune and post · pins unmoved.

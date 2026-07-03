@@ -929,6 +929,7 @@ def tabletop_camera(aim, subject_w, lens=58.0, pitch_deg=36.0, margin=1.32,
     con.target = aim
     con.track_axis = "TRACK_NEGATIVE_Z"
     con.up_axis = "UP_Y"
+    cd.dof.use_dof = True; cd.dof.focus_object = aim; cd.dof.aperture_fstop = 11.0  # T3 pair DOF · far device a hair soft
     return cam
 
 
@@ -975,7 +976,7 @@ def build_pair():
     # wave 7: MATCHED camera-relative yaw so both devices share the same eye line with parallel
     # front edges (was -9 / +16, which read as two unrelated tilts). Both on z=0 (coplanar).
     build_mac_studio(STUDIO_CX, yaw_deg=-14.0)
-    build_dgx_spark(SPARK_CX, yaw_deg=-14.0)
+    build_dgx_spark(SPARK_CX, yaw_deg=-14.5)  # T9 · Spark yawed a hair more · reads as hands, not software
 
 
 def scene_pair():
@@ -1054,6 +1055,11 @@ def portrait_camera(aim, subject_w, subject_h, shot, res, lens=85.0, yaw=38.0, e
                     az + dist * math.sin(el))
     con = cam.constraints.new("TRACK_TO"); con.target = aim
     con.track_axis = "TRACK_NEGATIVE_Z"; con.up_axis = "UP_Y"
+    # photoreal T3: physical depth of field · focus on the aim (front face); aperture per shot so
+    # the far top edge falls a breath soft on heroes and the background falls off on details.
+    cd.dof.use_dof = True
+    cd.dof.focus_object = aim
+    cd.dof.aperture_fstop = {"detail": 5.6, "front": 16.0, "q34": 16.0, "side": 16.0, "top": 16.0}.get(shot, 16.0)
     sc.render.resolution_x, sc.render.resolution_y = res
 
 def portrait_device(device, shot, res=(3840, 2400), samples=None):
