@@ -140,6 +140,19 @@ Honest residuals disclosed: XOR 4.6% bottom-corner (reference-noise-bound), inta
 is a Voronoi approximation of the hex mesh (tone matched, pattern coarser), base_reveal_gap
 INFERRED for the phase-4 tabletop, rear port field intentionally blank per the front doctrine.
 
+## ACCURACY GRIND v2 · RIDER 1 · Studio intake pattern (post-close)
+
+Change class: MATERIAL. Produced the matched-scale detail pair (measure_evidence/
+rider1_intake_pair.png). Verdict: the Voronoi F1 read WRONG at detail-crop distance ·
+irregular cellular gravel with scattered speckle, where the reference is a REGULAR hex-packed
+array of round holes. Swapped to a procedural hex round-hole array (object x-z grid, row pitch
+ph*sqrt(3)/2, alternate rows offset half a pitch, MapRange round-hole mask, bump-sunk pits).
+ph 1.70mm, hole ~1.0mm, web 0.74 / pit floor 0.16 · reads as a machined perforation matching
+the reference character; tone within dE ~8 on the dark curving-under strip, and the full front
+still grades mean contour 0.7%, clip 0.000% PASS. Rider 1 closed.
+Rider 2 (3/4 debt vs apple_lifestyle_3q) reserved for the phase-4 three-quarter portrait, as
+directed · the mandatory settlement of the soap-bar risk.
+
 ## Combined scene · tabletop hero
 
 ### iter 1 (128 spp, 25% preview)

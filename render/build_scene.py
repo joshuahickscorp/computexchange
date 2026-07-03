@@ -332,33 +332,54 @@ def foam_field(nt):
 
 
 def perforated_band():
-    """The Mac Studio base intake: a FINE DENSE regular hole mesh (reference is ~1.3 mm
-    pitch), not sparse speckle. A high-frequency Voronoi F1 gives one round pit per cell;
-    a sharp ramp keeps the metal web bright and the holes small + dark, and a Bump sinks
-    them so they read as recessed perforations, not painted dots (checklist: map domain,
-    not geometry)."""
-    m = principled("mac-base-band", (0.8, 0.81, 0.83), 0.5)
+    """The Mac Studio base intake: a REGULAR hex-packed array of round holes (the reference is
+    a machined perforation, not a random cell field · rider 1). Object x-z grid, horizontal
+    pitch ph, row pitch ph*sqrt(3)/2, alternate rows offset half a pitch; the pattern
+    foreshortens naturally as the bottom fillet curves under. The web is bright bead-blast
+    aluminium, the pits dark; tone stays L*~52 to match the reference."""
+    m = principled("mac-base-band", (0.6, 0.61, 0.63), 0.5)
     nt = m.node_tree
     b = nt.nodes["Principled BSDF"]
     tc = nt.nodes.new("ShaderNodeTexCoord")
-    v = nt.nodes.new("ShaderNodeTexVoronoi")
-    v.voronoi_dimensions = "3D"
-    v.feature = "F1"
-    v.inputs["Scale"].default_value = 1.0 / mm(1.3)   # ~1.3 mm pitch · dense fine mesh
-    nt.links.new(tc.outputs["Object"], v.inputs["Vector"])
-    ramp = nt.nodes.new("ShaderNodeValToRGB")
-    # The mesh WEB is bright bead-blast aluminium (like the body); only the pit centers go
-    # dark. Reference intake band reads L*~52 mid-grey, not a near-black stripe.
-    ramp.color_ramp.elements[0].position = 0.10       # small round holes
-    ramp.color_ramp.elements[0].color = (0.03, 0.03, 0.035, 1)
-    ramp.color_ramp.elements[1].position = 0.24
-    ramp.color_ramp.elements[1].color = (0.60, 0.61, 0.63, 1)
-    nt.links.new(v.outputs["Distance"], ramp.inputs["Fac"])
-    nt.links.new(ramp.outputs["Color"], b.inputs["Base Color"])
+    sep = nt.nodes.new("ShaderNodeSeparateXYZ")
+    nt.links.new(tc.outputs["Object"], sep.inputs["Vector"])
+
+    def mk(op, a, bb=None, clamp=False):
+        n = nt.nodes.new("ShaderNodeMath"); n.operation = op; n.use_clamp = clamp
+        def put(i, val):
+            if hasattr(val, "is_linked"):
+                nt.links.new(val, n.inputs[i])
+            else:
+                n.inputs[i].default_value = val
+        put(0, a)
+        if bb is not None: put(1, bb)
+        return n.outputs[0]
+
+    ph = mm(1.70); pv = ph * 0.866
+    u = mk("MULTIPLY", sep.outputs["X"], 1.0 / ph)
+    v = mk("MULTIPLY", sep.outputs["Z"], 1.0 / pv)
+    rowmod = mk("MODULO", mk("FLOOR", v), 2.0)          # 0 or 1 per row
+    ushift = mk("ADD", u, mk("MULTIPLY", rowmod, 0.5))
+    cu = mk("SUBTRACT", mk("FRACT", ushift), 0.5)
+    cv = mk("SUBTRACT", mk("FRACT", v), 0.5)
+    dist = mk("SQRT", mk("ADD", mk("MULTIPLY", cu, cu), mk("MULTIPLY", cv, cv)))
+    # hole mask: 1 inside a round hole, 0 on the web, soft edge (r_norm sets the diameter)
+    hole = nt.nodes.new("ShaderNodeMapRange")
+    hole.inputs["From Min"].default_value = 0.45       # web
+    hole.inputs["From Max"].default_value = 0.39       # hole
+    hole.inputs["To Min"].default_value = 0.0
+    hole.inputs["To Max"].default_value = 1.0
+    hole.clamp = True
+    nt.links.new(dist, hole.inputs["Value"])
+    mix = nt.nodes.new("ShaderNodeMixRGB")
+    mix.inputs["Color1"].default_value = (0.74, 0.75, 0.77, 1)   # bright bead-blast web
+    mix.inputs["Color2"].default_value = (0.16, 0.16, 0.17, 1)   # pit floor: dark grey, lit, not soot
+    nt.links.new(hole.outputs["Result"], mix.inputs["Fac"])
+    nt.links.new(mix.outputs["Color"], b.inputs["Base Color"])
     bump = nt.nodes.new("ShaderNodeBump")
-    bump.inputs["Strength"].default_value = 0.35
+    bump.inputs["Strength"].default_value = 0.28
     bump.inputs["Distance"].default_value = mm(0.4)
-    nt.links.new(v.outputs["Distance"], bump.inputs["Height"])
+    nt.links.new(mk("SUBTRACT", 1.0, hole.outputs["Result"]), bump.inputs["Height"])
     nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
     return m
 
