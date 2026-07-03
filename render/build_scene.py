@@ -641,10 +641,12 @@ def tabletop_rig(aim_loc=(0.0, 0.0, 0.03)):
     aim = bpy.data.objects.new("Aim", None)
     aim.location = aim_loc
     bpy.context.collection.objects.link(aim)
-    # Key: large soft box, high, camera-left-and-front. Energy in watts (metric).
-    add_area("Key", (-0.9, -0.7, 1.15), 1.35, 50, (1.0, 0.99, 0.97), aim=aim)
+    # Key: large soft box, high, camera-left-and-front. Energy in watts (metric). Softened
+    # + trimmed so the bright bead-blast aluminium top does not blow a specular highlight
+    # (clipcheck: device pixels >=0.98 must stay under 1%).
+    add_area("Key", (-0.9, -0.7, 1.15), 1.9, 30, (1.0, 0.99, 0.97), aim=aim)
     # Rim: a bright narrow strip behind and above, drawing the top edges.
-    add_area("Rim", (0.55, 1.1, 0.95), 0.5, 34, (0.93, 0.96, 1.0), sx=0.06, aim=aim)
+    add_area("Rim", (0.55, 1.1, 0.95), 0.5, 22, (0.93, 0.96, 1.0), sx=0.06, aim=aim)
     # Fill: very low, camera-right, so the shadow side keeps detail without lifting flat.
     add_area("Fill", (1.15, -0.9, 0.5), 1.1, 7, (0.96, 0.98, 1.0), aim=aim)
 

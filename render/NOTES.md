@@ -117,6 +117,29 @@ Both device materials now tone-matched (alu dE 1.6, intake dE 0.6), clip 0.00% P
 front residual: XOR-area 4.6% at the bottom corners · measured ref bottom corner 16.7mm looks
 inflated by the ragged mesh edge; verifying before any r_bottom change.
 
+Verified: the reference bottom-corner fit is UNSTABLE across windows (41.6 / 59.8 / 16.7 /
+17.7 mm as frac goes 0.10 -> 0.20) · it is not a clean arc, the ragged perforated edge fools
+the fit. So 16.7 is a measurement artifact; r_bottom stays 8.55 (tied to the intake band). The
+bottom-corner XOR is reference-noise-bound, not a fixable single radius.
+
+## ACCURACY GRIND v2 · PHASE 2 · light loop · Studio hero (portrait rig)
+
+Change class: LIGHT. The tabletop hero key blew a specular on the bright bead-blast top:
+clip 1.26% FAIL. Softened + trimmed the key (1.35/50W -> 1.9/30W) and rim (34W -> 22W); the
+768-sample 2048px hero is now clip 0.240% PASS, peak 1.000 on a hairline top edge only. Render
+render/verify/mac-studio@3x.png · the object reads as satin Apple silver on void black, the
+key catching the tight top fillet, ports + intake band correct.
+
+## STUDIO CHECKPOINT · case for closure (presented, awaiting grade)
+
+Stack: render/verify/loop-studio.png (front vs apple_front), render/verify/gate1-mac-studio.png
+(4-angle wireframe+shaded), render/verify/mac-studio@3x.png (hero). Measured state: mean contour
+0.7%, top corner 8.2 vs ref 8.35, all front features within ~0.5mm, USB-C orientation corrected
+to vertical (settled by two photographers), alu dE 1.6, intake dE 0.6, clip 0.00-0.24% PASS.
+Honest residuals disclosed: XOR 4.6% bottom-corner (reference-noise-bound), intake perforation
+is a Voronoi approximation of the hex mesh (tone matched, pattern coarser), base_reveal_gap
+INFERRED for the phase-4 tabletop, rear port field intentionally blank per the front doctrine.
+
 ## Combined scene · tabletop hero
 
 ### iter 1 (128 spp, 25% preview)
