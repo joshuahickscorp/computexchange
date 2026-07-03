@@ -39,6 +39,7 @@ def arg(name, default=None):
 
 EXPORT = arg("--export", None)
 VERIFY = arg("--verify", None)   # "studio" | "spark" | "all" · orthographic reference-match renders
+TURN = arg("--turnaround", None) # "studio" | "spark" · Gate 1 wireframe+shaded turntable
 PREVIEW = bool(arg("--preview", False))
 SAMPLES = int(arg("--samples", 128 if PREVIEW else 2048))
 OUT = str(arg("--out", "render/previews/" if PREVIEW else "web/assets/site/"))
@@ -766,6 +767,62 @@ def scene_solo(which):
     render_to(OUT + f"{name}{suffix}@3x.png")
 
 
+# ---- Gate 1 · flat-lit wireframe-plus-shaded turnaround (proves the geometry is real) ----
+def flat_turn_rig():
+    sc = bpy.context.scene
+    sc.render.film_transparent = True
+    w = bpy.data.worlds.new("flat"); w.use_nodes = True
+    w.node_tree.nodes["Background"].inputs[0].default_value = (0.32, 0.32, 0.34, 1)
+    sc.world = w
+    sc.view_settings.look = "None"
+    sc.view_settings.exposure = 0.0
+    aim = bpy.data.objects.new("Aim", None); aim.location = (0, 0, mm(47.5))
+    bpy.context.collection.objects.link(aim)
+    add_area("t-key", (-0.7, -0.9, 0.9), 1.8, 24, (1, 1, 1), aim=aim)
+    add_area("t-fill", (0.9, -0.7, 0.5), 1.8, 18, (1, 1, 1), aim=aim)
+    add_area("t-top", (0.0, 0.3, 1.3), 1.8, 16, (1, 1, 1), aim=aim)
+    return aim
+
+def wireframe_overlay(objs, thickness=0.28):
+    """Duplicate the shaded meshes and turn their edges into thin dark tubes (Wireframe
+    modifier) so the render shows the real tessellation over the shaded surface."""
+    wm = bpy.data.materials.new("wire"); wm.use_nodes = True
+    bsdf = wm.node_tree.nodes["Principled BSDF"]
+    bsdf.inputs["Base Color"].default_value = (0.02, 0.02, 0.025, 1)
+    try: bsdf.inputs["Emission Color"].default_value = (0.02, 0.02, 0.025, 1)
+    except KeyError: pass
+    for ob in objs:
+        if ob.type != "MESH": continue
+        dup = ob.copy(); dup.data = ob.data.copy(); dup.name = ob.name + "-wire"
+        bpy.context.collection.objects.link(dup)
+        m = dup.modifiers.new("wf", "WIREFRAME"); m.thickness = mm(thickness); m.use_replace = True
+        dup.data.materials.clear(); dup.data.materials.append(wm)
+
+def orbit_camera(aim, size, yaw_deg, elev_deg, res):
+    sc = bpy.context.scene
+    cd = bpy.data.cameras.new("tcam"); cd.type = "ORTHO"; cd.ortho_scale = size * 1.22
+    cam = bpy.data.objects.new("tcam", cd); bpy.context.collection.objects.link(cam); sc.camera = cam
+    ya = math.radians(yaw_deg); el = math.radians(elev_deg); R = 1.2
+    ax, ay, az = aim.location
+    cam.location = (ax + R * math.cos(el) * math.sin(ya),
+                    ay - R * math.cos(el) * math.cos(ya),
+                    az + R * math.sin(el))
+    con = cam.constraints.new("TRACK_TO"); con.target = aim
+    con.track_axis = "TRACK_NEGATIVE_Z"; con.up_axis = "UP_Y"
+
+def turnaround_device(which):
+    sc = reset_scene(); enable_gpu(sc); sc.cycles.samples = 256
+    if which == "studio":
+        objs = build_mac_studio(0.0, yaw_deg=0.0); size = mm(210)
+    else:
+        objs = build_dgx_spark(0.0, yaw_deg=0.0); size = mm(165)
+    wireframe_overlay(objs)
+    aim = flat_turn_rig()
+    name = "mac-studio" if which == "studio" else "dgx-spark"
+    for tag, yaw in (("front", 0), ("q34", 40), ("side", 90), ("rear34", 140)):
+        orbit_camera(aim, size, yaw, elev_deg=16, res=(1100, 1100))
+        render_to(f"render/verify/turn-{name}-{tag}.png")
+
 # ---- verify mode · orthographic reference-match renders (overlay against press imagery) ----
 def verify_rig_front(subject_w, subject_h, res, bright=False):
     """Neutral even front-elevation light: a flat product-catalogue look so silhouette
@@ -821,7 +878,12 @@ def verify_device(which):
     render_to("render/verify/" + name + "-front.png")
 
 
-if VERIFY:
+if TURN:
+    turnaround_device("studio" if TURN in ("all", "studio") else "spark")
+    if TURN == "all":
+        turnaround_device("spark")
+    print("turnaround renders done.")
+elif VERIFY:
     if VERIFY in ("all", "studio"):
         verify_device("studio")
     if VERIFY in ("all", "spark"):
@@ -831,8 +893,8 @@ elif EXPORT:
     scene_pair()  # export path returns early after building + exporting
 elif ONLY in ("all", "pair"):
     scene_pair()
-if not VERIFY and not EXPORT and ONLY in ("all", "studio"):
+if not TURN and not VERIFY and not EXPORT and ONLY in ("all", "studio"):
     scene_solo("studio")
-if not VERIFY and not EXPORT and ONLY in ("all", "spark"):
+if not TURN and not VERIFY and not EXPORT and ONLY in ("all", "spark"):
     scene_solo("spark")
 print("build_scene done.")
