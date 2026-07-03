@@ -525,3 +525,14 @@ recess wall + floor now read as a diagonal weave matching cl_side-profile (wave4
 spark_top still gates PASS dE 3.19. Panel reads darker than the reference under the hero (bright
 champagne border raises the contrast) but the tone gate holds and the weave character matches.
 Minor: the thin exhaust slot at the panel's front edge is deferred to the wave-8 polish pass.
+
+## WAVE 5 · foam realism (the boss fight) · three commits
+
+### 5a · class REMEASURE · density CONFIRMED, audit overturned
+Reopened foam_cells_per_cm at verified scale (cl_front-foam, 45.3 px/cm anchor, 1cm scale-bar
+crop wave5-foam-scale.png): ~13-14 pores/cm CONFIRMS the old 13-14/cm (~0.74mm pitch), size
+variance ~0.4-1.2mm. This OVERTURNS the audit's "cells 3-5x too small" · the real foam is this
+fine; density was never the miss. The real deficiencies (for 5b/5c): rounded blown-bubble voids
+(not angular Voronoi shards), REAL open-cell depth (not a flat displaced skin), size variance,
+and material (pore albedo off near-black, struts desaturated, threaded micro-normal removed).
+Old density rows stand (measurement confirmed, not superseded); the AUDIT claim is what's struck.
