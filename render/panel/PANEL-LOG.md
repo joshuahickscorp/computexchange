@@ -46,5 +46,37 @@ Calibrated against the real controls' render-call rate. Two CONSECUTIVE clean pa
   ("warped L and O"). Also the shader bevel highlight reads as a "uniform CG specular line" at ANY
   size (its UNIFORMITY along the whole edge is the tell, not its radius).
 
-## Loop 4 pending · L3 cleanup (warpXZ 1.05->0.6 [un-distort cutouts], bevel 0.24->0.16, reflector
-## broadened+raised+dimmed [kill the blobs]). Tone gate ALL PASS.
+## Loop 4 (2026-07-03) · NOT CLEAN but GAP COLLAPSING · after L3 cleanup
+- MINE render-call rate **0.83** (0.97 -> 0.90 -> 0.87 -> 0.83) vs REAL **0.29** (up from 0.06-0.14).
+  Discrimination gap 0.83 -> 0.84 -> 0.73 -> **0.54**. The panel is losing the ability to separate:
+  real Apple lifestyle 3/5 render, real spark-sth2/foam 2/5, and MY spark-front dropped to 2/5.
+- Persistent gate tells: foam (5/5 spark-detail, spark-q34), edge (edge6 spark-detail, edge4 studio-
+  front · the bevel/rim edge highlight UNIFORMITY, size-independent), perfect/clean/uniform, ground/
+  shadow (soft contact on seamless black · partly the deliberate site-match void = FALSE-TELL).
+- CRITICAL DISCOVERY: the "soft dark circular blobs / identical dimples / AO artifacts" the panel
+  named on the SILVER TOP across loops 2-4 were a SELF-INFLICTED bug in add_grunge, NOT a model
+  defect: the smudge used a 45 mm VORONOI, which tiled the 197 mm studio top into a ~4x4 grid of
+  roughness cells reading as a regular dimple grid on the reflective surface. Persisted at 1100
+  samples (so not denoiser) and with the reflector OFF (so not the reflector). AUTOPSY -> commit L4:
+  smudge Voronoi replaced by large ORGANIC NOISE (non-cellular), amplitude pulled back. The top now
+  reads as real mottled aluminium. This regression had been inflating my studio render-calls for 3
+  loops · the true post-fix rate is measured in loop 5.
+
+## Loop 5 pending · L4 grunge fix, on the FINAL 4K/700-sample delivery frames (fairest test).
+## Tone gate ALL PASS (alu 2.11, champ 3.16, top 2.99, foam 5.40).
+
+## Loop 5 (2026-07-03) · NOT CLEAN · on the 4K delivery frames (grid-dimple fixed)
+- MINE **0.97**, REAL **0.03**. MINE rose vs loop 4 (0.83) · TWO causes: (a) large loop-to-loop
+  PANEL VARIANCE (loop 4 drew a soft panel · REAL 0.29; loop 5 drew a harsh one · REAL 0.03), and
+  (b) the grunge FIX traded the "grid dimples" tell for a "cloudy blotchy procedural MARBLE/smudge"
+  tell on the reflective studio top (flagged 88-95 conf). Any roughness variation on the big mirror
+  top reads as fake.
+- DECISIVE LESSON: every REAL studio control scored 0/5 render DESPITE being "flawless/clean" · so
+  "too clean" was never the giveaway. Real Mac Studio tops ARE immaculate. Added imperfection is the
+  tell, not its absence. -> commit L5: grunge REMOVED from aluminium + champagne (anti-drift, dialed
+  to zero). The clean bead-blast/anodize stays.
+- Persistent structural residual across all 5 loops: foam (procedural macro, improved), edge/bevel
+  (uniform highlight), reflect (matte metal on void-black = site-match FALSE-TELL), soft contact
+  shadow (site-match FALSE-TELL).
+
+## Loop 6 pending · FINAL · clean surfaces (grunge removed), 4K delivery frames.

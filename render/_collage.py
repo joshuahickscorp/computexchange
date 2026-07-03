@@ -62,9 +62,9 @@ grid([(f"{P}/mac-studio-front.png","Studio · render"),
 
 # 3 · detail + raking evidence (foam geometry, bevel edge, pill relief)
 grid([(f"{RAW}/dgx-spark-detail.png","Spark bezel+foam · detail crop"),
-      ("render/calib/spark-raking.png","Raking light · concave pill relief"),
-      ("render/foamgeo-dethread.png","Foam · de-threaded cells"),
-      ("render/material-bevel-edge.png","Bevel edge · T7 hairline")],
+      ("render/measure_evidence/commit1-raking.png","Raking light · concave pill relief"),
+      ("render/measure_evidence/foamgeo-dethread.png","Foam · de-threaded cells"),
+      ("render/measure_evidence/material-bevel-edge.png","Bevel edge · T7 hairline")],
      2, 720, "MICROREALISM EVIDENCE · foam · relief · bevel", f"{OUT}/3_detail_raking.png")
 
 # 4 · loop-history strip (spark front across the waves, if present)

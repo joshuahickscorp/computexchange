@@ -387,10 +387,14 @@ def blasted_aluminum():
     bump.inputs["Strength"].default_value = 0.009  # wave 7: halve the micro-bump (bead-blast, not sandpaper)
     nt.links.new(n.outputs["Fac"], bump.inputs["Height"])
     nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
-    # photoreal T7 hairline edge + T1 grunge (organic-noise smudge/dust) on the aluminium
-    # L4: amplitude pulled back hard · the reflective top shows roughness variation strongly, so this
-    # stays subtle (the grid-dimple regression taught the lesson: on a mirror, less is more)
-    return add_bevel(add_grunge(m, smudge_amp=0.035, dust_amp=0.03))
+    # photoreal T7 hairline edge only · L5 ANTI-DRIFT REVERT: the T1 "wear/grunge" experiment
+    # BACKFIRED on the large reflective aluminium top · Voronoi smudge -> grid of dimples, then
+    # organic noise -> "fake procedural marble/smudge" (panel 88-95 conf). Real Mac Studio tops ARE
+    # immaculate: every REAL studio control scored 0/5 render DESPITE being flawless. So "too clean"
+    # was never the giveaway · added imperfection is. Grunge removed from the aluminium; the clean
+    # bead-blast (subtle 3-octave roughness) stays. "The moment a panel names an imperfection it is
+    # too loud · dial back." Dialed to zero.
+    return add_bevel(m)
 
 
 def port_plastic():
@@ -623,11 +627,11 @@ def champagne_gold(rough=0.28, pore_darken=False):
         nt.links.new(aomix.outputs["Color"], b.inputs["Base Color"])
         # struts glossier (catch the gold), pores matte
         nt.links.new(mr(webmask, 0.0, 1.0, 0.50, 0.22), b.inputs["Roughness"])
-    # photoreal: bevel edges (T7) on all champagne; anodize batch mottle (T8) + grunge (T1) on the
-    # SMOOTH shell only (the foam roughness is already geometry-driven, leave it be)
-    m = anodize_mottle(m, scale=60.0, rough_amp=0.025)
+    # photoreal: bevel edges (T7) on all champagne; anodize batch mottle (T8) on the SMOOTH shell
+    # only (the foam roughness is already geometry-driven). L5: grunge dropped here too (same
+    # anti-drift lesson · the matte champagne reads better clean than with added smudge).
     if not pore_darken:
-        m = add_grunge(m, smudge_amp=0.05, dust_amp=0.04)
+        m = anodize_mottle(m, scale=60.0, rough_amp=0.025)
     return add_bevel(m)
 
 

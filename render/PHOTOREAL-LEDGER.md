@@ -7,7 +7,7 @@ true of the reference device (measurement beats panel), logged and not chased. D
 
 | id | tell | owning class | status | fix commit | evidence | panel loops named | notes |
 |----|------|-------------|--------|-----------|----------|-------------------|-------|
-| T1 | surface perfection · single roughness band, no smudge/dust/sparkle | MATERIAL | REOPENED | - | - | - | 3-octave roughness, grazing sparkle, sub-threshold smudge+dust |
+| T1 | surface perfection · single roughness band, no smudge/dust/sparkle | MATERIAL | IN-PROGRESS | - | - | - | 3-octave roughness, grazing sparkle, sub-threshold smudge+dust |
 | T2 | foam depth uniformity + strut threading | FOAM-GEO-MAP | REOPENED | foamgeo | foamgeo-dethread.png | L1: 5/5 all spark | coarse Voronoi cells + non-periodic fine noise (de-thread) + low-freq clouds depth hierarchy (bimodal pores). Residual: faint strut ribbing, a few over-flat shallow patches. Crush band + torn-cells deferred. |
 | T3 | infinite focus | CAMERA | FIXED-UNCONFIRMED | camera | (reshoot) | - | physical DOF, focus on the front face · details f5.6 (strong falloff), pair f11 (far device softer), heroes f16 (far edge a breath soft, keeps tone patches sharp/gated) |
 | T4 | missing image-formation layer | POST | FIXED-UNCONFIRMED | post | dgx-spark-q34-post.png | - | one PIL chain: roll, radial CA (+/-0.18%), specular bloom (thr0.88), gentle vignette, fine luminance grain (deterministic per frame). Post-delta on tone patches < 0.6 L; gate stays pre-post |
