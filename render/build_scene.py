@@ -1012,6 +1012,12 @@ def portrait_device(device, shot, res=(3840, 2400), samples=None):
         aim = portrait_rig(sh, **rig)
         # tighter crop on the feature (Studio front ports · Spark foam+pill corner)
         portrait_camera(aim, sw * 0.42, sh * 0.9, "q34", res, yaw=20.0, elev=14.0, margin=1.05)
+    elif shot == "side":                             # wave 8 KEPT · straight side profile
+        aim = portrait_rig(sh, **rig)
+        portrait_camera(aim, sw, sh, "side", res, yaw=90.0, elev=10.0, margin=1.4)
+    elif shot == "top":                              # wave 8 KEPT · Spark top-down (the rebuilt vent)
+        aim = portrait_rig(sh, **rig)
+        portrait_camera(aim, sw, sw, "top", res, yaw=24.0, elev=66.0, margin=1.15)
     name = "mac-studio" if device == "studio" else "dgx-spark"
     import os as _os
     _os.makedirs(PDIR, exist_ok=True)

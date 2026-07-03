@@ -8,11 +8,14 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 TILES = [
     ("mac-studio-front.png", "Mac Studio · front"),
     ("mac-studio-q34.png", "Mac Studio · three-quarter"),
+    ("mac-studio-side.png", "Mac Studio · side profile"),
     ("mac-studio-detail.png", "Mac Studio · detail (front ports)"),
     ("dgx-spark-front.png", "DGX Spark · front"),
     ("dgx-spark-q34.png", "DGX Spark · three-quarter"),
+    ("dgx-spark-side.png", "DGX Spark · side profile"),
+    ("dgx-spark-top.png", "DGX Spark · top (rebuilt vent)"),
     ("dgx-spark-detail.png", "DGX Spark · detail (foam corner)"),
-    ("oracles-pair@3x.png", "Tabletop pair · standing 35 deg eye line"),
+    ("oracles-pair@3x.png", "Tabletop pair · standing eye line"),
 ]
 TW = 900
 

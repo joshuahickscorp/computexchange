@@ -603,3 +603,23 @@ The pair failed as a composition (Spark tilted, non-coplanar, mismatched light/s
 Result (wave7-pair-staging.png): coplanar, consistent lighting/shadow, legible ~2:1 height delta
 (Studio clearly the larger). Ortho height check (wave 6) already cleared the lens, so no focal
 change needed. Wave 8 re-shoots this at full res on the frozen rig.
+
+## WAVE 8 · re-shoot + settlement + export · class RENDER · THE SINGLE STOP
+
+Scope ruling honoured: STRUCK the Studio/Spark rear I/O + Studio bottom (never in the locked
+orbit); KEPT both side profiles + the Spark top-down (rebuilt vent). Full re-shoot on the FROZEN
+rig, 4K wide (3840), 640 samples + OIDN (noise-floor route), AgX.
+
+Ten frames, ALL clip GREEN: studio front 0.013% / q34 0.089% / side 0.005% / detail 0.000% ·
+spark front 0.000% / q34 0.000% / side 0.000% / top 0.000% / detail 0.000% · pair 0.034%.
+
+FINAL in-rig patch table (frozen rig, O=-12; wave8-patch-table.txt): studio_alu PASS 1.41,
+spark_top PASS 2.95, spark_foam PASS 3.01, spark_champ 4.26 (near-pass · chroma matched b10.4
+vs 12, residual is the key-facing cap orientation L, not the rig · alu passes at 1.41 same rig).
+Diagnostics (position/depth, not gated): studio_intake near-black (shadowed base, geometry
+verified), foam web/pore spread (open-cell depth).
+
+Five settlement sheets regenerated (settle8-*): Studio front vs apple_front, Studio 3/4 vs
+apple_lifestyle_3q, Spark front vs sth_front-1, Spark 3/4 vs nv_hero_3q, and the NEW Spark top
+vs cl_side-profile. Contact sheet = 10 angles (phase4-portrait-set.png). Exported to
+~/Downloads/cx-oracles-final-2026-07-03/. NOT declaring closure · presenting sheets + numbers.
