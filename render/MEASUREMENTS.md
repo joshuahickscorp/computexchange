@@ -30,7 +30,8 @@ under `render/measure_evidence/`. Dash gate: middot only.
 | led_from_base | 27.50 | mm | med | apple_front.jpg | mac_ports.png | LED height above device base |
 | led_x_from_center | 87.70 | mm | med | apple_front.jpg | mac_ports.png | feature position: far right |
 | intake_band_height | 8.55 | mm | high | apple_front.jpg | mac_intake_band.png | perforated hex mesh, front-face bottom edge to silhouette bottom (NOT the ground gap) |
-| intake_hole_pitch | 1.10 | mm | med | apple_front.jpg | wave6-intake-pitch.png | wave-6 remeasure at verified scale (12.27 px/mm, 1cm bar): ~9-10 holes/cm -> ~1.1mm hex pitch, hole dia ~0.8mm. The old builder 1.70mm was too coarse (audit right). |
+| intake_hole_pitch | 1.10 | mm | med | apple_front.jpg | wave6-intake-pitch.png | wave-6 remeasure at verified scale (12.27 px/mm, 1cm bar): ~9-10 holes/cm -> ~1.1mm hex pitch. The old builder 1.70mm was too coarse (audit right). |
+| intake_hole_diameter | 0.80 | mm | med | apple_front.jpg | wave6-intake-pitch.png | wave-6: hole diameter ~0.8mm (hole:pitch ~0.73), thin bright web between holes |
 | intake_corner_wrap | wraps | axis | high | apple_front.jpg | wave6-intake-corner.png | wave-6: the perforation CONTINUES around the rounded vertical corner (does NOT stop at solid aluminium). Resolves the audit split (detail-audit right, front-audit wrong); the render already wraps (mesh on the bottom fillet) |
 | front_height_spec | 95.00 | mm | spec | apple_front.jpg | mac_front_silhouette.png | absolute from Apple spec; image measures 96.20 (+1.3%) = intake-band inclusion, not scale error |
 | alu_Lab_L | 84.32 | L* | high | apple_front.jpg | mac_alu_patch.png | diffuse mid-face patch |
@@ -67,7 +68,9 @@ under `render/measure_evidence/`. Dash gate: middot only.
 | top_plan_corner_R | 21.04 | mm | med | cl_side-profile.jpg | dgx_top_corner.png | footprint corner (foam-edge softens fit), rms=0.64mm |
 | spark_top_border_Lab_L | 77.75 | L* | med | cl_side-profile.jpg | (top patches) | champagne top BORDER (neutral light: a0.0 b5.56 · desaturated, far less golden than the warm-lit storagereview shell b42.78 · lighting, not a different metal) |
 | spark_top_vent_Lab_L | 46.92 | L* | med | cl_side-profile.jpg | (top patches) | the recessed diagonal-WEAVE vent panel · distinctly DARKER than the champagne border (a3.55 b11.33). This is the "dedicated dark top material" (wave 4a). OVERRIDES the audit's dark-slate #2b2c2e/L17 and edge-aligned-hex assertions: the measured top is champagne + a CENTERED darker weave panel, NOT slate. Measurement wins. |
-| spark_top_vent_pitch | diagonal ~45deg ribbed weave | axis | med | cl_side-profile.jpg | (top patches) | the vent panel carries a fine diagonal (~45deg) ribbed weave, not a hex mesh |
+| spark_top_vent_pitch | diagonal ~45deg ribbed weave | axis | med | cl_side-profile.jpg | (top patches) | the vent panel carries a fine diagonal (~45deg) ribbed weave, not a hex mesh; builder ~4.6mm rib pitch |
+| spark_top_panel_border_R | 8.00 | mm | low | cl_side-profile.jpg | settle8-dgx-spark-top.png | recessed vent panel corner radius (builder, tightened from 12); the reference panel corner reads moderate |
+| spark_top_exhaust_slot | front-edge thin slot | axis | med | cl_side-profile.jpg | settle8-dgx-spark-top.png | a thin recessed exhaust slot runs along the front edge of the vent panel (wave-8 addition, closing the 4b defer) |
 | top_panel_width | 114.15 | mm | med | cl_side-profile.jpg | dgx_top_panel.png | recessed vent panel |
 | top_panel_height | 105.06 | mm | med | cl_side-profile.jpg | dgx_top_panel.png |  |
 | top_panel_inset_margin | 17.92 | mm | med | cl_side-profile.jpg | dgx_top_panel.png | frame edge -> panel, mean L/R |

@@ -719,6 +719,13 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
     tbox = apply_boolean(body, [tp])
     assign_interior(body, tbox, 2)      # top recessed panel -> dedicated dark vent material
 
+    # exhaust slot (wave 8, closing the 4b defer): a thin recessed slot along the front edge of
+    # the vent panel, per cl_side-profile. Wide in x, thin in y, shallow into the top.
+    es = cutter_box(mm(SPARK["top_panel_w"] * 0.66), mm(2.2), mm(2.6), mm(1.1),
+                    (0, -mm(SPARK["top_panel_h"] / 2.0) + mm(7.0), H + mm(1.5) - mm(2.6) / 2.0), seg=6)
+    ebox = apply_boolean(body, [es])
+    assign_interior(body, ebox, 2)
+
     # champagne tub floors sitting recessed at the back of each pocket, blank
     tubs = []
     for sx in (-1, 1):

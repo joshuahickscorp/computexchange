@@ -623,3 +623,11 @@ Five settlement sheets regenerated (settle8-*): Studio front vs apple_front, Stu
 apple_lifestyle_3q, Spark front vs sth_front-1, Spark 3/4 vs nv_hero_3q, and the NEW Spark top
 vs cl_side-profile. Contact sheet = 10 angles (phase4-portrait-set.png). Exported to
 ~/Downloads/cx-oracles-final-2026-07-03/. NOT declaring closure · presenting sheets + numbers.
+
+## WAVE 8b · completion audit closeout
+Point-by-point audit vs CX-ORACLES-GRADER-RETURN.md (render/GRADER-RETURN-COMPLETION.md) found
+two open items, now closed: (1) the wave-4b EXHAUST SLOT (deferred) is added to the Spark top
+(thin recessed slot along the vent panel's front edge, per cl_side-profile); (2) the two
+remaining measurement rows (intake_hole_diameter 0.80, spark_top_panel_border_R 8.0). Re-rendered
+the four top-showing frames (spark top/q34/side, pair) at 4K on the frozen rig. All 10 frames
+still clip GREEN; gate unchanged (alu 1.41, top 2.95, foam 3.01 PASS; champ 4.26 near-pass).
