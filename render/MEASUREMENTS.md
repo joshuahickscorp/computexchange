@@ -13,7 +13,7 @@ under `render/measure_evidence/`. Dash gate: middot only.
 | front_aspect_W:H_meas | 2.05 | ratio | high | apple_front.jpg | mac_front_silhouette.png | image aspect vs spec 2.074; image reads taller by intake-band inclusion |
 | front_corner_R_tl | 8.35 | mm | high | apple_front.jpg | mac_corner_tl.png | Kasa fit rms=0.59mm |
 | front_corner_R_tr | 8.20 | mm | high | apple_front.jpg | mac_corner_tr.png | Kasa fit rms=0.37mm |
-| top_edge_fillet_R | 8.27 | mm | high | apple_front.jpg | mac_corner_tl.png | = front-outline top-corner R_top (mean of tl/tr, spread 0.15mm); tight edge, top dead-flat |
+| top_edge_fillet_R | 2.50 | mm | high | dim_back-side.svg.png | wave1-fillet-fit | REMEASURED wave 1 from the dimensioned side/rear elevation top corner (Kasa nb24 R2.20 rms0.19mm, nb32 R2.91; both top corners agree ~3.6 at nb40, R grows with nb = tight fillet). ~SUPERSEDES 8.27~ AUTOPSY: the old value came from an apple_front FRONT-OUTLINE fit that conflated the tight top-edge fillet with the 31.4mm plan corner turning through the silhouette (the rounded vertical edge reads as a large arc in the 2D outline). The real top is flat with a ~2.5mm edge. |
 | usbc_orientation | vertical | axis | settled | apple_front.jpg | tiebreak_usbc.png | SETTLED by two photographers: Apple H/W 3.23, Wikimedia H/W 1.87 (3/4, foreshortened) · both vertical |
 | usbc_long_axis_vert | 8.47 | mm | high | apple_front.jpg | mac_usbc_zoom.png | = USB-C receptacle 8.4mm dimension, oriented vertical |
 | usbc_short_axis_horiz | 2.62 | mm | high | apple_front.jpg | mac_usbc_zoom.png | = USB-C 2.6mm dimension |

@@ -146,8 +146,12 @@ STUDIO = {
     "depth":        197.0,   # spec (square footprint)
     "height":        95.0,   # front_height_spec
     "corner_R":      31.4,   # plan_corner_R · footprint / vertical-edge radius
-    "top_fillet_R":   8.27,  # top_edge_fillet_R (MEASURED target for the rendered corner)
-    "top_fillet_build": 8.9, # builder knob, tuned so the RENDERED front corner = 8.3 above
+    "top_fillet_R":   2.50,  # top_edge_fillet_R · REMEASURED wave 1 from dim_back-side vector
+                             # side elevation (nb24 R2.20 rms0.19, nb32 R2.91; both top corners
+                             # agree). SUPERSEDES 8.27 (autopsy: front-outline fit conflated the
+                             # tight top fillet with the 31.4mm plan corner turning through the
+                             # silhouette). The real top reads flat, tight edge.
+    "top_fillet_build": 2.70, # builder knob -> ~2.5mm rendered fillet
     "intake_band":    8.55,  # intake_band_height · perforated hex mesh on the bottom fillet
     "reveal_gap":     2.5,   # base_reveal_gap · INFERRED design parameter (not measured)
     "usbc_w":         2.62,  # usbc_short_axis_horiz

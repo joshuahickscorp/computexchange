@@ -447,3 +447,24 @@ r = sd_h/2 = 1.25mm. Positions/sizes unchanged. Tongue blade changed from a shar
 rounded_box (r 0.42) so it matches the pill opening. Render: the two USB-C read as tall pills
 with semicircular caps and the SD as a long thin rounded slot (evidence wave1-stadium-ports.png).
 USB-C aspect 2.62 x 8.47 = 3.23:1 confirmed. Cavity depth is wave 2.
+
+### item 2 · top-edge fillet · remeasure + autopsy + rebuild
+REMEASURED off the dim_back-side vector side/rear elevation (grade-A source): top corner Kasa
+fit R2.20mm (nb24, rms0.19) to R2.91 (nb32); R grows with the neighborhood = a TIGHT fillet
+biased up by straight-tangent points, not a large one. Both top corners agree. Adopted 2.50mm.
+AUTOPSY of the old 8.27: it came from an apple_front FRONT-OUTLINE fit that conflated the tight
+top-edge fillet with the 31.4mm plan (vertical-edge) corner as it turns through the 2D silhouette
+outline · the rounded vertical edge reads as a big arc in the front outline. MEASUREMENTS row
+superseded. top_fillet_build 8.9 -> 2.70 (renders ~2.5mm). Result: top reads dead-flat with a
+tight crisp round-over and a thin rim line, not a pillow (evidence wave1-tight-fillet-q34.png).
+
+### item 3 · flatten front · diagnosis (no change needed)
+Straightedge check on the rendered front (horizontal L profile at mid-height): left 74.7,
+center 74.3 · FLAT, not domed. The front face is a planar quad by construction (rounded_box);
+the audit's "barrel bow" was a specular gradient read under the old rig, not geometry. No
+geometry change. Verified the corner fillets are the only curvature.
+
+### item 4 · aspect re-verify
+Rendered front silhouette W:H 1.899 = 197 / (95 body + 8.55 intake band) · the body is spec
+197:95 by construction; the earlier squat read was the pillowy fillet eating apparent height,
+now recovered. Ports read at true aspect (USB-C 3.23:1, SD long-thin). Wave 1 geometry complete.
