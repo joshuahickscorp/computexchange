@@ -40,6 +40,8 @@ def arg(name, default=None):
 EXPORT = arg("--export", None)
 VERIFY = arg("--verify", None)   # "studio" | "spark" | "all" · orthographic reference-match renders
 TURN = arg("--turnaround", None) # "studio" | "spark" · Gate 1 wireframe+shaded turntable
+PORTRAIT = arg("--portrait", None)  # "studio" | "spark" · phase-4 max-quality portraits
+SHOT = str(arg("--shot", "all"))    # front | q34 | detail | all
 PREVIEW = bool(arg("--preview", False))
 SAMPLES = int(arg("--samples", 128 if PREVIEW else 2048))
 OUT = str(arg("--out", "render/previews/" if PREVIEW else "web/assets/site/"))
@@ -827,6 +829,69 @@ def scene_solo(which):
     render_to(OUT + f"{name}{suffix}@3x.png")
 
 
+# ---- Phase 4 · portrait rig · lighting composed PER SHOT on void black (not inherited) ----
+def portrait_rig(subject_h, warm=False, key_e=55, rim_e=26, fill_e=9, expo=-0.55, ground=True):
+    """A product-photographer key/rim/fill on void black. Key high and camera-left, a narrow
+    rim strip behind+above to draw the top/edges, a low fill so the shadow side keeps detail.
+    A matte near-black floor grounds the object with a real contact shadow."""
+    sc = bpy.context.scene
+    sc.render.film_transparent = False
+    w = bpy.data.worlds.new("pvoid"); w.use_nodes = True
+    w.node_tree.nodes["Background"].inputs[0].default_value = (0.006, 0.006, 0.007, 1)
+    sc.world = w
+    sc.view_settings.exposure = expo
+    aim = bpy.data.objects.new("Aim", None); aim.location = (0, 0, subject_h * 0.5)
+    bpy.context.collection.objects.link(aim)
+    kcol = (1.0, 0.97, 0.92) if warm else (1.0, 0.99, 0.98)
+    add_area("p-key", (-0.85, -0.75, subject_h * 0.5 + 0.9), 1.5, key_e, kcol, aim=aim)
+    add_area("p-rim", (0.6, 1.05, subject_h * 0.5 + 0.85), 0.5, rim_e, (0.93, 0.96, 1.0), sx=0.05, aim=aim)
+    add_area("p-fill", (1.05, -0.8, subject_h * 0.5), 1.4, fill_e, (0.97, 0.98, 1.0), aim=aim)
+    if ground:
+        bpy.ops.mesh.primitive_plane_add(size=6.0, location=(0, 0, 0))
+        fl = bpy.context.active_object; fl.name = "p-floor"
+        fm = principled("p-desk", (0.004, 0.004, 0.0045), 0.55, metallic=0.0)
+        fl.data.materials.append(fm)
+    return aim
+
+def portrait_camera(aim, subject_w, subject_h, shot, res, lens=85.0, yaw=38.0, elev=24.0, margin=1.5):
+    sc = bpy.context.scene
+    cd = bpy.data.cameras.new("pcam"); cd.lens = lens; cd.sensor_width = 36.0
+    cam = bpy.data.objects.new("pcam", cd); bpy.context.collection.objects.link(cam); sc.camera = cam
+    subj = max(subject_w, subject_h)
+    hfov = 2.0 * math.atan(cd.sensor_width / (2.0 * lens))
+    dist = (subj * margin) / (2.0 * math.tan(hfov / 2.0))
+    if shot == "front":
+        yaw = 0.0; elev = 6.0
+    ya = math.radians(yaw); el = math.radians(elev)
+    ax, ay, az = aim.location
+    cam.location = (ax + dist * math.cos(el) * math.sin(ya),
+                    ay - dist * math.cos(el) * math.cos(ya),
+                    az + dist * math.sin(el))
+    con = cam.constraints.new("TRACK_TO"); con.target = aim
+    con.track_axis = "TRACK_NEGATIVE_Z"; con.up_axis = "UP_Y"
+    sc.render.resolution_x, sc.render.resolution_y = res
+
+def portrait_device(device, shot, res=(3840, 2400), samples=None):
+    sc = reset_scene(); enable_gpu(sc)
+    sc.cycles.samples = samples or (128 if PREVIEW else 2048)
+    warm = (device == "spark")
+    if device == "studio":
+        build_mac_studio(0.0, yaw_deg=0.0); sw, sh = mm(197), mm(95)
+    else:
+        build_dgx_spark(0.0, yaw_deg=0.0); sw, sh = mm(150), mm(50.5)
+    # per-shot framing
+    if shot == "front":
+        aim = portrait_rig(sh, warm=warm); portrait_camera(aim, sw, sh, "front", res, margin=1.45)
+    elif shot == "q34":
+        aim = portrait_rig(sh, warm=warm)
+        portrait_camera(aim, sw, sh, "q34", res, yaw=38.0, elev=24.0, margin=1.5)
+    elif shot == "detail":
+        aim = portrait_rig(sh, warm=warm)
+        # tighter crop on the feature (Studio front ports · Spark foam+pill corner)
+        portrait_camera(aim, sw * 0.42, sh * 0.9, "q34", res, yaw=20.0, elev=14.0, margin=1.05)
+    name = "mac-studio" if device == "studio" else "dgx-spark"
+    render_to(f"render/portraits/{name}-{shot}.png")
+
 # ---- Gate 1 · flat-lit wireframe-plus-shaded turnaround (proves the geometry is real) ----
 def flat_turn_rig():
     sc = bpy.context.scene
@@ -941,7 +1006,14 @@ def verify_device(which):
     render_to("render/verify/" + name + "-front.png")
 
 
-if TURN:
+if PORTRAIT:
+    import os as _os
+    _os.makedirs("render/portraits", exist_ok=True)
+    shots = ["front", "q34", "detail"] if SHOT == "all" else [SHOT]
+    for _s in shots:
+        portrait_device(PORTRAIT, _s)
+    print("portraits done.")
+elif TURN:
     turnaround_device("studio" if TURN in ("all", "studio") else "spark")
     if TURN == "all":
         turnaround_device("spark")
@@ -956,8 +1028,8 @@ elif EXPORT:
     scene_pair()  # export path returns early after building + exporting
 elif ONLY in ("all", "pair"):
     scene_pair()
-if not TURN and not VERIFY and not EXPORT and ONLY in ("all", "studio"):
+if not PORTRAIT and not TURN and not VERIFY and not EXPORT and ONLY in ("all", "studio"):
     scene_solo("studio")
-if not TURN and not VERIFY and not EXPORT and ONLY in ("all", "spark"):
+if not PORTRAIT and not TURN and not VERIFY and not EXPORT and ONLY in ("all", "spark"):
     scene_solo("spark")
 print("build_scene done.")
