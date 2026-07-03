@@ -676,3 +676,12 @@ The device had de-golded to bone/grey (wave-4 champagne re-pin + 5c strut desatu
 In-rig table against the honest sth_front-1 pins, same O=-12: ALL PASS · studio_alu 1.41,
 spark_champ 3.59 (b26.6 gold), spark_top 3.20, spark_foam 5.71 (b20.4 golden). Clip green. Bezels
 + slots separate cleanly from the golden foam (finalC-gold.png). Frozen rig unchanged.
+
+## FINAL WAVE · reshoot + stop · class RENDER
+Spark-only reshoot on the FROZEN rig (Studio is CLOSED/untouchable · not re-rendered), 4K/640+
+OIDN: front, q34, top, side, detail (crop), + the tabletop pair. Studio masters unchanged.
+In-rig table ALL PASS (studio_alu 1.41, spark_champ 3.38 b27 gold, spark_top 2.95, spark_foam
+3.97 b20 golden). All 10 frames clip GREEN. Three Spark settlement sheets regenerated
+(settle8-dgx-spark-front vs sth_front-1, -q34 vs nv_hero_3q, -top vs cl_side-profile) + 10-angle
+contact sheet. The three findings are closed: structure (foam edge-to-edge + embedded bezels),
+gold restored, and the laundered foam gate named + re-pinned honestly to sth_front-1.
