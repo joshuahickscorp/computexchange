@@ -309,12 +309,12 @@ def blasted_aluminum():
     n.inputs["Detail"].default_value = 3.0
     nt.links.new(tc.outputs["Object"], n.inputs["Vector"])
     mapr = nt.nodes.new("ShaderNodeMapRange")
-    mapr.inputs["To Min"].default_value = 0.34
-    mapr.inputs["To Max"].default_value = 0.42
+    mapr.inputs["To Min"].default_value = 0.375   # wave 7: tighter, calmer bead-blast band (was
+    mapr.inputs["To Max"].default_value = 0.405   # 0.34-0.42, read too sandy per the audit)
     nt.links.new(n.outputs["Fac"], mapr.inputs["Value"])
     nt.links.new(mapr.outputs["Result"], b.inputs["Roughness"])
     bump = nt.nodes.new("ShaderNodeBump")
-    bump.inputs["Strength"].default_value = 0.02
+    bump.inputs["Strength"].default_value = 0.009  # wave 7: halve the micro-bump (bead-blast, not sandpaper)
     nt.links.new(n.outputs["Fac"], bump.inputs["Height"])
     nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
     return m

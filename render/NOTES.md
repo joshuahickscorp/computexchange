@@ -582,3 +582,12 @@ wave5-foam-A.png, wave5-foam-B.png (3/4), wave5-foam-B-front.png. FOAM default =
   same rig), a position/geometry feature with no flat albedo to gate against a bright-even L71.8.
   Geometry verified instead. Final flat-albedo gate: alu PASS, top PASS, foam PASS, champ 4.25
   (near-pass, chroma matched). Clip green (front 0.013%, q34 0.114%).
+
+## WAVE 7 · staging + finish polish
+
+### material polish · class MATERIAL
+Studio bead-blast calmed: roughness noise band 0.34-0.42 -> 0.375-0.405 and micro-bump 0.02 ->
+0.009. The front face now reads as a fine even bead-blast, not sandpaper (wave7-beadblast.png).
+studio_alu still gates PASS (dE 1.41). Champagne shell is already satin (rough 0.50) and the foam
+lip is bounded/thin since wave 3; the LED reads as a clean small dot post-rebuild (the audit's
+"smudge/wide lip" were old-render artifacts, resolved by the waves 3-6 rebuild).
