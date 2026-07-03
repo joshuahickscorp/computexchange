@@ -13,12 +13,12 @@ true of the reference device (measurement beats panel), logged and not chased. D
 | T4 | missing image-formation layer · no grain/bloom/aberration/vignette | POST | OPEN | - | - | - | one post chain, each effect below conscious notice |
 | T5 | empty reflections · metals reflect abstract gradients | LIGHTING | OPEN | - | - | - | readable softbox EDGE in each metal, consistent between devices |
 | T6 | laboratory ground · pasted contact, no micro-texture/bounce | LIGHTING+MATERIAL | OPEN | - | - | - | AO-to-penumbra gradient, ground micro-sheen, champagne warmth into contact |
-| T7 | CAD-sharp silhouettes · mathematically sharp edges | MATERIAL (bevel) | OPEN | - | - | - | 0.2 to 0.4mm bevel shader on every metal, hairline edge highlight |
-| T8 | statistical placement perfection · perfect periodicity | MATERIAL+FOAM-GEO-MAP | OPEN | - | - | - | sub-perceptual breaks in intake/weave/foam, low-amplitude anodize mottle |
+| T7 | CAD-sharp silhouettes | MATERIAL (bevel) | FIXED-UNCONFIRMED | material | material-bevel-edge.png | - | ShaderNodeBevel 0.30mm on every metal (alu, champagne, top-vent); edges now catch a hairline highlight |
+| T8 | statistical placement perfection | MATERIAL+FOAM-GEO-MAP | FIXED-UNCONFIRMED | material | material-bevel-edge.png | - | anodize batch mottle (~60mm, low-amp) on the champagne shell + aluminium roughness. Intake/weave pitch-jitter deferred if the panel names them |
 | T9 | perfect coplanarity · everything axis-aligned | CAMERA+LIGHTING | OPEN | - | - | - | sub-degree camera roll, one device yawed a hair more |
 
 ## own cold re-look findings (appended as discovered; same schema)
 | id | tell | owning class | status | fix commit | evidence | panel loops named | notes |
 |----|------|-------------|--------|-----------|----------|-------------------|-------|
 | O1 | foam strut helical threading (two-displacement interference) | FOAM-GEO-MAP | FIXED-UNCONFIRMED | foamgeo | foamgeo-dethread.png | - | fine Voronoi replaced by non-periodic clouds noise · helical read much reduced (faint ribbing remains for the panel to judge) |
-| O2 | champagne reads a touch flat/plastic on the smooth shell (no anodize grain) | MATERIAL | OPEN | - | - | - | folded into T1/Spark-champagne anodize directional structure |
+| O2 | champagne flat/plastic (no anodize grain) | MATERIAL | FIXED-UNCONFIRMED | material | - | - | anodize mottle added; directional extrusion grain deferred |

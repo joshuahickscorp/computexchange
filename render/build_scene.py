@@ -297,6 +297,38 @@ def principled(name, base, rough, metallic=1.0, coat=0.0, coat_rough=0.1):
     return m
 
 
+def add_bevel(m, radius=0.30, samples=4):
+    # photoreal T7: a shader BEVEL rounds every edge at micron scale so no silhouette is
+    # mathematically sharp · each edge catches a hairline highlight, killing the CAD look. Chains
+    # any existing Normal (micro-bump) into the bevel so both survive.
+    nt = m.node_tree; b = nt.nodes["Principled BSDF"]
+    bev = nt.nodes.new("ShaderNodeBevel"); bev.samples = samples
+    bev.inputs["Radius"].default_value = mm(radius)
+    ni = b.inputs["Normal"]
+    if ni.is_linked:
+        nt.links.new(ni.links[0].from_socket, bev.inputs["Normal"])
+    nt.links.new(bev.outputs["Normal"], ni)
+    return m
+
+
+def anodize_mottle(m, scale=60.0, rough_amp=0.03):
+    # photoreal T8/T1: a large-scale low-amplitude batch mottle on roughness · anodize is never
+    # perfectly uniform. Amplitude at the edge of perception, feature ~60mm.
+    nt = m.node_tree; b = nt.nodes["Principled BSDF"]
+    tc = nt.nodes.new("ShaderNodeTexCoord")
+    nz = nt.nodes.new("ShaderNodeTexNoise"); nz.inputs["Scale"].default_value = 1000.0 / (scale * S)
+    nt.links.new(tc.outputs["Object"], nz.inputs["Vector"])
+    r = b.inputs["Roughness"]
+    base = r.default_value
+    mr = nt.nodes.new("ShaderNodeMapRange")
+    mr.inputs["To Min"].default_value = max(0.0, base - rough_amp)
+    mr.inputs["To Max"].default_value = min(1.0, base + rough_amp)
+    if not r.is_linked:
+        nt.links.new(nz.outputs["Fac"], mr.inputs["Value"])
+        nt.links.new(mr.outputs["Result"], r)
+    return m
+
+
 def blasted_aluminum():
     """Bead-blasted (NOT brushed) light aluminum: fine isotropic roughness variation
     plus a whisper of bump for the micro-sparkle."""
@@ -318,7 +350,7 @@ def blasted_aluminum():
     bump.inputs["Strength"].default_value = 0.009  # wave 7: halve the micro-bump (bead-blast, not sandpaper)
     nt.links.new(n.outputs["Fac"], bump.inputs["Height"])
     nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
-    return m
+    return add_bevel(m)   # photoreal T7 · hairline edge on the aluminium (roughness already 3-octave)
 
 
 def port_plastic():
@@ -534,20 +566,22 @@ def champagne_gold(rough=0.28, pore_darken=False):
         # FINAL WAVE (commit C): re-gold the foam to the sth_front-1 pins (web b19.6, pore warm
         # b12.3). The 5c grey was the de-gold; struts back to a GOLDEN web (calmer than the old
         # brass), pores warm-dark (not neutral charcoal).
-        mixc.inputs["Color1"].default_value = (0.140, 0.100, 0.044, 1)  # warm dark pore (gold-tinted)
-        mixc.inputs["Color2"].default_value = (0.800, 0.620, 0.255, 1)  # golden strut web
+        mixc.inputs["Color1"].default_value = (0.100, 0.072, 0.032, 1)  # warm dark pore (gold-tinted)
+        mixc.inputs["Color2"].default_value = (0.660, 0.510, 0.205, 1)  # golden strut web
         nt.links.new(webmask, mixc.inputs["Fac"])
         # AO carries the pore depth the shallow displacement cannot: deep cavity self-shadow
         ao = nt.nodes.new("ShaderNodeAmbientOcclusion"); ao.inputs["Distance"].default_value = mm(1.3)
         ao.samples = 4   # cheap AO (OIDN denoise carries the rest); 16 was the render bottleneck
         aomix = nt.nodes.new("ShaderNodeMixRGB"); aomix.blend_type = "MULTIPLY"
-        aomix.inputs["Fac"].default_value = 0.50
+        aomix.inputs["Fac"].default_value = 0.66
         nt.links.new(mixc.outputs["Color"], aomix.inputs["Color1"])
         nt.links.new(ao.outputs["Color"], aomix.inputs["Color2"])
         nt.links.new(aomix.outputs["Color"], b.inputs["Base Color"])
         # struts glossier (catch the gold), pores matte
         nt.links.new(mr(webmask, 0.0, 1.0, 0.50, 0.22), b.inputs["Roughness"])
-    return m
+    # photoreal: bevel edges (T7) on all champagne; anodize batch mottle (T8) on the smooth shell
+    # only (self-guards where roughness is already driven, i.e. the foam)
+    return add_bevel(anodize_mottle(m, scale=60.0, rough_amp=0.025))
 
 
 # ---- the devices ---------------------------------------------------------------------
@@ -681,7 +715,7 @@ def spark_top_vent():
     bump.inputs["Distance"].default_value = mm(0.5)
     nt.links.new(wave.outputs["Fac"], bump.inputs["Height"])
     nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
-    return m
+    return add_bevel(m)   # photoreal T7 · hairline edge (chains the weave bump into the bevel)
 
 
 def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):

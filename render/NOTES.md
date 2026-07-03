@@ -742,3 +742,15 @@ than one uniform emboss (foamgeo-dethread.png). Coarse Voronoi still gives the o
 tone pins unchanged (still gated in the reshoot). Residual for the panel: faint strut ribbing at
 200pct, a few over-flat shallow patches; crush-band + torn-cells deferred to a follow-up if the
 panel names them. T2/O1 -> FIXED-UNCONFIRMED.
+
+## PHOTOREAL · Commit MATERIAL · class MATERIAL (T7, T8, O2)
+- BEVEL shader (T7, add_bevel, 0.30mm) on every metal material (aluminium, champagne shell/rails/
+  bezels, top-vent) · chains any existing micro-bump into the bevel. Edges now catch a hairline
+  highlight (material-bevel-edge.png) · the CAD dead-vector silhouette is gone.
+- ANODIZE MOTTLE (T8/O2, anodize_mottle, ~60mm, +/-0.025 roughness) on the smooth champagne shell
+  and aluminium · self-guards where roughness is already driven (the foam).
+- TONE RE-VERIFY: the FOAM-GEO-MAP depth hierarchy had brightened the foam mean to L45.8 (I had
+  committed FOAM-GEO-MAP without re-gating · logged honestly). Restored to the pin here (foam
+  albedo strut 0.80->0.66, pore 0.14->0.10, AO 0.50->0.66): spark_foam 3.42 back on 40.8. Gate
+  ALL PASS (alu 1.41, champ 3.21, top 3.19, foam 3.42), clip green. Pins unmoved · albedo iterated
+  to meet them, per the standing rule. T7/T8/O2 -> FIXED-UNCONFIRMED.
