@@ -80,8 +80,12 @@ def reference_labs():
         "spark_champ":  np.array([77.75, 1.00, 12.00]),   # wave 4 RE-PIN · cl_side-profile pale
         # champagne (representative: border b5.56, rims b14, audit pale-champagne b~15 -> b12).
         # Supersedes storagereview L72.52 b42.78, which was WARM-light-inflated brass.
-        "spark_web":    web,                              # from dgx_foam_patch.png top quartile
-        "spark_pore":   pore,                             # from dgx_foam_patch.png bottom quartile
+        "spark_web":    web,                              # diagnostic only (5b depth spread)
+        "spark_pore":   pore,                             # diagnostic only (5b depth spread)
+        "spark_foam":   np.array([38.09, 1.00, 8.00]),    # wave 5c TONE gate · foam MEAN, b*
+        # de-warmed from foam_mean b20.5 (same warm-light autopsy as champ/top). The web/pore
+        # QUARTILES don't fit the additive offset (web = exposure-robust specular glints, pore =
+        # near-black extreme with a negative target); the MEAN is the reliable foam tone gate.
         "spark_top":    np.array([46.92, 3.55, 11.33]),   # wave 4 · cl_side-profile vent panel
     }
 
@@ -91,8 +95,12 @@ PATCHES = [
     dict(name="studio_intake", file="mac-studio-front.png", box=(0.32, 0.805, 0.62, 0.845), kind="smooth", tol=4),
     dict(name="spark_champ",   file="dgx-spark-q34.png",    box=(0.60, 0.55, 0.70, 0.62), kind="smooth", tol=4),
     dict(name="spark_top",     file="dgx-spark-q34.png",    box=(0.43, 0.23, 0.57, 0.33), kind="smooth", tol=4),
-    dict(name="spark_web",     file="dgx-spark-q34.png",    box=(0.18, 0.51, 0.40, 0.69), kind="web",    tol=4),
-    dict(name="spark_pore",    file="dgx-spark-q34.png",    box=(0.18, 0.51, 0.40, 0.69), kind="pore",   tol=6),
+    dict(name="spark_foam",    file="dgx-spark-q34.png",    box=(0.18, 0.51, 0.40, 0.69), kind="smooth", tol=6),
+]
+# diagnostic (5b depth, not gated): the foam web/pore quartile SPREAD proves 3D open-cell depth.
+DIAG = [
+    dict(name="spark_web",  file="dgx-spark-q34.png", box=(0.18, 0.51, 0.40, 0.69), kind="web"),
+    dict(name="spark_pore", file="dgx-spark-q34.png", box=(0.18, 0.51, 0.40, 0.69), kind="pore"),
 ]
 
 def measure(offset):

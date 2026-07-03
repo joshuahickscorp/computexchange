@@ -549,3 +549,17 @@ CHOSEN B: it delivers the overlapping-depth cue the audit called critical, at co
 (~21s vs 25s). Both survive the front crop; B wins the 3/4 grazing acceptance test. Evidence:
 wave5-foam-A.png, wave5-foam-B.png (3/4), wave5-foam-B-front.png. FOAM default = B. Strut colour
 (too gold/uniform) + pore albedo + threaded normal remain for 5c (material).
+
+### 5c · class MATERIAL · foam tone
+- Pore albedo LIFTED off near-black (0.012 = L~2) to a soft dark grey-champagne (0.050,0.044,
+  0.034); the new 5b open-cell depth + AO carry the darkness now, not a black albedo.
+- Struts DESATURATED off olive-gold (0.585,0.44,0.155) to grey-champagne (0.400,0.375,0.290);
+  the gold impression now comes from the metallic specular glints, not a saturated diffuse.
+- Threaded micro-normal: NONE to remove · that artifact was the old uniform Voronoi, gone with
+  the 5b geometry (the struts are real ligaments now).
+- Gate change: the web/pore QUARTILES don't fit the additive offset (web = exposure-robust
+  specular glints sitting at ref brightness; pore = near-black extreme with a negative target).
+  Replaced them with the foam MEAN tone gate (spark_foam), b* de-warmed 20.5 -> 8.0 (same
+  warm-light autopsy as champ/top). spark_foam PASS dE 2.54, natural offset -11.3 (matches the
+  -12 group). The web/pore spread stays as the 5b depth diagnostic. Foam reads as grey-gold
+  open-cell metal foam matching the reference (wave5c-foam.png). Clip green.

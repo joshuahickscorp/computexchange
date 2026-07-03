@@ -524,8 +524,14 @@ def champagne_gold(rough=0.28, pore_darken=False):
         mixc = nt.nodes.new("ShaderNodeMixRGB")
         # pinned to sth_front-1 clean foam (mean L47): the web/pore split showed pores +11 L too
         # bright (ref 16, ren 27) and web +6 (ref 74, ren 79) · darken both, pores hardest.
-        mixc.inputs["Color1"].default_value = (0.012, 0.008, 0.004, 1)  # near-black open pore
-        mixc.inputs["Color2"].default_value = (0.585, 0.44, 0.155, 1)   # gold strut, darkened to pull the mean to target
+        # wave 5c: pore albedo LIFTED off near-black (0.012 = L~2, nothing physical is that black)
+        # to a soft dark grey-champagne · the new real open-cell depth (5b) + AO carry the darkness,
+        # and this restores the warm pore b* the reference shows. Struts DESATURATED off olive-gold
+        # toward grey-champagne · the gold impression now comes from the metallic specular glints,
+        # not a saturated diffuse (the audit's fix). No threaded micro-normal (that was the old
+        # uniform Voronoi, gone with the 5b geometry).
+        mixc.inputs["Color1"].default_value = (0.050, 0.044, 0.034, 1)  # soft dark grey-champagne pore
+        mixc.inputs["Color2"].default_value = (0.400, 0.375, 0.290, 1)  # desaturated grey-champagne strut
         nt.links.new(webmask, mixc.inputs["Fac"])
         # AO carries the pore depth the shallow displacement cannot: deep cavity self-shadow
         ao = nt.nodes.new("ShaderNodeAmbientOcclusion"); ao.inputs["Distance"].default_value = mm(1.3)
