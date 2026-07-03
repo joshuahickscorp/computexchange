@@ -175,6 +175,29 @@ champagne surface blown + desaturated by AgX under the bright key) · the pocket
 a distinct darker rough material (assign_interior is not catching the floor). Geometry + foam
 are the win; the pill polish is scoped next.
 
+## SPARK · pill-cut fix (loop 2)
+
+Change class: GEOMETRY. Root cause found: the stadium() cutter's post-rotation origin extended
+in -y (in FRONT of the body face), so the pill pockets were never cut · the visible ovals were
+foam holes over the flat champagne face and the tub was embedded in solid (the green-debug tub
+was invisible, and assign_interior matched 0 faces). Corrected the cutter y (front edge at
+front_y+POCK): assign_interior now catches 134 pocket faces, the pills read as recessed
+champagne hand-holds with real inner-wall depth.
+
+## SPARK CHECKPOINT · case for closure (presented, awaiting grade)
+
+Stack: measure_evidence/spark_front_compare.png (render vs sth_front-1), verify/gate1-dgx-spark.png
+(4-angle wireframe+shaded turnaround), verify/dgx-spark@3x.png (hero, clip 0.000% peak 0.925).
+State: the FRONT is the 150 x 50.5 ~3:1 STRIP (headline fix, was read square); the open-cell
+metal foam is solved via mesh-curvature (Pointiness) keying (convex struts bright gold, concave
+pores dark + AO) at ~7/cm coarse + ~14/cm fine, foam tone dE 7.7 vs the reference; two recessed
+champagne pill hand-holds with real inner-wall depth at the measured positions; thin ~2.5mm
+champagne lips; a recessed top vent panel; crisp 6mm edges; anodized champagne gold; clip green.
+Honest residuals: foam pores read a touch finer/lighter than the reference (dE 7.7) and the pill
+floors slightly bright; the champagne is a touch saturated vs the muted reference; the top vent
+panel is smooth where the reference has a fine weave; pills stay blank (trademark gate). Foam
+density was corrected mid-loop (storagereview scale was desk-corrupted; sth_front-1 clean).
+
 ## Combined scene · tabletop hero
 
 ### iter 1 (128 spp, 25% preview)
