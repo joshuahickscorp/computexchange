@@ -50,6 +50,7 @@ ONLY = str(arg("--only", "all"))
 PW = int(arg("--pw", 0))            # portrait width override (fast wave-0 tone calibration)
 PSAMP = arg("--psamples", None)     # portrait sample override (calibration speed)
 PDIR = str(arg("--pdir", "render/portraits/"))  # portrait output dir (calib to a scratch dir)
+FOAM = str(arg("--foam", "B"))      # wave-5b foam depth technique: "A" single / "B" stacked shells
 if not PDIR.endswith("/"):
     PDIR += "/"
 if not OUT.endswith("/"):
@@ -720,30 +721,39 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
         foam = bpy.context.active_object; foam.name = "dgx-spark-foam"
         foam.scale = (ffx, ffz, 1.0); bpy.ops.object.transform_apply(scale=True)
         foam.data.materials.append(foam_flat_material())
+        foam_layers = [foam]
     else:
-        bpy.ops.mesh.primitive_grid_add(x_subdivisions=820, y_subdivisions=280, size=1.0,
-                                        location=(0, front_y - mm(0.4), zc),
-                                        rotation=(math.radians(90), 0, 0))
-        foam = bpy.context.active_object; foam.name = "dgx-spark-foam"
-        foam.scale = (ffx, ffz, 1.0); bpy.ops.object.transform_apply(scale=True)
-        bpy.context.view_layer.objects.active = foam
-        # wave 3: the foam field is now BOUNDED to the center span (86.9mm), so the pills at
-        # +/- 56.45mm sit in the solid champagne END-CAPS, outside the foam. No foam pill-holes
-        # needed (the old fhole cutters are gone).
-        # coarse displacement only · the ~1.5mm pores must read distinct, not sandpaper. The
-        # fine sub-structure lives in the shader (color/roughness), not the geometry.
-        for nm, cell, strength, mid in (("pores", FOAM_CELL, mm(1.4), 0.42),):
-            tex = bpy.data.textures.new("foam-voronoi-" + nm, "VORONOI")
-            tex.distance_metric = "DISTANCE"; tex.weight_1 = -1.0; tex.weight_2 = 1.0
-            tex.noise_scale = mm(cell); tex.noise_intensity = 1.0
-            disp = foam.modifiers.new(nm, "DISPLACE")
-            disp.texture = tex; disp.texture_coords = "LOCAL"; disp.direction = "Y"
-            disp.mid_level = mid; disp.strength = strength
-            bpy.ops.object.modifier_apply(modifier=disp.name)
+        # wave 5b · two-scale displacement for size VARIANCE (coarse 2.15mm cells subdivided by
+        # a finer 1.30mm strut network · fixes the uniform single-scale reptile-skin look) plus
+        # real DEPTH via a bake-off: A = single deeper plane, B = A + a stacked shell offset
+        # 1.6mm behind at DIFFERENT cell scales so its struts fall between the front pores and
+        # peek through -> overlapping open-cell depth. Displacement budgeted below cell pitch.
+        def _foam_layer(name, yoff, cells_strengths):
+            bpy.ops.mesh.primitive_grid_add(x_subdivisions=900, y_subdivisions=320, size=1.0,
+                                            location=(0, front_y - mm(0.4) + yoff, zc),
+                                            rotation=(math.radians(90), 0, 0))
+            f = bpy.context.active_object; f.name = name
+            f.scale = (ffx, ffz, 1.0); bpy.ops.object.transform_apply(scale=True)
+            bpy.context.view_layer.objects.active = f
+            for i, (cell, strength) in enumerate(cells_strengths):
+                tex = bpy.data.textures.new(name + "-v" + str(i), "VORONOI")
+                tex.distance_metric = "DISTANCE"; tex.weight_1 = -1.0; tex.weight_2 = 1.0
+                tex.noise_scale = mm(cell); tex.noise_intensity = 1.0
+                d = f.modifiers.new("d" + str(i), "DISPLACE")
+                d.texture = tex; d.texture_coords = "LOCAL"; d.direction = "Y"
+                d.mid_level = 0.42; d.strength = strength
+                bpy.ops.object.modifier_apply(modifier=d.name)
+            smooth(f, 70)
+            return f
+        foam = _foam_layer("dgx-spark-foam", 0.0, [(2.15, mm(1.9)), (1.30, mm(1.0))])
         foam.data.materials.append(champagne_gold(pore_darken=True))
-        smooth(foam, 70)
+        foam_layers = [foam]
+        if FOAM == "B":
+            back = _foam_layer("dgx-spark-foam-back", mm(1.6), [(1.80, mm(1.6)), (1.05, mm(0.9))])
+            back.data.materials.append(champagne_gold(pore_darken=True))
+            foam_layers.append(back)
 
-    group = [body, foam] + tubs
+    group = [body] + foam_layers + tubs
     for ob in group:
         ob.rotation_euler.z = math.radians(yaw_deg)
         x, y = ob.location.x, ob.location.y

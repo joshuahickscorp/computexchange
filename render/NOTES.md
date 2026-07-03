@@ -536,3 +536,16 @@ fine; density was never the miss. The real deficiencies (for 5b/5c): rounded blo
 (not angular Voronoi shards), REAL open-cell depth (not a flat displaced skin), size variance,
 and material (pore albedo off near-black, struts desaturated, threaded micro-normal removed).
 Old density rows stand (measurement confirmed, not superseded); the AUDIT claim is what's struck.
+
+### 5b · class GEOMETRY · foam rebuild + depth bake-off (B chosen)
+Root cause of the reptile-skin: single-scale (uniform) shallow (1.4mm) F2-F1 displacement.
+Rebuilt with TWO-scale displacement (coarse 2.15mm cells subdivided by a finer 1.30mm strut
+network -> size variance, deeper 1.9mm budgeted below cell pitch). Bake-off of the DEPTH
+technique, both self-graded against the reference on the 3/4 grazing render AND the front detail:
+- A · single deeper plane: real open-cell read, good depth from displacement + AO.
+- B · A + a stacked shell 1.6mm behind at DIFFERENT cell scales (1.80/1.05mm) so its struts fall
+  between the front pores and peek through -> genuine OVERLAPPING depth ("struts behind struts").
+CHOSEN B: it delivers the overlapping-depth cue the audit called critical, at comparable cost
+(~21s vs 25s). Both survive the front crop; B wins the 3/4 grazing acceptance test. Evidence:
+wave5-foam-A.png, wave5-foam-B.png (3/4), wave5-foam-B-front.png. FOAM default = B. Strut colour
+(too gold/uniform) + pore albedo + threaded normal remain for 5c (material).
