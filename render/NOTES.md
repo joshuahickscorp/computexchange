@@ -96,6 +96,17 @@ Self-grade (render/verify/loop-studio.png, front ortho vs apple_front, level cam
   on a 197mm-deep body even 1.5 deg projected ~5mm of false height. Next: geometry loop 2 on
   the bottom fillet, then phase 2 (material tone + light + clipcheck).
 
+## ACCURACY GRIND v2 · PHASE 2 · light loop · Studio verify tone
+
+Change class: LIGHT (no geometry/material touched). The high-key verify rig over-lit the
+aluminium to L*97 (dE 12.9 vs the reference L*84.3) · a blown near-white, not Apple's studio
+silver. Trimmed the bright verify world 0.62 -> 0.34 and exposure 0.0 -> -1.5 so the rendered
+mid-face reads L*85.8 / a*0 / b*-0.5 · dE 1.6 vs reference (PASS, tol 2.5). Matched to the
+reference tone, not flattered. clipcheck.py added (device pixels >=0.98, >1% fails); the front
+verify is clip 0.000% peak 0.859 PASS. verify_sheet now reports the alu patch dE every loop.
+Open residual for the next loops: the perforated intake band reads darker than the reference
+mid-grey (material), and XOR-area 4.6% at the bottom corners (geometry).
+
 ## Combined scene · tabletop hero
 
 ### iter 1 (128 spp, 25% preview)

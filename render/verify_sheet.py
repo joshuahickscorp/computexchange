@@ -132,6 +132,15 @@ def build(device):
     cd_ = contour_dev(refMs, renMs)
     clp = clip_pct(ren_c, ren_m)
 
+    # material tone: aluminium mid-face patch delta-E (CIE76), render vs reference, same region
+    def patch_lab_rel(rgb, mask, rx0, ry0, rx1, ry1):
+        x0, y0, x1, y1 = M.bbox_of(mask); W = x1 - x0; H = y1 - y0
+        px = rgb[y0+int(ry0*H):y0+int(ry1*H), x0+int(rx0*W):x0+int(rx1*W)]
+        return M.srgb_to_lab(px.astype(float).reshape(1, -1, 3) / 255.0).reshape(-1, 3).mean(0)
+    lab_ref = patch_lab_rel(ref_c, ref_m, 0.30, 0.28, 0.45, 0.42)
+    lab_ren = patch_lab_rel(ren_c, ren_m, 0.30, 0.28, 0.45, 0.42)
+    dE = float(np.sqrt(((lab_ref - lab_ren) ** 2).sum()))
+
     def fmt(v, u=""):
         return f"{v:.2f}{u}" if isinstance(v, float) else str(v)
     def dcol(delta, tol):
@@ -145,6 +154,7 @@ def build(device):
         lines.append((f"top corner R  ref {m_ref['corner_R']:.1f}  ren {m_ren['corner_R']:.1f}  d {dr:+.1f}mm", dcol(dr,1.0)))
     lines.append((f"contour  max {cd_['maxpct']:.1f}% @y{cd_['myfrac']:.0%}  mean {cd_['meanpct']:.1f}%  XOR-area {cd_['xorpct']:.1f}%", dcol(cd_['xorpct'],2.0)))
     lines.append((f"clip (>=0.98)  {clp:.2f}%  {'PASS' if clp<1.0 else 'FAIL'}", (90,220,120) if clp<1.0 else (240,90,90)))
+    lines.append((f"alu tone  ref Lab {lab_ref[0]:.0f}/{lab_ref[1]:+.0f}/{lab_ref[2]:+.0f}  ren {lab_ren[0]:.0f}/{lab_ren[1]:+.0f}/{lab_ren[2]:+.0f}  dE {dE:.1f}", dcol(dE, 2.5)))
     lines.append(("", (0,0,0)))
     lines.append(("front features (x from center, w x h mm, aspect):", (255,255,255)))
     for tag, mm_ in (("ref", m_ref), ("ren", m_ren)):

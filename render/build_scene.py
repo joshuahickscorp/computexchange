@@ -833,9 +833,11 @@ def verify_rig_front(subject_w, subject_h, res, bright=False):
     w.use_nodes = True
     # bright high-key white surround (Apple product studio) for aluminium so it reads
     # as bright silver · dim directional (StorageReview desk) for the Spark champagne
-    w.node_tree.nodes["Background"].inputs[0].default_value = (0.62, 0.62, 0.64, 1) if bright else (0.05, 0.05, 0.055, 1)
+    w.node_tree.nodes["Background"].inputs[0].default_value = (0.34, 0.34, 0.36, 1) if bright else (0.05, 0.05, 0.055, 1)
     sc.world = w
-    sc.view_settings.exposure = 0.0 if bright else -0.1
+    # bright verify exposure trimmed so the rendered aluminium mid-face reads L*~84 (Apple's
+    # studio tone), not a blown near-white · matched to the reference, not flattered.
+    sc.view_settings.exposure = -1.5 if bright else -0.1
     aim = bpy.data.objects.new("Aim", None)
     aim.location = (0, 0, subject_h * 0.5)
     bpy.context.collection.objects.link(aim)
