@@ -908,8 +908,9 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
             return f
         foam = _foam_layer("dgx-spark-foam", 0.0,
                            [("warpXZ", 5.5, mm(0.6), 0.5),   # L3 · reduced · was distorting the bezel cutouts
-                            ("vor", 3.35, mm(1.35), 0.42),   # BIG cells (L2 · breaks uniform-size tessellation)
-                            ("vor", 2.15, mm(1.95), 0.42),   # medium cells (primary open pores)
+                            ("vor", 4.70, mm(1.15), 0.30),   # torn/merged deep cells (grader part-4 · irregularity)
+                            ("vor", 3.35, mm(1.30), 0.42),   # BIG cells (L2 · breaks uniform-size tessellation)
+                            ("vor", 2.15, mm(1.90), 0.42),   # medium cells (primary open pores)
                             ("clouds", 0.85, mm(0.55), 0.5),
                             ("clouds", 8.0, mm(0.95), 0.5)])
         foam.data.materials.append(champagne_gold(pore_darken=True))
@@ -1158,9 +1159,13 @@ def portrait_rig(subject_h, warm=False, key_e=55, key_sz=1.5, rim_e=26, fill_e=9
     # above + a hair camera-side so it reflects in the tops and upper fillets, NOT the near-vertical
     # front faces (the spark_champ / studio_alu front patches). Energy gate-tuned; if spark_top
     # (the one top patch, tight) drifts, this dims first · tone SENIOR.
-    # L3 · broadened + raised + dimmed · the tighter/brighter version cast circular "ghost AO blob"
-    # artefacts on the silver top that read as CG. A larger, higher, softer source is a smooth smear.
-    add_area("p-refl", (0.15, -0.35, subject_h * 0.5 + 2.7), 3.8, 1.5, (1.0, 0.985, 0.95), aim=None)
+    # photoreal T5 (grader acceptance) · a large rectangular SOFTBOX whose SHAPE is identifiable with
+    # a READABLE EDGE in both metal tops (Apple dark-hero style: black world, one big soft source with
+    # visible shape). Camera-front and elevated so its bright rectangle reflects across the tops toward
+    # the raised camera. sx/size_y give the rectangle; energy gate-tuned so the reflection reads while
+    # the tone patches hold (the light iterates, the pin never moves). Replaces the shapeless soft card.
+    sb = add_area("p-softbox", (-0.15, -1.05, subject_h * 0.5 + 1.6), 1.5, 4.2,
+                  (1.0, 0.985, 0.95), sx=0.85, aim=aim)
     # photoreal T5: a defined SOFTBOX reflection on the matte champagne top desaturated its gold
     # below the pin at every energy that read (tone gate is SENIOR, and the champagne is already
     # borderline). Kept OFF · the STRIP RIM draws the readable-edge line on the fillets, and the
