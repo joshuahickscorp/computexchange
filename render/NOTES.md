@@ -3,6 +3,83 @@
 Minimum three look-fix cycles per device. "Done" requires a written pass stating what a
 device owner would check and why it now passes. Dash gate: middot only.
 
+## ACCURACY GRIND v2 · phase 0 (reference hunt) + phase 0b (measurement rig)
+
+Change class: REMEASURE (foundation). No geometry or material changed this pass · the
+builders are untouched. Two hard rules now bind every later loop: (1) I never grade my own
+work as done · I present a compare sheet + delta table and wait for the grade; (2) no
+guessed geometry · every radius/position/size traces to a `render/measure.py` row anchored
+to one known real dimension per device, with a pixel-evidence crop under
+`render/measure_evidence/`.
+
+Built this pass:
+- `render/ref/<device>/` reference libraries + `render/ref/SOURCES.md` coverage matrix.
+  All six views covered per device except the Mac Studio bottom face (documented gap, three
+  failed avenues named; the base *reveal* that a portrait shows is captured in the front +
+  three-quarter shots).
+- `render/measure.py` (pure numpy + Pillow): border-flood-fill silhouette, Kasa circle fit
+  with trimmed refit for radii, connected-component blobs for ports/pills, integral-image
+  local-std for foam-vs-champagne, ridge-peak foam density, sRGB->Lab patches.
+- `render/MEASUREMENTS.md` · 51 rows with evidence.
+
+Findings the measurement surfaces (for later loops, not graded here):
+- DGX Spark FRONT is a 150 x 50.5 strip, aspect 2.92 · NOT the square the prior model used
+  ("flat-square proportion"). The square face is the TOP (150 x 150).
+- Mac Studio has TWO distinct radii the prior pass conflated: front-outline top-edge fillet
+  R_top = 8.3 mm (tight, sub-mm rms) vs footprint / vertical-edge radius 31.4 mm (vector,
+  rms 0.04 mm). Prior model's ~28 to 30 mm on the front corners was the footprint radius
+  applied to the wrong edge.
+- Spark front edge radius 6.1 mm (crisp); champagne pills 31 x 13 mm, pitch 113 mm; foam
+  cell density 13 to 14.5 cells/cm; thin ~2.5 mm champagne lip framing the foam field.
+
+## ACCURACY GRIND v2 · remeasure loop 2 (phase-0 corrections)
+
+Change class: REMEASURE. Four corrections from the phase-0 grade, no geometry/material
+touched:
+1. Mac USB-C orientation · opened the full-res zoom (mac_usbc_zoom.png). The two front
+   ports are VERTICAL (long axis along the 95mm height; blob W/H = 0.31), 8.47 x 2.62 mm ·
+   a USB-C receptacle (8.4 x 2.6) rotated 90 degrees. The SD slot is the horizontal one
+   (26.85 x 2.50). Reporting now names each axis + orientation explicitly. This is what the
+   image shows; it does not match a horizontal 8.9 x 3.2 reading. Apple's own front press
+   photo + the connector dimensions both confirm vertical.
+2. base_reveal split · intake_band_height = 8.55 mm (perforated hex mesh, apple_front,
+   texture onset, evidence mac_intake_band.png). base_reveal_gap is physically a few mm but
+   NOT resolvable from refs (front floats; 3/4 conflates recess with cast shadow) · reported
+   as a documented gap, not a fabricated value.
+3. Anchoring rule adopted · spec supplies absolute dimensions (Studio 197x197x95, Spark
+   150x150x50.5); images supply only ratios + feature positions relative to their own anchor
+   edge. Spark short edge -> spec 50.5 (sources read 51.4 / 48.6, per-source perspective
+   noted). Mac height -> spec 95 (image reads 96.18, +1.2%, = intake-band inclusion; scale
+   validated by USB-C 8.47 vs true 8.4, +0.8%, so NOT scale error).
+4. top_edge_fillet_R and front_corner_R were one measurement (same front-outline top-corner
+   contour) · merged into a single top_edge_fillet_R = 8.27 mm row.
+Confirmed: Spark pill long axis runs along the 50.5mm short/depth edge, pills arrayed along
+the 150mm long axis.
+
+## ACCURACY GRIND v2 · remeasure loop 3 (tiebreak + positions, autonomy granted)
+
+Change class: REMEASURE.
+- USB-C orientation TIEBREAK · fetched a second independent photographer (Wikimedia Commons
+  "Mac Studio (2022) front", 4275x2850). Same blob measurement: ports read H/W 1.87 (a 3/4
+  from above, foreshortened) vs Apple's H/W 3.25 · both vertical. Two photographers agree ·
+  the row is SETTLED vertical (tiebreak sheet measure_evidence/tiebreak_usbc.png). Baking
+  vertical into the geometry.
+- Feature x-positions recorded (relative to anchor x spec): usbc left -66.2 / right -51.4,
+  sd -24.4, led +87.7 mm from center; port row 24.4 mm above the base.
+- base_reveal_gap · second hunt (iFixit teardown, OWC teardown, review galleries) found no
+  clean side-elevation on a surface. Per the closure directive, set 2.5 mm INFERRED (declared
+  design parameter, not measured), to be tuned in phase 3 against the 3/4 blend.
+
+## ACCURACY GRIND v2 · PHASE 1 · geometry loop 1 · Mac Studio rebuild from the table
+
+Change class: GEOMETRY (declared before the change). Rebuild build_mac_studio so every value
+traces to a MEASUREMENTS.md row. Fixes the known defects: footprint corner 36 -> 31.4 mm;
+top-edge fillet 3 -> 8.27 mm (tight, top dead-flat); USB-C ports HORIZONTAL 9x3.5 -> VERTICAL
+2.62x8.47 as real recessed pockets with inner darkness + a centered tongue blade at the
+measured x/z; beveled SD slot 26.85x2.50 horizontal; circular pedestal with the 8.55 mm
+perforated intake band on the bottom fillet + a 2.5 mm reveal gap. No material/light change
+this loop.
+
 ## Combined scene · tabletop hero
 
 ### iter 1 (128 spp, 25% preview)
