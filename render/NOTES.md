@@ -733,3 +733,12 @@ not an external button shadow. Tools added: --zaudit (z-table), --raking (accept
 FREEZE: the DGX Spark geometry is now FROZEN, equal in status to the closed Studio. Not one vertex
 or constant changes from here. The only geometry-adjacent surface that may still change is the foam
 displacement MAP (part 4), a texture contract, not a mesh contract.
+
+## PHOTOREAL · Commit FOAM-GEO-MAP · class FOAM-GEO-MAP (T2, O1)
+De-threaded the foam: the fine displacement is NON-periodic clouds noise (was a second Voronoi;
+the two-Voronoi interference caused the helical strut read). Added a low-frequency clouds layer
+(8mm) for a DEPTH HIERARCHY · pores now read bimodal (some fully dark/deep, some shallow) rather
+than one uniform emboss (foamgeo-dethread.png). Coarse Voronoi still gives the open cells; web/pore
+tone pins unchanged (still gated in the reshoot). Residual for the panel: faint strut ribbing at
+200pct, a few over-flat shallow patches; crush-band + torn-cells deferred to a follow-up if the
+panel names them. T2/O1 -> FIXED-UNCONFIRMED.

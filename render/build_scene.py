@@ -771,21 +771,33 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
                 mb.solver = "EXACT"; mb.object = bez
                 bpy.ops.object.modifier_apply(modifier=mb.name)
                 bpy.data.objects.remove(bez, do_unlink=True)
-            for i, (cell, strength) in enumerate(cells_strengths):
-                tex = bpy.data.textures.new(name + "-v" + str(i), "VORONOI")
-                tex.distance_metric = "DISTANCE"; tex.weight_1 = -1.0; tex.weight_2 = 1.0
-                tex.noise_scale = mm(cell); tex.noise_intensity = 1.0
+            # FOAM-GEO-MAP (photoreal): coarse VORONOI gives the open cells; the fine detail is
+            # NON-periodic noise (de-threads · the old two-Voronoi interference made a helical
+            # read on the struts); a low-frequency clouds layer adds a DEPTH HIERARCHY (some
+            # regions pushed deeper). Each entry: (type, scale_mm, strength_mm, mid).
+            for i, (ttype, scale, strength, mid) in enumerate(cells_strengths):
+                if ttype == "vor":
+                    tex = bpy.data.textures.new(name + "-t" + str(i), "VORONOI")
+                    tex.distance_metric = "DISTANCE"; tex.weight_1 = -1.0; tex.weight_2 = 1.0
+                    tex.noise_scale = mm(scale); tex.noise_intensity = 1.0
+                else:  # "clouds" · fBm-like non-periodic noise (fine de-thread / coarse depth)
+                    tex = bpy.data.textures.new(name + "-t" + str(i), "CLOUDS")
+                    tex.noise_scale = mm(scale); tex.noise_depth = 3
                 d = f.modifiers.new("d" + str(i), "DISPLACE")
                 d.texture = tex; d.texture_coords = "LOCAL"; d.direction = "Y"
-                d.mid_level = 0.42; d.strength = strength
+                d.mid_level = mid; d.strength = strength
                 bpy.ops.object.modifier_apply(modifier=d.name)
             smooth(f, 70)
             return f
-        foam = _foam_layer("dgx-spark-foam", 0.0, [(2.15, mm(1.9)), (1.30, mm(1.0))])
+        foam = _foam_layer("dgx-spark-foam", 0.0,
+                           [("vor", 2.15, mm(1.9), 0.42), ("clouds", 0.85, mm(0.55), 0.5),
+                            ("clouds", 8.0, mm(0.85), 0.5)])
         foam.data.materials.append(champagne_gold(pore_darken=True))
         foam_layers = [foam]
         if FOAM == "B":
-            back = _foam_layer("dgx-spark-foam-back", mm(1.6), [(1.80, mm(1.6)), (1.05, mm(0.9))], hole_pad=6.0, width=mm(90))  # center-only · never reaches the pills
+            back = _foam_layer("dgx-spark-foam-back", mm(1.6),
+                               [("vor", 1.80, mm(1.6), 0.42), ("clouds", 0.75, mm(0.45), 0.5)],
+                               hole_pad=6.0, width=mm(90))  # center-only · never reaches the pills
             back.data.materials.append(champagne_gold(pore_darken=True))
             foam_layers.append(back)
 

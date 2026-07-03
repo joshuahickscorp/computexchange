@@ -8,7 +8,7 @@ true of the reference device (measurement beats panel), logged and not chased. D
 | id | tell | owning class | status | fix commit | evidence | panel loops named | notes |
 |----|------|-------------|--------|-----------|----------|-------------------|-------|
 | T1 | surface perfection · single roughness band, no smudge/dust/sparkle | MATERIAL | OPEN | - | - | - | 3-octave roughness, grazing sparkle, sub-threshold smudge+dust |
-| T2 | foam depth uniformity + strut threading | FOAM-GEO-MAP | OPEN | - | - | - | bimodal pore depth, torn cells, crush band, de-thread on a test tile |
+| T2 | foam depth uniformity + strut threading | FOAM-GEO-MAP | FIXED-UNCONFIRMED | foamgeo | foamgeo-dethread.png | - | coarse Voronoi cells + non-periodic fine noise (de-thread) + low-freq clouds depth hierarchy (bimodal pores). Residual: faint strut ribbing, a few over-flat shallow patches. Crush band + torn-cells deferred. |
 | T3 | infinite focus · zero DOF | CAMERA | OPEN | - | - | - | per-shot focus plane + physical DOF; far device softer on the pair |
 | T4 | missing image-formation layer · no grain/bloom/aberration/vignette | POST | OPEN | - | - | - | one post chain, each effect below conscious notice |
 | T5 | empty reflections · metals reflect abstract gradients | LIGHTING | OPEN | - | - | - | readable softbox EDGE in each metal, consistent between devices |
@@ -20,5 +20,5 @@ true of the reference device (measurement beats panel), logged and not chased. D
 ## own cold re-look findings (appended as discovered; same schema)
 | id | tell | owning class | status | fix commit | evidence | panel loops named | notes |
 |----|------|-------------|--------|-----------|----------|-------------------|-------|
-| O1 | foam strut helical threading visible at 200pct (interference of the two displacement scales) | FOAM-GEO-MAP | OPEN | - | commit1-raking-A-left.png | - | folded into T2 de-threading; log separately if it survives |
+| O1 | foam strut helical threading (two-displacement interference) | FOAM-GEO-MAP | FIXED-UNCONFIRMED | foamgeo | foamgeo-dethread.png | - | fine Voronoi replaced by non-periodic clouds noise · helical read much reduced (faint ribbing remains for the panel to judge) |
 | O2 | champagne reads a touch flat/plastic on the smooth shell (no anodize grain) | MATERIAL | OPEN | - | - | - | folded into T1/Spark-champagne anodize directional structure |
