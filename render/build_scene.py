@@ -147,6 +147,25 @@ STUDIO = {
     "led_z":         27.50,  # led_from_base
 }
 
+SPARK = {
+    "width":       150.0,   # front_long_anchor · the 150mm long (x) axis of the front strip
+    "depth":       150.0,   # top_depth_spec (y)
+    "height":       50.5,   # front_short_edge_spec · the 50.5mm short (z) axis · a 3:1 STRIP
+    "edge_R":        6.09,  # front_edge_R_mean · crisp front-face edge fillet
+    "pill_long":    31.41,  # pill along the 50.5 short/depth (z) axis
+    "pill_short":   12.96,  # pill along the 150 long (x) axis
+    "pill_pitch":  112.90,  # center-to-center along the 150 x-axis (pills at +/- pitch/2)
+    "foam_field_long":  148.02,  # foam extent along x
+    "foam_field_short":  46.34,  # foam extent along z
+    "foam_lip":      2.53,  # champagne lip on the long (top/bottom) edges
+    "foam_cell_cm": 13.75,  # foam_cells_per_cm mean (13.0 / 14.5) -> ~0.73mm cell pitch
+    "top_panel_w": 114.15,  # recessed top vent panel
+    "top_panel_h": 105.06,
+    "top_panel_inset": 17.92,
+    "champ_Lab":  (72.52, 7.78, 42.78),   # champagne shell target
+    "foam_Lab":   (38.09, 1.19, 20.50),   # foam mean target (darker gold)
+}
+
 # ---- geometry helpers ----------------------------------------------------------------
 def rounded_box(name, w, d, h, r_corner, r_top, r_bottom, seg_corner=24, seg_fillet=6):
     """A racetrack-profile body: box (w x d x h), vertical corner radius r_corner,
@@ -283,8 +302,12 @@ def led_glass():
     return principled("led-glass", (0.02, 0.022, 0.025), 0.08, metallic=0.0, coat=1.0, coat_rough=0.05)
 
 
-FOAM_CELL = 2.0       # coarse pore pitch in true mm (reference is a fine dense foam)
-FOAM_FINE = FOAM_CELL / 3.0   # the overlapping second scale (checklist: ~1/3)
+# TWO overlapping scales (the reference is coarse open pores ~7/cm + finer sub-structure
+# ~14/cm; the phase-0 13-14.5/cm was the FINE scale, its coarse partner is ~1.45mm). The
+# clean-bg sth_front-1 remeasure gives ~6.5/cm coarse. Displacement must stay UNDER the cell
+# pitch or adjacent pores overlap into gravel.
+FOAM_CELL = 20.0 / SPARK["foam_cell_cm"]   # coarse pore pitch ~= 1.45 mm (~7/cm)
+FOAM_FINE = 10.0 / SPARK["foam_cell_cm"]   # fine sub-structure ~= 0.73 mm (~14/cm)
 
 
 def _voronoi_ridge(nt, tc, cell):
@@ -321,7 +344,7 @@ def foam_field(nt):
     mix.operation = "MULTIPLY_ADD"       # coarse + 0.4*fine
     fine_scaled = nt.nodes.new("ShaderNodeMath")
     fine_scaled.operation = "MULTIPLY"
-    fine_scaled.inputs[1].default_value = 0.4
+    fine_scaled.inputs[1].default_value = 0.22   # coarse ~1.5mm cells dominate the read
     nt.links.new(fine, fine_scaled.inputs[0])
     add = nt.nodes.new("ShaderNodeMath")
     add.operation = "ADD"
@@ -422,26 +445,47 @@ def foam_flat_material():
 
 
 def champagne_gold(rough=0.28, pore_darken=False):
+    # Anodized champagne is a COLOURED oxide, not a pure mirror · metallic ~0.5 so the gold
+    # diffuse shows (b*~40), otherwise a neutral key reflects off pure metal and reads cream.
     m = principled("spark-gold" + ("-foam" if pore_darken else ""),
-                   (0.60, 0.47, 0.25), rough)
+                   (0.78, 0.53, 0.14), rough, metallic=0.28)
     if pore_darken:
         nt = m.node_tree
         b = nt.nodes["Principled BSDF"]
-        field = foam_field(nt)
-        ramp = nt.nodes.new("ShaderNodeValToRGB")
-        # The champagne web dominates (reference reads golden, not black); only the
-        # deepest pore centers fall dark, and even they stay a dark champagne, not soot.
-        ramp.color_ramp.elements[0].position = 0.08
-        ramp.color_ramp.elements[0].color = (0.92, 0.74, 0.42, 1)
-        ramp.color_ramp.elements[1].position = 0.62
-        ramp.color_ramp.elements[1].color = (0.11, 0.08, 0.05, 1)
-        nt.links.new(field, ramp.inputs["Fac"])
-        nt.links.new(ramp.outputs["Color"], b.inputs["Base Color"])
-        rramp = nt.nodes.new("ShaderNodeMapRange")
-        rramp.inputs["To Min"].default_value = 0.22
-        rramp.inputs["To Max"].default_value = 0.55
-        nt.links.new(field, rramp.inputs["Value"])
-        nt.links.new(rramp.outputs["Result"], b.inputs["Roughness"])
+        tc = nt.nodes.new("ShaderNodeTexCoord")
+        coarse = _voronoi_ridge(nt, tc, FOAM_CELL)   # 0 on the strut web, ~0.5 at pore centers
+        fine = _voronoi_ridge(nt, tc, FOAM_FINE)
+
+        def mr(val, fmn, fmx, tmn, tmx, clamp=True):
+            n = nt.nodes.new("ShaderNodeMapRange"); n.clamp = clamp
+            n.inputs["From Min"].default_value = fmn; n.inputs["From Max"].default_value = fmx
+            n.inputs["To Min"].default_value = tmn; n.inputs["To Max"].default_value = tmx
+            nt.links.new(val, n.inputs["Value"]); return n.outputs["Result"]
+
+        # web mask driven by real mesh CURVATURE (Pointiness) of the displaced foam: the convex
+        # strut tops read bright gold, the concave pore floors dark · this keys colour to the
+        # actual geometry (the Voronoi field alone did not produce the open-cell contrast). A
+        # touch of the coarse Voronoi web keeps the struts continuous where curvature is flat.
+        geo = nt.nodes.new("ShaderNodeNewGeometry")
+        wcurv = mr(geo.outputs["Pointiness"], 0.50, 0.555, 0.0, 1.0)   # narrow bright web (pore-dominant)
+        wcoarse = mr(coarse, 0.16, 0.05, 0.0, 0.22)                    # light secondary web
+        web = nt.nodes.new("ShaderNodeMath"); web.operation = "MAXIMUM"
+        nt.links.new(wcurv, web.inputs[0]); nt.links.new(wcoarse, web.inputs[1])
+        webmask = web.outputs[0]
+
+        mixc = nt.nodes.new("ShaderNodeMixRGB")
+        mixc.inputs["Color1"].default_value = (0.028, 0.019, 0.010, 1)  # deep dark open pore
+        mixc.inputs["Color2"].default_value = (0.72, 0.54, 0.24, 1)     # gold strut
+        nt.links.new(webmask, mixc.inputs["Fac"])
+        # AO carries the pore depth the shallow displacement cannot: deep cavity self-shadow
+        ao = nt.nodes.new("ShaderNodeAmbientOcclusion"); ao.inputs["Distance"].default_value = mm(0.8)
+        aomix = nt.nodes.new("ShaderNodeMixRGB"); aomix.blend_type = "MULTIPLY"
+        aomix.inputs["Fac"].default_value = 0.45
+        nt.links.new(mixc.outputs["Color"], aomix.inputs["Color1"])
+        nt.links.new(ao.outputs["Color"], aomix.inputs["Color2"])
+        nt.links.new(aomix.outputs["Color"], b.inputs["Base Color"])
+        # struts glossier (catch the gold), pores matte
+        nt.links.new(mr(webmask, 0.0, 1.0, 0.50, 0.22), b.inputs["Roughness"])
     return m
 
 
@@ -530,97 +574,84 @@ def stadium(name, w, h, d, r, loc):
 
 
 def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
-    """150 x 150 x 50.5 mm, matched to the StorageReview front photos: the porous
-    metal foam IS the whole front face, flush between two ~7 mm champagne side
-    rails and ~2.5 mm top/bottom lips, with two vertical stadium cutouts (about
-    20 x 32 mm, centers near +/-47 mm) whose smooth gold tubs sit recessed in the
-    foam. The real device's left tub carries the NVIDIA plate; ours stays BLANK
-    (trademark gate). Rear foam skipped: never visible at the shipped cameras.
-    Satin anodize on the body, no jewelry polish."""
-    body = rounded_box("dgx-spark", mm(150), mm(150), mm(50.5),
-                       mm(10), mm(4), mm(4), seg_corner=20, seg_fillet=7)
+    """150 x 150 x 50.5 mm, sitting flat · every value from SPARK (traces to MEASUREMENTS.md).
+    The FRONT is the 150 x 50.5 face, a ~3:1 STRIP (not a square): a two-scale open-cell metal
+    foam field (148 x 46) framed by thin ~2.5 mm champagne lips, with two recessed champagne
+    pill hand-holds (12.96 wide x 31.4 tall, arrayed along the 150 axis) that have real
+    inner-wall depth. Champagne anodized shell; smooth sides; the top (150 x 150) carries a
+    recessed vent panel. Rear foam/ports skipped. Trademark gate: pills stay blank."""
+    W = mm(SPARK["width"]); D = mm(SPARK["depth"]); H = mm(SPARK["height"])
+    r = mm(SPARK["edge_R"])
+    body = rounded_box("dgx-spark", W, D, H, r, r, r, seg_corner=24, seg_fillet=8)
     bpy.context.view_layer.update()
+    body.data.materials.append(champagne_gold(0.50))                       # 0 shell
+    body.data.materials.append(principled("spark-pill-wall", (0.40, 0.27, 0.085), 0.72, metallic=0.1))  # 1 inner wall (rough anodized, no hotspot)
 
-    gold = champagne_gold(0.52)
-    body.data.materials.append(gold)
+    front_y = -D / 2.0
+    zc = H / 2.0
+    px = mm(SPARK["pill_pitch"]) / 2.0        # pills symmetric at +/- pitch/2 along x
+    pw = mm(SPARK["pill_short"]); phz = mm(SPARK["pill_long"])
 
-    # Full-face pocket between the rails: 136 wide x 44.5 tall, 4 mm deep.
-    front_y = -mm(150) / 2.0
-    fw, fh = mm(124), mm(38.0)
-    zc = mm(50.5 / 2.0)
-    pocket = cutter_box(fw, mm(24), fh, mm(6), (0, front_y + mm(4.0), zc), seg=12)
-    boxes = apply_boolean(body, [pocket])
-    backing = principled("spark-pocket", (0.10, 0.085, 0.06), 0.6, metallic=0.4)
-    body.data.materials.append(backing)
-    assign_interior(body, boxes, 1)
+    # recessed pill pockets with real inner-wall depth (stadium prisms cut into the front)
+    POCK = mm(4.2); DCUT = mm(10.0)
+    cutters = []
+    for sx in (-1, 1):
+        cutters.append(stadium("pillcut", pw, phz, DCUT, pw / 2.0,
+                               (sx * px, front_y + POCK - DCUT, zc)))
+    boxes = apply_boolean(body, cutters)
+    assign_interior(body, boxes, 1, ymin=front_y + mm(0.3))
     smooth(body, 40)
 
-    # The foam sheet. EXPORT path (glb): a FLAT low-poly plane with a UV map and the
-    # baked foam maps (render/foam_maps.py) · keeps the glb tiny for the live hero.
-    # RENDER path (Cycles still): a dense grid carved by real Voronoi displacement.
+    # top recessed vent panel (seen in 3/4 + top): a shallow rounded-rect pocket in the top face
+    tp = cutter_box(mm(SPARK["top_panel_w"]), mm(SPARK["top_panel_h"]), mm(3.0), mm(12),
+                    (0, 0, H + mm(1.5) - mm(3.0) / 2.0), seg=16)
+    # (cut from the top; cutter_box origin logic handles the z placement)
+    tbox = apply_boolean(body, [tp])
+    assign_interior(body, tbox, 1)
+
+    # champagne tub floors sitting recessed at the back of each pocket, blank
+    tubs = []
+    for sx in (-1, 1):
+        tub = stadium("tub", pw - mm(1.4), phz - mm(1.4), mm(1.4), (pw - mm(1.4)) / 2.0,
+                      (sx * px, front_y + POCK - mm(1.6), zc))
+        tub.data.materials.append(principled("spark-tub", (0.46, 0.32, 0.11), 0.6, metallic=0.2))
+        smooth(tub, 50); tubs.append(tub)
+
+    # the open-cell foam field (148 x 46), two-scale Voronoi displacement, pill holes.
+    ffx = mm(SPARK["foam_field_long"]); ffz = mm(SPARK["foam_field_short"])
     if EXPORT:
-        bpy.ops.mesh.primitive_grid_add(x_subdivisions=2, y_subdivisions=2,
-                                        size=1.0, location=(0, front_y + mm(1.2), zc),
+        bpy.ops.mesh.primitive_grid_add(x_subdivisions=2, y_subdivisions=2, size=1.0,
+                                        location=(0, front_y - mm(0.4), zc),
                                         rotation=(math.radians(90), 0, 0))
-        foam = bpy.context.active_object
-        foam.name = "dgx-spark-foam"
-        foam.scale = (fw + mm(3), fh + mm(3), 1.0)
-        bpy.ops.object.transform_apply(scale=True)
-        bpy.ops.object.select_all(action="DESELECT")
-        foam.select_set(True)
-        bpy.context.view_layer.objects.active = foam
-        bpy.ops.object.mode_set(mode="EDIT")
-        bpy.ops.uv.smart_project(angle_limit=1.15)
-        bpy.ops.object.mode_set(mode="OBJECT")
+        foam = bpy.context.active_object; foam.name = "dgx-spark-foam"
+        foam.scale = (ffx, ffz, 1.0); bpy.ops.object.transform_apply(scale=True)
         foam.data.materials.append(foam_flat_material())
     else:
-        bpy.ops.mesh.primitive_grid_add(x_subdivisions=720, y_subdivisions=240,
-                                        size=1.0, location=(0, front_y + mm(1.2), zc),
+        bpy.ops.mesh.primitive_grid_add(x_subdivisions=820, y_subdivisions=280, size=1.0,
+                                        location=(0, front_y - mm(0.4), zc),
                                         rotation=(math.radians(90), 0, 0))
-        foam = bpy.context.active_object
-        foam.name = "dgx-spark-foam"
-        foam.scale = (fw + mm(3), fh + mm(3), 1.0)
-        bpy.ops.object.transform_apply(scale=True)
-        holes = [
-            stadium("hole-l", mm(16.5), mm(30.5), mm(30), mm(8.0), (-mm(47), front_y - mm(10), zc)),
-            stadium("hole-r", mm(16.5), mm(30.5), mm(30), mm(8.0), (mm(47), front_y - mm(10), zc)),
-        ]
+        foam = bpy.context.active_object; foam.name = "dgx-spark-foam"
+        foam.scale = (ffx, ffz, 1.0); bpy.ops.object.transform_apply(scale=True)
         bpy.context.view_layer.objects.active = foam
-        for h in holes:
-            mod = foam.modifiers.new("hole", "BOOLEAN")
-            mod.operation = "DIFFERENCE"
-            mod.solver = "EXACT"
-            mod.object = h
-            bpy.ops.object.modifier_apply(modifier=mod.name)
+        for sx in (-1, 1):                       # holes where the pills are
+            h = stadium("fhole", pw + mm(1.0), phz + mm(1.0), mm(20), (pw + mm(1.0)) / 2.0,
+                        (sx * px, front_y - mm(9), zc))
+            md = foam.modifiers.new("hole", "BOOLEAN"); md.operation = "DIFFERENCE"
+            md.solver = "EXACT"; md.object = h
+            bpy.ops.object.modifier_apply(modifier=md.name)
             bpy.data.objects.remove(h, do_unlink=True)
-        # TWO displacement scales for real two-scale foam geometry (checklist): the
-        # coarse pores carry the depth, a finer pass at ~1/3 scale adds sub-structure.
-        for nm, cell, strength, mid in (("pores", FOAM_CELL, mm(4.2), 0.42),
-                                        ("pores-fine", FOAM_FINE, mm(1.2), 0.5)):
+        # coarse displacement only · the ~1.5mm pores must read distinct, not sandpaper. The
+        # fine sub-structure lives in the shader (color/roughness), not the geometry.
+        for nm, cell, strength, mid in (("pores", FOAM_CELL, mm(1.4), 0.42),):
             tex = bpy.data.textures.new("foam-voronoi-" + nm, "VORONOI")
-            tex.distance_metric = "DISTANCE"
-            tex.weight_1 = -1.0
-            tex.weight_2 = 1.0
-            tex.noise_scale = mm(cell)
-            tex.noise_intensity = 1.0
+            tex.distance_metric = "DISTANCE"; tex.weight_1 = -1.0; tex.weight_2 = 1.0
+            tex.noise_scale = mm(cell); tex.noise_intensity = 1.0
             disp = foam.modifiers.new(nm, "DISPLACE")
-            disp.texture = tex
-            disp.texture_coords = "LOCAL"
-            disp.direction = "Y"
-            disp.mid_level = mid
-            disp.strength = strength
+            disp.texture = tex; disp.texture_coords = "LOCAL"; disp.direction = "Y"
+            disp.mid_level = mid; disp.strength = strength
             bpy.ops.object.modifier_apply(modifier=disp.name)
         foam.data.materials.append(champagne_gold(pore_darken=True))
         smooth(foam, 70)
-
-    # The two smooth tubs, recessed 1.5 mm behind the foam face, blank.
-    tubs = []
-    for sx in (-1, 1):
-        tub = stadium("tub", mm(18), mm(33), mm(3), mm(8.8),
-                      (sx * mm(47), front_y + mm(4.0), zc))
-        tub.data.materials.append(principled("tub-gold", (0.52, 0.40, 0.21), 0.34))
-        smooth(tub, 50)
-        tubs.append(tub)
 
     group = [body, foam] + tubs
     for ob in group:
@@ -858,11 +889,12 @@ def verify_rig_front(subject_w, subject_h, res, bright=False):
     w.use_nodes = True
     # bright high-key white surround (Apple product studio) for aluminium so it reads
     # as bright silver · dim directional (StorageReview desk) for the Spark champagne
-    w.node_tree.nodes["Background"].inputs[0].default_value = (0.34, 0.34, 0.36, 1) if bright else (0.05, 0.05, 0.055, 1)
+    w.node_tree.nodes["Background"].inputs[0].default_value = (0.34, 0.34, 0.36, 1) if bright else (0.15, 0.14, 0.14, 1)
     sc.world = w
     # bright verify exposure trimmed so the rendered aluminium mid-face reads L*~84 (Apple's
-    # studio tone), not a blown near-white · matched to the reference, not flattered.
-    sc.view_settings.exposure = -1.5 if bright else -0.1
+    # studio tone). The Spark (non-bright) is a brighter directional gold studio (sth_front-1):
+    # the key rakes the foam so struts catch gold + pores self-shadow; champagne reads ~L72.
+    sc.view_settings.exposure = -1.5 if bright else -0.35
     aim = bpy.data.objects.new("Aim", None)
     aim.location = (0, 0, subject_h * 0.5)
     bpy.context.collection.objects.link(aim)
@@ -870,8 +902,8 @@ def verify_rig_front(subject_w, subject_h, res, bright=False):
         add_area("vf-key", (-0.4, -1.3, subject_h * 0.5 + 0.6), 2.0, 30, (1, 1, 1), aim=aim)
         add_area("vf-fill", (0.7, -1.3, subject_h * 0.5), 2.0, 22, (1, 1, 1), aim=aim)
     else:
-        add_area("vf-key", (-0.4, -1.2, subject_h * 0.5 + 0.9), 1.1, 40, (1.0, 0.99, 0.96), aim=aim)
-        add_area("vf-fill", (0.7, -1.3, subject_h * 0.5), 1.4, 8, (0.96, 0.98, 1.0), aim=aim)
+        add_area("vf-key", (-0.45, -1.15, subject_h * 0.5 + 0.7), 1.5, 78, (1.0, 0.98, 0.93), aim=aim)
+        add_area("vf-fill", (0.7, -1.3, subject_h * 0.5), 1.9, 22, (1.0, 0.99, 0.97), aim=aim)
     # orthographic front elevation: look along +Y at the -Y face
     cd = bpy.data.cameras.new("vcam")
     cd.type = "ORTHO"

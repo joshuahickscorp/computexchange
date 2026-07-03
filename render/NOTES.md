@@ -153,6 +153,28 @@ still grades mean contour 0.7%, clip 0.000% PASS. Rider 1 closed.
 Rider 2 (3/4 debt vs apple_lifestyle_3q) reserved for the phase-4 three-quarter portrait, as
 directed · the mandatory settlement of the soap-bar risk.
 
+## ACCURACY GRIND v2 · SPARK · rebuild loop 1 (geometry + foam material)
+
+Change class: GEOMETRY + MATERIAL (the full rebuild). build_dgx_spark now traces to SPARK
+(MEASUREMENTS.md). Headline fix: the FRONT is the 150 x 50.5 face, a ~3:1 STRIP · the foam
+field (148 x 46) fills it framed by thin champagne lips, with two recessed champagne pill
+hand-holds at +/- pitch/2 along the 150 axis, a 6mm crisp edge fillet, and a recessed top vent
+panel. The prior builder's undersized centred foam panel (that read square) is gone.
+
+FOAM (the boss fight) · the density measurement was corrected first: the phase-0 13-14.5/cm
+came from a storagereview scale corrupted by the wooden desk; the clean-bg sth_front-1 gives
+~6.5/cm coarse pores (~1.5mm) with finer sub-structure ~13/cm · "two overlapping scales".
+Coarse Voronoi displacement at 1.45mm (strength under the cell so pores do not overlap into
+gravel). The open-cell READ came from mesh CURVATURE (Pointiness), not the Voronoi field: the
+convex strut tops key bright gold, the concave pore floors dark, + gentle AO for cavity depth.
+Result reads as golden open-cell metal foam, tone L*51/a2.5/b16 vs reference L*47/a4/b18 (dE
+~5), clip 0.000% PASS. Champagne set anodized (metallic 0.28) so the gold diffuse shows instead
+of a neutral-key cream.
+Known remaining item for the next loop: the pill floors read a bright cream specular (a flat
+champagne surface blown + desaturated by AgX under the bright key) · the pocket interior needs
+a distinct darker rough material (assign_interior is not catching the floor). Geometry + foam
+are the win; the pill polish is scoped next.
+
 ## Combined scene · tabletop hero
 
 ### iter 1 (128 spp, 25% preview)
