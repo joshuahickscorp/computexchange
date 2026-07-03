@@ -297,7 +297,7 @@ def principled(name, base, rough, metallic=1.0, coat=0.0, coat_rough=0.1):
     return m
 
 
-def add_bevel(m, radius=0.30, samples=4):
+def add_bevel(m, radius=0.42, samples=4):
     # photoreal T7: a shader BEVEL rounds every edge at micron scale so no silhouette is
     # mathematically sharp · each edge catches a hairline highlight, killing the CAD look. Chains
     # any existing Normal (micro-bump) into the bevel so both survive.
@@ -329,6 +329,41 @@ def anodize_mottle(m, scale=60.0, rough_amp=0.03):
     return m
 
 
+def add_grunge(m, smudge_amp=0.06, dust_amp=0.05):
+    # photoreal (L1 uniform/dust/clean tell) · break single-band surface perfection with real-world
+    # contamination on ROUGHNESS only (albedo/tone untouched, so the gate holds): soft irregular
+    # SMUDGE blotches (fingerprint-scale ~45 mm Voronoi) drop roughness a touch = glossier oily
+    # zones; sparse DUST speck tips (~2.5 mm noise, only the brightest peaks) nudge roughness up =
+    # matte flecks. Both edge-of-notice · dialed back if a panel names them by name.
+    nt = m.node_tree; b = nt.nodes["Principled BSDF"]
+    tc = nt.nodes.new("ShaderNodeTexCoord")
+    r = b.inputs["Roughness"]
+    if r.is_linked:
+        cur = r.links[0].from_socket
+    else:
+        val = nt.nodes.new("ShaderNodeValue"); val.outputs[0].default_value = r.default_value
+        cur = val.outputs[0]
+    sv = nt.nodes.new("ShaderNodeTexVoronoi"); sv.inputs["Scale"].default_value = 1000.0 / (45.0 * S)
+    nt.links.new(tc.outputs["Object"], sv.inputs["Vector"])
+    sm = nt.nodes.new("ShaderNodeMapRange")
+    sm.inputs["From Min"].default_value = 0.0; sm.inputs["From Max"].default_value = 0.35
+    sm.inputs["To Min"].default_value = -smudge_amp; sm.inputs["To Max"].default_value = 0.0
+    nt.links.new(sv.outputs["Distance"], sm.inputs["Value"])
+    dn = nt.nodes.new("ShaderNodeTexNoise"); dn.inputs["Scale"].default_value = 1000.0 / (2.5 * S)
+    dn.inputs["Detail"].default_value = 2.0
+    nt.links.new(tc.outputs["Object"], dn.inputs["Vector"])
+    dm = nt.nodes.new("ShaderNodeMapRange")
+    dm.inputs["From Min"].default_value = 0.74; dm.inputs["From Max"].default_value = 0.95
+    dm.inputs["To Min"].default_value = 0.0; dm.inputs["To Max"].default_value = dust_amp
+    nt.links.new(dn.outputs["Fac"], dm.inputs["Value"])
+    a1 = nt.nodes.new("ShaderNodeMath"); a1.operation = "ADD"
+    nt.links.new(cur, a1.inputs[0]); nt.links.new(sm.outputs["Result"], a1.inputs[1])
+    a2 = nt.nodes.new("ShaderNodeMath"); a2.operation = "ADD"; a2.use_clamp = True
+    nt.links.new(a1.outputs[0], a2.inputs[0]); nt.links.new(dm.outputs["Result"], a2.inputs[1])
+    nt.links.new(a2.outputs[0], r)
+    return m
+
+
 def blasted_aluminum():
     """Bead-blasted (NOT brushed) light aluminum: fine isotropic roughness variation
     plus a whisper of bump for the micro-sparkle."""
@@ -350,7 +385,8 @@ def blasted_aluminum():
     bump.inputs["Strength"].default_value = 0.009  # wave 7: halve the micro-bump (bead-blast, not sandpaper)
     nt.links.new(n.outputs["Fac"], bump.inputs["Height"])
     nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
-    return add_bevel(m)   # photoreal T7 · hairline edge on the aluminium (roughness already 3-octave)
+    # photoreal T7 hairline edge + T1 grunge (smudge/dust) on the aluminium (roughness already 3-octave)
+    return add_bevel(add_grunge(m, smudge_amp=0.06, dust_amp=0.05))
 
 
 def port_plastic():
@@ -566,22 +602,29 @@ def champagne_gold(rough=0.28, pore_darken=False):
         # FINAL WAVE (commit C): re-gold the foam to the sth_front-1 pins (web b19.6, pore warm
         # b12.3). The 5c grey was the de-gold; struts back to a GOLDEN web (calmer than the old
         # brass), pores warm-dark (not neutral charcoal).
-        mixc.inputs["Color1"].default_value = (0.100, 0.072, 0.032, 1)  # warm dark pore (gold-tinted)
-        mixc.inputs["Color2"].default_value = (0.660, 0.510, 0.205, 1)  # golden strut web
+        # photoreal (L1 foam tell) · RAISE strut-to-pore contrast so the cells read as deep 3D
+        # cavities, not a flat noise map. Pore a touch warmer-dark, strut brighter gold; the deeper
+        # (2.25 mm) displacement + a longer AO reach now carry real self-shadow. Mean held to the
+        # spark_foam pin by the gate (albedo lifted a hair to offset the extra geometric shadow).
+        mixc.inputs["Color1"].default_value = (0.108, 0.078, 0.035, 1)  # warm dark pore (gold-tinted)
+        mixc.inputs["Color2"].default_value = (0.705, 0.548, 0.221, 1)  # brighter golden strut web
         nt.links.new(webmask, mixc.inputs["Fac"])
         # AO carries the pore depth the shallow displacement cannot: deep cavity self-shadow
-        ao = nt.nodes.new("ShaderNodeAmbientOcclusion"); ao.inputs["Distance"].default_value = mm(1.3)
+        ao = nt.nodes.new("ShaderNodeAmbientOcclusion"); ao.inputs["Distance"].default_value = mm(1.7)
         ao.samples = 4   # cheap AO (OIDN denoise carries the rest); 16 was the render bottleneck
         aomix = nt.nodes.new("ShaderNodeMixRGB"); aomix.blend_type = "MULTIPLY"
-        aomix.inputs["Fac"].default_value = 0.66
+        aomix.inputs["Fac"].default_value = 0.70
         nt.links.new(mixc.outputs["Color"], aomix.inputs["Color1"])
         nt.links.new(ao.outputs["Color"], aomix.inputs["Color2"])
         nt.links.new(aomix.outputs["Color"], b.inputs["Base Color"])
         # struts glossier (catch the gold), pores matte
         nt.links.new(mr(webmask, 0.0, 1.0, 0.50, 0.22), b.inputs["Roughness"])
-    # photoreal: bevel edges (T7) on all champagne; anodize batch mottle (T8) on the smooth shell
-    # only (self-guards where roughness is already driven, i.e. the foam)
-    return add_bevel(anodize_mottle(m, scale=60.0, rough_amp=0.025))
+    # photoreal: bevel edges (T7) on all champagne; anodize batch mottle (T8) + grunge (T1) on the
+    # SMOOTH shell only (the foam roughness is already geometry-driven, leave it be)
+    m = anodize_mottle(m, scale=60.0, rough_amp=0.025)
+    if not pore_darken:
+        m = add_grunge(m, smudge_amp=0.05, dust_amp=0.04)
+    return add_bevel(m)
 
 
 # ---- the devices ---------------------------------------------------------------------
@@ -810,6 +853,19 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
             # read on the struts); a low-frequency clouds layer adds a DEPTH HIERARCHY (some
             # regions pushed deeper). Each entry: (type, scale_mm, strength_mm, mid).
             for i, (ttype, scale, strength, mid) in enumerate(cells_strengths):
+                if ttype == "warpXZ":
+                    # photoreal (L1 foam tell) · a LATERAL domain warp applied BEFORE the pore
+                    # displacement · a low-freq clouds field nudges vertices in X and Z so the
+                    # Voronoi cell lattice below never lands on a repeating grid (kills the
+                    # "tiled/periodic procedural" read without a second interfering Voronoi).
+                    tex = bpy.data.textures.new(name + "-w" + str(i), "CLOUDS")
+                    tex.noise_scale = mm(scale); tex.noise_depth = 2
+                    for dirn in ("X", "Z"):
+                        d = f.modifiers.new("w" + str(i) + dirn, "DISPLACE")
+                        d.texture = tex; d.texture_coords = "LOCAL"; d.direction = dirn
+                        d.mid_level = mid; d.strength = strength
+                        bpy.ops.object.modifier_apply(modifier=d.name)
+                    continue
                 if ttype == "vor":
                     tex = bpy.data.textures.new(name + "-t" + str(i), "VORONOI")
                     tex.distance_metric = "DISTANCE"; tex.weight_1 = -1.0; tex.weight_2 = 1.0
@@ -824,13 +880,15 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
             smooth(f, 70)
             return f
         foam = _foam_layer("dgx-spark-foam", 0.0,
-                           [("vor", 2.15, mm(1.9), 0.42), ("clouds", 0.85, mm(0.55), 0.5),
-                            ("clouds", 8.0, mm(0.85), 0.5)])
+                           [("warpXZ", 5.5, mm(1.05), 0.5),
+                            ("vor", 2.15, mm(2.25), 0.42), ("clouds", 0.85, mm(0.55), 0.5),
+                            ("clouds", 8.0, mm(0.95), 0.5)])
         foam.data.materials.append(champagne_gold(pore_darken=True))
         foam_layers = [foam]
         if FOAM == "B":
             back = _foam_layer("dgx-spark-foam-back", mm(1.6),
-                               [("vor", 1.80, mm(1.6), 0.42), ("clouds", 0.75, mm(0.45), 0.5)],
+                               [("warpXZ", 5.0, mm(0.9), 0.5),
+                                ("vor", 1.80, mm(1.7), 0.42), ("clouds", 0.75, mm(0.45), 0.5)],
                                hole_pad=6.0, width=mm(90))  # center-only · never reaches the pills
             back.data.materials.append(champagne_gold(pore_darken=True))
             foam_layers.append(back)
@@ -1029,6 +1087,13 @@ def portrait_rig(subject_h, warm=False, key_e=55, key_sz=1.5, rim_e=26, fill_e=9
     kcol = (1.0, 0.97, 0.92) if warm else (1.0, 0.99, 0.98)
     add_area("p-key", (-0.85, -0.75, subject_h * 0.5 + 0.9), key_sz, key_e, kcol, aim=aim)
     add_area("p-rim", (0.6, 1.05, subject_h * 0.5 + 0.85), 0.5, rim_e, (0.93, 0.96, 1.0), sx=0.05, aim=aim)
+    # photoreal (L1 reflect tell) · a broad OVERHEAD reflector card the metal TOPS catch as a soft
+    # bright softbox streak toward the slightly-elevated camera · fixes the "empty/abstract" metal
+    # reflection, strongest on the SILVER studio (no top tone-patch, fully safe). Placed directly
+    # above + a hair camera-side so it reflects in the tops and upper fillets, NOT the near-vertical
+    # front faces (the spark_champ / studio_alu front patches). Energy gate-tuned; if spark_top
+    # (the one top patch, tight) drifts, this dims first · tone SENIOR.
+    add_area("p-refl", (0.15, -0.35, subject_h * 0.5 + 2.05), 2.6, 2.4, (1.0, 0.985, 0.95), aim=None)
     # photoreal T5: a defined SOFTBOX reflection on the matte champagne top desaturated its gold
     # below the pin at every energy that read (tone gate is SENIOR, and the champagne is already
     # borderline). Kept OFF · the STRIP RIM draws the readable-edge line on the fillets, and the
@@ -1047,8 +1112,14 @@ def portrait_rig(subject_h, warm=False, key_e=55, key_sz=1.5, rim_e=26, fill_e=9
         _tc = _nt.nodes.new("ShaderNodeTexCoord"); _nz = _nt.nodes.new("ShaderNodeTexNoise")
         _nz.inputs["Scale"].default_value = 900.0; _nz.inputs["Detail"].default_value = 2.0
         _nt.links.new(_tc.outputs["Object"], _nz.inputs["Vector"])
-        _bmp = _nt.nodes.new("ShaderNodeBump"); _bmp.inputs["Strength"].default_value = 0.04
-        _nt.links.new(_nz.outputs["Fac"], _bmp.inputs["Height"]); _nt.links.new(_bmp.outputs["Normal"], _pb.inputs["Normal"])
+        # photoreal (L1 reflect/shadow tell) · a broad low-freq unevenness added to the fine grain so
+        # the softbox smear in the floor is NOT a perfectly symmetric mirror (real desk reflection).
+        _nz2 = _nt.nodes.new("ShaderNodeTexNoise"); _nz2.inputs["Scale"].default_value = 7.0
+        _nt.links.new(_tc.outputs["Object"], _nz2.inputs["Vector"])
+        _mixh = _nt.nodes.new("ShaderNodeMixRGB"); _mixh.inputs["Fac"].default_value = 0.5
+        _nt.links.new(_nz.outputs["Fac"], _mixh.inputs["Color1"]); _nt.links.new(_nz2.outputs["Fac"], _mixh.inputs["Color2"])
+        _bmp = _nt.nodes.new("ShaderNodeBump"); _bmp.inputs["Strength"].default_value = 0.08
+        _nt.links.new(_mixh.outputs["Color"], _bmp.inputs["Height"]); _nt.links.new(_bmp.outputs["Normal"], _pb.inputs["Normal"])
         fl.data.materials.append(fm)
     return aim
 
