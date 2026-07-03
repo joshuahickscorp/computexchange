@@ -763,3 +763,12 @@ render-time so it must not fail the gate; at f16 the subject stays sharp and ALL
 (alu 1.41, champ 3.79, top 3.21, foam 5.76). T9 (partial): the pair Spark is yawed -14.5 vs the
 Studio -14.0 (a hair more, reads as hands). The sub-degree camera ROLL is applied in POST. Full-
 frame sensor (36mm) stated. Tone gate re-verified pre-DOF-tune and post · pins unmoved.
+
+## PHOTOREAL · Commit POST · class POST (T4, T9-roll)
+render/post_chain.py · ONE chain, applied identically to every final frame AFTER the gated raw
+render: (1) T9 sub-degree ROLL 0.3deg; (2) radial chromatic aberration R+0.18% / B-0.18% (fringe
+at borders, zero at centre); (3) specular bloom (thr 0.88, blur 7, str 0.30); (4) gentle vignette
+(corner ~0.80); (5) fine luminance grain (sigma 0.008, deterministic per output name · no shimmer).
+POST-DELTA REPORT (informational; gate is PRE-post): tone patches shift < 0.6 L pre->post
+(spark_champ 65.9->65.3, top 32.9->32.6, foam 41.9->41.7). Each effect below conscious notice,
+jointly transformative (dgx-spark-q34-post.png). T4 -> FIXED-UNCONFIRMED, T9-roll done.
