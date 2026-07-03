@@ -25,6 +25,18 @@ LEGEND = {
         ("port row height", "port_row_center_from_base", "24.4 mm"),
         ("base reveal gap", "base_reveal_gap", "2.5 mm INFERRED (phase-4 tabletop)"),
     ],
+    "spark": [
+        ("width x depth x height", "front_long / short / top_depth", "150 x 150 x 50.5 mm (spec)"),
+        ("FRONT face proportion", "front_aspect_long:short", "150 x 50.5 = ~3:1 STRIP, not square"),
+        ("crisp edge fillet", "front_edge_R_mean", "6.09 mm"),
+        ("foam field (open-cell)", "foam_field_long x short", "148 x 46 mm, ~7/cm coarse + ~14/cm fine"),
+        ("champagne lips", "foam_lip", "~2.5 mm (long edges)"),
+        ("pill hand-holds x2", "pill_long x short", "31.4 x 12.96 mm, recessed w/ inner wall"),
+        ("pill spacing", "pill_pitch", "112.9 mm (along the 150 axis)"),
+        ("top vent panel", "top_panel_w x h", "114 x 105 mm, inset 17.9"),
+        ("champagne tone", "champ_Lab", "L*72 a*8 b*43 (anodized gold)"),
+        ("foam tone", "foam_Lab", "L*~47 open-cell gold"),
+    ],
 }
 
 def load_on_bg(path, bg):
