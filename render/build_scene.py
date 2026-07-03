@@ -180,8 +180,8 @@ SPARK = {
                                  # wrong: no solid end-caps · foam runs to the ~1mm rails, flowing
                                  # around the champagne pill bezels). Double autopsy in MEASUREMENTS.
     "foam_field_short":  46.34,  # foam extent along z (~2.5mm champagne lip top/bottom)
-    "bezel_w":           29.00,  # champagne pill-bezel island along 150 (final wave)
-    "bezel_h":           33.00,  # bezel island along 50.5
+    "bezel_w":           30.00,  # champagne pill-bezel island along 150 (final wave)
+    "bezel_h":           40.00,  # bezel island along 50.5
     "slot_recess_depth":  4.20,  # pill finger-slot pocket depth (accepted; relocates into the bezel)
     "foam_lip":      2.53,  # champagne lip on the long (top/bottom) edges
     "foam_cell_cm": 13.75,  # foam_cells_per_cm mean (13.0 / 14.5) -> ~0.73mm cell pitch
@@ -492,7 +492,7 @@ def champagne_gold(rough=0.28, pore_darken=False):
     # Anodized champagne is a COLOURED oxide, not a pure mirror · metallic ~0.5 so the gold
     # diffuse shows (b*~40), otherwise a neutral key reflects off pure metal and reads cream.
     m = principled("spark-gold" + ("-foam" if pore_darken else ""),
-                   (0.755, 0.575, 0.170), rough, metallic=0.30)  # metallic anodized GOLD champagne ·
+                   (0.800, 0.548, 0.175), rough, metallic=0.30)  # metallic anodized GOLD champagne ·
     # FINAL WAVE (commit C): the device had DE-GOLDED to bone (wave-4 re-pin + 5c overshot). Pinned
     # to sth_front-1 (b29): visibly gold, calmer than the storagereview brass (b42.8). Foam struts
     # override this in the pore_darken branch.
@@ -731,8 +731,8 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
     # champagne tub floors sitting recessed at the back of each pocket, blank
     tubs = []
     for sx in (-1, 1):
-        tub = stadium("tub", pw - mm(1.4), phz - mm(1.4), mm(1.4), (pw - mm(1.4)) / 2.0,
-                      (sx * px, front_y + POCK - mm(1.6), zc))
+        tub = stadium("tub", pw - mm(0.8), phz - mm(0.8), mm(5.0), (pw - mm(0.8)) / 2.0,
+                      (sx * px, front_y + mm(0.3), zc))  # deep plug forward · blocks back-foam show-through
         tub.data.materials.append(principled("spark-tub", (0.46, 0.32, 0.11), 0.6, metallic=0.2))
         smooth(tub, 50); tubs.append(tub)
 
