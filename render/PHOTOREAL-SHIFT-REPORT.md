@@ -214,7 +214,17 @@ reflection), not more tuning of the current scene.
 
 ## 11. Deliverables
 
-- Gate frames (4K, post): `render/portraits/` · Studio + Spark front/q34/side/top, pair, details.
-- Collages: `render/collages/` (gate frames, settlement pairs, microrealism evidence, loop history).
-- Panel: `render/panel/` (per-loop neutral sets, private keys, raw verdicts, PANEL-LOG.md).
-- This report + the ledger. Export mirror: `~/Downloads/cx-oracles-final-2026-07-03/`.
+**Checkpoint upload folder (16 attachments, under the 20 cap):**
+`~/Downloads/cx-oracles-checkpoint-2026-07-03/`
+- `00_REPORT.md` (this file)
+- `01`-`10` · per-angle hero frames (final, post, JPG 2000px): Studio front/q34/side/detail, Spark
+  front/q34/side/top/detail, pair · every angle at good quality.
+- `11_all-angles` · one contact sheet of all ten.
+- `12_settlement-vs-real` · render beside the real reference photo.
+- `13_microrealism` · foam macro (torn/merged cells) · raking-light concave relief · de-thread · bevel.
+- `14_reflection-edge` · the readable-edge softbox (grader T5) in the metal tops.
+- `15_loop-history` · Spark front across the run.
+
+In-repo sources: `render/portraits/` (4K), `render/collages/`, `render/panel/` (per-loop neutral
+sets, keys, verdicts, PANEL-LOG.md), `render/PHOTOREAL-LEDGER.md`. Prior mirror:
+`~/Downloads/cx-oracles-final-2026-07-03/`.
