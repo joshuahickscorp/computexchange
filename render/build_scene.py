@@ -1029,13 +1029,26 @@ def portrait_rig(subject_h, warm=False, key_e=55, key_sz=1.5, rim_e=26, fill_e=9
     kcol = (1.0, 0.97, 0.92) if warm else (1.0, 0.99, 0.98)
     add_area("p-key", (-0.85, -0.75, subject_h * 0.5 + 0.9), key_sz, key_e, kcol, aim=aim)
     add_area("p-rim", (0.6, 1.05, subject_h * 0.5 + 0.85), 0.5, rim_e, (0.93, 0.96, 1.0), sx=0.05, aim=aim)
+    # photoreal T5: a defined SOFTBOX reflection on the matte champagne top desaturated its gold
+    # below the pin at every energy that read (tone gate is SENIOR, and the champagne is already
+    # borderline). Kept OFF · the STRIP RIM draws the readable-edge line on the fillets, and the
+    # key gives the soft top reflection that bead-blast/anodize matte metal physically shows. T5
+    # revisit is gated on the panel (a champagne-albedo compensation if it is the top tell).
     # frontal camera-axis softbox: the bright source the silver front face reflects toward
     # camera, so it reads silver instead of void black. Slightly above the aim, on axis.
     add_area("p-fill", (0.0, -1.75, subject_h * 0.5 + 0.1), fill_sz, fill_e, (0.98, 0.99, 1.0), aim=aim)
     if ground:
         bpy.ops.mesh.primitive_plane_add(size=6.0, location=(0, 0, 0))
         fl = bpy.context.active_object; fl.name = "p-floor"
-        fm = principled("p-desk", (0.004, 0.004, 0.0045), 0.55, metallic=0.0)
+        # photoreal T6 · faint micro-normal + low sheen · the softbox reads as a broad smear in
+        # the floor (not a mirror) and the contact grades to a soft penumbra.
+        fm = principled("p-desk", (0.006, 0.006, 0.007), 0.62, metallic=0.0)
+        _nt = fm.node_tree; _pb = _nt.nodes["Principled BSDF"]
+        _tc = _nt.nodes.new("ShaderNodeTexCoord"); _nz = _nt.nodes.new("ShaderNodeTexNoise")
+        _nz.inputs["Scale"].default_value = 900.0; _nz.inputs["Detail"].default_value = 2.0
+        _nt.links.new(_tc.outputs["Object"], _nz.inputs["Vector"])
+        _bmp = _nt.nodes.new("ShaderNodeBump"); _bmp.inputs["Strength"].default_value = 0.04
+        _nt.links.new(_nz.outputs["Fac"], _bmp.inputs["Height"]); _nt.links.new(_bmp.outputs["Normal"], _pb.inputs["Normal"])
         fl.data.materials.append(fm)
     return aim
 

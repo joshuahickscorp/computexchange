@@ -772,3 +772,16 @@ at borders, zero at centre); (3) specular bloom (thr 0.88, blur 7, str 0.30); (4
 POST-DELTA REPORT (informational; gate is PRE-post): tone patches shift < 0.6 L pre->post
 (spark_champ 65.9->65.3, top 32.9->32.6, foam 41.9->41.7). Each effect below conscious notice,
 jointly transformative (dgx-spark-q34-post.png). T4 -> FIXED-UNCONFIRMED, T9-roll done.
+
+## PHOTOREAL · Commit LIGHTING · class LIGHTING (T6; T5 tone-blocked)
+- T6 GROUND: the floor gets a faint micro-normal (~fine noise, bump 0.04) + low sheen (rough 0.62)
+  so the light reads as a broad SMEAR in the floor (not a mirror) and the contact grades to a soft
+  penumbra. Rig versioned (part 5), tone gate re-verified: ALL PASS (alu 1.07, champ 3.91, top
+  3.21, foam 5.69).
+- T5 REFLECTIONS: authority-hierarchy call LOGGED. A defined rectangular softbox reflected in the
+  matte champagne TOP desaturated its gold below the frozen pin at every energy that read (champ
+  b* 29 -> 22 to 25). The spec's own rule (the light iterates, the pin never moves, the tone gate
+  is SENIOR) resolves this against the reflection. Kept: the strip RIM draws the readable-edge line
+  on the fillets, and the key gives the soft top reflection that bead-blast/anodize matte metal
+  physically shows. T5 stays OPEN (tone-blocked) · revisit with a champagne-albedo compensation only
+  if the panel names it the top tell (authority hierarchy: measurement/tone beats the tell).
