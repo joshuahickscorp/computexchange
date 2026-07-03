@@ -176,14 +176,13 @@ SPARK = {
     "pill_long":    31.41,  # pill along the 50.5 short/depth (z) axis
     "pill_short":   12.96,  # pill along the 150 long (x) axis
     "pill_pitch":  112.90,  # center-to-center along the 150 x-axis (pills at +/- pitch/2)
-    "foam_field_long":   86.90,  # foam extent along x · BOUNDED center span (wave 3 remeasure;
-                                 # SUPERSEDES edge-to-edge 148.02 · the model assumption leaked
-                                 # into the old window). Foam sits between the two end-caps.
-    "endcap_width":      31.50,  # solid champagne end-cap at each 150-axis end (wave 3; top 30.4
-                                 # bottom 32.6). 2x31.5 + 86.9 foam = 149.9 ~ 150. Pills recess
-                                 # into these solid caps (pill center 15.2mm from each end).
-    "foam_field_short":  45.70,  # foam extent along z (measured; ~2.4mm champagne side lip each)
-    "slot_recess_depth":  4.20,  # pill finger-slot pocket depth (approx, from pill shadow) = POCK
+    "foam_field_long":  148.02,  # foam EDGE-TO-EDGE (final wave · wave-3's 86.9 bounded span was
+                                 # wrong: no solid end-caps · foam runs to the ~1mm rails, flowing
+                                 # around the champagne pill bezels). Double autopsy in MEASUREMENTS.
+    "foam_field_short":  46.34,  # foam extent along z (~2.5mm champagne lip top/bottom)
+    "bezel_w":           29.00,  # champagne pill-bezel island along 150 (final wave)
+    "bezel_h":           33.00,  # bezel island along 50.5
+    "slot_recess_depth":  4.20,  # pill finger-slot pocket depth (accepted; relocates into the bezel)
     "foam_lip":      2.53,  # champagne lip on the long (top/bottom) edges
     "foam_cell_cm": 13.75,  # foam_cells_per_cm mean (13.0 / 14.5) -> ~0.73mm cell pitch
     "top_panel_w": 114.15,  # recessed top vent panel
@@ -757,6 +756,16 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
             f = bpy.context.active_object; f.name = name
             f.scale = (ffx, ffz, 1.0); bpy.ops.object.transform_apply(scale=True)
             bpy.context.view_layer.objects.active = f
+            # final wave: cut the BEZEL holes on the FLAT grid, BEFORE displacement · a clean 2D
+            # cut, not a fragile EXACT boolean on heavily-displaced geo (which left foam remnants
+            # in one bezel). The champagne body then shows through as the pill-bezel islands.
+            for sx in (-1, 1):
+                bez = stadium("bezelhole", mm(SPARK["bezel_w"]), mm(SPARK["bezel_h"]), mm(20),
+                              mm(6.0), (sx * px, front_y - mm(9), zc))
+                mb = f.modifiers.new("bez", "BOOLEAN"); mb.operation = "DIFFERENCE"
+                mb.solver = "EXACT"; mb.object = bez
+                bpy.ops.object.modifier_apply(modifier=mb.name)
+                bpy.data.objects.remove(bez, do_unlink=True)
             for i, (cell, strength) in enumerate(cells_strengths):
                 tex = bpy.data.textures.new(name + "-v" + str(i), "VORONOI")
                 tex.distance_metric = "DISTANCE"; tex.weight_1 = -1.0; tex.weight_2 = 1.0

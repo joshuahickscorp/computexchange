@@ -654,3 +654,13 @@ documented in MEASUREMENTS): champagne L80 a2.8 b29 · foam mean L52.8 a4.2 b18.
 b19.6 · foam pore L15.2 a5.3 b12.3. Gate pins updated (spark_champ, spark_foam). No geometry or
 material changed this commit; the gate will fail against the honest pins until Commit C restores
 the gold. Frozen rig + O=-12 unchanged.
+
+## FINAL WAVE · Commit B · class GEOMETRY · rebuild the front to the corrected structure
+Reverted the wave-3 bounding: foam field back to EDGE-TO-EDGE (148x46), flush in the flat front
+slab. Cut champagne pill-BEZEL holes (rounded-rect 29x33, r6) in the foam at each pill so the
+champagne body shows through as the bezel islands, with the recessed slot already inside; foam
+flows AROUND the bezels; ~1mm rails at the ends. Crisp slab, tight edge radii (edge_R 6.09) · no
+rolled cap wrap. BUGFIX: the bezel holes are cut on the FLAT grid BEFORE displacement (a clean 2D
+cut) · cutting the heavily-displaced 2-layer foam with EXACT left foam remnants in one bezel
+(caught on the first q34). Both bezels now read as clean champagne islands + recessed slots
+(finalB-structure.png). Material still grey/bone · Commit C restores the gold.
