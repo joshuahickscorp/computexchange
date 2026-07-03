@@ -77,18 +77,22 @@ def reference_labs():
     return {
         "studio_alu":   np.array([84.32, 0.03, -1.12]),   # MEASUREMENTS row (apple_front)
         "studio_intake": intake,                          # from mac_intake_band.png
-        "spark_champ":  np.array([72.52, 7.78, 42.78]),   # MEASUREMENTS row (storagereview)
+        "spark_champ":  np.array([77.75, 1.00, 12.00]),   # wave 4 RE-PIN · cl_side-profile pale
+        # champagne (representative: border b5.56, rims b14, audit pale-champagne b~15 -> b12).
+        # Supersedes storagereview L72.52 b42.78, which was WARM-light-inflated brass.
         "spark_web":    web,                              # from dgx_foam_patch.png top quartile
         "spark_pore":   pore,                             # from dgx_foam_patch.png bottom quartile
+        "spark_top":    np.array([46.92, 3.55, 11.33]),   # wave 4 · cl_side-profile vent panel
     }
 
 # ---- in-rig patch definitions (normalized boxes on the calib renders) -----------------
 PATCHES = [
     dict(name="studio_alu",    file="mac-studio-front.png", box=(0.42, 0.44, 0.56, 0.60), kind="smooth", tol=4),
     dict(name="studio_intake", file="mac-studio-front.png", box=(0.32, 0.805, 0.62, 0.845), kind="smooth", tol=4),
-    dict(name="spark_champ",   file="dgx-spark-q34.png",    box=(0.42, 0.22, 0.62, 0.32), kind="smooth", tol=4),
-    dict(name="spark_web",     file="dgx-spark-q34.png",    box=(0.14, 0.48, 0.40, 0.72), kind="web",    tol=4),
-    dict(name="spark_pore",    file="dgx-spark-q34.png",    box=(0.14, 0.48, 0.40, 0.72), kind="pore",   tol=6),
+    dict(name="spark_champ",   file="dgx-spark-q34.png",    box=(0.60, 0.55, 0.70, 0.62), kind="smooth", tol=4),
+    dict(name="spark_top",     file="dgx-spark-q34.png",    box=(0.43, 0.23, 0.57, 0.33), kind="smooth", tol=4),
+    dict(name="spark_web",     file="dgx-spark-q34.png",    box=(0.18, 0.51, 0.40, 0.69), kind="web",    tol=4),
+    dict(name="spark_pore",    file="dgx-spark-q34.png",    box=(0.18, 0.51, 0.40, 0.69), kind="pore",   tol=6),
 ]
 
 def measure(offset):

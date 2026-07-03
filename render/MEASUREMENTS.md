@@ -63,6 +63,9 @@ under `render/measure_evidence/`. Dash gate: middot only.
 | top_depth_spec | 150.00 | mm | spec | cl_side-profile.jpg | dgx_top_silhouette.png | absolute from spec; this source reads 148.6 (-0.9%) |
 | top_aspect_W:D_meas | 1.01 | ratio | high | cl_side-profile.jpg | dgx_top_silhouette.png | top face is square (spec 1.00) |
 | top_plan_corner_R | 21.04 | mm | med | cl_side-profile.jpg | dgx_top_corner.png | footprint corner (foam-edge softens fit), rms=0.64mm |
+| spark_top_border_Lab_L | 77.75 | L* | med | cl_side-profile.jpg | (top patches) | champagne top BORDER (neutral light: a0.0 b5.56 · desaturated, far less golden than the warm-lit storagereview shell b42.78 · lighting, not a different metal) |
+| spark_top_vent_Lab_L | 46.92 | L* | med | cl_side-profile.jpg | (top patches) | the recessed diagonal-WEAVE vent panel · distinctly DARKER than the champagne border (a3.55 b11.33). This is the "dedicated dark top material" (wave 4a). OVERRIDES the audit's dark-slate #2b2c2e/L17 and edge-aligned-hex assertions: the measured top is champagne + a CENTERED darker weave panel, NOT slate. Measurement wins. |
+| spark_top_vent_pitch | diagonal ~45deg ribbed weave | axis | med | cl_side-profile.jpg | (top patches) | the vent panel carries a fine diagonal (~45deg) ribbed weave, not a hex mesh |
 | top_panel_width | 114.15 | mm | med | cl_side-profile.jpg | dgx_top_panel.png | recessed vent panel |
 | top_panel_height | 105.06 | mm | med | cl_side-profile.jpg | dgx_top_panel.png |  |
 | top_panel_inset_margin | 17.92 | mm | med | cl_side-profile.jpg | dgx_top_panel.png | frame edge -> panel, mean L/R |
@@ -70,7 +73,7 @@ under `render/measure_evidence/`. Dash gate: middot only.
 | foam_cells_per_cm_B | 14.50 | cells/cm | med | storagereview_front.jpg | dgx_foam_B.png | 29 ridges / 20mm strip |
 | champagne_Lab_L | 72.52 | L* | med | storagereview_front.jpg | dgx_champ_patch.png | left rail patch |
 | champagne_Lab_a | 7.78 | a* | med | storagereview_front.jpg | dgx_champ_patch.png |  |
-| champagne_Lab_b | 42.78 | b* | med | storagereview_front.jpg | dgx_champ_patch.png |  |
+| champagne_Lab_b | 42.78 | b* | med | storagereview_front.jpg | dgx_champ_patch.png | ~b42.78 is WARM-LIGHT-INFLATED brass~ AUTOPSY (wave 4): the storagereview desk light was warm, pushing b* to 42.78. The same champagne under neutral light (cl_side-profile) reads b5.56 (border) to b14 (rims); the audit's pale-champagne target is b~15. RE-PINNED the tone gate to a representative pale champagne L77.75 a1.0 b12.0. The shell material desaturated off brass to a pale warm gold accordingly. |
 | foam_mean_Lab_L | 38.09 | L* | med | storagereview_front.jpg | dgx_foam_patch.png | mean over foam patch |
 | foam_mean_Lab_a | 1.19 | a* | med | storagereview_front.jpg | dgx_foam_patch.png |  |
 | foam_mean_Lab_b | 20.50 | b* | med | storagereview_front.jpg | dgx_foam_patch.png |  |

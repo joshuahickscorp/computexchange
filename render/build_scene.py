@@ -492,7 +492,10 @@ def champagne_gold(rough=0.28, pore_darken=False):
     # Anodized champagne is a COLOURED oxide, not a pure mirror · metallic ~0.5 so the gold
     # diffuse shows (b*~40), otherwise a neutral key reflects off pure metal and reads cream.
     m = principled("spark-gold" + ("-foam" if pore_darken else ""),
-                   (0.68, 0.55, 0.29), rough, metallic=0.28)  # muted warm titanium, not jewelry (doctrine)
+                   (0.670, 0.575, 0.370), rough, metallic=0.28)  # pale warm gold ·
+    # wave 4: pulled OFF brass toward a pale champagne (renders b~12, between cl_side-profile's
+    # neutral border b5.56 and its brighter rims b14 / the audit's pale-champagne b~15). Less
+    # golden than the old (0.68,0.55,0.29). Muted titanium, not jewelry. Foam struts override this.
     if pore_darken:
         nt = m.node_tree
         b = nt.nodes["Principled BSDF"]
@@ -635,6 +638,14 @@ def stadium(name, w, h, d, r, loc):
     return ob
 
 
+def spark_top_vent():
+    # wave 4a · the recessed diagonal-weave vent panel on the top. Distinctly DARKER than the
+    # champagne border (measured L46.9 vs 77.8, cl_side-profile), satin, low saturation. NOT
+    # dark slate: the measurement overrides the audit's #2b2c2e. The diagonal weave normal is
+    # added in 4b. Base tuned so the panel gates in-rig near spark_top_vent_Lab (L46.9) + O.
+    return principled("spark-top-vent", (0.165, 0.140, 0.100), 0.50, metallic=0.30)
+
+
 def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
     """150 x 150 x 50.5 mm, sitting flat · every value from SPARK (traces to MEASUREMENTS.md).
     The FRONT is the 150 x 50.5 STRIP: solid champagne END-CAPS (31.5mm each) at both 150-axis
@@ -648,6 +659,7 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
     bpy.context.view_layer.update()
     body.data.materials.append(champagne_gold(0.50))                       # 0 shell
     body.data.materials.append(principled("spark-pill-wall", (0.40, 0.27, 0.085), 0.72, metallic=0.1))  # 1 inner wall
+    body.data.materials.append(spark_top_vent())                           # 2 top recessed vent panel
 
     front_y = -D / 2.0
     zc = H / 2.0
@@ -671,7 +683,7 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
                     (0, 0, H + mm(1.5) - mm(3.0) / 2.0), seg=16)
     # (cut from the top; cutter_box origin logic handles the z placement)
     tbox = apply_boolean(body, [tp])
-    assign_interior(body, tbox, 1)
+    assign_interior(body, tbox, 2)      # top recessed panel -> dedicated dark vent material
 
     # champagne tub floors sitting recessed at the back of each pocket, blank
     tubs = []

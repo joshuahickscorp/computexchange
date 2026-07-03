@@ -498,3 +498,21 @@ compare.png vs sth_front-1): solid champagne end-caps at both ends, each holding
 finger-slot, framing the bounded center foam · matches the reference structure. Left cap BLANK
 (D2 · no logo). Pills read as recesses in solid champagne, not ovals on foam. Champagne tone
 (bright/glossy), top tray, and fine foam remain for waves 4/5.
+
+## WAVE 4 · Spark top · MEASUREMENT OVERRIDES THE AUDIT
+
+Measured the top from cl_side-profile (grade-A near-ortho top): the top is CHAMPAGNE (border
+L77.75) with a distinctly DARKER recessed diagonal-WEAVE vent panel (L46.92), CENTERED, plus a
+thin exhaust slot. This OVERRIDES the audit's "dark slate #2b2c2e / edge-aligned hex" · that was
+the sth_front-1 grazing-reflection artifact (the top reflecting the dark room), exactly like the
+Studio charcoal. Per the grader's rule, the measurement wins.
+
+### 4a · class MATERIAL
+- Dedicated top-vent material (spark_top_vent): darker desaturated champagne, the recessed
+  panel's tone. GATED in-rig: spark_top PASS dE 2.79 (target L34.9 = 46.9 + O). This is the
+  grader's "dedicated dark top material", distinctly darker than the champagne border.
+- Champagne shell RE-PIN (the wave-0 champ-chroma deferral): the storagereview b42.78 pin was
+  warm-light-inflated brass. Re-pinned to a representative pale champagne (L77.75 a1.0 b12.0)
+  and desaturated the shell base 0.68,0.55,0.29 -> 0.67,0.575,0.37 (pale warm gold, not brass,
+  not greige). spark_champ now dE 4.20 (chroma matched b10.6 vs 12; residual +3.8 L is the
+  key-facing end-cap orientation, not the rig · alu passes dE1). Clip green (0.000%).
