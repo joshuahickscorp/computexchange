@@ -142,3 +142,13 @@ Calibrated against the real controls' render-call rate. Two CONSECUTIVE clean pa
 | 6 | 0.87 | 0.20 | grunge removed (clean) |
 | 7 | 0.93 | 0.17 | glossy reflection env + foam tonal variation |
 | 8 | 0.90 | 0.20 | readable-edge softbox + foam torn cells |
+
+## Loop 9 (2026-07-03) · REAL 3D FOAM · BREAKTHROUGH · MINE 0.63 (best yet)
+- MINE render-call **0.63** (was ~0.90 for 8 loops) vs REAL **0.29**. Gap collapsed 0.75 -> 0.34.
+- The technique switch WORKED: spark-front **1/5** render (was 4-5/5, only foam2 left), spark-detail
+  **2/5** (was 5/5), studio-q34 1/5. Real controls now genuinely confused: studio-apple 4/5 render,
+  spark-sth2 4/5 render (the panel can no longer cleanly separate).
+- Bottleneck SHIFTED off the Spark foam onto: (a) the STUDIO (studio-front 5/5 · grain4, clean3,
+  texture2, edge2 · too clean/CG, post-grain reads synthetic), (b) foam at GRAZING angle (spark-q34
+  still foam5 · the 3D foam reads real head-on but the q34 angle flattens it), (c) pair reflect3/foam4.
+- Next highest-frequency tells to work: grain (studio), foam-at-angle (q34), clean/edge (studio).
