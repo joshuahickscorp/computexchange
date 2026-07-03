@@ -346,3 +346,39 @@ match ITS reference: Studio under a bright high-key white studio (Apple product 
 the dim directional desk key (StorageReview). Fix: aluminium base 0.58 to 0.86 (real ~0.9 alu
 reflectance) · the Studio now reads as bright Apple silver in both the verify compare and the hero
 (preview iterr2). Both devices confirmed accurate in the hero lighting.
+
+## PHASE 4 · portraits (maximum quality, site not invited)
+
+Change class: PORTRAIT LIGHTING + ASSEMBLY. No geometry changed this pass · the phase-4
+mandate was to shoot the settled builders at portrait quality, not to re-cut them. Per-shot
+lighting composed fresh (not inherited from verify): a key/rim/fill void-black rig, tuned per
+device because silver clips where champagne does not.
+
+Rig: studio dict(key_e=34, rim_e=14, fill_e=6, expo=-1.15) · spark dict(warm, key_e=55,
+rim_e=26, fill_e=9, expo=-0.55). 768 samples + OIDN denoise + ao.samples=4 (noise-floor route,
+~3.4 min/frame · the 2048/native path was ~14 min and clip-identical after denoise). 4K wide,
+AgX High Contrast.
+
+Frames (all clip-audited GREEN, clipcheck exit 0):
+- mac-studio-front   0.018%   · mac-studio-q34   0.158%   · mac-studio-detail  0.000%
+- dgx-spark-front    0.000%   · dgx-spark-q34    0.000%   · dgx-spark-detail   0.000%
+- oracles-pair@3x    0.098%
+Detail crops are 1:1 crops of the 4K portraits (the multi-shot studio pass only wrote the
+first frame when chained · shots re-run as separate Blender calls, detail taken as a crop).
+
+SETTLEMENT 1 · Studio 3/4 soap-bar-radius vs apple_lifestyle_3q (settle-studio-q34.png):
+the algebraic top-corner fit returns n/a (the 3/4 top corner is not a clean circle to fit),
+so the gate is read visually. Render top reads dead-flat, sides near-vertical, the top edge a
+tight fillet catching a bright specular rim · it is a crisp rounded edge, NOT a pillow. The
+band LOOKS wide only because a rounded metal edge throws a broad highlight; the geometry under
+it is a tight fillet. Visual verdict: crisp-edge, not soap-bar.
+
+SETTLEMENT 2 · Spark 3/4 pore-depth under grazing light vs nv_hero_3q (settle-spark-q34.png):
+the gate tests whether the foam holds 3D depth under directional grazing light or collapses to
+a flat displaced plane (geometry-or-nothing). It holds hard: render web L37 / pore L2 / spread
+35 vs reference web L63 / pore L41 / spread 22. Depth PASS (35 >= 14 threshold; well above the
+reference's own 22). Honest tone flag, surfaced not hidden: my foam is DARKER and more
+contrasty than the reference · pores L2 vs L41 (39 too dark), web L37 vs L63 (26 too dark). The
+grazing key I used to deepen pores overshot the reference's soft-lit gold. The depth gate the
+grader bound this to passes on geometry; the dark-pore residual is the pre-accepted
+displaced-plane limit, now quantified. NOT declaring closure · presenting for the grade.

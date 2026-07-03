@@ -878,18 +878,22 @@ def portrait_device(device, shot, res=(3840, 2400), samples=None):
     # high raw sample counts impractical, so denoise 768 to the floor.
     sc.cycles.samples = samples or (128 if PREVIEW else 768)
     warm = (device == "spark")
+    # per-device light: the bright bead-blast silver clips easily (verify found this), so the
+    # Studio gets a dimmer/softer key + lower exposure · the champagne Spark can take more.
+    rig = (dict(warm=False, key_e=34, rim_e=14, fill_e=6, expo=-1.15) if device == "studio"
+           else dict(warm=True, key_e=55, rim_e=26, fill_e=9, expo=-0.55))
     if device == "studio":
         build_mac_studio(0.0, yaw_deg=0.0); sw, sh = mm(197), mm(95)
     else:
         build_dgx_spark(0.0, yaw_deg=0.0); sw, sh = mm(150), mm(50.5)
     # per-shot framing
     if shot == "front":
-        aim = portrait_rig(sh, warm=warm); portrait_camera(aim, sw, sh, "front", res, margin=1.45)
+        aim = portrait_rig(sh, **rig); portrait_camera(aim, sw, sh, "front", res, margin=1.45)
     elif shot == "q34":
-        aim = portrait_rig(sh, warm=warm)
+        aim = portrait_rig(sh, **rig)
         portrait_camera(aim, sw, sh, "q34", res, yaw=38.0, elev=24.0, margin=1.5)
     elif shot == "detail":
-        aim = portrait_rig(sh, warm=warm)
+        aim = portrait_rig(sh, **rig)
         # tighter crop on the feature (Studio front ports · Spark foam+pill corner)
         portrait_camera(aim, sw * 0.42, sh * 0.9, "q34", res, yaw=20.0, elev=14.0, margin=1.05)
     name = "mac-studio" if device == "studio" else "dgx-spark"
