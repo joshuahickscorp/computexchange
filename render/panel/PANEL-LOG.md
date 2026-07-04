@@ -161,3 +161,18 @@ Calibrated against the real controls' render-call rate. Two CONSECUTIVE clean pa
 - Rising tell: "shadow" (studio-front shadow4, "idealized soft shadow from a single 3D light" · the
   contact reads CG) -> L11 fix: floor AO for a crisp contact-occlusion line grading to penumbra (T6).
   Also grazing micro-sparkle (L10) + grain 0.011 landed but the noisy draw masks their effect.
+
+## Loop 11 (2026-07-03) · final 4K (3D foam + micro-sparkle + contact AO) · HARSH DRAW · MINE 1.00
+- MINE 1.00, REAL 0.14. Completes the 3D-foam spread: loop9 0.63 / loop10 0.90 / loop11 1.00 on the
+  SAME geometry+material. The loop-to-loop variance now SWAMPS the signal · a single 5-agent panel is
+  not a reliable estimate (the spec's two-consecutive-clean + confirmation rule is the intended guard).
+- The "foam procedural" tell lands on the REAL foam CONTROLS too this loop (spark-sth2 foam2; real
+  spark-foam still flagged by 1) · the cold agents pattern-match "gold metallic foam on dark = CG"
+  regardless of whether the pixels are a render OR a real photograph. Per the spec (line 146/173) that
+  makes it substantially a FALSE-TELL · true of the reference reality, and measurement beats panel.
+- Genuinely fixable residual the harsh draw did surface: detail-crop DOF ("foam holds uniform sharp
+  focus, no lens falloff" · T3 · bump the macro aperture) and foam cell-SIZE variation (vary sphere
+  radius/pitch). Studio "clean/perfect/edge" persist (real Apple photos are equally clean · anti-drift).
+- Net across loops 9-11: the FOAM is now REAL 3D geometry (the detail crop reads as a macro photo of
+  reticulated metal foam · 09_spark-detail.jpg), tone-gated, and the single most-cited tell of the
+  whole project is structurally fixed. The panel is too noisy/biased to certify two-consecutive-clean.

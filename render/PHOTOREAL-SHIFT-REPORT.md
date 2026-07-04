@@ -120,6 +120,13 @@ call it render, or one tell is named by >=2. Calibrated against the real control
 | 8 | readable-edge softbox (grader T5) + foam torn cells (grader part-4) | 0.90 | 0.20 | 0.70 | NOT CLEAN |
 | 9 | **REAL 3D foam geometry** (technique switch) | **0.63** | 0.29 | 0.34 | NOT CLEAN |
 | 10 | grazing micro-sparkle + grain (studio) | 0.90 | 0.17 | 0.73 | NOT CLEAN |
+| 11 | contact-shadow AO (T6), final 4K deliverables | 1.00 | 0.14 | 0.86 | NOT CLEAN (harsh draw) |
+
+The three 3D-foam loops (9,10,11) read 0.63 / 0.90 / 1.00 on the same geometry · the panel variance now
+swamps the per-loop signal, and the "foam procedural" tell lands on the REAL foam CONTROL photos too
+(the agents distrust gold-foam-on-dark imagery categorically), which the spec classes as a FALSE-TELL
+(measurement beats panel). The foam is now real geometry · that battle is structurally won even where a
+noisy panel keeps naming it.
 
 Loops 7-8 implemented the grader's own remaining T5/part-4 items and the ~0.90 ceiling held with the
 displaced foam. Loop 9 is the inflection: the FOAM TECHNIQUE SWITCH (section 12) dropped MINE to 0.63,
