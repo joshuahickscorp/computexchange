@@ -842,21 +842,48 @@ def foam3d_material(base=(0.560, 0.470, 0.300), ao_fac=0.54, ao_dist=1.2, rough=
     return add_bevel(m)
 
 
-def foam3d_field(name, cx, cz, w, h, depth, front_face_y, pitch, voxel, seed=11):
+def foam3d_field(name, cx, cz, w, h, depth, front_face_y, pitch, voxel, seed=11, holes=None):
     # REAL 3D open-cell foam geometry (technique-class switch · grader line 149; the displaced
     # heightfield could not produce struts-behind-struts self-shadow, named 5/5 every loop). A slab
     # is carved by a jittered 3D grid of icospheres UNIONED via voxel remesh (fixes the self-
     # intersecting-cutter boolean failure) then subtracted · leaving a connected strut network with
     # true depth and pores that go fully dark against the recess behind. Slab front at front_face_y,
-    # extends +y (into the body) by depth.
-    import random as _r
+    # extends +y (into the body) by depth. holes = [(x, w, h, r), ...] stadium cutouts (the pill
+    # bezel plateaus · L15) subtracted from the slab BEFORE the sphere carve, so the foam tears
+    # organically against the island edges. The finished mesh is CACHED to render/cache/ keyed on
+    # every shape parameter (the fine full-width build costs minutes · reloads are instant).
+    import random as _r, os as _os
     from mathutils import Matrix
-    _r.seed(seed)
+    # NOTE the baked mesh is in WORLD coords (transform_apply defaults location=True), so the cache
+    # key must include the position and the loaded object sits at the origin.
+    key = (f"w{w*1000:.1f}h{h*1000:.1f}d{depth*1000:.1f}p{pitch*1000:.2f}v{voxel*1000:.2f}s{seed}"
+           f"f{front_face_y*1000:.2f}x{cx*1000:.1f}z{cz*1000:.1f}"
+           + ("" if not holes else "H" + "-".join(f"{hx*1000:.0f}_{hw*1000:.0f}_{hh*1000:.0f}" for hx, hw, hh, _ in holes)))
+    cdir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "cache")
+    _os.makedirs(cdir, exist_ok=True)
+    cpath = _os.path.join(cdir, f"foam3d_{key}.blend")
     slab_cy = front_face_y + depth / 2.0
+    if _os.path.exists(cpath):
+        with bpy.data.libraries.load(cpath) as (src, dst):
+            dst.meshes = list(src.meshes)[:1]
+        slab = bpy.data.objects.new(name, dst.meshes[0])
+        bpy.context.collection.objects.link(slab)
+        slab.location = (0.0, 0.0, 0.0)
+        print(f"[foam3d] {name}: cache hit ({len(slab.data.polygons)} tris)")
+        return slab
+    _r.seed(seed)
     bpy.ops.mesh.primitive_cube_add(size=1.0, location=(cx, slab_cy, cz))
     slab = bpy.context.active_object; slab.name = name
     slab.scale = (w, depth, h)   # size=1.0 cube spans +/-0.5, so scale by full dim
     bpy.ops.object.transform_apply(scale=True)
+    if holes:
+        for hx, hw, hh, hr in holes:
+            hc = stadium("fhole", hw, hh, depth * 3.0, hr, (hx, slab_cy, cz))
+            hm = slab.modifiers.new("h", "BOOLEAN"); hm.operation = "DIFFERENCE"
+            hm.solver = "EXACT"; hm.object = hc
+            bpy.context.view_layer.objects.active = slab
+            bpy.ops.object.modifier_apply(modifier=hm.name)
+            bpy.data.objects.remove(hc, do_unlink=True)
     rad = pitch * 0.57; jit = pitch * 0.24
     nx = int(w / pitch) + 2; nz = int(h / pitch) + 2; ny = max(2, int(depth / pitch) + 1)
     bm = bmesh.new()
@@ -893,6 +920,11 @@ def foam3d_field(name, cx, cz, w, h, depth, front_face_y, pitch, voxel, seed=11)
     bb = [slab.matrix_world @ __import__("mathutils").Vector(c) for c in slab.bound_box]
     xs = [v.x for v in bb]; zs = [v.z for v in bb]
     print(f"[foam3d] {name}: {len(slab.data.polygons)} tris  x[{min(xs)*1000:.0f},{max(xs)*1000:.0f}]mm  z[{min(zs)*1000:.0f},{max(zs)*1000:.0f}]mm")
+    try:
+        bpy.data.libraries.write(cpath, {slab.data}, compress=True)
+        print(f"[foam3d] cached -> {cpath}")
+    except Exception as e:
+        print(f"[foam3d] cache write failed: {e}")
     return slab
 
 
@@ -919,13 +951,15 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
     # recessed pill pockets with real inner-wall depth (stadium prisms cut into the front)
     # stadium() places its front edge at loc.y+DCUT/2 and extends back in -y, so to cut a
     # POCK-deep pocket into the body (front face at front_y) the front edge sits at front_y+POCK.
+    # L15: in the FOAM3D layout the slots live in the polished bezel ISLANDS (below), not the body.
     POCK = mm(4.2); DCUT = mm(10.0)
-    cutters = []
-    for sx in (-1, 1):
-        cutters.append(stadium("pillcut", pw, phz, DCUT, pw / 2.0,
-                               (sx * px, front_y + POCK - DCUT / 2.0, zc)))
-    boxes = apply_boolean(body, cutters)
-    assign_interior(body, boxes, 1, ymin=front_y + mm(0.3))
+    if not FOAM3D:
+        cutters = []
+        for sx in (-1, 1):
+            cutters.append(stadium("pillcut", pw, phz, DCUT, pw / 2.0,
+                                   (sx * px, front_y + POCK - DCUT / 2.0, zc)))
+        boxes = apply_boolean(body, cutters)
+        assign_interior(body, boxes, 1, ymin=front_y + mm(0.3))
     smooth(body, 40)
 
     # top recessed vent panel (seen in 3/4 + top): a shallow rounded-rect pocket in the top face
@@ -944,11 +978,12 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
 
     # champagne tub floors sitting recessed at the back of each pocket, blank
     tubs = []
-    for sx in (-1, 1):
-        tub = stadium("tub", pw - mm(0.8), phz - mm(0.8), mm(2.4), (pw - mm(0.8)) / 2.0,
-                      (sx * px, front_y + mm(3.7), zc))  # RECESSED floor at the pocket back (concave, never proud)
-        tub.data.materials.append(principled("spark-tub", (0.46, 0.32, 0.11), 0.6, metallic=0.2))
-        smooth(tub, 50); tubs.append(tub)
+    if not FOAM3D:
+        for sx in (-1, 1):
+            tub = stadium("tub", pw - mm(0.8), phz - mm(0.8), mm(2.4), (pw - mm(0.8)) / 2.0,
+                          (sx * px, front_y + mm(3.7), zc))  # RECESSED floor at the pocket back (concave, never proud)
+            tub.data.materials.append(principled("spark-tub", (0.46, 0.32, 0.11), 0.6, metallic=0.2))
+            smooth(tub, 50); tubs.append(tub)
 
     # the open-cell foam field (148 x 46), two-scale Voronoi displacement, pill holes.
     ffx = mm(SPARK["foam_field_long"]); ffz = mm(SPARK["foam_field_short"])
@@ -961,19 +996,64 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
         foam.data.materials.append(foam_flat_material())
         foam_layers = [foam]
     elif FOAM3D:
-        # L9 · REAL 3D open-cell foam geometry (technique-class switch). A dark RECESS is carved into
-        # the champagne body over the bounded center field (bezel-to-bezel), backed by a near-black
-        # material so the deep foam pores read fully dark · then the 3D strut network fills it.
-        fw = mm(SPARK["pill_pitch"] - SPARK["bezel_w"])   # center field bezel-to-bezel ~= 82.9 mm
-        fh = mm(SPARK["foam_field_short"])                # 46.34 mm
-        rec = cutter_box(fw, mm(5.4), fh, mm(3.0), (0, front_y + mm(2.7), zc), seg=10)
+        # L15 (user correction vs cl_front-foam) · the REAL front is foam EDGE-TO-EDGE (the 148.02
+        # pin) with the foam running AROUND two POLISHED bezel plateaus that carry the concave pill
+        # slots, and only a SLIGHT champagne tab at each 150-axis end. The L9 bounded-center layout
+        # (giant matte caps) was a silent regression to the wave-3 spec. Rebuild:
+        # 1 · dark recess across the SAFE flat zone (a full-width cut would break through the 6.09
+        #     corner fillets) · the foam's end strips back onto champagne instead, which reads as
+        #     the real block's cut-edge crush against the tabs.
+        rec = cutter_box(mm(137.0), mm(5.4), ffz, mm(3.0), (0, front_y + mm(2.7), zc), seg=10)
         rbox = apply_boolean(body, [rec])
         body.data.materials.append(principled("spark-foam-recess", (0.045, 0.035, 0.018), 0.82, metallic=0.1))  # 3
         assign_interior(body, rbox, 3, ymin=front_y - mm(0.5))
-        foam = foam3d_field("dgx-spark-foam", 0, zc, fw - mm(1.6), fh - mm(1.6), mm(5.0),
-                            front_y + mm(0.2), pitch=mm(1.62), voxel=mm(0.185))  # L14 · FINER/denser to
-        foam.data.materials.append(foam3d_material())              # match the real fine reticulated foam
+        # 2 · full-width 3D foam, slightly PROUD of the body face (crests forward like the real
+        #     block), with stadium holes where the plateaus sit · the sphere carve then tears the
+        #     hole edges organically.
+        bez_w, bez_h, bez_r = mm(SPARK["bezel_w"]), mm(SPARK["bezel_h"]), mm(6.0)
+        holes = [(sx * px, bez_w, bez_h, bez_r) for sx in (-1, 1)]
+        foam = foam3d_field("dgx-spark-foam", 0, zc, ffx - mm(0.6), ffz - mm(0.8), mm(5.0),
+                            front_y - mm(0.6), pitch=mm(1.62), voxel=mm(0.185), holes=holes)
+        foam.data.materials.append(foam3d_material())
         foam_layers = [foam]
+        # 3 · POLISHED pill plateaus (the shiny islands the reference shows) · a hair proud of the
+        #     foam crests (bezel_foam_relief 0.60 class), slot riding toward the OUTER end
+        #     (pill_center_from_end 15.21, not centered), concave 4.2 with a recessed tub floor.
+        islandfront = front_y - mm(1.1)
+        for sx in (-1, 1):
+            # island 0.8mm larger than its foam hole so it covers the sphere-nibbled edge; face is
+            # SATIN champagne (bright plateau · a 0.17-rough mirror read black against the void),
+            # the slot interior is the POLISHED dark part (matches cl_front-foam: bright plateau,
+            # dark shiny pocket).
+            isl = stadium("pill-bezel", bez_w + mm(0.8), bez_h + mm(0.8), mm(7.0), bez_r,
+                          (sx * px, islandfront + mm(3.5), zc))
+            isl.data.materials.append(add_bevel(principled("spark-bezel-satin",
+                                                           (0.84, 0.585, 0.205), 0.30, metallic=0.40)))
+            isl.data.materials.append(principled("spark-pill-wall3d", (0.30, 0.205, 0.075), 0.18, metallic=0.60))
+            slot_x = sx * (W / 2.0 - mm(15.21))
+            # r a hair under pw/2 (a FULL round makes degenerate tangent verts the EXACT solver
+            # chokes on when cutting another stadium · it returned an EMPTY island) + FAST solver
+            # (robust for convex-prism-minus-convex-prism).
+            pcut = stadium("pillslot", pw, phz, mm(10.0), pw / 2.0 - mm(0.25),
+                           (slot_x, islandfront + mm(4.2) - mm(5.0), zc))
+            mn = [min((pcut.matrix_world @ v.co)[i] for v in pcut.data.vertices) for i in range(3)]
+            mx = [max((pcut.matrix_world @ v.co)[i] for v in pcut.data.vertices) for i in range(3)]
+            sb = isl.modifiers.new("slot", "BOOLEAN"); sb.operation = "DIFFERENCE"
+            sb.solver = "FAST"; sb.object = pcut
+            bpy.context.view_layer.objects.active = isl
+            bpy.ops.object.modifier_apply(modifier=sb.name)
+            bpy.data.objects.remove(pcut, do_unlink=True)
+            assign_interior(isl, [(mn, mx)], 1, ymin=islandfront + mm(0.2))
+            smooth(isl, 40)
+            tub = stadium("tub", pw - mm(0.8), phz - mm(0.8), mm(2.4), (pw - mm(0.8)) / 2.0,
+                          (slot_x, islandfront + mm(3.7), zc))
+            tub.data.materials.append(principled("spark-tub", (0.30, 0.21, 0.075), 0.35, metallic=0.5))
+            smooth(tub, 50)
+            tubs += [isl, tub]
+            mi = [p.material_index for p in isl.data.polygons]
+            ys = [(isl.matrix_world @ v.co).y for v in isl.data.vertices]
+            print(f"[island {sx}] polys={len(mi)} mat0={mi.count(0)} mat1={mi.count(1)}"
+                  f" y[{min(ys)*1000:.1f},{max(ys)*1000:.1f}]mm loc={tuple(round(c*1000,1) for c in isl.location)}")
     else:
         # wave 5b · two-scale displacement for size VARIANCE (coarse 2.15mm cells subdivided by
         # a finer 1.30mm strut network · fixes the uniform single-scale reptile-skin look) plus
