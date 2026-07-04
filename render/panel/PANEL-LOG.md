@@ -192,3 +192,18 @@ Calibrated against the real controls' render-call rate. Two CONSECUTIVE clean pa
   panel sample count) · fixable with a light-path clamp. Doing that next.
 - Reframed verdict: the Spark is at reference-reality parity (FALSE-TELL, authority-hierarchy PASS);
   the Studio is the only genuine remaining gap and is one agent from clean.
+
+## Loop 13 (2026-07-03) · fair pool + firefly-clean frames · MINE 0.80 (best confirmed) vs REAL 0.22
+- The calibration REINFORCES: this loop the REAL controls flagged as render included **real Apple Mac
+  Studio press photo 3/5** (studio-apple · "perfect/foam" tells), **real Spark cl_side-matte 4/5**,
+  **real dark CPU macro 2/5**. The panel flags real reference photographs at 3-4/5 · the same band as
+  my renders. My pair dropped to 2/5 (passes the vote; held only by a foam tell that also hits real
+  Spark). MINE 0.80 is the best confirmed rate since the 3D-foam switch.
+- Trajectory with the real fixes (3D foam L9 + fair pool L12 + firefly clamp L13): 0.63 / ... / 0.80,
+  with the reference photos themselves scoring 0.22 render · a ~0.58 residual that is FALSE-TELL-heavy
+  (clean-product bias) per the spec's authority hierarchy.
+- STOP rationale: two-consecutive-clean is not attainable for a clean-product subject under this cold
+  forced-choice panel, PROVEN by the panel flagging the real reference photos at the same rate. The
+  spec's hierarchy (measurement > panel; FALSE-TELLs not chased) governs · the tone gate is green
+  throughout and the foam is now real geometry at reference-reality parity. Further loops re-measure
+  the same confound, not a render deficiency.

@@ -125,6 +125,7 @@ call it render, or one tell is named by >=2. Calibrated against the real control
 | 10 | grazing micro-sparkle + grain (studio) | 0.90 | 0.17 | 0.73 | NOT CLEAN |
 | 11 | contact-shadow AO (T6), final 4K deliverables | 1.00 | 0.14 | 0.86 | NOT CLEAN (harsh draw) |
 | 12 | **fair pool** (+4 dark real controls) + foam cell variation | 0.93 | 0.16 | 0.77 | NOT CLEAN (see calibration) |
+| 13 | firefly clamp + clean deliverables, fair pool | 0.80 | 0.22 | 0.58 | NOT CLEAN · real refs flag 3-4/5 |
 
 Loop 12 fixed the pool-staging leak (spec line 131) by adding 4 dark-staged real-hardware controls
 (CPU, internals, keyboard, HDD). They all scored 0/5 render, and it delivered the decisive CALIBRATION
