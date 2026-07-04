@@ -226,3 +226,22 @@ Calibrated against the real controls' render-call rate. Two CONSECUTIVE clean pa
   a defect. Fourteen panel loops across two techniques (heightfield, then real 3D foam) and a
   calibration study together demonstrate the literal two-consecutive-clean criterion is unreachable
   for this subject under this panel design · not through lack of iteration, but through evidence.
+
+## Loop 15 (2026-07-04) · ISOLATION CONTROL STUDY · partial (usage cap) · MINE 1.00 vs REAL 0.45
+- Design: each image judged ALONE · one image per agent per conversation, 5 lenses, no other images
+  visible. Tests whether batch cross-referencing ("same procedural foam as the other renders in this
+  set") was inflating render-calls. 8 of 17 items completed before the subagent weekly usage cap hit
+  (the 4 MINE gate frames all completed; 4 REAL controls completed).
+- MINE isolated: studio-front 5/5, spark-front 5/5, spark-detail 5/5, pair 5/5 (conf 88-96).
+  Isolation does NOT rescue the frames · the tells named are intrinsic single-image reads (uniform
+  gradient, procedural-foam read, too-clean cutouts).
+- REAL isolated: **real:studio-apple 4/5 render** (a genuine Apple press photograph, shown alone,
+  called CG by 4 of 5 cold agents) · real:spark-side 3/5 · real:spark-foam 2/5 · real:spark-srv 0/5.
+- Interpretation, both directions, honestly: (a) a MINE-vs-REAL gap remains even in isolation
+  (1.00 vs 0.45) · the frames still read cleaner/more uniform than most real photos; (b) the pass
+  criterion (no gate frame flagged by >=2 of 5) is unreachable when a REAL Apple marketing photo
+  draws 4/5 alone · a "clean" verdict would require the renders to look LESS clean than real product
+  photography, i.e. to be WRONG vs the references and the tone pins. The only real photo scoring
+  0/5 is the messy-environment lab shot (spark-srv) · environment clutter, not surface realism, is
+  what this panel actually keys on.
+- No further loops are runnable this session (weekly subagent cap until 18:00 America/Toronto).
