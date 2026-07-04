@@ -30,23 +30,20 @@ items = [
     ("real:studio-apple", "render/ref/mac-studio/apple_front.jpg",     False),
     ("real:studio-wiki",  "render/ref/mac-studio/wikimedia_front.jpg", False),
     ("real:studio-3q",    "render/ref/mac-studio/apple_lifestyle_3q.jpg", False),
+    # real controls · OTHER hardware in DARK staging (L13 · fixes the staging leak, spec line 131 ·
+    # so the pool spans bright AND dark and "dark == render" is no longer a valid shortcut)
+    ("real:dark-cpu",     "render/ref/pool-dark/us_zwlwJKtaU7U.jpg",   False),
+    ("real:dark-internals", "render/ref/pool-dark/us_qTRGISczzM8.jpg", False),
+    ("real:dark-keyboard", "render/ref/pool-dark/us_1osIUArK5oA.jpg",  False),
+    ("real:dark-hdd",     "render/ref/pool-dark/us_sIX4eDtak7k.jpg",   False),
 ]
 items = [(l, p, m) for (l, p, m) in items if os.path.exists(p)]
 
-# two fixed permutations (no RNG in this env) · loop1 and loop2 shuffle differently
-PERM = {1: [7, 0, 11, 3, 9, 1, 5, 12, 2, 8, 4, 10, 6],
-        2: [2, 9, 4, 12, 0, 7, 10, 3, 11, 1, 8, 5, 6],
-        3: [10, 4, 1, 8, 12, 5, 0, 9, 3, 11, 6, 2, 7],
-        4: [5, 11, 8, 2, 6, 10, 1, 12, 0, 4, 9, 7, 3],
-        5: [8, 3, 12, 6, 1, 11, 4, 0, 10, 2, 9, 5, 7],
-        6: [1, 7, 10, 4, 12, 2, 8, 5, 0, 11, 3, 9, 6],
-        7: [9, 2, 6, 11, 0, 8, 3, 12, 5, 1, 10, 4, 7],
-        8: [4, 12, 1, 7, 3, 9, 11, 2, 6, 0, 5, 10, 8],
-        9: [11, 5, 0, 9, 2, 12, 7, 3, 10, 1, 6, 4, 8],
-        10: [6, 0, 9, 3, 11, 5, 12, 1, 8, 2, 7, 10, 4],
-        11: [3, 9, 6, 0, 12, 2, 10, 5, 7, 1, 11, 4, 8]}
-order = PERM.get(LOOP, list(range(len(items))))
-order = [i for i in order if i < len(items)]
+# deterministic per-loop shuffle (robust to item count · random IS available in this plain script)
+import random as _rng
+_rng.seed(LOOP * 97 + 13)
+order = list(range(len(items)))
+_rng.shuffle(order)
 
 key = []
 for slot, idx in enumerate(order, 1):
