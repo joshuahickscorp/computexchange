@@ -245,3 +245,19 @@ Calibrated against the real controls' render-call rate. Two CONSECUTIVE clean pa
   0/5 is the messy-environment lab shot (spark-srv) · environment clutter, not surface realism, is
   what this panel actually keys on.
 - No further loops are runnable this session (weekly subagent cap until 18:00 America/Toronto).
+
+## L18 (2026-07-04, post-loop-15) · the last TRUE tell worked · detail camera fixed
+- The highest-frequency tell that was NOT a FALSE-TELL: "uniform sharp focus at macro / no lens
+  falloff" on the detail gate frame. Root cause found in code: the detail branch passed shot="q34"
+  to the camera (f-stop lookup returned f16, not the published f5.6) and aimed at the device center;
+  the pipeline then delivered a CROP of the sharp q34 frame. The camera table promised f5.6 · it was
+  never actually shipped. Fixed: feature-aimed detail camera per device (Spark pill-bezel + foam
+  corner · Studio ports), shot="detail" so f5.6 applies, focus plane on the feature, genuine macro
+  falloff. Verified by eye at calib res on both devices; shipped as true 4K renders (not crops).
+- No panel can verify this today (weekly subagent cap until 18:00 America/Toronto). Per the loop
+  discipline this is logged FIXED-UNCONFIRMED; the confirming panel is the first action when
+  capacity resets, if the grader keeps the gate open after ruling on the 10e conflict.
+- Foam strut sparkle (the other candidate from the isolation verdicts) deliberately NOT attempted
+  without a panel to check it · the wear/grunge history (dimples -> marble) showed speculative
+  surface tuning without verification is how regressions happen. Anti-drift: work the named tell
+  with a defined fix; do not render variants to feel progress.

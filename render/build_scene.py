@@ -1453,8 +1453,21 @@ def portrait_device(device, shot, res=(3840, 2400), samples=None):
         portrait_camera(aim, sw, sh, "q34", res, yaw=38.0, elev=24.0, margin=1.5)
     elif shot == "detail":
         aim = portrait_rig(sh, **rig)
-        # tighter crop on the feature (Studio front ports · Spark foam+pill corner)
-        portrait_camera(aim, sw * 0.42, sh * 0.9, "q34", res, yaw=20.0, elev=14.0, margin=1.05)
+        # TRUE macro detail (L18) · the old branch passed shot="q34" so the f-stop lookup returned
+        # f16 (deep focus) and it aimed at the DEVICE CENTER · the delivered "detail" was then a
+        # crop of a sharp frame, which the panel repeatedly named ("uniform sharp focus at macro ·
+        # no lens falloff"). Now: a dedicated FEATURE-aimed empty (Spark pill-bezel + foam corner ·
+        # Studio front ports) and shot="detail" so the published f5.6 actually applies · the focus
+        # plane sits on the feature and the far foam/body falls off like a real macro.
+        det = bpy.data.objects.new("DetailAim", None)
+        if device == "studio":
+            det.location = (-mm(30), -mm(98.5), mm(16))     # USB-C pair + SD slot region
+            dw, dh = mm(95), mm(52)
+        else:
+            det.location = (-mm(44), -mm(75), mm(25))       # left pill bezel + surrounding foam
+            dw, dh = mm(66), mm(42)
+        bpy.context.collection.objects.link(det)
+        portrait_camera(det, dw, dh, "detail", res, yaw=22.0, elev=12.0, margin=1.06)
     elif shot == "side":                             # wave 8 KEPT · straight side profile
         aim = portrait_rig(sh, **rig)
         portrait_camera(aim, sw, sh, "side", res, yaw=90.0, elev=10.0, margin=1.4)

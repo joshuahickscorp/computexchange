@@ -81,6 +81,15 @@ self-occlusion) but never crosses dE6.
 | pair | 11 | far device a touch softer; T9 depth separation |
 | front / q34 / side / top | 16 | subject sharp end-to-end, keeps the tone patches crisp/gated |
 
+L18 correction: until the final pass, the delivered "detail" was silently NOT this table's f5.6 shot ·
+a code bug passed shot="q34" to the camera (so the f-stop lookup returned f16) and aimed at the device
+CENTER, and the pipeline then shipped a CROP of the sharp q34 frame instead. That is exactly why the
+panel kept naming "uniform sharp focus at macro / no lens falloff" on the detail frame · a TRUE tell,
+correctly named, with a fix that was already specified in this table but never actually delivered. L18
+adds a FEATURE-aimed detail camera per device (Spark pill-bezel + foam corner · Studio USB-C/SD ports)
+with shot="detail" so f5.6 genuinely applies: the focus plane sits on the feature and the field falls
+off like a real macro. Both final detail heroes are now true f5.6 renders, not crops.
+
 Pair asymmetry (T9): Spark yawed -14.5 vs Studio -14.0; sub-degree camera ROLL applied in post.
 
 ## 5. Lighting version table
