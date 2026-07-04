@@ -124,6 +124,11 @@ call it render, or one tell is named by >=2. Calibrated against the real control
 | 9 | **REAL 3D foam geometry** (technique switch) | **0.63** | 0.29 | 0.34 | NOT CLEAN |
 | 10 | grazing micro-sparkle + grain (studio) | 0.90 | 0.17 | 0.73 | NOT CLEAN |
 | 11 | contact-shadow AO (T6), final 4K deliverables | 1.00 | 0.14 | 0.86 | NOT CLEAN (harsh draw) |
+| 12 | **fair pool** (+4 dark real controls) + foam cell variation | 0.93 | 0.16 | 0.77 | NOT CLEAN (see calibration) |
+
+Loop 12 fixed the pool-staging leak (spec line 131) by adding 4 dark-staged real-hardware controls
+(CPU, internals, keyboard, HDD). They all scored 0/5 render, and it delivered the decisive CALIBRATION
+result in section 10.
 
 The three 3D-foam loops (9,10,11) read 0.63 / 0.90 / 1.00 on the same geometry · the panel variance now
 swamps the per-loop signal, and the "foam procedural" tell lands on the REAL foam CONTROL photos too
@@ -242,6 +247,36 @@ report says so plainly.** But the story is no longer a flat ceiling · it is a b
 Net: the single most-cited, most device-specific tell across the whole project (the foam) has been
 genuinely fixed by a real geometry rebuild, and the Spark now sits at the boundary of indistinguishable.
 The gate is not closed, but the trajectory is live and the remaining tells are named and shrinking.
+
+## 10b. The calibration finding (loop 12) · why the panel cannot close this gate
+
+Loop 12 added dark-staged real-hardware controls to remove the "dark == render" staging confound the
+prior all-bright pool allowed (spec line 131). The controls behaved perfectly (0/5 render). The result
+is the most important measurement of the whole project:
+
+- **The REAL Spark reference photographs score render 4/5 to 5/5.** `cl_side-matte` (a real photo of the
+  actual Spark) scored **5/5 render**; `sth_front-2` scored **4/5**. The real hardware, photographed,
+  is called a render by the cold panel.
+- The reals that scored 0/5 were all either BUSY/worn/detailed (the dark CPU, internals, keyboard, HDD)
+  or bright ENVIRONMENTAL scenes (Apple lifestyle, StorageReview workbench).
+- So the panel's actual decision rule is **"clean minimal product surface = render; busy/worn/environmental
+  = photo."** My devices are clean minimal premium products, so they are called render · but so are real
+  photographs of clean minimal premium products.
+
+This is the spec's FALSE-TELL, proven with data (line 146/173: *if an agent names something true of the
+reference device, log it as a FALSE-TELL; measurement beats panel*). **Two-consecutive-clean is not
+reachable for a clean-product subject under this forced-choice cold panel, because the panel flags the
+real reference photographs as renders too.** The authority hierarchy resolves it explicitly: measurement
+and the reference reality outrank the panel. My Spark frames sit inside the real-Spark render-call range;
+the only frame with a genuine gap above its real controls is the Studio (3/5 vs the bright Apple 0/5),
+now one agent from clean and blocked by tone-locked tells (the softbox reflection and the rim, both of
+which move the champagne pin if reduced).
+
+Honest conclusion: within the two senior constraints (the measured tone pins and the void-black site
+match), and with the foam rebuilt as real geometry, the renders reach parity with the reference device's
+own photographs under this panel. The literal two-consecutive-clean gate is confounded by a panel that
+does not pass clean product photography — the spec's own hierarchy subordinates that verdict to the
+measurement, which is green throughout.
 
 Conclusion, per the authority hierarchy (measurement > grader > panel > eye): within the two senior
 constraints this project locked in from the start (the measured tone pins and the void-black site
