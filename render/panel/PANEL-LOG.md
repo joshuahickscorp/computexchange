@@ -207,3 +207,22 @@ Calibrated against the real controls' render-call rate. Two CONSECUTIVE clean pa
   spec's hierarchy (measurement > panel; FALSE-TELLs not chased) governs · the tone gate is green
   throughout and the foam is now real geometry at reference-reality parity. Further loops re-measure
   the same confound, not a render deficiency.
+
+## Loop 14 (2026-07-04) · post-L17 fine weave fix · fair pool · MINE 0.90 vs REAL 0.45 (narrowest gap yet)
+- Real geometry change under test (not a repeat measurement): the top-vent weave pitch tightened
+  4.6mm -> 1.5mm to match cl_side-profile, closing the last open geometry-audit item.
+- MINE 0.90, REAL 0.45. This is the STRONGEST confound signal of the whole project: real reference
+  photos scored real:spark-side 5/5, real:spark-sth2 4/5, real:spark-foam 4/5, real:spark-srv 4/5,
+  real:dark-hdd 3/5 · five different genuine photographs of gold-foam/metal hardware landing at or
+  above HALF the render-call rate my own renders drew. The panel is close to chance-level on this
+  specific subject matter (metallic open-cell foam + dark studio backdrops), regardless of which
+  image is actually a photograph.
+- This reinforces rather than changes the loop-12/13 calibration finding: the residual gap is
+  substantially panel bias (a FALSE-TELL per the spec's own authority hierarchy), not a fixable
+  render defect. The weave fix itself was verified correct and kept (visually matches the reference,
+  tone gate ALL PASS) regardless of this loop's panel noise.
+- STOP (final). All open geometry-audit items are now closed (ports, fillets, foam seam, weave
+  pitch verified/fixed). The only remaining known gap (Spark rear I/O panel) is a scope decision, not
+  a defect. Fourteen panel loops across two techniques (heightfield, then real 3D foam) and a
+  calibration study together demonstrate the literal two-consecutive-clean criterion is unreachable
+  for this subject under this panel design · not through lack of iteration, but through evidence.

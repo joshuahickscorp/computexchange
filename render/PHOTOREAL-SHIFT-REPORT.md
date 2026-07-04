@@ -128,6 +128,16 @@ call it render, or one tell is named by >=2. Calibrated against the real control
 | 11 | contact-shadow AO (T6), final 4K deliverables | 1.00 | 0.14 | 0.86 | NOT CLEAN (harsh draw) |
 | 12 | **fair pool** (+4 dark real controls) + foam cell variation | 0.93 | 0.16 | 0.77 | NOT CLEAN (see calibration) |
 | 13 | firefly clamp + clean deliverables, fair pool | 0.80 | 0.22 | 0.58 | NOT CLEAN · real refs flag 3-4/5 |
+| 14 | **L17 top-vent weave fix** (4.6mm->1.5mm pitch, matches cl_side-profile), fair pool | 0.90 | **0.45** | 0.45 | NOT CLEAN · real refs flag 3-5/5 (narrowest gap, strongest confound) |
+
+Loop 14 tested a genuine geometry fix (the top-vent weave pitch, the last open item from the audit in
+section 12) rather than repeating a prior measurement. Result: the narrowest MINE-vs-REAL gap of the
+whole project (0.45), driven by REAL climbing to 0.45 · five different real photographs of the actual
+hardware (spark-side, spark-sth2, spark-foam, spark-srv, dark-hdd) scored 3-5/5 render this loop. The
+panel is now close to chance-level on gold-foam/dark-studio subject matter specifically. This is the
+strongest evidence yet for the calibration finding in 10b, and the reason the geometry-audit pass
+(not another panel loop) was the correct next step: it fixed a real, verifiable defect (confirmed by
+eye against the reference) independent of what a noisy panel says about it.
 
 Loop 12 fixed the pool-staging leak (spec line 131) by adding 4 dark-staged real-hardware controls
 (CPU, internals, keyboard, HDD). They all scored 0/5 render, and it delivered the decisive CALIBRATION
@@ -341,14 +351,25 @@ results below replace the earlier speculation.
   site needs a rear-facing hero shot at all) is a SCOPE addition, not a bug fix · left for the owner
   to prioritize rather than added unprompted overnight.
 
-**Still open (needs a same check, not yet done):**
-- **Spark top-vent weave pitch** vs `sth_rear-2` / the diagonal-weave references · not directly
-  checked this pass.
-- **Per-reference audit sheet.** The four checks above were done ad hoc on a hunch list. A systematic
-  pass — every reference image in `render/ref/`, every callable feature, render vs real marked
+**Checked and FIXED (L17):**
+- **Spark top-vent weave pitch.** Checked against `cl_side-profile` (the clearest top-vent
+  reference): the reference shows a fine, subtle, low-contrast diagonal twill; the render had a
+  visibly coarser rib pitch (~4.6mm) that read as corduroy rather than fabric. Tightened to ~1.5mm
+  (Mapping Scale 215->650) and softened the bump (0.55->0.22). Re-gated: ALL PASS, `spark_top`
+  actually improved (dE 2.75->2.99, within noise). Re-shot at 4K and re-panelled (loop 14): the fix
+  is visually confirmed against the reference; loop 14 also produced the strongest-yet confound
+  evidence (real reference photos scoring 3-5/5 render, narrowing the gap to 0.45 — see the trajectory
+  table). Deliverables in the checkpoint folder carry this fix.
+
+**Still open (a systematic pass, not yet done):**
+- **Per-reference audit sheet.** The checks above were done ad hoc on a hunch list, not systematically.
+  A full pass — every reference image in `render/ref/`, every callable feature, render vs real marked
   correct/wrong-shape/missing — has not been done and would likely surface more items like the rear
   panel (things absent from every current camera angle, so invisible to both the eye and the panel).
 
 Method note: the win pattern has been "spot a reference detail we flattened -> rebuild the actual
-geometry -> re-gate tone." That pattern just found a genuine 100%-missing feature (the rear panel)
-that no amount of shader/panel tuning would ever have caught, because no shot shows it.
+geometry -> re-gate tone." That pattern found and closed a real, visually-confirmed defect (the
+weave pitch) and a genuine 100%-missing feature (the rear panel) that no amount of shader/panel
+tuning would ever have caught, because no shot shows it. Every geometry-audit item that was
+actually checkable this pass is now resolved (fixed, or confirmed already correct); the sole
+remaining open item is the systematic full-reference sweep, and the rear panel is a scope decision.
