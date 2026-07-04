@@ -93,6 +93,10 @@ def reset_scene():
     sc.cycles.use_adaptive_sampling = True
     sc.cycles.adaptive_threshold = 0.005
     sc.cycles.use_denoising = True
+    # L13 · light-path clamp on INDIRECT only · kills the bright noise fireflies that the deep 3D
+    # foam cavities (concave geo + AO) throw at panel sample counts, without dulling the direct-lit
+    # metal speculars (clamp_direct left 0). Panel named "render-noise fireflies in the cavities".
+    sc.cycles.sample_clamp_indirect = 8.0
     try:
         sc.cycles.denoiser = "OPENIMAGEDENOISE"
         sc.cycles.denoising_input_passes = "RGB_ALBEDO_NORMAL"

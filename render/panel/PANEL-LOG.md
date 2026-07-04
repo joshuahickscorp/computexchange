@@ -176,3 +176,19 @@ Calibrated against the real controls' render-call rate. Two CONSECUTIVE clean pa
 - Net across loops 9-11: the FOAM is now REAL 3D geometry (the detail crop reads as a macro photo of
   reticulated metal foam · 09_spark-detail.jpg), tone-gated, and the single most-cited tell of the
   whole project is structurally fixed. The panel is too noisy/biased to certify two-consecutive-clean.
+
+## Loop 12 (2026-07-03) · FAIR POOL (bright + 4 dark real controls) · the calibration finding
+- MINE 0.93, REAL 0.16. The 4 dark-staged real-hardware controls (CPU/internals/keyboard/HDD) all
+  scored 0/5 render · so "dark staging" alone was NOT the tell (the staging fix was still correct to
+  make · it removes the confound). The decisive result is CALIBRATION:
+  * REAL Spark reference photos scored render **5/5 (spark-side/cl_side-matte)** and **4/5 (spark-sth2)**
+    · the actual Spark hardware (clean champagne + regular gold foam) reads as CG to cold agents even
+    in a real photograph. Per spec line 146/173 this makes the Spark "foam/clean/procedural" verdicts
+    FALSE-TELLs · measurement/reference beats panel. My Spark frames (5/5) sit inside the real-Spark
+    render-call range · statistically the panel cannot separate my Spark from real Spark photos.
+  * REAL Apple studio photos scored 0/5 · and my studio-front improved to **3/5** (was 5/5). So the
+    STUDIO is the one GENUINE residual gap (uniform/reflect/edge), and it is now borderline.
+- Render-quality tell surfaced: "noise fireflies in the deep foam cavities" (deep concave geo + AO at
+  panel sample count) · fixable with a light-path clamp. Doing that next.
+- Reframed verdict: the Spark is at reference-reality parity (FALSE-TELL, authority-hierarchy PASS);
+  the Studio is the only genuine remaining gap and is one agent from clean.
