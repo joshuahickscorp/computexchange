@@ -28,6 +28,8 @@ FALSE-TELLs (true of the reference device, or deliberate product choices) are lo
 ## 2. Commit log (this frontier)
 
 ```
+81dea7e  L15: restore true front layout per cl_front-foam (edge-to-edge 3D foam UNDER the pills, satin
+         plateaus with dark polished slots, end tabs); fix stadium-vs-stadium boolean + foam mesh cache
 26f59b0  L12: foam cell-size variation (bimodal cells); rim-trim reverted (tone-locked to champagne)
 a7a231e  L10: grazing-angle micro-sparkle on aluminium (Fresnel-gated) + grain 0.011 + floor AO (T6)
 1cd25c8  L9: REAL 3D open-cell foam geometry (icosphere+voxel-remesh+boolean) + foam3d_material to pin
@@ -302,3 +304,31 @@ reflection), not more tuning of the current scene.
 In-repo sources: `render/portraits/` (4K), `render/collages/`, `render/panel/` (per-loop neutral
 sets, keys, verdicts, PANEL-LOG.md), `render/PHOTOREAL-LEDGER.md`. Prior mirror:
 `~/Downloads/cx-oracles-final-2026-07-03/`.
+
+Both devices in this pack are freshly re-rendered (Studio + Spark) so the folder is a full overview,
+not a Spark-only delta.
+
+## 12. Geometry reference-audit backlog (the next pass · owner review)
+
+The photoreal methodology that keeps paying off is: pull HARDER off the reference photos, feature by
+feature, and diff the render against the real part. The L15 front rebuild (foam edge-to-edge UNDER
+the pills, satin plateaus, end tabs · from `cl_front-foam`) is the newest example. Do a per-reference
+EXACT-GEOMETRY audit next, not just per-surface tone. Concrete items already spotted:
+
+- **Per-reference audit sheet.** For each reference image in `render/ref/`, list every callable
+  feature and mark render vs real: correct / wrong-shape / missing. Fix wrong-shape and missing before
+  any more material work · geometry reads before microtexture.
+- **Studio USB-C / SD ports.** Confirm the front ports are true PILL / STADIUM cutouts with real
+  interior depth and a visible connector tongue, not flat rectangles pasted on the face (this exact
+  bug was fixed once on the Spark pills · re-verify it did not regress on the Studio front).
+- **Studio body form.** Audit against `apple_front` / `dim_top-front`: it is a rounded-rectangular
+  prism (border-radius on the vertical corners) that is BISECTED so the TOP is dead-flat while the
+  BOTTOM carries a fillet/curve for the intake · confirm the top is flat, the corner radius matches,
+  and the bottom intake curve is present (not a symmetric top-and-bottom fillet).
+- **Spark top vent + rear.** Verify the diagonal weave pitch and the rear I/O panel against
+  `nv_rear-panel` / `sth_rear-2` before the next hero set.
+- **Foam-to-plateau seam.** L15 tears the foam organically against the island edge; sanity-check the
+  seam width and that no foam nibbles over the polished plateau at q34.
+
+Method note: the win pattern each loop has been "spot a reference detail we flattened → rebuild the
+actual geometry → re-gate tone." Keep doing exactly that; it moves the needle more than shader tuning.
