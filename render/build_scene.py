@@ -1286,6 +1286,15 @@ def portrait_rig(subject_h, warm=False, key_e=55, key_sz=1.5, rim_e=26, fill_e=9
         _nt.links.new(_nz.outputs["Fac"], _mixh.inputs["Color1"]); _nt.links.new(_nz2.outputs["Fac"], _mixh.inputs["Color2"])
         _bmp = _nt.nodes.new("ShaderNodeBump"); _bmp.inputs["Strength"].default_value = 0.08
         _nt.links.new(_mixh.outputs["Color"], _bmp.inputs["Height"]); _nt.links.new(_bmp.outputs["Normal"], _pb.inputs["Normal"])
+        # photoreal T6 (spec line 54 · loop-10 "shadow reads CG / too-clean soft" tell) · AO on the
+        # floor darkens CRISPLY right at the contact and grades out to a soft penumbra (real contact
+        # occlusion), so the device stops reading as floated on a single-light gradient. Base lifted a
+        # hair off pure void so the occlusion gradient is readable against it.
+        _ao = _nt.nodes.new("ShaderNodeAmbientOcclusion"); _ao.inputs["Distance"].default_value = mm(24); _ao.samples = 8
+        _aom = _nt.nodes.new("ShaderNodeMixRGB"); _aom.blend_type = "MULTIPLY"; _aom.inputs["Fac"].default_value = 0.9
+        _aom.inputs["Color1"].default_value = (0.011, 0.011, 0.012, 1)
+        _nt.links.new(_ao.outputs["Color"], _aom.inputs["Color2"])
+        _nt.links.new(_aom.outputs["Color"], _pb.inputs["Base Color"])
         fl.data.materials.append(fm)
     return aim
 

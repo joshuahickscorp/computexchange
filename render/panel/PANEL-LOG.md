@@ -152,3 +152,12 @@ Calibrated against the real controls' render-call rate. Two CONSECUTIVE clean pa
   texture2, edge2 · too clean/CG, post-grain reads synthetic), (b) foam at GRAZING angle (spark-q34
   still foam5 · the 3D foam reads real head-on but the q34 angle flattens it), (c) pair reflect3/foam4.
 - Next highest-frequency tells to work: grain (studio), foam-at-angle (q34), clean/edge (studio).
+
+## Loop 10 (2026-07-03) · HIGH PANEL VARIANCE exposed · MINE 0.90
+- MINE 0.90, REAL 0.17. BUT the SAME 3D-foam spark-front frame that scored 1/5 in loop 9 scored 4/5
+  here (no Spark code changed between loops). This is not a regression · it is the panel's large
+  loop-to-loop draw variance: the 3D foam pushed the Spark frames onto the photo/render BOUNDARY,
+  where fresh cold agents flip-flop. Exactly why the spec requires TWO CONSECUTIVE clean panels.
+- Rising tell: "shadow" (studio-front shadow4, "idealized soft shadow from a single 3D light" · the
+  contact reads CG) -> L11 fix: floor AO for a crisp contact-occlusion line grading to penumbra (T6).
+  Also grazing micro-sparkle (L10) + grain 0.011 landed but the noisy draw masks their effect.
