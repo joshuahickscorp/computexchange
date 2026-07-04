@@ -28,8 +28,11 @@ FALSE-TELLs (true of the reference device, or deliberate product choices) are lo
 ## 2. Commit log (this frontier)
 
 ```
-e78637d  L7->L8: readable-edge softbox (grader T5) + foam torn/merged cells (grader part-4) + gentler vignette
-2b9ac3f  L6->L7: glossy-only studio reflection world (tone-safe) + large foam tonal variation
+26f59b0  L12: foam cell-size variation (bimodal cells); rim-trim reverted (tone-locked to champagne)
+a7a231e  L10: grazing-angle micro-sparkle on aluminium (Fresnel-gated) + grain 0.011 + floor AO (T6)
+1cd25c8  L9: REAL 3D open-cell foam geometry (icosphere+voxel-remesh+boolean) + foam3d_material to pin
+e78637d  L8: readable-edge softbox (grader T5) + foam torn/merged cells (grader part-4) + gentler vignette
+2b9ac3f  L7: glossy-only studio reflection world (tone-safe) + large foam tonal variation
 5f1bc8f  L5 anti-drift: remove grunge (wear backfired: dimples->marble on the reflective top)
 cea4633  L4 fix: grunge smudge Voronoi->organic noise (kill grid-of-dimples regression), pull amplitude
 0682bea  L3 cleanup: un-distort bezel cutouts (warp 0.6), soften bevel 0.16, broaden reflector
@@ -209,6 +212,11 @@ bake-off.* So the class was switched to **real 3D open-cell geometry**:
 Bake-off evidence: `render/measure_evidence/foam3d-tile.png` (test tile · struts-behind-struts, pores
 fully dark). Result: loop 9 spark-front went from 4-5/5 render-calls to 1/5; MINE 0.90 to 0.63. The
 foam stopped being the dominant tell. The pill relief (concave finger-slots) is preserved.
+
+L12 refinement (panel "foam too uniform in scale"): the sphere grid now draws BIMODAL cell sizes ·
+~14% much larger merged/blown pores + ~10% fine cells over the base spread, so no single cell pitch is
+detectable. Re-gated: spark_foam dE 5.09 PASS. This is the version in the delivered frames
+(`09_spark-detail.jpg` is the showcase · a macro of real reticulated metal foam with varied cells).
 
 ## 10. Final verdict (honest)
 
