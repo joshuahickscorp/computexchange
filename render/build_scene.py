@@ -802,10 +802,13 @@ def spark_top_vent():
     wave.inputs["Distortion"].default_value = 0.0
     try: wave.inputs["Detail"].default_value = 0.0
     except KeyError: pass
-    # ~3mm rib pitch: object space is metres, panel ~0.114m; use a Value node scale via Mapping
-    mapp.inputs["Scale"].default_value = (215.0, 215.0, 215.0)     # ~4.6mm rib pitch (coarser)
+    # L17 (geometry audit vs cl_side-profile) · the reference twill is much FINER/subtler than the
+    # old 4.6mm rib pitch (which read as a coarse visible corduroy, not a fabric-like weave). Tighten
+    # to ~1.5mm pitch (Scale 215->650) and soften the bump so it reads as a low sheen-direction change,
+    # not a ridged texture.
+    mapp.inputs["Scale"].default_value = (650.0, 650.0, 650.0)     # ~1.5mm rib pitch (fine twill)
     nt.links.new(mapp.outputs["Vector"], wave.inputs["Vector"])
-    bump = nt.nodes.new("ShaderNodeBump"); bump.inputs["Strength"].default_value = 0.55
+    bump = nt.nodes.new("ShaderNodeBump"); bump.inputs["Strength"].default_value = 0.22
     bump.inputs["Distance"].default_value = mm(0.5)
     nt.links.new(wave.outputs["Fac"], bump.inputs["Height"])
     nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
