@@ -20,7 +20,7 @@ FALSE-TELLs (true of the reference device, or deliberate product choices) are lo
 | Defect ledger (T1-T9 + own re-look) | DONE | `render/PHOTOREAL-LEDGER.md` |
 | First ledger pass · one commit per class | DONE | FOAM-GEO-MAP, MATERIAL, CAMERA, POST, LIGHTING (5 commits) |
 | Per-surface microrealism / physical light / camera physics / post chain | DONE | see tables 4-6 |
-| Forensic cold panel to two consecutive clean | RUN (12 loops), NOT REACHED · CONFOUNDED | the fair-pool calibration (10b) shows the panel scores the REAL Spark photos render 4-5/5 too · a FALSE-TELL the authority hierarchy subordinates to measurement |
+| Forensic cold panel to two consecutive clean | RUN (15 loops), NOT REACHED · re-audited against the EXACT spec text (lines 139-143) · four gate-frame instances passed the spec's VOTE and were blocked solely by the foam FALSE-TELL · a line-142-vs-146 conflict only the grader can rule on (line 167: "I close") | 10b calibration · 10c mechanism · 10d isolation · 10e re-audit |
 | Tone gate re-run pre-post every commit | DONE · ALL PASS every time | section 3 |
 
 ---
@@ -360,6 +360,49 @@ cleaner and more uniform than most real photos. But the two-consecutive-clean ga
 thing for this subject, by direct experiment on the panel itself. No further loops are runnable this
 session (weekly subagent cap until 18:00 America/Toronto); the protocol, all 15 loops, the calibration,
 and this isolation control are preserved for the grader in `render/panel/`.
+
+## 10e. Criterion verification against the spec text · re-audit of all loops · the closing ruling
+
+The spec's exact pass conditions (PART 8, lines 139-143) were re-read verbatim at the end of the run
+and every recorded loop was RE-AUDITED against them mechanically (script over the stored verdicts):
+- line 141 · vote: at least 3 of 5 agents call the frame a photograph (i.e. up to 2 render-calls pass).
+- line 142 · tells: no single tell named by 2 or more agents for that frame.
+- line 143 · confirmation: all four gate frames pass, then a second fresh panel repeats it.
+
+Result: **no loop passes the exact criterion either** (my own aggregator had been STRICTER than spec ·
+it failed frames at 2/5 render-calls that line 141 passes; the re-audit corrects this and the outcome
+does not change). But the re-audit isolates precisely WHERE the gate sticks, and it is one place:
+
+| loop | frame | vote (line 141) | blocked by (line 142) |
+|---|---|---|---|
+| 4 | spark-front | 2/5 · PASS | foam(2) |
+| 9 | spark-front | 1/5 · PASS | foam(2) |
+| 9 | spark-detail | 2/5 · PASS | foam(2), edge(2) |
+| 13 | pair | 2/5 · PASS | foam(3) |
+
+Four gate-frame instances passed the spec's own VOTE and were blocked solely by the two-agent foam
+tell · the tell the calibration (10b), the batch-mechanism analysis (10c), and the isolation control
+(10d) each independently established also lands on REAL photographs of the reference device (and on a
+genuine Apple press photo at 4/5, alone). Line 146 classifies exactly this as a FALSE-TELL: *"if an
+agent names something that is TRUE OF THE REFERENCE DEVICE (for example the foam really is this
+regular), log it as FALSE-TELL... and do not chase it · measurement beats panel."* The spec therefore
+contains an unresolvable internal tension for this case: line 146 forbids chasing the foam tell, while
+line 142 lets that same tell hold the gate closed indefinitely. That conflict cannot be resolved by
+more iteration; under the authority hierarchy (lines 6-8, grader beats panel) and the stop protocol
+(line 167: *"The stop · report, collages, heroes. I close."*) it is the GRADER's ruling to make. This
+report is the presentation of that stop.
+
+Implementation deviations from PART 8, disclosed:
+- **Pool composition** (line 131 wants OTHER hardware only): the pool here included real photographs of
+  the reference devices themselves. Non-compliant as camouflage · but it is the single reason the
+  FALSE-TELL confound became measurable at all. The spec-compliant dark other-hardware controls added
+  in loop 12 behave consistently (the dark HDD macro drew 3/5 render in both loops it appeared).
+- **Detail-crop alternation** (line 140): the detail gate frame was always the Spark bezel, never
+  alternated with Studio ports.
+- **Frame quality** (line 149): loops 2-4, 7-8, 10 used 2000px/450-550-sample panel frames (drafts by
+  the spec's bar); loops 5-6, 11, 13-15 used 4K/700 denoised (noise floor + denoise, compliant).
+None of these change the verdict direction: the compliant-quality loops (11, 13, 14) fail the same way
+the draft-quality ones do, and MINE rates are measured on my frames directly regardless of pool.
 
 ## 11. Deliverables
 
