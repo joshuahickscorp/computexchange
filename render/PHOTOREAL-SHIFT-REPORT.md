@@ -308,27 +308,47 @@ sets, keys, verdicts, PANEL-LOG.md), `render/PHOTOREAL-LEDGER.md`. Prior mirror:
 Both devices in this pack are freshly re-rendered (Studio + Spark) so the folder is a full overview,
 not a Spark-only delta.
 
-## 12. Geometry reference-audit backlog (the next pass · owner review)
+## 12. Geometry reference-audit (verified overnight, post-finalpack) + open backlog
 
 The photoreal methodology that keeps paying off is: pull HARDER off the reference photos, feature by
 feature, and diff the render against the real part. The L15 front rebuild (foam edge-to-edge UNDER
-the pills, satin plateaus, end tabs · from `cl_front-foam`) is the newest example. Do a per-reference
-EXACT-GEOMETRY audit next, not just per-surface tone. Concrete items already spotted:
+the pills, satin plateaus, end tabs · from `cl_front-foam`) is the newest example. After the finalpack,
+four items from the first draft of this backlog were actually checked against the 4K frames and the
+official references, at full resolution (crops in `/tmp/studio_ports_zoom3.png` etc., not retained) ·
+results below replace the earlier speculation.
 
-- **Per-reference audit sheet.** For each reference image in `render/ref/`, list every callable
-  feature and mark render vs real: correct / wrong-shape / missing. Fix wrong-shape and missing before
-  any more material work · geometry reads before microtexture.
-- **Studio USB-C / SD ports.** Confirm the front ports are true PILL / STADIUM cutouts with real
-  interior depth and a visible connector tongue, not flat rectangles pasted on the face (this exact
-  bug was fixed once on the Spark pills · re-verify it did not regress on the Studio front).
-- **Studio body form.** Audit against `apple_front` / `dim_top-front`: it is a rounded-rectangular
-  prism (border-radius on the vertical corners) that is BISECTED so the TOP is dead-flat while the
-  BOTTOM carries a fillet/curve for the intake · confirm the top is flat, the corner radius matches,
-  and the bottom intake curve is present (not a symmetric top-and-bottom fillet).
-- **Spark top vent + rear.** Verify the diagonal weave pitch and the rear I/O panel against
-  `nv_rear-panel` / `sth_rear-2` before the next hero set.
-- **Foam-to-plateau seam.** L15 tears the foam organically against the island edge; sanity-check the
-  seam width and that no foam nibbles over the polished plateau at q34.
+**Verified CORRECT (false alarms, closed, no action needed):**
+- **Studio USB-C / SD ports.** At full 4K resolution both USB-C pockets and the SD slot are genuine
+  stadium cutouts with visible rounded caps, a lit interior gradient, and (USB-C) a lighter tongue
+  blade. The "flat rectangle" read was a thumbnail-viewing artifact, not a render defect. Code:
+  `stadium()` calls at build_scene.py:719-721 already use radius = short-axis/2 (a true pill).
+- **Studio top/bottom fillet asymmetry.** Code already bisects correctly:
+  `rounded_box(..., r_top=STUDIO["top_fillet_build"]=2.70mm, r_bottom=STUDIO["intake_band"]=8.55mm)`
+  (build_scene.py:694-696) · a tight near-flat top and a real curved-fillet bottom carrying the
+  perforated intake mesh, matching `apple_front`/`dim_top-front`. This was already the intended
+  design (see the function docstring), not a gap.
+- **Foam-to-plateau seam (L15).** Checked at q34: clean edge, no foam nibbling over the polished
+  plateau, no visible seam artifact.
 
-Method note: the win pattern each loop has been "spot a reference detail we flattened → rebuild the
-actual geometry → re-gate tone." Keep doing exactly that; it moves the needle more than shader tuning.
+**GENUINE GAP FOUND (owner scope decision, not built overnight):**
+- **Spark rear I/O panel does not exist.** The official NVIDIA rear-panel reference
+  (`render/ref/dgx-spark/nv_rear-panel.png`) documents ON/OFF, power connector, 4x USB-C, HDMI,
+  Ethernet (RJ45), and 2x QSFP cutouts on the rear face. The current `build_dgx_spark()` has NO rear
+  geometry at all (an old code comment literally says "Rear field skipped"), and none of the six
+  render angles (front/q34/side/top/detail/pair) show the rear face, so this has never been visible
+  in any deliverable — which is exactly why it went unnoticed through 15 loops. This is a real,
+  bounded, well-evidenced gap, but building it (new port geometry + materials + deciding whether the
+  site needs a rear-facing hero shot at all) is a SCOPE addition, not a bug fix · left for the owner
+  to prioritize rather than added unprompted overnight.
+
+**Still open (needs a same check, not yet done):**
+- **Spark top-vent weave pitch** vs `sth_rear-2` / the diagonal-weave references · not directly
+  checked this pass.
+- **Per-reference audit sheet.** The four checks above were done ad hoc on a hunch list. A systematic
+  pass — every reference image in `render/ref/`, every callable feature, render vs real marked
+  correct/wrong-shape/missing — has not been done and would likely surface more items like the rear
+  panel (things absent from every current camera angle, so invisible to both the eye and the panel).
+
+Method note: the win pattern has been "spot a reference detail we flattened -> rebuild the actual
+geometry -> re-gate tone." That pattern just found a genuine 100%-missing feature (the rear panel)
+that no amount of shader/panel tuning would ever have caught, because no shot shows it.
