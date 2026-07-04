@@ -20,7 +20,7 @@ FALSE-TELLs (true of the reference device, or deliberate product choices) are lo
 | Defect ledger (T1-T9 + own re-look) | DONE | `render/PHOTOREAL-LEDGER.md` |
 | First ledger pass · one commit per class | DONE | FOAM-GEO-MAP, MATERIAL, CAMERA, POST, LIGHTING (5 commits) |
 | Per-surface microrealism / physical light / camera physics / post chain | DONE | see tables 4-6 |
-| Forensic cold panel to two consecutive clean | RUN, NOT REACHED | 4+ loops; trajectory + honest verdict in section 7 |
+| Forensic cold panel to two consecutive clean | RUN (12 loops), NOT REACHED · CONFOUNDED | the fair-pool calibration (10b) shows the panel scores the REAL Spark photos render 4-5/5 too · a FALSE-TELL the authority hierarchy subordinates to measurement |
 | Tone gate re-run pre-post every commit | DONE · ALL PASS every time | section 3 |
 
 ---
