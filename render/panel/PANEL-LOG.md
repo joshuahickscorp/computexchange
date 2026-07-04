@@ -261,3 +261,20 @@ Calibrated against the real controls' render-call rate. Two CONSECUTIVE clean pa
   without a panel to check it · the wear/grunge history (dimples -> marble) showed speculative
   surface tuning without verification is how regressions happen. Anti-drift: work the named tell
   with a defined fix; do not render variants to feel progress.
+
+## Loop 16 (2026-07-04 evening, capacity restored) · confirming panel on the L18 state · NOT CLEAN
+- MINE 0.97, REAL 0.09 · a harsh draw (variance again). Gate: spark-front 5/5 (foam5, edge4),
+  studio-front 4/5 (edge2 only · the closest studio has come on a harsh draw), pair 5/5, detail 5/5.
+- DECISIVE datum #3: **real:studio-apple drew 5/5 CG_RENDER · UNANIMOUS** (conf ~66) while messy
+  reals sailed (srv 0/5, lifestyle 0/5, all four dark controls 0/5, and this draw even the real
+  spark foam/sth2/side all 0/5). A genuine Apple marketing photograph was unanimously called a
+  render by five cold agents in the same sitting that flagged my frames. The clean-product
+  FALSE-TELL could not be demonstrated more plainly.
+- Panel noise exhibit: one agent described img_05 (my studio-front) and img_06 (the real lifestyle
+  scene) with the SAME lifestyle-scene tells ("duplicate frame") · verdict text confusion inside a
+  single sitting, logged as-is in loop16/_verdicts.json.
+- NEW TRUE SUB-TELL from the L18 macro: at f5.6 4K the foam struts read "smooth waxy metaball
+  blobs · real reticulated foam has thin sharp-edged webbing." Root cause is mechanical: the voxel
+  remesh at 0.185mm rounds the strut ridges. Defined fix: finer voxel (~0.13mm) for a crisper web ·
+  queued as the next FOAM-GEO-MAP commit IF the grader keeps the gate open after ruling on 10e.
+  Not speculative tuning · a named, mechanistic, reference-checked defect with a one-parameter fix.

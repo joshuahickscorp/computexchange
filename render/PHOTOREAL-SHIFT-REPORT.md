@@ -139,6 +139,15 @@ call it render, or one tell is named by >=2. Calibrated against the real control
 | 13 | firefly clamp + clean deliverables, fair pool | 0.80 | 0.22 | 0.58 | NOT CLEAN · real refs flag 3-4/5 |
 | 14 | **L17 top-vent weave fix** (4.6mm->1.5mm pitch, matches cl_side-profile), fair pool | 0.90 | **0.45** | 0.45 | NOT CLEAN · real refs flag 3-5/5 (narrowest gap, strongest confound) |
 | 15 | **ISOLATION control** · each image judged alone, no batch to cross-reference (partial · usage cap) | 1.00 | 0.45 | 0.55 | NOT CLEAN · a real Apple press photo judged ALONE drew 4/5 render |
+| 16 | **L18 true f5.6 macro details** (confirming panel, capacity restored) | 0.97 | 0.09 | 0.88 | NOT CLEAN · harsh draw · the real Apple press photo drew **5/5 render, unanimous** |
+
+Loop 16 adds the third and strongest calibration datum: in the same sitting that flagged my frames,
+five cold agents UNANIMOUSLY called a genuine Apple marketing photograph a render, while every messy
+or environmental real (lab bench, lifestyle, teardown, keyboard, CPU) passed 0/5. It also surfaced one
+genuinely new TRUE sub-tell from the first-ever true-macro detail frame: at f5.6/4K the foam struts
+read "smooth waxy metaball blobs" where real reticulated foam has thin sharp webbing · mechanical root
+cause (the 0.185mm voxel remesh rounds strut ridges), defined one-parameter fix (finer voxel), queued
+as the next FOAM-GEO-MAP commit if the grader keeps the gate open after ruling on the 10e conflict.
 
 Loop 14 tested a genuine geometry fix (the top-vent weave pitch, the last open item from the audit in
 section 12) rather than repeating a prior measurement. Result: the narrowest MINE-vs-REAL gap of the
