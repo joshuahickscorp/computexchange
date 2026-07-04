@@ -828,6 +828,17 @@ def foam3d_material(base=(0.560, 0.470, 0.300), ao_fac=0.54, ao_dist=1.2, rough=
     aom = nt.nodes.new("ShaderNodeMixRGB"); aom.blend_type = "MULTIPLY"; aom.inputs["Fac"].default_value = ao_fac
     aom.inputs["Color1"].default_value = (*base, 1)
     nt.links.new(ao.outputs["Color"], aom.inputs["Color2"]); nt.links.new(aom.outputs["Color"], b.inputs["Base Color"])
+    # L14 · CRYSTALLINE STRUT SURFACE · real sintered/cast metal foam struts are rough and faceted,
+    # not the smooth blobs the voxel remesh leaves · a fine high-freq bump breaks the "procedural
+    # metaball/voronoi" read the lookdev agents named, and a sparse glint lifts the sugary sparkle the
+    # reference foam shows. Object-space so it rides the geometry.
+    tc = nt.nodes.new("ShaderNodeTexCoord")
+    cn = nt.nodes.new("ShaderNodeTexNoise"); cn.inputs["Scale"].default_value = 5200.0 / S
+    cn.inputs["Detail"].default_value = 3.0; cn.inputs["Roughness"].default_value = 0.7
+    nt.links.new(tc.outputs["Object"], cn.inputs["Vector"])
+    cb = nt.nodes.new("ShaderNodeBump"); cb.inputs["Strength"].default_value = 0.30
+    cb.inputs["Distance"].default_value = mm(0.12)
+    nt.links.new(cn.outputs["Fac"], cb.inputs["Height"]); nt.links.new(cb.outputs["Normal"], b.inputs["Normal"])
     return add_bevel(m)
 
 
@@ -960,8 +971,8 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
         body.data.materials.append(principled("spark-foam-recess", (0.045, 0.035, 0.018), 0.82, metallic=0.1))  # 3
         assign_interior(body, rbox, 3, ymin=front_y - mm(0.5))
         foam = foam3d_field("dgx-spark-foam", 0, zc, fw - mm(1.6), fh - mm(1.6), mm(5.0),
-                            front_y + mm(0.2), pitch=mm(2.15), voxel=mm(0.27))
-        foam.data.materials.append(foam3d_material())
+                            front_y + mm(0.2), pitch=mm(1.62), voxel=mm(0.185))  # L14 · FINER/denser to
+        foam.data.materials.append(foam3d_material())              # match the real fine reticulated foam
         foam_layers = [foam]
     else:
         # wave 5b · two-scale displacement for size VARIANCE (coarse 2.15mm cells subdivided by
