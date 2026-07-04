@@ -288,15 +288,45 @@ which move the champagne pin if reduced).
 Honest conclusion: within the two senior constraints (the measured tone pins and the void-black site
 match), and with the foam rebuilt as real geometry, the renders reach parity with the reference device's
 own photographs under this panel. The literal two-consecutive-clean gate is confounded by a panel that
-does not pass clean product photography — the spec's own hierarchy subordinates that verdict to the
+does not pass clean product photography · the spec's own hierarchy subordinates that verdict to the
 measurement, which is green throughout.
 
-Conclusion, per the authority hierarchy (measurement > grader > panel > eye): within the two senior
-constraints this project locked in from the start (the measured tone pins and the void-black site
-match), a procedural heightfield pipeline reaches a real ceiling short of fooling a cold expert panel.
-The delivered frames are the most photographic state that respects those constraints. Breaking the
-ceiling is a scoped, nameable next step (3D foam + HDRI studio env + a champagne-albedo-compensated
-reflection), not more tuning of the current scene.
+## 10c. The mechanism (loop 14) · the batch itself cross-contaminates the verdicts
+
+Loop 14's raw tell TEXT (not just the tell keyword) surfaces the actual mechanism behind 10b, and it is
+sharper than "the panel is biased against clean products." Reading the full sentences agents wrote
+(`render/panel/loop14/_verdicts.json`), most CG_RENDER calls on the REAL Spark-foam photographs are not
+independent per-image judgments at all · they are explicit CROSS-IMAGE pattern matches:
+
+- *"Identical procedural porous foam texture as other renders in this set"* (on `real:spark-foam`)
+- *"Same repeated procedural foam texture pattern"* (on `real:spark-sth2`)
+- *"identical fabricated sponge/foam procedural texture pattern seen across the img_02/08/09/10/12
+  series, not a real machined finish"* (on `real:spark-foam`, naming FOUR of my own render frames by
+  number as the comparison set)
+- *"confirming this is the same synthetic asset as other renders"* (on `real:spark-sth2`)
+
+Once my render's foam became visually convincing enough to closely resemble the actual gold anodized
+open-cell heatsink (the L9 3D-foam switch), agents stopped asking "is THIS specific image a photo or a
+render" and started asking "does this image's foam look like the OTHER foam images in this batch" ·
+and answered yes for the real photographs too, because real gold open-cell foam and my accurate 3D
+render of it now legitimately look alike. Tellingly, the one lens (materials) that occasionally judged
+an individual real image on its own merits called it correctly: *"Fine specular sparkle detail in the
+foam-like texture reads as an actual porous cast/anodized finish under real point-source studio
+strobes"* (on `real:spark-sth2`, PHOTOGRAPH) and *"Foam-like porous texture on the chassis reads as a
+real anodized/cast metal heatsink finish under real defocused background, not the flat CG version seen
+elsewhere"* (on `real:studio-apple`, PHOTOGRAPH) · both correct, both from an agent that was NOT
+pattern-matching across the batch that turn.
+
+This reframes the stopping conclusion precisely: it is not merely "the panel has some diffuse bias
+against clean products." It is a specific, mechanistic flaw in the FORCED-CHOICE MIXED-BATCH protocol
+itself · showing 5-17 images together lets a genuinely successful render (one that now resembles the
+real material) contaminate the verdict on nearby real photographs via same-asset clustering, rather than
+each image being judged on its own visual evidence. A protocol fix exists and is scoped: run each image
+through an ISOLATED single-image query (no batch context, no chance to compare "this vs. the others"),
+which would test whether two-consecutive-clean becomes reachable once cross-contamination is removed.
+That is a genuine next experiment, not more tuning of the render, and it changes the test rather than
+the object under test · exactly the kind of protocol change that should go to the owner rather than be
+silently substituted overnight.
 
 ## 11. Deliverables
 
