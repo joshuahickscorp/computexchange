@@ -68,6 +68,9 @@ if not OUT.endswith("/"):
 # key"). Single source of truth; recorded in NOTES.md. A later wave that needs a rig change is
 # its own lighting-class commit with all patches re-verified.
 PORTRAIT_RIG = dict(warm=False, key_e=64, key_sz=2.2, rim_e=16, fill_e=28, fill_sz=2.7, expo=-0.70)
+# L12 · rim trim to 10 was tried to soften the "CG wraparound rim" tell but it dropped the champagne
+# front below its pin (spark_champ dE 5.99) · the rim is tone-critical for the champagne, so it stays
+# at 16 (tone SENIOR). The edge-rim tell is tone-locked, like the T5 champagne reflection.
 
 # ---- scale ---------------------------------------------------------------------------
 # True metric scale: 1 Blender unit = 1 metre, so every dimension is real and the
@@ -848,7 +851,17 @@ def foam3d_field(name, cx, cz, w, h, depth, front_face_y, pitch, voxel, seed=11)
                 x = cx + (ix - (nx - 1) / 2.0) * pitch + _r.uniform(-jit, jit)
                 z = cz + (iz - (nz - 1) / 2.0) * pitch + _r.uniform(-jit, jit)
                 y = slab_cy + (iy - (ny - 1) / 2.0) * pitch + _r.uniform(-jit, jit)
-                bmesh.ops.create_icosphere(bm, subdivisions=2, radius=rad * _r.uniform(0.82, 1.18),
+                # L12 · CELL-SIZE VARIATION (panel "foam too uniform in scale") · widened base jitter,
+                # plus ~14% of cells much larger (merged/blown pores) and ~10% smaller (fine cells) ·
+                # a real reticulated block is bimodal, never one pitch.
+                roll = _r.random()
+                if roll < 0.14:
+                    rmul = _r.uniform(1.35, 1.85)     # occasional big merged cell
+                elif roll < 0.24:
+                    rmul = _r.uniform(0.62, 0.78)     # occasional fine cell
+                else:
+                    rmul = _r.uniform(0.80, 1.20)     # base spread
+                bmesh.ops.create_icosphere(bm, subdivisions=2, radius=rad * rmul,
                                            matrix=Matrix.Translation((x, y, z)))
     cmesh = bpy.data.meshes.new(name + "-cut"); bm.to_mesh(cmesh); bm.free()
     cutter = bpy.data.objects.new(name + "-cut", cmesh); bpy.context.collection.objects.link(cutter)
