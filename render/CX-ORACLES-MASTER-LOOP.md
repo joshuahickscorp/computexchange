@@ -154,7 +154,9 @@ contradict L15's direct verification · hence the RE-MEASURE tags).
       Accept: thin under-shadow band reads side-on.
 - [ ] SP9 VERIFY · pair relative scale: measured Spark:Studio width ratio within 3% of the
       perspective-corrected 0.761 · fix PAIR_SPAN/camera math if off, never device dims.
-- [ ] SP10 REMEASURE+GEOMETRY · foam spatial frequency at hero distance (PR-gate loop 18: MY
+- [x] SP10 (MATERIAL, loop 19): foam contrast 0.48->0.51 + deeper voids/crests · spark-detail macro 5/5->1/5 PASS (foam macro tell RETIRED) · wide-field still reads noise -> SP11
+- [ ] SP11 REMEASURE+GEOMETRY · foam WIDE-FIELD macro-scale variation (loop 19: detail passes, front/pair read 'noise-fill' · cells do not resolve at distance) · measure real block's large-scale density/tone mottling on sth_front-1 FIRST, add patchy field zones · Accept: spark-front foam not a unique >=2 tell in the PR-gate
+- [x] SP10-orig REMEASURE · foam spatial frequency at hero distance (PR-gate loop 18: MY
       foam reads "mushy, low-frequency" vs the real block's "crisp chaotic cells", judged
       side-by-side in-batch) · this is the flip-flop-guarded cell-scale live case: measure the
       REAL foam's cell frequency at matched pixel scale across sth_front-1 + cl_front-foam
@@ -172,18 +174,18 @@ contradict L15's direct verification · hence the RE-MEASURE tags).
 ## mirrored from RACK-LOOP.md v2 · run in the RACK worktree, rack_verify gates)
 
 Wave 0 · FRAME CORRECTIONS (built part is wrong before anything stacks):
-- [ ] R0.1 GEOMETRY · outer width 760 -> 600mm: walls/posts inboard ~80mm/side, rail x FROZEN
+- [x] R0.1 GEOMETRY · outer width 760 -> 600mm (DONE 608mm measured, rails held, gate PASS): walls/posts inboard ~80mm/side, rail x FROZEN
       (rails measured correct: c-c 464.5 vs 465.1 spec) · Accept: rail-derived scale gives
       width 600 +/-2% on a fresh front.
 - [ ] R0.2 GEOMETRY · post faces ~45mm + 3 hinge bosses + latch keeper · Accept: face ratio
       ~0.075 of width, silhouette not dead-straight.
-- [ ] R0.3 GEOMETRY · top band ~45mm · 4 leveling feet (pad ~45mm, 30mm floor gap) + twin
+- [x] R0.3 GEOMETRY (DONE, gate PASS, floor reveal + feet + casters + roof band read) · top band ~45mm · 4 leveling feet (pad ~45mm, 30mm floor gap) + twin
       casters inboard · Accept: light gap under base reads.
-- [ ] R0.4 GEOMETRY · rear rail pair (holed, same pattern) at rear depth · corner gusset
+- [~] R0.4 GEOMETRY · corner gusset castle plates DONE (gate PASS) · rear rail HOLES deferred to assembly wave (see-through crashes the fragile flange patch; reads between real units there) · corner gusset
       castle plates · brush strips · Accept: rear rails read between units from dead front.
 - [ ] R0.5 GEOMETRY · U-tick strip on rail flange + hole size verified 9.5mm in source ·
       Accept: ticks resolve at 4K.
-- [ ] R0.6 MATERIAL · orange-peel powder micro-texture (NEW target) + RE-MEASURE the frame
+- [x] R0.6 MATERIAL (DONE, gate dE2.42 PASS, tone held) · orange-peel powder micro-texture (NEW target) + RE-MEASURE the frame
       tone (eye says grey, committed number says L22 · one autopsies) · Accept: rack_verify
       powder_black PASS.
 

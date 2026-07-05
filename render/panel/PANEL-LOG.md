@@ -297,3 +297,21 @@ Calibrated against the real controls' render-call rate. Two CONSECUTIVE clean pa
 - DISPOSITION: the PR-gate remains the master loop's stop condition (wave 6 R6.4) · unmet,
   open, with a concrete evidence trail feeding SP10/POST-1 queue items. No claim of
   completion is made.
+
+## Loop 19 (2026-07-05) · PR-GATE on SP10 contrast-fixed foam + POST-1 · FAIL overall, macro WON
+- clean-real controls: spark-foam 4/5, spark-side 3/5, studio-apple 4/5, studio-wiki 3/5, sth2 0/5
+  -> threshold 3.80 (strong clean-product confound this sitting · real Apple studio photo 4/5 render).
+- Gate frames: **spark-detail 1/5 render = PASS** (was 5/5 in loop 18 · the SP10 contrast fix
+  RETIRED the foam macro tell, validated), spark-front 5/5, pair 5/5, studio-front 5/5 (unique
+  tell 'repeat' = the speaker grille reads procedural). VERDICT FAIL (3 frames over threshold).
+- KEY FINDING: SP10 split the foam tell by DISTANCE. Up close (detail macro) the deeper voids +
+  brighter crests now read as real reticulated foam (1/5). At WIDE distance (front/pair) the whole
+  foam FIELD still reads "noise-fill / tiles unnaturally" · the cells no longer resolve individually
+  so the eye sees an averaged procedural speckle. NEXT LEVER (SP11): large-scale field variation
+  visible at wide distance (patchy density/tone zones across the foam field, not just per-cell) ·
+  measure the real block's macro-scale mottling on sth_front-1 first (flip-flop guard).
+- Also named: studio 'repeat' (grille perforation regularity · a STUDIO geometry item, ST queue),
+  and the blank trademark-gated pill recesses read as "non-functional concept" (a FALSE-TELL: the
+  blank is deliberate per L6 · logged, not chased).
+- PR-gate remains OPEN (no consecutive pass · loop 18 FAIL, loop 19 FAIL). Real progress: the
+  single most-cited tell of the whole project (foam) now PASSES at macro distance.
