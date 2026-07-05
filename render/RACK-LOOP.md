@@ -100,7 +100,7 @@ an owner of this hardware finds nothing missing at any deliverable distance.
       desktop USB-C law) instanced as 4 GANGS of 2x6 · TOP row latch-up, BOTTOM row MIRRORED
       latch-down · gang gaps > port gaps · per-port LED pipes (above top row, below bottom).
       Accept: gang structure + mirror flip read at detail distance; never flat black.
-- [ ] 2.3 GEOMETRY · gang window recess + bezel (color VERIFY-THEN-PIN vs 2nd ref) · SFP+ 2x2 +
+- [x] 2.3 GEOMETRY DONE (4 SFP+ 2x2 + 2 QSFP+ stacked, dark-nickel recessed cages, gate PASS) · gang window recess + bezel (color VERIFY-THEN-PIN vs 2nd ref) · SFP+ 2x2 +
       QSFP+ 2x1 cages with lips + bale latches · console/MGMT stack far right · status LEDs +
       reset pinhole. Accept: every zone present at correct x-ratio +/-2%.
 - [ ] 2.4 MATERIAL · switch_white patch into rack_verify SHOTS, PASS. Accept: exit 0.

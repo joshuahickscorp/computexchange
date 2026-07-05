@@ -551,6 +551,26 @@ def build_crs354_switch(cx=0.0, cz=0.0):
         cb = box("rj45-pin", pw - mm(2.5), mm(1.2), mm(1.6), (x, fy + mm(3.0), zc - ph/2 + mm(2.0)))
         cb.data.materials.append(contact_mat); contacts.append(cb)
     parts += contacts
+    # Wave 2.3 · SFP+ (4, 2x2) + QSFP+ (2, stacked) cages · dark-nickel recessed, right of the grid.
+    nickel = principled("cage-nickel", (0.10, 0.10, 0.11), 0.42, metallic=0.8)
+    cage_cut = []; cage_lips = []
+    sfp_x0 = grid_left + 4 * (6 * col_pitch + gang_gap) + mm(6)
+    for i in range(2):
+        for zc in (z_top, z_bot):
+            x = sfp_x0 + i * mm(15.0)
+            cage_cut.append(box("sfpc", mm(13.0), mm(16), mm(11.5), (x, fy + mm(5), zc)))
+            lip = box("sfp-lip", mm(13.6), mm(1.2), mm(12.1), (x, fy + mm(0.6), zc)); lip.data.materials.append(nickel); cage_lips.append(lip)
+    qsfp_x0 = sfp_x0 + mm(34.0)
+    for zc in (z_top + mm(1), z_bot - mm(1)):
+        cage_cut.append(box("qsfpc", mm(20.0), mm(16), mm(13.0), (qsfp_x0, fy + mm(5), zc)))
+        lip = box("qsfp-lip", mm(20.8), mm(1.2), mm(13.8), (qsfp_x0, fy + mm(0.6), zc)); lip.data.materials.append(nickel); cage_lips.append(lip)
+    bpy.context.view_layer.objects.active = cage_cut[0]
+    for c in cage_cut[1:]: c.select_set(True)
+    cage_cut[0].select_set(True); bpy.ops.object.join(); jc = cage_cut[0]
+    md2 = body.modifiers.new("cages", "BOOLEAN"); md2.operation = "DIFFERENCE"; md2.solver = "EXACT"; md2.object = jc
+    bpy.context.view_layer.objects.active = body; bpy.ops.object.modifier_apply(modifier=md2.name)
+    bpy.data.objects.remove(jc, do_unlink=True)
+    parts += cage_lips
     return parts
 
 def switch_rig_camera(shot, res):
