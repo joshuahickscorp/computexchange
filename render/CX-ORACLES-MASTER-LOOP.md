@@ -201,7 +201,7 @@ Wave 1 · RM44 NODE (hero · two-layer mesh):
 - [x] R1.5 LIGHTING DONE (rig calibrated, node reads real dark server, gate dE0.47) · interior fill · holes read open, exterior patches stay green.
 - [ ] R1.6 RENDER · node turnaround + TRUE macro (L8) · rack_verify PASS + pitch check.
 
-Wave 2 · CRS354 SWITCH: chassis 443x44.3x297 WHITE + seam + ears (+7mm) · port grid 4 GANGS of
+Wave 2 · CRS354 SWITCH: [x]2.1 chassis 443x44.3x297 WHITE + seam + ears DONE (gate PASS) (+7mm) · port grid 4 GANGS of
 2x6, bottom row MIRRORED (latch flip), per-port LED pipes, gang window bezel (VERIFY-THEN-PIN
 color) · SFP+ 2x2 + QSFP+ 2x1 cages w/ bale latches · console/MGMT stack · status LEDs +
 pinhole · switch_white patch added to rack_verify and PASS. [4 boxes · R2.1-R2.4]

@@ -59,6 +59,9 @@ SHOTS = {
     "node-front": [
         ("powder_black", (0.165, 0.46, 0.185, 0.56), "RM44 left ear front face, solid powder"),
     ],
+    "switch-front": [
+        ("switch_white", (0.44, 0.46, 0.56, 0.52), "CRS354 front face, white powder"),
+    ],
     # full assembly front (gate 6 framing · boxes land when framing locks)
     # "front": [ ... ],
     # "q34":   [ ... ],

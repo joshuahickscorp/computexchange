@@ -185,6 +185,18 @@ def interior_dark(name="interior"):
     # cavity interior · albedo NEVER 0 so wall gradients read (desktop wave-2 lesson).
     return principled(name, (0.020, 0.020, 0.022), 0.80, metallic=0.0)
 
+def switch_white(name="switch-white"):
+    # CRS354 · the ONE bright face (material variety · L74 pin, cool white-grey · crs354_sth_front).
+    # A faint peel like the powder, much higher albedo · reads bright on the dark-hero rig.
+    m = principled(name, (0.535, 0.543, 0.560), 0.46, metallic=0.0)  # tuned to L74 pin (was 0.62, read L78.5)
+    nt = m.node_tree; b = nt.nodes["Principled BSDF"]
+    tc = nt.nodes.new("ShaderNodeTexCoord"); n = nt.nodes.new("ShaderNodeTexNoise")
+    n.inputs["Scale"].default_value = 900.0 / S; n.inputs["Detail"].default_value = 2.0
+    nt.links.new(tc.outputs["Object"], n.inputs["Vector"])
+    bump = nt.nodes.new("ShaderNodeBump"); bump.inputs["Strength"].default_value = 0.05
+    nt.links.new(n.outputs["Fac"], bump.inputs["Height"]); nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
+    return add_bevel(m)
+
 # ---- the enclosure frame -----------------------------------------------------------------
 def rail_with_holes(x, name, ry=-490.0):
     """One EIA rail: a 1U flange segment with 3 square holes, arrayed x42. Placed at world
@@ -487,6 +499,50 @@ def node_rig_camera(shot, res):
     sc.render.resolution_x, sc.render.resolution_y = res
     return aim
 
+# ---- CRS354 switch · Wave 2 · the white 1U unit (material variety) · crs354_sth_front.jpg -----
+CRS = dict(W=443.0, D=297.0, Hb=44.3, EARW=482.6)
+
+def build_crs354_switch(cx=0.0, cz=0.0):
+    """Wave 2.1 · chassis 443x297x44.3 WHITE powder + rack ears (+~20mm/side to 482.6) +
+    faceplate seam. Port grid / cages / LEDs land on 2.2-2.4."""
+    W, D, Hb = mm(CRS["W"]), mm(CRS["D"]), mm(CRS["Hb"])
+    sw = switch_white()
+    parts = []
+    body = rounded_box("crs-body", W, D, Hb, mm(1.5), seg=3)
+    body.location = (cx, 0, cz + Hb / 2.0); body.data.materials.append(sw); smooth(body, 30); parts.append(body)
+    fy = -D / 2.0
+    ear_ext = mm((CRS["EARW"] - CRS["W"]) / 2.0)
+    for sx in (-1, 1):
+        ear = rounded_box("crs-ear", ear_ext, mm(2.0), Hb - mm(3), mm(1.0), seg=3)
+        ear.location = (sx * (W / 2.0 + ear_ext / 2.0), fy + mm(1.0), cz + Hb / 2.0)
+        ear.data.materials.append(sw); smooth(ear, 30); parts.append(ear)
+    # faceplate seam · a thin recessed line ~4mm below the top edge (the front bezel split)
+    seam = box("crs-seam", W - mm(4), mm(1.0), mm(0.6), (cx, fy + mm(0.3), cz + Hb - mm(6)))
+    seam.data.materials.append(principled("crs-seam-mat", (0.30, 0.31, 0.33), 0.5)); parts.append(seam)
+    return parts
+
+def switch_rig_camera(shot, res):
+    aim = bpy.data.objects.new("Aim", None); aim.location = (0, 0, mm(CRS["Hb"]) / 2.0)
+    bpy.context.collection.objects.link(aim)
+    # white unit · brighter albedo, so the dark-object energies land it near the L74 pin
+    add_area("key", (-0.5, -0.7, 0.7), 0.4, float(arg("--key", 14.0)), (1.0, 0.99, 0.97), aim=aim)
+    add_area("rim", (0.4, 0.6, 0.7), 0.04, float(arg("--rim", 9.0)), (0.93, 0.96, 1.0), sx=0.5, aim=aim)
+    add_area("fill", (0.0, -0.8, 0.3), 0.7, float(arg("--fill", 5.3)), (0.97, 0.98, 1.0), aim=aim)
+    bpy.ops.mesh.primitive_plane_add(size=6.0, location=(0, 0, 0))
+    fl = bpy.context.active_object; fl.data.materials.append(principled("floor", (0.006, 0.006, 0.007), 0.62))
+    sc = bpy.context.scene
+    cd = bpy.data.cameras.new("cam"); cd.lens = 85.0; cd.sensor_width = 36.0
+    cam = bpy.data.objects.new("cam", cd); bpy.context.collection.objects.link(cam); sc.camera = cam
+    dist = 1.9
+    yaw, elev = (0.0, 4.0) if shot == "front" else (30.0, 12.0)
+    ya, el = math.radians(yaw), math.radians(elev)
+    ax, ay, az = aim.location
+    cam.location = (ax + dist*math.cos(el)*math.sin(ya), ay - dist*math.cos(el)*math.cos(ya), az + dist*math.sin(el))
+    c = cam.constraints.new("TRACK_TO"); c.target = aim; c.track_axis = "TRACK_NEGATIVE_Z"; c.up_axis = "UP_Y"
+    cd.dof.use_dof = True; cd.dof.focus_object = aim; cd.dof.aperture_fstop = 11.0
+    sc.render.resolution_x, sc.render.resolution_y = res
+    return aim
+
 # ---- main --------------------------------------------------------------------------------
 import os as _os
 _os.makedirs(OUT, exist_ok=True)
@@ -497,6 +553,11 @@ if PART == "node":
     node_rig_camera(SHOT, (1800, 1400))
     render_to(OUT + f"node-{SHOT}.png")
     print("build_rack RM44 node proof done.")
+elif PART == "switch":
+    build_crs354_switch()
+    switch_rig_camera(SHOT, (1900, 900))
+    render_to(OUT + f"switch-{SHOT}.png")
+    print("build_rack CRS354 switch proof done.")
 else:
     build_frame()
     aim = rack_rig()

@@ -94,7 +94,7 @@ an owner of this hardware finds nothing missing at any deliverable distance.
       + pitch check on the macro.
 
 ### Wave 2 · CRS354 switch face
-- [ ] 2.1 GEOMETRY · chassis 443x44.3x297 WHITE + ears (+7mm) + faceplate seam. Accept: CAD
+- [x] 2.1 GEOMETRY DONE (white chassis+ears+seam, switch_white L76.6 dE3.26 PASS) · chassis 443x44.3x297 WHITE + ears (+7mm) + faceplate seam. Accept: CAD
       dims +/-1%.
 - [ ] 2.2 GEOMETRY · port grid: ONE recessed RJ45 cavity (dark wall + AO + lit lower contact ·
       desktop USB-C law) instanced as 4 GANGS of 2x6 · TOP row latch-up, BOTTOM row MIRRORED
