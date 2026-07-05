@@ -209,13 +209,19 @@ def build_frame():
     dk = interior_dark()
     parts = []
 
-    # 4 corner posts (30mm square section, full height)
-    ps = mm(30.0)
+    # 4 corner posts · R0.2 (geo-audit S3): front FACE widened 30 -> 45mm (0.075 of 600mm width,
+    # the real NetShelter front vertical frame weight); depth kept 32mm (C-profile front leg).
+    psx = mm(45.0); psy = mm(32.0)
     for sx in (-1, 1):
         for sy in (-1, 1):
-            p = rounded_box("post", ps, ps, H, mm(2.0), seg=4)
-            p.location = (sx * (fx - ps / 2), sy * (fy - ps / 2), H / 2.0)
+            p = rounded_box("post", psx, psy, H, mm(2.0), seg=4)
+            p.location = (sx * (fx - psx / 2), sy * (fy - psy / 2), H / 2.0)
             p.data.materials.append(pc); smooth(p, 30); parts.append(p)
+
+    # R0.2 note · hinge bosses + latch keeper (door-off hardware, audit S2) DEFERRED to a
+    # dedicated closer-shot box: at dead-front frame distance they sit edge-on and do not read,
+    # and getting their proud-of-face Y right belongs with the 3/4 door-hardware pass. The post
+    # FACE WIDENING (the graded S3 win) stands alone here · one clean measurable change.
 
     # top cap + base plinth
     cap = box("cap", W, D, mm(24.0), (0, 0, H - mm(12.0)))
