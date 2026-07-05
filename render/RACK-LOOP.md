@@ -65,7 +65,7 @@ an owner of this hardware finds nothing missing at any deliverable distance.
 - [x] W0.3 GEOMETRY (DONE, gate PASS) · top front band to ~45mm; base band floats: 4 leveling feet (pad ~45mm,
       30mm floor gap) + twin casters inboard. Accept: light gap under base reads; feet at
       corner footprints.
-- [ ] W0.4 GEOMETRY · rear rail pair (holed, same pattern/c-c) at rear depth; corner gusset
+- [~] W0.4 GEOMETRY · corner gussets DONE (gate PASS) · rear-rail HOLES deferred to assembly wave (see-through vs fragile flange patch) · corner gusset
       castle plates; brush strips inboard of posts. Accept: rear rails read between units
       from dead front.
 - [ ] W0.5 GEOMETRY · U-tick strip on rail flange (blank ticks, 1/U) + hole size verified

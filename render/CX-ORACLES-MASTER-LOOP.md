@@ -179,7 +179,7 @@ Wave 0 · FRAME CORRECTIONS (built part is wrong before anything stacks):
       ~0.075 of width, silhouette not dead-straight.
 - [x] R0.3 GEOMETRY (DONE, gate PASS, floor reveal + feet + casters + roof band read) · top band ~45mm · 4 leveling feet (pad ~45mm, 30mm floor gap) + twin
       casters inboard · Accept: light gap under base reads.
-- [ ] R0.4 GEOMETRY · rear rail pair (holed, same pattern) at rear depth · corner gusset
+- [~] R0.4 GEOMETRY · corner gusset castle plates DONE (gate PASS) · rear rail HOLES deferred to assembly wave (see-through crashes the fragile flange patch; reads between real units there) · corner gusset
       castle plates · brush strips · Accept: rear rails read between units from dead front.
 - [ ] R0.5 GEOMETRY · U-tick strip on rail flange + hole size verified 9.5mm in source ·
       Accept: ticks resolve at 4K.

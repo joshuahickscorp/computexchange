@@ -186,17 +186,17 @@ def interior_dark(name="interior"):
     return principled(name, (0.020, 0.020, 0.022), 0.80, metallic=0.0)
 
 # ---- the enclosure frame -----------------------------------------------------------------
-def rail_with_holes(x, name):
-    """One front EIA rail: a 1U flange segment with 3 square holes, arrayed x42.
-    Placed at world x, front face toward -Y. The square-hole pattern is THE recognizable
-    rack signature · hole size + per-U offsets are exact (MEASUREMENTS)."""
+def rail_with_holes(x, name, ry=-490.0):
+    """One EIA rail: a 1U flange segment with 3 square holes, arrayed x42. Placed at world
+    (x, ry). The square-hole pattern is THE recognizable rack signature · hole size + per-U
+    offsets are exact (MEASUREMENTS). ry selects front (-490) or rear rail plane (W0.4)."""
     flange_w, thick = mm(30.0), mm(2.0)
-    seg = box(name + "-seg", flange_w, thick, mm(U), (x, mm(-490.0), u_z(1) / 1000.0 + mm(U) / 2.0))
+    seg = box(name + "-seg", flange_w, thick, mm(U), (x, mm(ry), u_z(1) / 1000.0 + mm(U) / 2.0))
     # cut 3 square holes through the Y thickness at the measured offsets
     cutters = []
     for off in HOLE_OFF:
         cz = u_z(1) / 1000.0 + mm(off)
-        c = box("hcut", mm(SQ_HOLE), thick * 4, mm(SQ_HOLE), (x, mm(-490.0), cz))
+        c = box("hcut", mm(SQ_HOLE), thick * 4, mm(SQ_HOLE), (x, mm(ry), cz))
         cutters.append(c)
     bpy.context.view_layer.objects.active = seg
     for c in cutters:
@@ -273,9 +273,22 @@ def build_frame():
     for sx in (-1, 1):
         r = rail_with_holes(sx * rail_x, f"rail-front-{sx}")
         r.data.materials.append(pc); parts.append(r)
+        # W0.4 · rear rail DEFERRED to the assembly wave: making it holed at the shared rail x put
+        # its dark see-through holes directly behind the front rail, crashing the powder_black
+        # median (L18->L7) · the fragile perforated-flange patch cannot survive it, and the durable
+        # patch (RM44 solid face) does not exist yet. On the POPULATED rack the rear rail reads
+        # between real units and the patch lives on a unit · correct place for this. Plain bar for now.
         rr = box(f"rail-rear-{sx}", mm(30), mm(2), H - mm(PLINTH) - mm(40),
                  (sx * rail_x, fy - mm(120), mm(PLINTH) + (H - mm(PLINTH) - mm(40)) / 2.0))
         rr.data.materials.append(pc); parts.append(rr)
+
+    # W0.4 · corner gusset 'castle' plates · small perforated brackets tying post to top/base,
+    # visible at all four post ends in the refs · breaks the bare post-to-cap junction.
+    for sx in (-1, 1):
+        for zc in (mm(PLINTH) + mm(30), H - mm(60)):
+            gus = rounded_box("gusset", mm(40.0), mm(30.0), mm(50.0), mm(3.0), seg=4)
+            gus.location = (sx * (fx - psx / 2), -(fy - psy - mm(8)), zc)
+            gus.data.materials.append(pc); smooth(gus, 30); parts.append(gus)
     return parts
 
 # ---- rig · dark-object hero (edge + sheen carve the black out of void black) --------------
