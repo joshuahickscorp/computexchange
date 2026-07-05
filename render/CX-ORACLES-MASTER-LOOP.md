@@ -210,9 +210,20 @@ units identical. [5 boxes · R5.1-R5.5]
 
 Wave 6 · PHOTOREAL + TRIO: post chain on deliverables + firefly verify · ledger rows T-RACK-1
 array uniformity / T-RACK-2 dead-black depth / T-RACK-3 filter-layer read · panel per L12 with
-real-rack controls (driver reads) · THE SCALE TRIO: Studio + Spark + rack, one rig, per-class
-offsets, true scale by U-arithmetic · BOTH gates green in the same frame set · driver owns
-composition. [3 boxes · R6.1-R6.3]
+real-rack controls (driver reads) · THE PR-GATE (below) on all three objects · THE SCALE TRIO:
+Studio + Spark + rack, one rig, per-class offsets, true scale by U-arithmetic · BOTH tone gates
+green in the same frame set · driver owns composition. [4 boxes · R6.1-R6.4]
+
+THE PR-GATE (R6.4 · descended from FRONTIER-V2's two-consecutive-clean, recalibrated by the
+three confound experiments · this is the criterion that closes the photoreal question):
+TWO CONSECUTIVE blind panels (5 fresh cold agents, neutral names, matched REAL controls in the
+same sitting) where, for EVERY gate frame: (a) the frame's render-call count is <= the same
+panel's render-call count on the matched CLEAN-PRODUCT real controls + 1 vote, and (b) the frame
+draws no >=2-agent tell that the real controls never draw. Parity with reality, measured in the
+same room, same draw · achievable (Studio reached it in loop 16: 4/5 vs the real Apple press
+photo's 5/5), unlike the raw criterion that real photographs fail. Tooling: split REAL controls
+into clean-product vs environmental classes in _panel_agg.py (small queue item, do before
+running). Driver reads verdicts (L12). Two consecutive passes close photoreal for that object.
 
 ## PART 7 · FINAL DELIVERABLES (the definition of "majestic, done")
 
@@ -222,8 +233,9 @@ composition. [3 boxes · R6.1-R6.3]
 3. Refreshed 16-attachment checkpoint folder(s) with collages + the consolidated report.
 4. Every tone gate green · every acceptance ratio in tolerance · audits updated to final
    scores · all worktrees committed clean.
-Stop condition: every box above checked, every non-scope-gated audit aspect at 9+ · then
-present to the owner · the owner closes.
+Stop condition: every box above checked, every non-scope-gated audit aspect at 9+, and the
+PR-GATE (wave 6 R6.4) passed twice consecutively per object · then present to the owner · the
+owner closes.
 
 ## PART 8 · INGEST GATE (state at handoff · 2026-07-05)
 
