@@ -17,7 +17,7 @@ build, it was just unplanned.
 
 | unit | grades | headline |
 |---|---|---|
-| frame vs refs | proportions 2 · holes 8 · posts 3 · overall 4 | **S5: frame 27% too wide** (rails prove it) · feet/casters missing · posts half-weight, featureless |
+| frame vs refs | proportions 2->8 (R0.1 width fixed) · holes 8 · posts 3 · overall 4->6 | **S5: frame 27% too wide** (rails prove it) · feet/casters missing · posts half-weight, featureless |
 | RM44 node (hero) | refs 6 · plan coverage 4 · ladder 4 | **S5: mesh is TWO-LAYER** (coarse tri punches + fine filter screen behind) · lock has a bail handle · badge zone is a keystone plate · border fade rows |
 | CRS354 switch | refs 7 · plan coverage 5 · ladder 4 | port grid is 4 GANGS of 2x6 with mirrored bottom row (latch flip) · console/MGMT stack · gang window bezel |
 | UPS | refs 4 (photo gap known) · coverage 6 · ladder 5 | face is grille-left / control-right SPLIT with scallop pillars · CGI-vs-photo disagreements logged |

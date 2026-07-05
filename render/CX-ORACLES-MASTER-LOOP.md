@@ -172,7 +172,7 @@ contradict L15's direct verification · hence the RE-MEASURE tags).
 ## mirrored from RACK-LOOP.md v2 · run in the RACK worktree, rack_verify gates)
 
 Wave 0 · FRAME CORRECTIONS (built part is wrong before anything stacks):
-- [ ] R0.1 GEOMETRY · outer width 760 -> 600mm: walls/posts inboard ~80mm/side, rail x FROZEN
+- [x] R0.1 GEOMETRY · outer width 760 -> 600mm (DONE 608mm measured, rails held, gate PASS): walls/posts inboard ~80mm/side, rail x FROZEN
       (rails measured correct: c-c 464.5 vs 465.1 spec) · Accept: rail-derived scale gives
       width 600 +/-2% on a fresh front.
 - [ ] R0.2 GEOMETRY · post faces ~45mm + 3 hinge bosses + latch keeper · Accept: face ratio

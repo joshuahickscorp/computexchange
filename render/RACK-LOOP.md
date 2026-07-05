@@ -57,7 +57,7 @@ an owner of this hardware finds nothing missing at any deliverable distance.
 ## WORK QUEUE v2 (in order · audit evidence tags [rack-audit-raw.json])
 
 ### Wave 0 · FRAME CORRECTIONS (the built part is wrong before anything stacks on it)
-- [ ] W0.1 GEOMETRY · outer width 760 -> 600mm: move walls/posts inboard ~80mm/side, FREEZE
+- [x] W0.1 GEOMETRY · outer width 760 -> 600mm (DONE 608mm, rails held, gate PASS): move walls/posts inboard ~80mm/side, FREEZE
       rail x (rails measured CORRECT at c-c 464.5). Accept: rail-derived px/mm scale gives
       outer width 600 +/- 2% on a fresh front render.
 - [ ] W0.2 GEOMETRY · post faces to ~45mm width + 3 hinge bosses one side + latch keeper other.

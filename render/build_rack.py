@@ -33,7 +33,12 @@ def mm(v): return v / 1000.0
 U = 44.45  # THE anchor · mm
 
 # measured constants (MEASUREMENTS.md · RACK section) --------------------------------------
-RACK = dict(W=750.0, H=1991.0, D=1070.0, Ucount=42)
+# R0.1 (geo-audit S5): outer width was 750 · the rail-derived pixel scale on frame-frame-front
+# proved the render at ~760mm vs the real NetShelter SX 600mm. Rails are anchored on HOLE_SPAN
+# (unchanged), so W drives only posts/walls/cap/plinth · at W=600 the rail-to-outer-edge lands
+# 67.4mm, matching the AR3140 ref's 67.5mm. AUTOPSY: 750 was a wide-variant assumption; the
+# archetype (D-ARCH A · NetShelter SX 42U) is the 600mm standard cabinet.
+RACK = dict(W=600.0, H=1991.0, D=1070.0, Ucount=42)
 PANEL_W = 482.6           # 19in ear-to-ear
 HOLE_SPAN = 465.12        # rail hole-center span
 SQ_HOLE = 9.5             # square cage-nut hole
