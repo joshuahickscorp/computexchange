@@ -450,9 +450,12 @@ def node_rig_camera(shot, res):
     """Solo-node rig: reuse the dark-object hero energies, re-aim at the node center (~88mm)."""
     aim = bpy.data.objects.new("Aim", None); aim.location = (0, 0, mm(RM44["Hb"]) / 2.0)
     bpy.context.collection.objects.link(aim)
-    add_area("key", (-0.55, -0.7, 0.9), 0.5, float(arg("--key", 62)), (1.0, 0.99, 0.97), aim=aim)
-    add_area("rim", (0.45, 0.7, 0.85), 0.04, float(arg("--rim", 40)), (0.93, 0.96, 1.0), sx=0.6, aim=aim)
-    add_area("fill", (0.0, -0.9, 0.4), 0.8, float(arg("--fill", 24)), (0.97, 0.98, 1.0), aim=aim)
+    # Wave 1.5 · dark-object calibration · the first-guess energies lit the powder to L54 (grey) ·
+    # a black server on the hero rig should read ~L20 lit-face (the frame-proof value) so the mesh
+    # WEB is dark powder and the HOLES fall darker still (depth into the interior). Cut ~7x.
+    add_area("key", (-0.55, -0.7, 0.9), 0.5, float(arg("--key", 14.0)), (1.0, 0.99, 0.97), aim=aim)
+    add_area("rim", (0.45, 0.7, 0.85), 0.04, float(arg("--rim", 9.0)), (0.93, 0.96, 1.0), sx=0.6, aim=aim)
+    add_area("fill", (0.0, -0.9, 0.4), 0.8, float(arg("--fill", 5.3)), (0.97, 0.98, 1.0), aim=aim)
     bpy.ops.mesh.primitive_plane_add(size=6.0, location=(0, 0, 0))
     fl = bpy.context.active_object; fl.name = "floor"
     fl.data.materials.append(principled("floor", (0.006, 0.006, 0.007), 0.62))

@@ -88,7 +88,7 @@ an owner of this hardware finds nothing missing at any deliverable distance.
 - [ ] 1.4 GEOMETRY · keystone badge plate (proud, chevron bottom, BLANK) + bail-handle lock at
       photo-measured y + top lip seam + bottom sill with 2 corner screws + 4 witness dots.
       Accept: feature positions vs rm44_front_A +/-2% of face width.
-- [ ] 1.5 LIGHTING · interior fill so holes read as openings; exterior patches stay green
+- [x] 1.5 LIGHTING DONE (dark-object calibrated key14/rim9/fill5.3 · ear-face L15.7 dE0.47 · mesh holes read dark = depth) · interior fill so holes read as openings; exterior patches stay green
       (rack_verify before/after). Accept: both.
 - [ ] 1.6 RENDER · node solo turnaround + TRUE-MACRO detail (law 9). Accept: rack_verify PASS
       + pitch check on the macro.

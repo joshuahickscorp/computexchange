@@ -198,7 +198,7 @@ Wave 1 · RM44 NODE (hero · two-layer mesh):
       the formal Problem-2 evidence render.
 - [ ] R1.4 keystone badge plate (blank, chevron bottom) + bail-handle lock at measured y +
       lid lip seam + bottom sill 2 screws + 4 witness dots · +/-2% of face width.
-- [ ] R1.5 LIGHTING · interior fill · holes read open, exterior patches stay green.
+- [x] R1.5 LIGHTING DONE (rig calibrated, node reads real dark server, gate dE0.47) · interior fill · holes read open, exterior patches stay green.
 - [ ] R1.6 RENDER · node turnaround + TRUE macro (L8) · rack_verify PASS + pitch check.
 
 Wave 2 · CRS354 SWITCH: chassis 443x44.3x297 WHITE + seam + ears (+7mm) · port grid 4 GANGS of

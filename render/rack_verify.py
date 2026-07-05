@@ -53,6 +53,12 @@ SHOTS = {
         # contamination class as the gate-5a +6 autopsy. FRAGILE by construction (perforated rail) ·
         # the durable powder_black patch moves to the RM44 solid front face at the node wave.
     ],
+    # RM44 node solo front (Wave 1.5 · durable powder patch = the SOLID ear L-face · stable low-std
+    # read, NOT the perforated mesh or edge-highlight border · lands L15.7 on the L16 pin at the
+    # calibrated rig key14/rim9/fill5.3, the dark-object read the frame proof established).
+    "node-front": [
+        ("powder_black", (0.165, 0.46, 0.185, 0.56), "RM44 left ear front face, solid powder"),
+    ],
     # full assembly front (gate 6 framing · boxes land when framing locks)
     # "front": [ ... ],
     # "q34":   [ ... ],
