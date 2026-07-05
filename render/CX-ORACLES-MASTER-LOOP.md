@@ -227,9 +227,13 @@ present to the owner · the owner closes.
 
 ## PART 8 · INGEST GATE (state at handoff · 2026-07-05)
 
-- Desktops geopack (final 4K reshoot with geo-pass-1 fixes): [PENDING at doc-write · the
-  executor's FIRST action in the desktop worktree is ST-V1/ST-V2 verification on
-  render/portraits/*.png, then tick this line] -> on ingest: gate ALL PASS re-confirmed,
-  checkpoint repacked, ST-V1/ST-V2 verdicts recorded here.
+- Desktops geopack INGESTED (2026-07-05 02:01 · driver): final 4K reshoot delivered, gate
+  ALL PASS re-confirmed on delivered frames, 16-attachment checkpoint repacked. ST-V1: LED on
+  the flat face PASS · SD aperture dark PASS · intake band present with holes crossing the
+  fillet tangent, no blank lip PASS · exact band/LED ratios DEFERRED to ST4 (the 6-degree
+  front camera compresses edge ratios · measure on the ortho frame, not this one). ST-V2:
+  corner blend smooth at hero distance, PROVISIONAL PASS · the 4K-zoom no-polyline check
+  remains inside ST1 before closing it. Executor starts at: rack R0.1 (primary) or ST4/ST2
+  (desktop lane).
 - Rack: audit + loop v2 committed (384471f) · nothing running · Wave 0 is open and FIRST.
 - Panel history + calibration: PHOTOREAL-SHIFT-REPORT.md sections 10b-10e (desktop worktree).
