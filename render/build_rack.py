@@ -222,6 +222,35 @@ def rail_with_holes(x, name, ry=-490.0):
     bpy.ops.object.modifier_apply(modifier=arr.name)
     return seg
 
+def build_side_panel(sx, pc):
+    """A real cabinet side panel: recessed field + raised perimeter frame (edge returns that
+    throw a shadow line at the post junction) + a quarter-turn slam latch near the front-top.
+    Replaces the flat 2mm slab that read as a dead CGI wall at hero (q34) distance · the
+    orange-peel powder micro-bump is sub-pixel there, so the READ has to come from geometry."""
+    W, H, D = mm(RACK["W"]), mm(RACK["H"]), mm(RACK["D"])
+    fx = W / 2.0; Ph = mm(PLINTH)
+    z0, z1 = Ph, H - mm(30.0)                 # vertical extent (matches the old sidewall)
+    hz = z1 - z0; zc = (z0 + z1) / 2.0
+    dy = D - mm(60.0); yh = dy / 2.0          # depth extent
+    b = mm(30.0)                              # perimeter frame width
+    rim_x = sx * (fx - mm(2.5))              # rim outer face ~flush with the post outer face (±fx)
+    fld_x = sx * (fx - mm(10.0))            # field recessed ~7mm behind the rim inner face
+    parts = []
+    fld = box("side-field", mm(2.0), dy - 2 * b, hz - 2 * b, (fld_x, 0, zc))
+    fld.data.materials.append(pc); parts.append(fld)
+    for nm, sy, sz, cy, cz in (
+        ("top",   dy,        b,          0.0,        z1 - b / 2),
+        ("bot",   dy,        b,          0.0,        z0 + b / 2),
+        ("front", b,         hz - 2 * b, -yh + b / 2, zc),
+        ("rear",  b,         hz - 2 * b,  yh - b / 2, zc)):
+        r = box(f"side-rim-{nm}", mm(5.0), sy, sz, (rim_x, cy, cz))
+        r.data.materials.append(pc); parts.append(r)
+    latch = rounded_box("side-latch", mm(4.0), mm(20.0), mm(20.0), mm(3.0), seg=8)
+    latch.location = (sx * (fx - mm(1.0)), -yh + b + mm(30.0), z1 - b - mm(80.0))
+    latch.data.materials.append(principled("side-latch-mat", (0.30, 0.30, 0.32), 0.34, metallic=0.8))
+    smooth(latch, 30); parts.append(latch)
+    return parts
+
 def build_frame():
     """Open 42U enclosure skeleton (door removed so the fill will read). Posts, top cap,
     base plinth, two 0U side channels, four EIA rails (front pair holed), dark rear panel."""
@@ -269,11 +298,10 @@ def build_frame():
         cst.location = (sx * (fx - mm(150)), -(fy - mm(60)), (FG - mm(4)) / 2.0)
         cst.data.materials.append(interior_dark("caster-rubber")); smooth(cst, 30); parts.append(cst)
 
-    # two side channels (0U gutters): solid dark walls from rail-outer to cabinet wall
+    # two side panels · recessed field + raised perimeter frame + latch (build_side_panel) ·
+    # the flat slab read as a dead CGI wall from the q34 hero angle · geometry carries the read.
     for sx in (-1, 1):
-        wall = box("sidewall", mm(2.0), D - mm(60), H - mm(PLINTH) - mm(30),
-                   (sx * (fx - mm(2)), 0, mm(PLINTH) + (H - mm(PLINTH) - mm(30)) / 2.0))
-        wall.data.materials.append(pc); parts.append(wall)
+        parts += build_side_panel(sx, pc)
 
     # dark rear interior panel (what shows through empty bays · the depth read)
     back = box("back", W - mm(20), mm(3.0), H - mm(PLINTH) - mm(40),

@@ -133,6 +133,12 @@ an owner of this hardware finds nothing missing at any deliverable distance.
       holes L6.8 + bright ear L39 median to a coincidental L20.9) AND powder reads brighter under the
       whole-frame rack_rig (ear L44) than the solo-node rig (L15.7 · rig-transplant confound). Durable
       solid-powder assembly patch + its offset land with the tone-gate box at 5.3/6.2, not faked here.
+- [x] 5.2b ENCLOSURE · side panels · the q34 hero angle exposed the side panel as a dead-flat CGI
+      slab (the powder orange-peel micro-bump is sub-pixel at 4.6m). Replaced the flat 2mm box with
+      build_side_panel: recessed field + raised perimeter frame (edge-return shadow line at the post
+      junction) + a quarter-turn slam latch. q34 now reads as a real NetShelter-style cabinet side;
+      front unchanged; clip PASS both (front 0.000%, q34 0.022% peak 1.000). OPEN: the light-leak
+      smear on the interior back wall behind the switch (key spill · separate rig fix).
 - [ ] 5.3 MATERIAL · variance: LED budget ~60% lit mixed green/amber 2-3 bright, node states
       A-on/B-off/C-on, seating jitter <=0.4deg, per-instance roughness/dust (handled-hardware
       law · every knob cites a gestalt photo). Accept: no two adjacent units identical + LED
