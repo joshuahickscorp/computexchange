@@ -72,6 +72,21 @@ Archetype A · air-cooled node hardware (real photos):
   CoreWeave = stylized marketing art · Google gallery = real but no GPU-identifiable gear.
 - Equinix SV11 SuperPOD aisle (2025-12): one worker labels the racks DGX B200 SuperPOD, the
   other 8x GB200 NVL72 · CONFLICT, resolve at gate 3 before using as either archetype's ref.
+- APC NetShelter SX (final compile): AR3100 42U 1991x600x1070mm + full install/customization
+  manual w/ drawings (objects.eanixter.com PD321440.PDF · rail adjustability 191-935mm, door
+  OPEN-AREA figures 593,018mm2 front/600mm-wide, 14GA rails) · 48U = AR3357 2258x750x1200mm
+  (task-brief note: AR3300 is 42U, not 48U) · apcguard.com AR3140 white-bg photo gallery
+  (hero + 21 sequential images).
+- NVIDIA QM9700/QM9790 1U InfiniBand switch VERIFIED: 438mm W x 43.6mm H (1U) x 660/854mm D
+  (NVIDIA's published H/W labels are swapped · noted), front = 2x16 grid of 32 OSFP cages
+  (64 NDR ports), official user manual w/ panel figures + datasheet URLs recorded
+  (networking-docs.nvidia.com). This is the fill-map switch face.
+- Zero-U PDU (AP8800 family): ~1791-1829mm x 56mm x 46-51mm, five models cross-confirmed
+  from official Schneider spec docs; AP8865 has an actual dimensioned technical drawing
+  (se.com SPD_VBUH-86MPWY_EN). 1U blanking panel AR8136BLK 483x45mm toolless plastic.
+- Dell rail-sizing matrix PDF (official, v5.2 2026-02): per-SKU rail adjustability ranges
+  incl. XE9680 (607-924mm square-hole) + EIA flange keep-out diagram (16.7mm flange depth,
+  50mm height min) · delltechnologies.com asset PDF.
 
 ## Recon notes
 
