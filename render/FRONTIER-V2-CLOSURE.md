@@ -52,3 +52,11 @@ the form the confound experiments proved meaningful, and one the renders can act
 to (the Studio already reached parity in loop 16). The PR-gate must pass twice per object
 before the master loop's stop condition is satisfiable. FRONTIER-V2's acceptance intent is
 therefore still in force · only its uncalibrated form is retired.
+
+## Addendum 2 · the recalibrated criterion was EXECUTED, not deferred · it FAILED
+Loop 18 (2026-07-05): PR-GATE run on the current frames with the rule fixed in advance.
+FAIL · gate frames 5/5 vs clean-real mean 1.0 (the real Apple press photo itself drew 5/5
+render for the fourth time). The criterion therefore remains OPEN as the master loop's stop
+condition, with loop 18's new evidence (foam spatial frequency vs the real block, CA post
+fringing) converted into queue items SP10 and POST-1. FRONTIER-V2's acceptance intent is
+in force, actively gated, and honestly unmet · not claimed, not abandoned.
