@@ -840,9 +840,22 @@ def foam3d_material(base=(0.560, 0.470, 0.300), ao_fac=0.54, ao_dist=1.2, rough=
     mr.inputs["From Max"].default_value = 0.58; mr.inputs["To Min"].default_value = rough + 0.06
     mr.inputs["To Max"].default_value = rough - 0.10
     nt.links.new(geo.outputs["Pointiness"], mr.inputs["Value"]); nt.links.new(mr.outputs["Result"], b.inputs["Roughness"])
+    # L20 · per-strut COLOR variation (panel loop-17: "flat matte gold, no per-cell tonal variation";
+    # the real foam control was explicitly credited with "per-cell tonal variation"). A large-scale
+    # object-space noise mixes the gold strut-to-strut between a warmer-bright and a cooler-dark tone,
+    # centered on `base` so the spark_foam patch mean holds the pin (gate stays senior). Feeds the AO
+    # multiply in place of the old flat constant.
+    tcc = nt.nodes.new("ShaderNodeTexCoord")
+    cvar = nt.nodes.new("ShaderNodeTexNoise"); cvar.inputs["Scale"].default_value = 1000.0 / (8.0 * S)
+    cvar.inputs["Detail"].default_value = 2.0; cvar.inputs["Roughness"].default_value = 0.6
+    nt.links.new(tcc.outputs["Object"], cvar.inputs["Vector"])
+    cmix = nt.nodes.new("ShaderNodeMixRGB")
+    cmix.inputs["Color1"].default_value = (base[0] - 0.10, base[1] - 0.09, base[2] - 0.06, 1)  # cool/dark strut
+    cmix.inputs["Color2"].default_value = (base[0] + 0.09, base[1] + 0.075, base[2] + 0.05, 1)  # warm/bright strut
+    nt.links.new(cvar.outputs["Fac"], cmix.inputs["Fac"])
     ao = nt.nodes.new("ShaderNodeAmbientOcclusion"); ao.inputs["Distance"].default_value = mm(ao_dist); ao.samples = 8
     aom = nt.nodes.new("ShaderNodeMixRGB"); aom.blend_type = "MULTIPLY"; aom.inputs["Fac"].default_value = ao_fac
-    aom.inputs["Color1"].default_value = (*base, 1)
+    nt.links.new(cmix.outputs["Color"], aom.inputs["Color1"])
     nt.links.new(ao.outputs["Color"], aom.inputs["Color2"]); nt.links.new(aom.outputs["Color"], b.inputs["Base Color"])
     # L14 · CRYSTALLINE STRUT SURFACE · real sintered/cast metal foam struts are rough and faceted,
     # not the smooth blobs the voxel remesh leaves · a fine high-freq bump breaks the "procedural
