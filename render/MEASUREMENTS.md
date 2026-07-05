@@ -88,3 +88,59 @@ under `render/measure_evidence/`. Dash gate: middot only.
 | spark_foam_web_pin | 76.9 / -- / 19.6 | Lab | med | sth_front-1.jpg | finalA-sth-pill.png | golden web, top-quartile L. Supersedes foam_web 67.98. |
 | spark_foam_pore_pin | 15.2 / 5.3 / 12.3 | Lab | med | sth_front-1.jpg | finalA-sth-pill.png | WARM dark pore (b12.3), not neutral charcoal. Supersedes foam_pore 10.66. |
 | side_thickness_persp_check | 48.63 | mm | med | sth_side-1-vertical.jpg | dgx_side_silhouette.png | smooth side reads 48.6 vs spec 50.5 (-3.7%); a per-source perspective indicator, NOT the absolute (spec 50.5 governs) |
+
+## RACK (third oracle · D-ARCH A-prosumer · person-owned 42U)
+
+Anchor discipline inverts for the rack: the absolute anchor is the EIA-310 U-MODULE, a
+standard, not a photo · vertical placement of every unit is U-arithmetic, not pixel-measured.
+Spec rows cite the archived evidence PDFs under ref/rack/ (integrity-checked, provenance in
+ref/rack/RECON-D-ARCH.md). Pixel rows (per-part face features · RM44 perforation pitch, lock
+position, seam heights · CRS354 port-grid positions) land with measure.py runs + evidence
+crops in each part's modeling wave, anchored on that part's spec width. Dash gate: middot.
+
+| parameter | value | unit | conf | source | evidence | note |
+|---|---|---|---|---|---|---|
+| U_module | 44.45 | mm | anchor | eia-rs310-1968.pdf | ref/rack/standards/ | THE anchor · 1.75in exactly · every U position = (n-1)*44.45 above rail datum |
+| hole_offsets_per_U | 6.35 / 22.25 / 38.10 | mm | spec | eia-rs310-1968.pdf | ref/rack/standards/ | hole centers from U boundary · pattern 12.70/15.88/15.88 pitch · U boundary bisects the 12.7mm pair |
+| square_hole | 9.5 | mm | spec | intel-rack-compat-guide-r24.pdf | ref/rack/standards/ | cage-nut square holes (EIA-310-D) · round alt 7.1mm |
+| panel_height_rule | 44.45n - 0.79 | mm | spec | eia-rs310-1968.pdf | ref/rack/standards/ | equipment faces undersized 1/32in · the inter-unit AIR GAP every real rack shows |
+| rail_opening_W | 450.85 | mm | spec | eia-rs310-1968.pdf | ref/rack/standards/ | 17.750in min (450mm-min camp recorded in RECON · spread noted) |
+| panel_W | 482.60 | mm | spec | eia-rs310-1968.pdf | ref/rack/standards/ | 19in preferred width · ear-to-ear |
+| hole_center_span | 465.12 | mm | spec | eia-rs310-1968.pdf | ref/rack/standards/ | 18.312in rail-to-rail hole centers |
+| enclosure_HWD | 1991 x 750 x 1070 | mm | spec | apc-netshelter-sx-manual.pdf | ref/rack/enclosure/ | NetShelter SX 42U 750mm class (AR3150 table row) · donor SKU |
+| enclosure_flange_range | 292.10 to 787.40 | mm | spec | apc-netshelter-sx-manual.pdf | ref/rack/enclosure/ | 750-wide flange adjustability · factory position fits 737mm-deep equipment |
+| enclosure_door_open_area | 593018 (600w) | mm2 | spec | apc-netshelter-sx-manual.pdf | ref/rack/enclosure/ | perforated front door open-area table · door shown OPEN/REMOVED in the portrait (D-ARCH) |
+| node_HWD (RM44) | 176 x 440 x 468 | mm | spec | vendor feed (RECON) | ref/rack/node/rm44_front_A.jpg | SilverStone RM44 4U GPU chassis · 4U nominal 177.8 -> 1.8mm reveal |
+| node_face | full triangular-perforation mesh door + center lock | axis | high | rm44_front_A.jpg | ref/rack/node/ | REAL 1600px dead-front photo (driver-inspected) · mesh reads through to interior darkness |
+| switch_HWD (CRS354) | 44.3 x 443 x 297 | mm | spec | mikrotik-crs354-dimensions-cad.pdf | ref/rack/switch/ | official CAD · +7mm ear projection · WHITE chassis (real photo crs354_sth_front.jpg) |
+| switch_face | 48x RJ45 grouped grid + 4x SFP+ + 2x QSFP+ | axis | high | crs354_sth_front.jpg | ref/rack/switch/ | EXIF-verified straight-on photo, 800x483 |
+| ups_HWD (SMT1500RM2UC) | 86 x 432 x 477 | mm | spec | smt1500rm2uc-datasheet.pdf | ref/rack/ups/ | official Schneider datasheet · face layout from CGI + 440px photo (tone LOW-CONF, ledger-flagged) |
+| blanking_1U | 483 x 45 | mm | spec | apc-ar8136blk-blanking-spec.pdf | ref/rack/accessories/ | toolless plastic class · photos blankb1_*.jpg (1500px, real) |
+| duct_1U_HWD | 43.7 x 482.6 x 67.7 | mm | spec | tripplite-srcableduct1u-spec.pdf | ref/rack/accessories/ | finger-duct cable manager |
+| pdu_0U_HWD | 1829 x 56 x 51 | mm | spec | apc-ap8868-pdu-spec.pdf | ref/rack/accessories/ | vertical zero-U · rear channel · likely invisible in the front orbit |
+| cage_nut_body | ~13.5 x 13.5 | mm | med | RECON (RS PRO/ITA/Chatsworth) | ref/rack/accessories/cagenut_single_macro.jpg | M6 in 9.5 sq hole · macro photo for texture |
+
+### RACK FILL MAP · first-class artifact (bottom -> top, U1 datum at rail bottom)
+
+Grader-ruled archetype: person-owned, homelab-real. Populated U1-U21, honest empty rails
+U22-U42 (real homelabs grow into oversized racks · shows the square-hole rail signature).
+No two adjacent units identical; unit types alternate; variance system (LED states, seating
+jitter, wear) is the assembly wave's Problem-1 system.
+
+| U range | occupant | face H (mm) | note |
+|---|---|---|---|
+| U1-U2 | APC SMT1500RM2UC UPS | 86.0 | the iconic bottom-of-rack · LCD lit |
+| U3 | 1U blanking panel | 43.7 | |
+| U4 | EMPTY (open rails) | · | deliberate gap · square holes + cage nuts read |
+| U5-U8 | RM44 GPU node A | 176.0 | power LED on |
+| U9 | 1U finger duct | 43.7 | patch slack |
+| U10-U13 | RM44 GPU node B | 176.0 | LED off (idle/earning states differ) |
+| U14 | 1U blanking panel | 43.7 | |
+| U15-U18 | RM44 GPU node C | 176.0 | LED on · sub-degree seating jitter differs per node |
+| U19 | 1U finger duct | 43.7 | cords up to the switch |
+| U20 | MikroTik CRS354 (WHITE) | 44.3 | sparse random port LEDs · the one white face |
+| U21 | 1U blanking panel | 43.7 | |
+| U22-U42 | EMPTY rails | · | 21U honest headroom · rails, cage nuts, side channels visible |
+
+Front door: OPEN or REMOVED in the portraits (fill must read). Zero-U PDU + rear cabling:
+rear channel, modeled ONLY if the locked orbit shows them (front-facing doctrine).
