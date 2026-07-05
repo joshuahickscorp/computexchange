@@ -1,117 +1,154 @@
-# render/RACK-LOOP.md · the goal-iterative loop (run this on Opus)
+# render/RACK-LOOP.md · v2 · the goal-iterative loop (run this on Opus)
 
-Purpose: everything taste-bearing is DECIDED and pinned · archetype (D-ARCH.md), fill map +
-all dimensions (MEASUREMENTS.md RACK section), technique class (real cut holes · bake-off
-verdict in RACK-NOTES.md), rig values + tone pins + the numeric oracle (rack_verify.py).
-What remains is MECHANICAL ITERATION: build each part to its goal state, judged by numbers
-and fixed acceptance images, one change per iteration. This file is the protocol. Worktree:
-worktree-rack-oracle. Builder: render/build_rack.py. Dash gate: middot only.
+Purpose: everything taste-bearing is DECIDED: archetype (D-ARCH.md), dimensions + fill map
+(MEASUREMENTS.md RACK section · fill map v2 per RACK-DETAIL-AUDIT.md section 3), technique class
+(real cut holes, bake-off in RACK-NOTES.md), rig defaults + tone pins + numeric oracle
+(rack_verify.py), and the full detail ladders (RACK-DETAIL-AUDIT.md section 2 · read it FIRST,
+it is the standard of done). What remains is MECHANICAL ITERATION, one bounded change per
+iteration, judged by numbers and fixed acceptance images. Worktree: worktree-rack-oracle.
+Builder: render/build_rack.py. Dash gate: middot only. Target: Apple/NVIDIA launch grade ·
+an owner of this hardware finds nothing missing at any deliverable distance.
 
-## INVARIANTS · never touch these (escalate instead)
+## INVARIANTS · never touch (escalate instead)
+1. Pins never move to make a render pass. Evidence -> driver re-measures. (Finding-3 law.)
+2. Desktop masters CLOSED (build_scene.py, desktop MEASUREMENTS rows, desktop portraits).
+3. Technique class LOCKED: door mesh = REAL cut holes (cell boolean + array, _rack_bakeoff
+   build_A). The fine FILTER layer behind it is a MAPPED micro-perf plane (ports-vs-maps
+   distance rule · legit at 4mm setback). Class switches need a logged bake-off + sign-off.
+4. Rig defaults (key 460 / rim 300 / fill 175 / expo -0.70 / void 0.006) + O_rack=0.0: any
+   change is a LIGHTING-class commit that re-runs rack_verify on EVERY existing shot; if the
+   shared trio rig is touched, the DESKTOP pins get re-verified too (O_desktop=-12 stands).
+5. U-arithmetic places everything: u_z(n), fill map, 44.45n-0.79 panel rule. No eyeballing.
+6. Git: one change class per commit (REMEASURE/GEOMETRY/MATERIAL/LIGHTING/CAMERA/RENDER/DOCS),
+   class named in the message, no AI attribution ever.
 
-1. **Pins never move to make a render pass.** The PINS/TOL in rack_verify.py and every value
-   in MEASUREMENTS.md are frozen. If a pin seems wrong, STOP and present the evidence · the
-   driver re-measures. (The desktops' finding-3 laundering autopsy is the law here.)
-2. **The desktop masters are CLOSED.** build_scene.py, MEASUREMENTS desktop sections, the
-   desktop portraits: read-only, always.
-3. **Technique class is locked**: mesh perforation = REAL cut holes (cell-boolean + array,
-   see _rack_bakeoff.py build_A). Switching class requires a logged bake-off + driver sign-off.
-4. **Rig defaults in build_rack.py** (key 460 / rim 300 / fill 175 / expo -0.70 / void 0.006)
-   and O_rack = 0.0 in rack_verify.py: changing ANY is a LIGHTING-class commit that re-runs
-   rack_verify on EVERY existing shot and re-checks the desktop pins if the shared trio rig
-   is involved.
-5. **U-arithmetic places everything.** No eyeballed positions. u_z(n) + the fill map.
-6. **Git discipline**: one change class per commit (REMEASURE / GEOMETRY / MATERIAL /
-   LIGHTING / CAMERA / RENDER / DOCS), message states the class, no AI attribution ever.
+## PORTED DESKTOP LAWS (new in v2 · learned the hard way on Studio/Spark)
+7. FLIP-FLOP GUARD: any value already changed once on visual evidence moves again ONLY after a
+   fresh measurement across TWO independent references, written to MEASUREMENTS.md first.
+8. AUTOPSY PROTOCOL: any overturned pin/value gets an autopsy line in MEASUREMENTS.md · old
+   value, why it was wrong (mechanism, not vibes), the replacing measurement. Precedents:
+   led_x corner-arc autopsy; the gate-5a +6 offset strike.
+9. CAMERA PHYSICS: DOF per shot class · detail f5.6 (TRUE macro camera aimed at the feature,
+   NEVER a crop of a wide frame · the L18 lesson) · pair/trio f11 · heroes f16. Tone patches
+   must stay sharp at gate time.
+10. POST CHAIN: the desktop post (roll 0.3deg · CA +/-0.18% · bloom thr 0.88 · vignette ~0.80
+    corner · grain 0.011) applies to DELIVERABLE frames only, AFTER the gate · the gate is
+    always PRE-post. Copy post_chain.py usage from the desktop worktree; do not re-tune.
+11. FIREFLY CLAMP: cycles indirect clamp 8.0 on portrait shots (desktop L13 lesson) · dark
+    interiors + small bright LEDs is exactly the firefly recipe.
+12. PANEL CALIBRATION: any blind panel run includes REAL photos of OTHER vendors' rack gear as
+    controls; a clean-product FALSE-TELL is proven for desktops (real Apple press photos score
+    3-5/5 render) · racks are handled hardware so the bias differs, MEASURE it before believing
+    any verdict; two consecutive panel readings before acting on any delta.
+13. TOOLING LIVES IN THE REPO: the mesh-pitch FFT check becomes render/rack_measure.py (port
+    from scratchpad in wave 1) · acceptance numbers must be reproducible forever.
 
 ## THE LOOP · one iteration
+1. Top unchecked box below · declare change class.
+2. ONE bounded change in build_rack.py (or the named new file).
+3. Render the part proof: `/Applications/Blender.app/Contents/MacOS/Blender -b -P
+   render/build_rack.py -- --shot <s> --preview` (drop --preview for acceptance renders).
+4. Judge: `python3 render/rack_verify.py <png> --shot <s>` exit 0 AND Read the render vs the
+   part's reference + its ladder in RACK-DETAIL-AUDIT.md section 2.
+5. One entry in RACK-NOTES.md (template at EOF). Commit if green.
+6. Part DONE when every box checked -> mark FROZEN on its builder function. Three consecutive
+   fails on one box -> STOP, write evidence, escalate.
 
-1. Pick the top unchecked box in the WORK QUEUE below. Declare the change class.
-2. Make ONE bounded change in build_rack.py (or a new part function).
-3. Render the part's proof shot(s):
-   `/Applications/Blender.app/Contents/MacOS/Blender -b -P render/build_rack.py -- --shot <s> --preview`
-4. Judge: `python3 render/rack_verify.py <render.png> --shot <s>` (exit 0 required) AND
-   Read the image · compare against the part's ACCEPTANCE list + its reference photo.
-5. Log one entry in RACK-NOTES.md (template at bottom). Commit if the gate is green.
-6. A part is DONE when every acceptance box is checked; freeze it (comment "FROZEN" on its
-   builder function) and move on. Three consecutive failed iterations on the same box ->
-   STOP, write up the evidence, escalate to the driver.
+## WORK QUEUE v2 (in order · audit evidence tags [rack-audit-raw.json])
 
-## WORK QUEUE (in order · check boxes off in this file as they land)
+### Wave 0 · FRAME CORRECTIONS (the built part is wrong before anything stacks on it)
+- [ ] W0.1 GEOMETRY · outer width 760 -> 600mm: move walls/posts inboard ~80mm/side, FREEZE
+      rail x (rails measured CORRECT at c-c 464.5). Accept: rail-derived px/mm scale gives
+      outer width 600 +/- 2% on a fresh front render.
+- [ ] W0.2 GEOMETRY · post faces to ~45mm width + 3 hinge bosses one side + latch keeper other.
+      Accept: post face ratio ~0.075 of width; silhouette no longer dead-straight.
+- [ ] W0.3 GEOMETRY · top front band to ~45mm; base band floats: 4 leveling feet (pad ~45mm,
+      30mm floor gap) + twin casters inboard. Accept: light gap under base reads; feet at
+      corner footprints.
+- [ ] W0.4 GEOMETRY · rear rail pair (holed, same pattern/c-c) at rear depth; corner gusset
+      castle plates; brush strips inboard of posts. Accept: rear rails read between units
+      from dead front.
+- [ ] W0.5 GEOMETRY · U-tick strip on rail flange (blank ticks, 1/U) + hole size verified
+      9.5mm in source. Accept: ticks resolve at 4K front.
+- [ ] W0.6 MATERIAL · orange-peel powder micro-texture (NEW target · not bead-blast, not
+      anodize · scale from enclosure-photos macro) + RE-MEASURE the frame render tone with
+      rack_verify (my eye says grey, committed number says L22 · one of them autopsies).
+      Accept: rack_verify powder_black PASS on the corrected frame.
 
-### Part 1 · RM44 node face (gate 5b) · reference node/rm44_front_A.jpg
-- [ ] body 440 x 176 x 468mm + ears to 482.6mm (EIA flange, thumbscrew bosses) · GEOMETRY
-- [ ] mesh door: measured lattice P=2.87 R=2.59 shrink=0.24 THICK=1.2, cell-boolean+array
-      method from _rack_bakeoff.build_A, door border frame ~8mm, cached like foam3d · GEOMETRY
-- [ ] center lock cylinder ~9mm dia at face-center-x, ~14mm below face top (APPROX row ·
-      re-measure against the photo when the door frame exists) + recessed badge zone · GEOMETRY
-- [ ] top lid seam + bottom rail seam (from the photo's horizontal seams) · GEOMETRY
-- [ ] interior: inward-normal box (albedo 0.032 · NEVER 0), 3x 120mm fan discs+hubs ~20mm
-      behind the door, blades never crossing the door plane · GEOMETRY
-- [ ] interior fill light inside the node: holes read as openings, exterior patches stay
-      green (run rack_verify before/after) · LIGHTING
-- [ ] node solo turnaround (front/q34/side, flat rig like turnaround_sheet) · RENDER
-- ACCEPTANCE: (a) raking detail tile matches bake-A-raking's opening-read or better ·
-  (b) rack_verify powder_black on the node front PASS · (c) mesh pitch on the render
-  measures 2.87/2.59 +-5% via the FFT autocorr (scratchpad rm44 script method) ·
-  (d) grazing shot holds the perforation read (compare bake-A-graze).
+### Wave 1 · RM44 node face (hero · ladder in DETAIL-AUDIT sec 2)
+- [ ] 1.1 GEOMETRY · body 440x176x468 + ears: folded flange to 482.6, 2 knurled thumbscrews
+      each, fold radius per rm44_q34. Accept: silhouette vs photo +/-1.5%.
+- [ ] 1.2 GEOMETRY · door: real tri punches P2.87/R2.59 (rounded corners, alternating
+      orientation), border FADE ROWS (clipped partial triangles at frame edge), border ~8mm,
+      cached like foam3d. Accept: FFT pitch on render 2.87/2.59 +/-5% (rack_measure.py) ·
+      fade rows visible in the macro.
+- [ ] 1.3 GEOMETRY · FILTER LAYER: mapped micro-perf plane 4mm behind door (fine hex ~0.9mm),
+      then fan wall (3x120mm rings+hubs) behind it, interior albedo 0.032 never 0.
+      Accept: raking + grazing tiles read door->filter->dark (beats bake-A) · this is the
+      Problem-2 acceptance, committed as evidence.
+- [ ] 1.4 GEOMETRY · keystone badge plate (proud, chevron bottom, BLANK) + bail-handle lock at
+      photo-measured y + top lip seam + bottom sill with 2 corner screws + 4 witness dots.
+      Accept: feature positions vs rm44_front_A +/-2% of face width.
+- [ ] 1.5 LIGHTING · interior fill so holes read as openings; exterior patches stay green
+      (rack_verify before/after). Accept: both.
+- [ ] 1.6 RENDER · node solo turnaround + TRUE-MACRO detail (law 9). Accept: rack_verify PASS
+      + pitch check on the macro.
 
-### Part 2 · CRS354 switch face · reference switch/crs354_sth_front.jpg + CAD pdf
-- [ ] chassis 443 x 44.3 x 297mm WHITE powder + ears (+7mm projection) · GEOMETRY
-- [ ] port block: ONE recessed RJ45 cavity (dark wall + AO + lit lower contact tab · the
-      desktop USB-C treatment) instanced to the 2x24 grid with the photo's group gaps ·
-      GEOMETRY
-- [ ] 4x SFP+ + 2x QSFP+ cages right side (dark nickel, recessed) · GEOMETRY
-- [ ] per-port LED dots row (emission OFF here · states set at assembly variance) · GEOMETRY
-- ACCEPTANCE: switch_white patch PASS (add the shot box to rack_verify SHOTS first) ·
-  port cavities read recessed at detail distance, never flat black · silhouette vs CAD
-  dims +-1%.
+### Wave 2 · CRS354 switch face
+- [ ] 2.1 GEOMETRY · chassis 443x44.3x297 WHITE + ears (+7mm) + faceplate seam. Accept: CAD
+      dims +/-1%.
+- [ ] 2.2 GEOMETRY · port grid: ONE recessed RJ45 cavity (dark wall + AO + lit lower contact ·
+      desktop USB-C law) instanced as 4 GANGS of 2x6 · TOP row latch-up, BOTTOM row MIRRORED
+      latch-down · gang gaps > port gaps · per-port LED pipes (above top row, below bottom).
+      Accept: gang structure + mirror flip read at detail distance; never flat black.
+- [ ] 2.3 GEOMETRY · gang window recess + bezel (color VERIFY-THEN-PIN vs 2nd ref) · SFP+ 2x2 +
+      QSFP+ 2x1 cages with lips + bale latches · console/MGMT stack far right · status LEDs +
+      reset pinhole. Accept: every zone present at correct x-ratio +/-2%.
+- [ ] 2.4 MATERIAL · switch_white patch into rack_verify SHOTS, PASS. Accept: exit 0.
 
-### Part 3 · UPS face (2U) · reference ups/smt1500rm2u_amazon_cgi.jpg (geometry ONLY) 
-- [ ] chassis 86 x 432 x 477mm black + ears · GEOMETRY
-- [ ] face: recessed LCD window (emissive, dim · the ALIVE departure), button cluster,
-      vent slot bank, badge blank · GEOMETRY/MATERIAL
-- ACCEPTANCE: ups_black patch PASS (tol 6, low-conf pin flagged) · LCD emission does not
-  clip (rack_verify clip gate) and reads at portrait distance.
+### Wave 3 · UPS face (2U)
+- [ ] 3.1 GEOMETRY · 432x89 bezel · grille-LEFT / control-RIGHT split · louvered grille
+      (photo-counted pitch, recessed) · scallop pillars flanking recessed control plate.
+      Accept: massing split ratio vs photo +/-3% (photo outranks CGI on every disagreement).
+- [ ] 3.2 GEOMETRY/MATERIAL · power bar + 2x2 buttons + LCD window (dim emissive · the ALIVE
+      departure · clip gate must hold) + ears + blank badge. Accept: ups_black PASS · no clip.
 
-### Part 4 · blanking panel + finger duct (1U each) · refs accessories/*
-- [ ] blanking 483 x 45 flat + edge relief · duct: finger row + cover 43.7 x 482.6 x 67.7 ·
-      GEOMETRY
-- ACCEPTANCE: reads correct in a 3-unit stack test render with the U-gap rule (44.45n-0.79).
+### Wave 4 · accessories
+- [ ] 4.1 GEOMETRY · blanking panel: face + edge returns + end relief notches + mounting slots.
+      Accept: 3-stack test with 44.45n-0.79 gaps reads.
+- [ ] 4.2 GEOMETRY · duct: photo-counted fingers/pitch/profile + cover. Accept: same stack.
+- [ ] 4.3 GEOMETRY · cage nut CANONICAL: square cage + collar + castellated spring wings, zinc
+      + M6 screws (two head styles). Placed at OCCUPIED holes + 2-3 spares ONLY. Accept: macro
+      matches cagenut_single_macro.
+- [ ] 4.4 GEOMETRY · shelf + generic blank mini-PC (gestalt shelf rule · scope note in commit).
 
-### Part 5 · assembly (gate 6) · the fill map in MEASUREMENTS.md
-- [ ] place ALL units by u_z() per the fill map, linked duplicates for the 3 nodes · GEOMETRY
-- [ ] variance system: per-instance seed drives LED palette {off,green,amber}, sub-degree
-      seating jitter (<=0.4deg), micro-roughness/dust variation · node A on / B off / C on ·
-      switch ports sparse-random · MATERIAL
-- [ ] cage nuts at OCCUPIED holes only + a few spares (zinc, from the macro refs) · GEOMETRY
-- [ ] restrained cabling: duct-to-switch patch cords only where the open front shows them ·
-      GEOMETRY
-- ACCEPTANCE: full-rack front + q34 · rack_verify ALL PASS on both · no two adjacent units
-  read identical at portrait distance (Read the render and check explicitly) · empty rails
-  U22-42 show square holes crisply.
+### Wave 5 · assembly (fill map v2 · REMEASURE commit adopts it into MEASUREMENTS.md first)
+- [ ] 5.1 REMEASURE · write fill map v2 (DETAIL-AUDIT sec 3: bottom-heavy, deliberate voids,
+      network band TOP: duct U37 + switch U38 + shelf U40, honest U21-36 void run).
+- [ ] 5.2 GEOMETRY · place all units by u_z() · linked dupes for nodes. Accept: front + q34,
+      rack_verify ALL PASS both.
+- [ ] 5.3 MATERIAL · variance: LED budget ~60% lit mixed green/amber 2-3 bright, node states
+      A-on/B-off/C-on, seating jitter <=0.4deg, per-instance roughness/dust (handled-hardware
+      law · every knob cites a gestalt photo). Accept: no two adjacent units identical + LED
+      field reads alive-not-decorated.
+- [ ] 5.4 GEOMETRY · cabling: patch catenary arcs duct->switch->near columns (gestalt rule),
+      velcro loops, restrained elsewhere. Accept: arcs read as slack physics, not splines.
+- [ ] 5.5 RENDER · full-rack front + q34 + empty-bay TRUE-MACRO + node TRUE-MACRO.
 
-### Part 6 · depth gate (gate 7) + materials (gate 8) + photoreal (gate 9) + portraits (10)
-- [ ] raking-light detail of node face + one empty bay: openings-with-interior · the formal
-      Problem-2 acceptance render, committed as evidence · RENDER
-- [ ] tone table: every patch on front + q34 green at O_rack=0 · re-derive O_rack on the
-      node's broad front face FIRST (one commit · see rack_verify autopsy note) · MATERIAL
-- [ ] photoreal ledger rows T-RACK-1 (array uniformity) + T-RACK-2 (dead-black depth) +
-      inherited taxonomy · then blind 5-agent panel loops per render/panel/PANEL-LOG.md
-      protocol (pool = renders + homelab-gestalt/ + OTHER-vendor rack photos) · driver
-      reads verdicts against control calibration
-- [ ] portraits: front, q34, node detail, empty-bay detail + THE SCALE TRIO (Mac Studio +
-      Spark + rack, one rig, true scale · per-object-class tone offsets) · RENDER
+### Wave 6 · photoreal + portraits (driver-shared)
+- [ ] 6.1 post chain onto deliverables (law 10) + firefly clamp verify (law 11).
+- [ ] 6.2 photoreal ledger rows T-RACK-1 (array uniformity) T-RACK-2 (dead-black depth)
+      T-RACK-3 (filter-layer read) · panel per law 12 (driver reads verdicts).
+- [ ] 6.3 THE SCALE TRIO: Studio + Spark + rack, one rig, per-class offsets (law 4), true
+      scale by U-module arithmetic. Driver owns composition. Accept: both desktop pins AND
+      rack pins green in the same frame set.
 
-## ESCALATE TO THE DRIVER (stop the loop, write up, wait)
+## ESCALATE (stop, write up, wait)
+Pin disputes · acceptance judgment calls the ladder does not answer · 3 fails on one box ·
+any rig change beyond invariants · anything touching desktop files · panel verdict reading ·
+trio composition · any NEW reference need (driver hunts or approves web fetch).
 
-- Any pin or measured row looks wrong · any acceptance image needs a judgment call the
-  checklist doesn't answer · technique class feels exhausted (3 failed iterations) · any rig
-  change beyond the invariant values · anything requiring the desktops' files · the panel
-  gate (driver runs it) · the trio composition (driver taste).
-
-## NOTES ENTRY TEMPLATE
-
+## NOTES TEMPLATE
     ## <part> · iteration N · class <CLASS>
     Change: <one sentence>. Render: <file>. Verify: <PASS/FAIL + numbers>.
-    Eyeball: <one sentence vs the reference>. Next: <the single next fix>.
+    Eyeball: <one sentence vs the reference>. Next: <single next fix>.
