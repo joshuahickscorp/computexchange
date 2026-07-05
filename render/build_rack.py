@@ -519,6 +519,38 @@ def build_crs354_switch(cx=0.0, cz=0.0):
     # faceplate seam · a thin recessed line ~4mm below the top edge (the front bezel split)
     seam = box("crs-seam", W - mm(4), mm(1.0), mm(0.6), (cx, fy + mm(0.3), cz + Hb - mm(6)))
     seam.data.materials.append(principled("crs-seam-mat", (0.30, 0.31, 0.33), 0.5)); parts.append(seam)
+    # Wave 2.2 · 48 RJ45 ports = 4 GANGS of 2x6, recessed cavities (desktop USB-C treatment · dark
+    # wall + AO interior + a lit lower contact) · the grid sits LEFT, leaving the right for the
+    # SFP/QSFP cages (2.3). One joined cutter -> boolean once (not 48 booleans).
+    pw, ph = mm(12.0), mm(10.5)                     # RJ45 aperture
+    col_pitch, row_pitch = mm(13.6), mm(14.0); gang_gap = mm(7.0)
+    z_top = cz + Hb * 0.66; z_bot = cz + Hb * 0.34
+    grid_left = cx - mm(200.0)                       # grid starts left of center
+    cav_mat = principled("rj45-cavity", (0.055, 0.055, 0.060), 0.62, metallic=0.1)
+    contact_mat = principled("rj45-contact", (0.55, 0.47, 0.20), 0.4, metallic=0.7)   # gold pins
+    cutters = []; contacts = []; centers = []
+    for gang in range(4):
+        gx = grid_left + gang * (6 * col_pitch + gang_gap)
+        for col in range(6):
+            x = gx + col * col_pitch
+            for zc in (z_top, z_bot):
+                cutters.append(box("pc", pw, mm(16), ph, (x, fy + mm(5), zc)))
+                centers.append((x, zc))
+    # join cutters into one mesh, boolean once
+    bpy.context.view_layer.objects.active = cutters[0]
+    for c in cutters[1:]: c.select_set(True)
+    cutters[0].select_set(True); bpy.ops.object.join()
+    joined = cutters[0]
+    md = body.modifiers.new("ports", "BOOLEAN"); md.operation = "DIFFERENCE"; md.solver = "EXACT"; md.object = joined
+    bpy.context.view_layer.objects.active = body; bpy.ops.object.modifier_apply(modifier=md.name)
+    bpy.data.objects.remove(joined, do_unlink=True)
+    # dark interior slab just behind the face + a gold contact bar low in each port
+    inter = box("crs-interior", W - mm(20), mm(2), Hb - mm(6), (cx, fy + mm(7), cz + Hb / 2.0))
+    inter.data.materials.append(cav_mat); parts.append(inter)
+    for (x, zc) in centers:
+        cb = box("rj45-pin", pw - mm(2.5), mm(1.2), mm(1.6), (x, fy + mm(3.0), zc - ph/2 + mm(2.0)))
+        cb.data.materials.append(contact_mat); contacts.append(cb)
+    parts += contacts
     return parts
 
 def switch_rig_camera(shot, res):
