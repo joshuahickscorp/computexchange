@@ -349,6 +349,62 @@ def render_to(path):
 
 # ---- RM44 4U GPU node · the hero unit (Wave 1) · ref node/rm44_front_A.jpg ----------------
 RM44 = dict(W=440.0, D=468.0, Hb=176.0, EARW=482.6, EAR_T=2.0)   # body + ear-tip width (EIA 19in)
+MESH_P, MESH_R = 2.87, 2.59      # measured triangular lattice (mm · rm44 FFT autocorr, MEASUREMENTS)
+MESH_SHRINK, MESH_THICK = 0.24, 1.2
+
+def _tri_prism(name, side, depth, up=True, loc=(0, 0, 0)):
+    me = bpy.data.meshes.new(name); bm = bmesh.new()
+    hgt = side * math.sqrt(3) / 2.0; s = 1.0 if up else -1.0
+    pts = [(-side/2.0, -s*hgt/2.0), (side/2.0, -s*hgt/2.0), (0.0, s*hgt/2.0)]
+    vs = [bm.verts.new((mm(px), -mm(depth)/2.0, mm(pz))) for (px, pz) in pts]
+    fce = bm.faces.new(vs)
+    r = bmesh.ops.extrude_face_region(bm, geom=[fce])
+    for gg in r["geom"]:
+        if isinstance(gg, bmesh.types.BMVert): gg.co.y += mm(depth)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:]); bm.to_mesh(me); bm.free()
+    ob = bpy.data.objects.new(name, me); bpy.context.collection.objects.link(ob); ob.location = loc
+    bpy.context.view_layer.update(); return ob
+
+def build_mesh_door(cx, cz, fy, field_w, field_h):
+    """Wave 1.2 · the triangular-perforation mesh door · REAL cut holes (bake-off verdict, locked).
+    One cell (P x 2R, up+down triangle boolean) arrayed across the field · cached like foam3d
+    (heavy array). Placed at the front plane fy · the holes read through to the dark interior."""
+    import os as _os
+    key = f"mesh_w{field_w:.0f}h{field_h:.0f}p{MESH_P}r{MESH_R}s{MESH_SHRINK}t{MESH_THICK}"
+    cdir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "cache"); _os.makedirs(cdir, exist_ok=True)
+    cpath = _os.path.join(cdir, f"{key}.blend")
+    if _os.path.exists(cpath):
+        with bpy.data.libraries.load(cpath) as (src, dst): dst.meshes = list(src.meshes)[:1]
+        door = bpy.data.objects.new("rm44-door", dst.meshes[0]); bpy.context.collection.objects.link(door)
+        door.location = (cx, fy, cz); print(f"[mesh] cache hit ({len(door.data.polygons)} tris)")
+        return door
+    cw, ch = mm(MESH_P), mm(2 * MESH_R)
+    me = bpy.data.meshes.new("cell"); bm = bmesh.new(); bmesh.ops.create_cube(bm, size=1.0)
+    for v in bm.verts: v.co.x *= cw; v.co.y *= mm(MESH_THICK); v.co.z *= ch
+    bm.to_mesh(me); bm.free()
+    cell = bpy.data.objects.new("cell", me); bpy.context.collection.objects.link(cell)
+    side = MESH_P - 2 * MESH_SHRINK
+    for up, zc in ((True, mm(MESH_R/2)), (False, -mm(MESH_R/2))):
+        c = _tri_prism("c", side, MESH_THICK*4, up=up, loc=(0, 0, zc))
+        bpy.context.view_layer.objects.active = cell
+        md = cell.modifiers.new("b", "BOOLEAN"); md.operation = "DIFFERENCE"; md.solver = "EXACT"; md.object = c
+        bpy.ops.object.modifier_apply(modifier=md.name); bpy.data.objects.remove(c, do_unlink=True)
+    nx, nz = int(mm(field_w)/cw), int(mm(field_h)/ch)
+    for ax, off in (("ax", (cw, 0, 0)), ("az", (0, 0, ch))):
+        a = cell.modifiers.new(ax, "ARRAY"); a.count = nx if ax == "ax" else nz
+        a.use_relative_offset = False; a.use_constant_offset = True; a.constant_offset_displace = off
+        bpy.ops.object.modifier_apply(modifier=ax)
+    cell.location = (0, 0, 0)
+    bbx = [cell.matrix_world @ __import__("mathutils").Vector(c) for c in cell.bound_box]
+    ctr = sum((v for v in bbx), __import__("mathutils").Vector()) / 8.0
+    for v in cell.data.vertices: v.co -= cell.matrix_world.inverted() @ ctr
+    for p in cell.data.polygons: p.use_smooth = False
+    try:
+        bpy.data.libraries.write(cpath, {cell.data}, compress=True); print(f"[mesh] cached {cpath}")
+    except Exception as e: print(f"[mesh] cache write failed: {e}")
+    cell.name = "rm44-door"; cell.location = (cx, fy, cz)
+    print(f"[mesh] {nx}x{nz} cells, {len(cell.data.polygons)} tris")
+    return cell
 
 def build_rm44_node(cx=0.0, cz=0.0):
     """Wave 1.1 · body + rack ears + 2 thumbscrews per ear. Front face toward -Y. The mesh door
@@ -359,7 +415,21 @@ def build_rm44_node(cx=0.0, cz=0.0):
     parts = []
     body = rounded_box("rm44-body", W, D, Hb, mm(2.5), seg=4)
     body.location = (cx, 0, cz + Hb / 2.0)
-    body.data.materials.append(pc); smooth(body, 30); parts.append(body)
+    body.data.materials.append(pc); smooth(body, 30)
+    fy = -D / 2.0
+    # Wave 1.2 · cut the door WINDOW in the body front (~8mm border frame) so the mesh reads
+    # through to a dark interior · then the dark interior box · then the perforated mesh door.
+    border = mm(8.0); field_w = RM44["W"] - 16.0; field_h = RM44["Hb"] - 16.0
+    win = box("door-win", mm(field_w), mm(30), mm(field_h), (cx, fy + mm(3), cz + Hb / 2.0))
+    bpy.context.view_layer.objects.active = body
+    md = body.modifiers.new("win", "BOOLEAN"); md.operation = "DIFFERENCE"; md.solver = "EXACT"; md.object = win
+    bpy.ops.object.modifier_apply(modifier=md.name); bpy.data.objects.remove(win, do_unlink=True)
+    parts.append(body)
+    interior = box("rm44-interior", W - mm(10), D - mm(20), Hb - mm(10),
+                   (cx, mm(4), cz + Hb / 2.0))
+    interior.data.materials.append(interior_dark("rm44-interior-mat")); parts.append(interior)
+    door = build_mesh_door(cx, cz + Hb / 2.0, fy + mm(1.5), field_w, field_h)
+    door.data.materials.append(powder_coat("door-powder")); parts.append(door)
     # rack EARS · thin folded flanges at the front extending the width to 482.6 (each ear tip
     # (482.6-440)/2 = 21.3mm proud of the body side), full node height, front-mounted.
     ear_ext = mm((RM44["EARW"] - RM44["W"]) / 2.0)

@@ -75,7 +75,7 @@ an owner of this hardware finds nothing missing at any deliverable distance.
       Accept: rack_verify powder_black PASS on the corrected frame.
 
 ### Wave 1 · RM44 node face (hero · ladder in DETAIL-AUDIT sec 2)
-- [ ] 1.1 GEOMETRY · body 440x176x468 + ears: folded flange to 482.6, 2 knurled thumbscrews
+- [x] 1.1 GEOMETRY DONE (silhouette+ears+thumbscrews, 2.7:1) · body 440x176x468 + ears: folded flange to 482.6, 2 knurled thumbscrews
       each, fold radius per rm44_q34. Accept: silhouette vs photo +/-1.5%.
 - [ ] 1.2 GEOMETRY · door: real tri punches P2.87/R2.59 (rounded corners, alternating
       orientation), border FADE ROWS (clipped partial triangles at frame edge), border ~8mm,

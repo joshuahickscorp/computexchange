@@ -190,8 +190,8 @@ Wave 0 · FRAME CORRECTIONS (built part is wrong before anything stacks):
       powder_black PASS.
 
 Wave 1 · RM44 NODE (hero · two-layer mesh):
-- [ ] R1.1 body 440x176x468 + folded ears to 482.6 + 2 knurled thumbscrews each · +/-1.5%.
-- [ ] R1.2 door: real tri punches P2.87/R2.59 rounded-corner alternating + border FADE ROWS +
+- [x] R1.1 DONE · body 440x176x468 + folded ears to 482.6 + 2 knurled thumbscrews each · +/-1.5%.
+- [x] R1.2 DONE (cached mesh door + window + interior) · door: real tri punches P2.87/R2.59 rounded-corner alternating + border FADE ROWS +
       ~8mm frame, cached · Accept: FFT pitch +/-5% via render/rack_measure.py (port the tool).
 - [ ] R1.3 FILTER LAYER (mapped micro-perf ~0.9mm at 4mm setback) + fan wall (3x120mm rings/
       hubs) + interior albedo 0.032 · Accept: raking + grazing read door->filter->dark ·
