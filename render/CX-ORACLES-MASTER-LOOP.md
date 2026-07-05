@@ -154,6 +154,15 @@ contradict L15's direct verification · hence the RE-MEASURE tags).
       Accept: thin under-shadow band reads side-on.
 - [ ] SP9 VERIFY · pair relative scale: measured Spark:Studio width ratio within 3% of the
       perspective-corrected 0.761 · fix PAIR_SPAN/camera math if off, never device dims.
+- [ ] SP10 REMEASURE+GEOMETRY · foam spatial frequency at hero distance (PR-gate loop 18: MY
+      foam reads "mushy, low-frequency" vs the real block's "crisp chaotic cells", judged
+      side-by-side in-batch) · this is the flip-flop-guarded cell-scale live case: measure the
+      REAL foam's cell frequency at matched pixel scale across sth_front-1 + cl_front-foam
+      FIRST, then one bounded change (pitch and/or voxel and/or strut sharpening) · Accept:
+      FFT cell frequency of the render within 10% of the reals at matched scale, edges crisp.
+- [ ] POST-1 DRIVER DECISION · the post chain's uniform CA (+/-0.18%) was explicitly named
+      "a post-process giveaway" by two lenses in loop 18 · L9 forbids executor re-tuning ·
+      the DRIVER decides: reduce/remove CA or keep with rationale · log either way.
 
 ## PART 6 · RACK QUEUE (the gap · full detail in render/RACK-DETAIL-AUDIT.md sections 2-3,
 ## mirrored from RACK-LOOP.md v2 · run in the RACK worktree, rack_verify gates)
@@ -247,5 +256,8 @@ owner closes.
   corner blend smooth at hero distance, PROVISIONAL PASS · the 4K-zoom no-polyline check
   remains inside ST1 before closing it. Executor starts at: rack R0.1 (primary) or ST4/ST2
   (desktop lane).
+- PR-GATE first execution (loop 18, 2026-07-05): FAIL · gate frames 5/5 vs clean-real mean
+  1.0 · the real Apple press photo drew 5/5 render for the 4th consecutive sitting. Evidence
+  converted to SP10 + POST-1. The PR-gate stays the stop condition · unmet and open.
 - Rack: audit + loop v2 committed (384471f) · nothing running · Wave 0 is open and FIRST.
 - Panel history + calibration: PHOTOREAL-SHIFT-REPORT.md sections 10b-10e (desktop worktree).
