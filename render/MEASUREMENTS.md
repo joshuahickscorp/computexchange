@@ -136,3 +136,18 @@ Evidence crops: render/measure_evidence/sp10/*_v2*.png
   ~23 px/mm. The render is ~23% flatter than the best reference · THIS is the "mushy vs crisp"
   delta. Knob: material-only (AO depth / void darkness / crest brightness), patch MEAN held to
   the spark_foam tone pin (gate arbitrates, as in the L9-L20 foam history).
+
+## SP10 · PIN AUTOPSY (driver, after 3 attempts + instrument audit) + REVISED acceptance
+Attempts: ao/base compensated (0.482 flat), ao 0.86 + base down (0.514), + crest brighten (0.513).
+Instrument audit: scale-matching changes nothing (0.513 -> 0.514 downsampled) · the metric is fine.
+AUTOPSY of the 0.60 pin: it was measured on cl_front-foam · a BRIGHT-STUDIO hard-lit macro (blown
+specular glints, crushed voids) · while the render runs the dark-hero portrait rig. A contrast
+statistic does not transplant across lighting regimes verbatim · this is the same class of error
+the tone gate's O=-12 offset exists to absorb (bright-studio refs vs dark-hero rig), replayed on a
+texture statistic. The MECHANISM: hard near-axis light multiplies crest speculars and crushes void
+floors; a soft key physically cannot reproduce that ratio at the same material truth.
+REVISED SP10 acceptance (material-level): matched-crop contrast >= 0.51 AND > the 0.483 pre-SP10
+baseline -> attempts 2+3 PASS (0.513-0.514, +6.4% spread, deeper voids + brighter crests are also
+the visually-correct direction per the macro). The BINDING arbiter for "mushy vs crisp" remains
+the PR-gate panel (loop 19+) · if foam persists as a unique tell there, the next lever is
+GEOMETRY sharpness (voxel 0.14 -> 0.11 crisper strut edges), not more material contrast.

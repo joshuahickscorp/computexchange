@@ -857,10 +857,11 @@ def spark_top_vent():
     return add_bevel(m)   # photoreal T7 · hairline edge (chains the weave bump into the bevel)
 
 
-def foam3d_material(base=(0.615, 0.515, 0.330), ao_fac=0.72, ao_dist=1.2, rough=0.40):
-    # SP10 (PR-gate loop 18 "mushy vs crisp" + measured contrast pin 0.60): voids DEEPER via
-    # ao_fac 0.54->0.72, base LIFTED to hold the spark_foam patch mean (hold-the-mean,
-    # widen-the-spread · the proven foam move). Pitch measured NOT the delta · unchanged.
+def foam3d_material(base=(0.575, 0.483, 0.308), ao_fac=0.86, ao_dist=1.4, rough=0.40):
+    # SP10 attempt 2 (attempt 1 cancelled itself: base lift raised the mean as fast as deeper AO
+    # raised the spread · std/mean flat at 0.482 vs pin 0.60). Now: voids MUCH deeper (ao 0.86,
+    # reach 1.4mm) and base near-original · spread UP, mean DOWN, and the gate mean has been
+    # ABOVE its L-target all along so the darkening moves TOWARD the tone pin too.
     # material for the REAL 3D foam · the deep pores go dark on their OWN (geometry self-shadow), so
     # unlike the displaced-heightfield material this needs BRIGHT struts + GENTLE AO to bring the
     # patch mean back up to the spark_foam pin (the gate is senior · tuned via rig_patches).
@@ -885,9 +886,20 @@ def foam3d_material(base=(0.615, 0.515, 0.330), ao_fac=0.72, ao_dist=1.2, rough=
     cmix.inputs["Color1"].default_value = (base[0] - 0.10, base[1] - 0.09, base[2] - 0.06, 1)  # cool/dark strut
     cmix.inputs["Color2"].default_value = (base[0] + 0.09, base[1] + 0.075, base[2] + 0.05, 1)  # warm/bright strut
     nt.links.new(cvar.outputs["Fac"], cmix.inputs["Fac"])
+    # SP10 attempt 3 · CREST BRIGHTEN (the reference macro's "bright crisp struts"): convex
+    # crest tops (high Pointiness) get a bright warm-gold boost · raises the strut-void SPREAD
+    # with little mean movement (crests are a small area fraction).
+    crest = nt.nodes.new("ShaderNodeMapRange"); crest.clamp = True
+    crest.inputs["From Min"].default_value = 0.56; crest.inputs["From Max"].default_value = 0.72
+    crest.inputs["To Min"].default_value = 0.0; crest.inputs["To Max"].default_value = 0.55
+    nt.links.new(geo.outputs["Pointiness"], crest.inputs["Value"])
+    cbright = nt.nodes.new("ShaderNodeMixRGB")
+    cbright.inputs["Color2"].default_value = (min(1, base[0]*1.55), min(1, base[1]*1.55), min(1, base[2]*1.5), 1)
+    nt.links.new(cmix.outputs["Color"], cbright.inputs["Color1"])
+    nt.links.new(crest.outputs["Result"], cbright.inputs["Fac"])
     ao = nt.nodes.new("ShaderNodeAmbientOcclusion"); ao.inputs["Distance"].default_value = mm(ao_dist); ao.samples = 8
     aom = nt.nodes.new("ShaderNodeMixRGB"); aom.blend_type = "MULTIPLY"; aom.inputs["Fac"].default_value = ao_fac
-    nt.links.new(cmix.outputs["Color"], aom.inputs["Color1"])
+    nt.links.new(cbright.outputs["Color"], aom.inputs["Color1"])
     nt.links.new(ao.outputs["Color"], aom.inputs["Color2"]); nt.links.new(aom.outputs["Color"], b.inputs["Base Color"])
     # L14 · CRYSTALLINE STRUT SURFACE · real sintered/cast metal foam struts are rough and faceted,
     # not the smooth blobs the voxel remesh leaves · a fine high-freq bump breaks the "procedural
