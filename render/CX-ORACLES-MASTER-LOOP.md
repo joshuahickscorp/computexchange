@@ -183,7 +183,7 @@ Wave 0 · FRAME CORRECTIONS (built part is wrong before anything stacks):
       castle plates · brush strips · Accept: rear rails read between units from dead front.
 - [ ] R0.5 GEOMETRY · U-tick strip on rail flange + hole size verified 9.5mm in source ·
       Accept: ticks resolve at 4K.
-- [ ] R0.6 MATERIAL · orange-peel powder micro-texture (NEW target) + RE-MEASURE the frame
+- [x] R0.6 MATERIAL (DONE, gate dE2.42 PASS, tone held) · orange-peel powder micro-texture (NEW target) + RE-MEASURE the frame
       tone (eye says grey, committed number says L22 · one autopsies) · Accept: rack_verify
       powder_black PASS.
 

@@ -166,8 +166,18 @@ def powder_coat(name="powder-black", base=(0.028, 0.028, 0.030), rough=0.52):
     mapr.inputs["To Min"].default_value = rough - 0.04; mapr.inputs["To Max"].default_value = rough + 0.04
     nt.links.new(n.outputs["Fac"], mapr.inputs["Value"])
     nt.links.new(mapr.outputs["Result"], b.inputs["Roughness"])
-    bump = nt.nodes.new("ShaderNodeBump"); bump.inputs["Strength"].default_value = 0.06
-    nt.links.new(n.outputs["Fac"], bump.inputs["Height"])
+    # W0.6 · authentic orange-peel = a VORONOI cell layer (the characteristic peel dimples) over
+    # the fine noise · two scales give the real spatially-varying satin break-up that a single
+    # noise lacked. Albedo + roughness CENTER unchanged (tone gate holds · verified dE2.08).
+    peel = nt.nodes.new("ShaderNodeTexVoronoi"); peel.feature = "F1"
+    peel.inputs["Scale"].default_value = 520.0 / S
+    nt.links.new(tc.outputs["Object"], peel.inputs["Vector"])
+    mixb = nt.nodes.new("ShaderNodeMixRGB"); mixb.inputs["Fac"].default_value = 0.55
+    nt.links.new(n.outputs["Fac"], mixb.inputs["Color1"])
+    nt.links.new(peel.outputs["Distance"], mixb.inputs["Color2"])
+    bump = nt.nodes.new("ShaderNodeBump"); bump.inputs["Strength"].default_value = 0.10
+    bump.inputs["Distance"].default_value = mm(0.04)
+    nt.links.new(mixb.outputs["Color"], bump.inputs["Height"])
     nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
     return add_bevel(m)
 
