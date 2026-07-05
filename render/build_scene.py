@@ -857,7 +857,10 @@ def spark_top_vent():
     return add_bevel(m)   # photoreal T7 · hairline edge (chains the weave bump into the bevel)
 
 
-def foam3d_material(base=(0.560, 0.470, 0.300), ao_fac=0.54, ao_dist=1.2, rough=0.40):
+def foam3d_material(base=(0.615, 0.515, 0.330), ao_fac=0.72, ao_dist=1.2, rough=0.40):
+    # SP10 (PR-gate loop 18 "mushy vs crisp" + measured contrast pin 0.60): voids DEEPER via
+    # ao_fac 0.54->0.72, base LIFTED to hold the spark_foam patch mean (hold-the-mean,
+    # widen-the-spread · the proven foam move). Pitch measured NOT the delta · unchanged.
     # material for the REAL 3D foam · the deep pores go dark on their OWN (geometry self-shadow), so
     # unlike the displaced-heightfield material this needs BRIGHT struts + GENTLE AO to bring the
     # patch mean back up to the spark_foam pin (the gate is senior · tuned via rig_patches).

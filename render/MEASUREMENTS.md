@@ -126,3 +126,13 @@ REQUIRED NEXT (executor): cl_front-foam is the high-resolution source · anchor 
 (x420..800, y360..560) at native res. Two agreeing numbers -> pin cells/mm + contrast target,
 then ONE bounded change (candidates: pitch, voxel 0.14 crispness, strut albedo contrast).
 Evidence crops: render/measure_evidence/sp10/*_v2*.png
+
+## SP10 · PIN LANDED (session 3 · two refs + corrected render read · evidence sp10/*_v3.png)
+- PITCH: real cl_front-foam 0.96mm vs real sth_front-1 1.99mm · the references DISAGREE (70%)
+  and BRACKET the render (autocorr 1.39mm · built 1.62mm) -> per the flip-flop guard the pitch
+  pin DOES NOT MOVE. The "low-frequency" panel read was not pitch.
+- CONTRAST (std/mean on matched crops): real high-res macro 0.611 · real sth 0.490 · render
+  0.495. PIN: foam strut-void contrast target 0.60 +/- 0.05 measured on the front raw at
+  ~23 px/mm. The render is ~23% flatter than the best reference · THIS is the "mushy vs crisp"
+  delta. Knob: material-only (AO depth / void darkness / crest brightness), patch MEAN held to
+  the spark_foam tone pin (gate arbitrates, as in the L9-L20 foam history).
