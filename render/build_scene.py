@@ -171,9 +171,14 @@ STUDIO = {
     "usbc_left_x":  -66.16,  # usbc_left_x_from_center
     "usbc_right_x": -51.36,  # usbc_right_x_from_center
     "sd_w":          26.85,  # sd_slot_width · horizontal
-    "sd_h":           2.50,  # sd_slot_height
+    "sd_h":           2.25,  # sd_slot_height · GEO-AUDIT: two units measured h/w 0.081-0.084 on
+                             # apple_front (was 2.50 = 0.093, read 25-45% too tall at 4K). AUTOPSY:
+                             # the 2.50 pin bundled the entry chamfer shadow into the aperture.
     "sd_x":         -24.41,  # sd_center_x_from_center
-    "led_x":         87.70,  # led_x_from_center
+    "led_x":         64.60,  # led_x_from_center · GEO-AUDIT: apple_front puts the LED 0.172 W from
+                             # the right edge (~33.9mm) = 64.6 from center, ON THE FLAT FACE.
+                             # AUTOPSY of old 87.70: that x sits 10.8mm from the edge, i.e. on the
+                             # 31.4mm corner ARC · the pin was measured through corner foreshortening.
     "led_d":          2.94,  # led_diameter (approx, glow-inclusive)
     "port_row_z":    24.36,  # port_row_center_from_base (above the device bottom)
     "led_z":         27.50,  # led_from_base
@@ -706,7 +711,9 @@ def build_mac_studio(loc_x=0.0, yaw_deg=0.0):
     intake = mm(STUDIO["intake_band"])
     body = rounded_box("mac-studio", W, D, Htot,
                        mm(STUDIO["corner_R"]), mm(STUDIO["top_fillet_build"]), intake,
-                       seg_corner=48, seg_fillet=12)
+                       seg_corner=64, seg_fillet=24)  # GEO-AUDIT: 48/12 left a visible straight
+                             # facet where the plan corner turns through the top silhouette (the
+                             # "chamfer" tell, confirmed by eye on the side frame). Pure mesh density.
     zlift = mm(STUDIO["reveal_gap"])   # wave 6 base reveal: lift the body onto a recessed foot
     body.location = (0, 0, zlift)
     bpy.context.view_layer.update()
@@ -735,9 +742,13 @@ def build_mac_studio(loc_x=0.0, yaw_deg=0.0):
                            mm(STUDIO["sd_h"]) / 2.0, (mm(STUDIO["sd_x"]), yc, pz)))   # horizontal stadium
     boxes = apply_boolean(body, cutters)
     assign_interior(body, boxes, 1, ymin=front_y + mm(0.3))
-    # intake band = the lower `intake` mm (bottom fillet) carries the perforated mesh
+    # intake band = the perforated mesh zone. GEO-AUDIT (S4): apple_front reads a ~12.4mm band
+    # (0.13 of the 95mm height, 9-10 hole rows). The old threshold `intake + 0.3` (8.85mm WORLD z)
+    # silently lost the 2.5mm zlift, rendering only ~6.3mm of band (~half the reference) · the
+    # perforations must also climb past the fillet tangent onto the lower wall (ref: first row
+    # ~1.5mm below the tangent, no blank lip, no hard seam).
     for poly in body.data.polygons:
-        if (body.matrix_world @ poly.center).z < intake + mm(0.3):
+        if (body.matrix_world @ poly.center).z < zlift + mm(12.4):
             poly.material_index = 2
     smooth(body, 40)
 
@@ -757,7 +768,9 @@ def build_mac_studio(loc_x=0.0, yaw_deg=0.0):
     # minimal depth cue that kills the flat-black decal read.
     lip = rounded_box("sd-lip", mm(STUDIO["sd_w"] - 3.0), mm(1.4), mm(0.6),
                       mm(0.3), mm(0.2), mm(0.2), seg_corner=6, seg_fillet=2)
-    lip.location = (mm(STUDIO["sd_x"]), front_y + mm(2.4), pz - mm(STUDIO["sd_h"] / 2.0))
+    # GEO-AUDIT (S2 "bright strip in SD aperture"): the lip at 2.4mm caught the key light · the real
+    # slot reads uniformly dark inside. Recess it past 3.4mm so the aperture self-shadows.
+    lip.location = (mm(STUDIO["sd_x"]), front_y + mm(3.4), pz - mm(STUDIO["sd_h"] / 2.0))
     lip.data.materials.append(tongue_mat)
     tongues.append(lip)
 
@@ -823,6 +836,22 @@ def spark_top_vent():
     nt.links.new(mapp.outputs["Vector"], wave.inputs["Vector"])
     bump = nt.nodes.new("ShaderNodeBump"); bump.inputs["Strength"].default_value = 0.22
     bump.inputs["Distance"].default_value = mm(0.5)
+    # GEO-AUDIT fix (spark-top S4 "zipper ribbing") · the weave bump wrapped the sloped RECESS WALL,
+    # embossing regular teeth along the recess boundary that read as a ratchet line. Gate the bump
+    # strength by the face normal: weave lives ONLY on the horizontal panel floor (|Nz| ~ 1), the
+    # wall and border stay geometrically smooth. Acceptance: rib count on the wall = zero.
+    geo = nt.nodes.new("ShaderNodeNewGeometry")
+    sep = nt.nodes.new("ShaderNodeSeparateXYZ")
+    nt.links.new(geo.outputs["Normal"], sep.inputs["Vector"])
+    zabs = nt.nodes.new("ShaderNodeMath"); zabs.operation = "ABSOLUTE"
+    nt.links.new(sep.outputs["Z"], zabs.inputs[0])
+    zgate = nt.nodes.new("ShaderNodeMath"); zgate.operation = "GREATER_THAN"
+    zgate.inputs[1].default_value = 0.985
+    nt.links.new(zabs.outputs[0], zgate.inputs[0])
+    smul = nt.nodes.new("ShaderNodeMath"); smul.operation = "MULTIPLY"
+    smul.inputs[1].default_value = 0.22
+    nt.links.new(zgate.outputs[0], smul.inputs[0])
+    nt.links.new(smul.outputs[0], bump.inputs["Strength"])
     nt.links.new(wave.outputs["Fac"], bump.inputs["Height"])
     nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
     return add_bevel(m)   # photoreal T7 · hairline edge (chains the weave bump into the bevel)
