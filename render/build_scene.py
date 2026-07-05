@@ -897,9 +897,26 @@ def foam3d_material(base=(0.575, 0.483, 0.308), ao_fac=0.86, ao_dist=1.4, rough=
     cbright.inputs["Color2"].default_value = (min(1, base[0]*1.55), min(1, base[1]*1.55), min(1, base[2]*1.5), 1)
     nt.links.new(cmix.outputs["Color"], cbright.inputs["Color1"])
     nt.links.new(crest.outputs["Result"], cbright.inputs["Fac"])
+    # SP11 (PR-gate loop 19: foam FIELD reads "noise-fill / tiles unnaturally" at WIDE distance while
+    # the macro passes 1/5) · real reticulated blocks show LARGE-SCALE density/tone zones. A ~40mm
+    # object-space noise multiplies the foam brightness 0.86..1.14 so lighter/darker patches read
+    # across the field at portrait distance · breaks the uniform-speckle read. Mean held (multiplier
+    # averages ~1.0 · gate arbitrates). Cells + strut colour (SP10) unchanged · this is a NEW scale.
+    fvar = nt.nodes.new("ShaderNodeTexNoise"); fvar.inputs["Scale"].default_value = 1000.0 / (40.0 * S)
+    fvar.inputs["Detail"].default_value = 3.0; fvar.inputs["Roughness"].default_value = 0.65
+    nt.links.new(tcc.outputs["Object"], fvar.inputs["Vector"])
+    fmap = nt.nodes.new("ShaderNodeMapRange"); fmap.inputs["From Min"].default_value = 0.30
+    fmap.inputs["From Max"].default_value = 0.70; fmap.inputs["To Min"].default_value = 0.86
+    fmap.inputs["To Max"].default_value = 1.14; fmap.clamp = True
+    nt.links.new(fvar.outputs["Fac"], fmap.inputs["Value"])
+    fmot = nt.nodes.new("ShaderNodeMixRGB"); fmot.blend_type = "MULTIPLY"; fmot.inputs["Fac"].default_value = 1.0
+    nt.links.new(cbright.outputs["Color"], fmot.inputs["Color1"])
+    fmc = nt.nodes.new("ShaderNodeCombineXYZ")
+    nt.links.new(fmap.outputs["Result"], fmc.inputs["X"]); nt.links.new(fmap.outputs["Result"], fmc.inputs["Y"]); nt.links.new(fmap.outputs["Result"], fmc.inputs["Z"])
+    nt.links.new(fmc.outputs["Vector"], fmot.inputs["Color2"])
     ao = nt.nodes.new("ShaderNodeAmbientOcclusion"); ao.inputs["Distance"].default_value = mm(ao_dist); ao.samples = 8
     aom = nt.nodes.new("ShaderNodeMixRGB"); aom.blend_type = "MULTIPLY"; aom.inputs["Fac"].default_value = ao_fac
-    nt.links.new(cbright.outputs["Color"], aom.inputs["Color1"])
+    nt.links.new(fmot.outputs["Color"], aom.inputs["Color1"])   # SP11 · mottled color into the AO multiply
     nt.links.new(ao.outputs["Color"], aom.inputs["Color2"]); nt.links.new(aom.outputs["Color"], b.inputs["Base Color"])
     # L14 · CRYSTALLINE STRUT SURFACE · real sintered/cast metal foam struts are rough and faceted,
     # not the smooth blobs the voxel remesh leaves · a fine high-freq bump breaks the "procedural
