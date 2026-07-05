@@ -347,13 +347,72 @@ def render_to(path):
     t0 = time.time(); bpy.ops.render.render(write_still=True)
     print(f"rendered {path} in {time.time()-t0:.1f}s ({sc.cycles.samples} spp, {sc.render.resolution_percentage}%)")
 
+# ---- RM44 4U GPU node · the hero unit (Wave 1) · ref node/rm44_front_A.jpg ----------------
+RM44 = dict(W=440.0, D=468.0, Hb=176.0, EARW=482.6, EAR_T=2.0)   # body + ear-tip width (EIA 19in)
+
+def build_rm44_node(cx=0.0, cz=0.0):
+    """Wave 1.1 · body + rack ears + 2 thumbscrews per ear. Front face toward -Y. The mesh door
+    (1.2) + badge/lock (1.4) + interior (1.3) land on later boxes · this is the chassis silhouette,
+    the foundation the ladder (RACK-DETAIL-AUDIT sec 2) builds on."""
+    W, D, Hb = mm(RM44["W"]), mm(RM44["D"]), mm(RM44["Hb"])
+    pc = powder_coat("node-powder")
+    parts = []
+    body = rounded_box("rm44-body", W, D, Hb, mm(2.5), seg=4)
+    body.location = (cx, 0, cz + Hb / 2.0)
+    body.data.materials.append(pc); smooth(body, 30); parts.append(body)
+    # rack EARS · thin folded flanges at the front extending the width to 482.6 (each ear tip
+    # (482.6-440)/2 = 21.3mm proud of the body side), full node height, front-mounted.
+    ear_ext = mm((RM44["EARW"] - RM44["W"]) / 2.0)
+    fy = -D / 2.0
+    for sx in (-1, 1):
+        ear = rounded_box("rm44-ear", ear_ext, mm(RM44["EAR_T"]), Hb - mm(6), mm(1.0), seg=3)
+        ear.location = (sx * (W / 2.0 + ear_ext / 2.0), fy + mm(RM44["EAR_T"]) / 2.0, cz + Hb / 2.0)
+        ear.data.materials.append(pc); smooth(ear, 30); parts.append(ear)
+        # 2 knurled thumbscrews per ear (proud discs · U-boundary rows)
+        for uz in (0.22, 0.78):
+            ts = rounded_box("rm44-thumb", mm(11.0), mm(6.0), mm(11.0), mm(3.0), seg=6)
+            ts.location = (sx * (W / 2.0 + ear_ext / 2.0), fy - mm(3.0), cz + uz * Hb)
+            ts.data.materials.append(principled("thumb-zinc", (0.40, 0.40, 0.42), 0.34, metallic=0.85))
+            smooth(ts, 30); parts.append(ts)
+    return parts
+
+def node_rig_camera(shot, res):
+    """Solo-node rig: reuse the dark-object hero energies, re-aim at the node center (~88mm)."""
+    aim = bpy.data.objects.new("Aim", None); aim.location = (0, 0, mm(RM44["Hb"]) / 2.0)
+    bpy.context.collection.objects.link(aim)
+    add_area("key", (-0.55, -0.7, 0.9), 0.5, float(arg("--key", 62)), (1.0, 0.99, 0.97), aim=aim)
+    add_area("rim", (0.45, 0.7, 0.85), 0.04, float(arg("--rim", 40)), (0.93, 0.96, 1.0), sx=0.6, aim=aim)
+    add_area("fill", (0.0, -0.9, 0.4), 0.8, float(arg("--fill", 24)), (0.97, 0.98, 1.0), aim=aim)
+    bpy.ops.mesh.primitive_plane_add(size=6.0, location=(0, 0, 0))
+    fl = bpy.context.active_object; fl.name = "floor"
+    fl.data.materials.append(principled("floor", (0.006, 0.006, 0.007), 0.62))
+    sc = bpy.context.scene
+    cd = bpy.data.cameras.new("cam"); cd.lens = 85.0; cd.sensor_width = 36.0
+    cam = bpy.data.objects.new("cam", cd); bpy.context.collection.objects.link(cam); sc.camera = cam
+    dist = 1.9   # node is 482mm wide x 176mm tall (2.7:1) · width drives the framing at 85mm
+    yaw, elev = (0.0, 3.0) if shot == "front" else (32.0, 10.0)
+    ya, el = math.radians(yaw), math.radians(elev)
+    ax, ay, az = aim.location
+    cam.location = (ax + dist*math.cos(el)*math.sin(ya), ay - dist*math.cos(el)*math.cos(ya), az + dist*math.sin(el))
+    c = cam.constraints.new("TRACK_TO"); c.target = aim; c.track_axis = "TRACK_NEGATIVE_Z"; c.up_axis = "UP_Y"
+    cd.dof.use_dof = True; cd.dof.focus_object = aim; cd.dof.aperture_fstop = 11.0
+    sc.render.resolution_x, sc.render.resolution_y = res
+    return aim
+
 # ---- main --------------------------------------------------------------------------------
 import os as _os
 _os.makedirs(OUT, exist_ok=True)
 sc = reset_scene(); enable_gpu(sc)
-build_frame()
-aim = rack_rig()
-res = (1400, 2000) if SHOT in ("front", "frame-front") else (1800, 2000)
-rack_camera(aim, SHOT, res)
-render_to(OUT + f"frame-{SHOT}.png")
-print("build_rack frame proof done.")
+PART = str(arg("--part", "frame"))
+if PART == "node":
+    build_rm44_node()
+    node_rig_camera(SHOT, (1800, 1400))
+    render_to(OUT + f"node-{SHOT}.png")
+    print("build_rack RM44 node proof done.")
+else:
+    build_frame()
+    aim = rack_rig()
+    res = (1400, 2000) if SHOT in ("front", "frame-front") else (1800, 2000)
+    rack_camera(aim, SHOT, res)
+    render_to(OUT + f"frame-{SHOT}.png")
+    print("build_rack frame proof done.")
