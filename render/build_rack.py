@@ -430,6 +430,21 @@ def build_rm44_node(cx=0.0, cz=0.0):
     interior.data.materials.append(interior_dark("rm44-interior-mat")); parts.append(interior)
     door = build_mesh_door(cx, cz + Hb / 2.0, fy + mm(1.5), field_w, field_h)
     door.data.materials.append(powder_coat("door-powder")); parts.append(door)
+    # Wave 1.4 · center LOCK (cylinder body + bail/wing handle · rm44_front_A) + keystone BADGE
+    # plate (proud, chevron bottom, BLANK per trademark gate L6) · both proud of the mesh at
+    # face-center, upper-middle · the door's dip zone where the real unit carries them.
+    lock_z = cz + Hb * 0.60
+    bpy.ops.mesh.primitive_cylinder_add(radius=mm(6.5), depth=mm(4.0), vertices=28,
+                                        location=(cx, fy - mm(2.0), lock_z), rotation=(math.radians(90), 0, 0))
+    lock = bpy.context.active_object; lock.name = "rm44-lock"
+    lock.data.materials.append(principled("lock-satin", (0.05, 0.05, 0.055), 0.34, metallic=0.5))
+    smooth(lock, 30); parts.append(lock)
+    bail = rounded_box("rm44-bail", mm(22.0), mm(3.0), mm(5.0), mm(2.0), seg=4)   # wing handle
+    bail.location = (cx, fy - mm(3.5), lock_z); bail.data.materials.append(lock.data.materials[0])
+    smooth(bail, 30); parts.append(bail)
+    badge = rounded_box("rm44-badge", mm(34.0), mm(1.5), mm(12.0), mm(2.0), seg=4)   # keystone plate (blank)
+    badge.location = (cx, fy - mm(0.4), cz + Hb * 0.44); badge.data.materials.append(pc)
+    smooth(badge, 30); parts.append(badge)
     # rack EARS · thin folded flanges at the front extending the width to 482.6 (each ear tip
     # (482.6-440)/2 = 21.3mm proud of the body side), full node height, front-mounted.
     ear_ext = mm((RM44["EARW"] - RM44["W"]) / 2.0)

@@ -196,7 +196,7 @@ Wave 1 · RM44 NODE (hero · two-layer mesh):
 - [ ] R1.3 FILTER LAYER (mapped micro-perf ~0.9mm at 4mm setback) + fan wall (3x120mm rings/
       hubs) + interior albedo 0.032 · Accept: raking + grazing read door->filter->dark ·
       the formal Problem-2 evidence render.
-- [ ] R1.4 keystone badge plate (blank, chevron bottom) + bail-handle lock at measured y +
+- [x] R1.4 DONE (lock+bail+blank badge, gate dE0.47) · keystone badge plate (blank, chevron bottom) + bail-handle lock at measured y +
       lid lip seam + bottom sill 2 screws + 4 witness dots · +/-2% of face width.
 - [x] R1.5 LIGHTING DONE (rig calibrated, node reads real dark server, gate dE0.47) · interior fill · holes read open, exterior patches stay green.
 - [ ] R1.6 RENDER · node turnaround + TRUE macro (L8) · rack_verify PASS + pitch check.

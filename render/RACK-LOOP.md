@@ -85,7 +85,7 @@ an owner of this hardware finds nothing missing at any deliverable distance.
       then fan wall (3x120mm rings+hubs) behind it, interior albedo 0.032 never 0.
       Accept: raking + grazing tiles read door->filter->dark (beats bake-A) · this is the
       Problem-2 acceptance, committed as evidence.
-- [ ] 1.4 GEOMETRY · keystone badge plate (proud, chevron bottom, BLANK) + bail-handle lock at
+- [x] 1.4 GEOMETRY DONE (lock cylinder+bail handle + blank keystone badge, center · gate PASS) · keystone badge plate (proud, chevron bottom, BLANK) + bail-handle lock at
       photo-measured y + top lip seam + bottom sill with 2 corner screws + 4 witness dots.
       Accept: feature positions vs rm44_front_A +/-2% of face width.
 - [x] 1.5 LIGHTING DONE (dark-object calibrated key14/rim9/fill5.3 · ear-face L15.7 dE0.47 · mesh holes read dark = depth) · interior fill so holes read as openings; exterior patches stay green
