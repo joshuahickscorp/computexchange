@@ -106,3 +106,23 @@ the 50.5mm face height, not the anchor axis. Correct method for the executor:
    smoothing (0.14mm) rather than pitch · measure before deciding which knob.
 Failed-attempt evidence patches: render/measure_evidence/sp10/*_patch.png (mis-cropped · kept
 as a what-not-to-do exhibit).
+
+## SP10 · measurement session 2 (driver, by-eye crops) · PIN STILL OPEN · partials + autopsy
+AUTOPSY of session-1 note: sth_front-1 is HORIZONTAL (clean straight-on front, face 150mm spans
+x277..880 = 603px -> 4.02 px/mm), not vertical · the vertical strip is cl_front-foam. Corrected.
+Partial results (both CAVEATED, do not pin from these):
+- real sth_front-1 foam crop (480,380)-(750,540): autocorr first peak 4px = 1.00mm BUT the peak
+  sits at the search floor of a small 4 px/mm JPEG crop · unreliable. DRIVER EYE READ of the same
+  photo: cells 8-16px = 2-4mm, coarse, HIGH contrast (deep black voids, bright crisp struts) ·
+  the eye and the autocorr disagree, which is exactly why the pin waits for a better source.
+- render raw front: body auto-edge FAILED again (rim glow beats threshold 30 across the band ·
+  use threshold on a y-band above the floor line with V>60, or anchor on the foam field
+  148.02mm between tab inner edges). Uncorrected pitch readback 32px · with a plausible
+  ~22 px/mm that is ~1.45mm vs the built 1.62 (autocorr quantization) · consistent, not exact.
+- contrast (std/mean): real 0.517 vs render 0.502 on these crops · closer than the panel language
+  implied, but the render crop was scale-mismatched · re-run at matched px/mm.
+REQUIRED NEXT (executor): cl_front-foam is the high-resolution source · anchor on the strip's
+50.5mm width, crop foam away from plateaus, re-run; second source sth_front-1 with a LARGER crop
+(x420..800, y360..560) at native res. Two agreeing numbers -> pin cells/mm + contrast target,
+then ONE bounded change (candidates: pitch, voxel 0.14 crispness, strut albedo contrast).
+Evidence crops: render/measure_evidence/sp10/*_v2*.png
