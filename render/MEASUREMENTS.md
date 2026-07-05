@@ -88,3 +88,21 @@ under `render/measure_evidence/`. Dash gate: middot only.
 | spark_foam_web_pin | 76.9 / -- / 19.6 | Lab | med | sth_front-1.jpg | finalA-sth-pill.png | golden web, top-quartile L. Supersedes foam_web 67.98. |
 | spark_foam_pore_pin | 15.2 / 5.3 / 12.3 | Lab | med | sth_front-1.jpg | finalA-sth-pill.png | WARM dark pore (b12.3), not neutral charcoal. Supersedes foam_pore 10.66. |
 | side_thickness_persp_check | 48.63 | mm | med | sth_side-1-vertical.jpg | dgx_side_silhouette.png | smooth side reads 48.6 vs spec 50.5 (-3.7%); a per-source perspective indicator, NOT the absolute (spec 50.5 governs) |
+
+## SP10 · foam cell frequency · METHOD NOTE (2026-07-05 · no pin yet · do not guess one)
+Auto-measurement attempt failed for a mechanical reason worth recording: sth_front-1/2 are
+VERTICALLY oriented (the 150mm axis runs vertical), so a horizontal body-width scan measures
+the 50.5mm face height, not the anchor axis. Correct method for the executor:
+1. Read the reference, choose the foam crop BY EYE, save the crop to
+   render/measure_evidence/sp10/ (evidence discipline).
+2. Anchor px/mm on the FOAM FIELD SHORT AXIS = 46.34mm (spans nearly the full strip width in
+   the vertical photos · unambiguous edges) or on a plateau (30x40mm) if sharper.
+3. FFT/autocorr radial peak on the crop -> pitch px -> mm. Two references minimum (sth_front-1
+   + cl_front-foam) per the flip-flop guard · this is the LIVE cell-scale case.
+4. Same measurement on render/portraits-raw/dgx-spark-front.png (anchor: foam field 148.02mm
+   between tab inner edges) · current built pitch is 1.62mm by construction; the loop-18 panel
+   says the REAL reads higher-frequency/crisper ("crisp chaotic cells" vs "mushy low-frequency")
+   · expect the real pitch to come in UNDER 1.62mm and/or the crispness delta to be voxel
+   smoothing (0.14mm) rather than pitch · measure before deciding which knob.
+Failed-attempt evidence patches: render/measure_evidence/sp10/*_patch.png (mis-cropped · kept
+as a what-not-to-do exhibit).
