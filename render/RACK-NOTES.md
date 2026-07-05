@@ -43,3 +43,46 @@ The measured truth (RACK-BUILD-PLAN section 0): the triangular mesh reads L~16 e
 studio light, so the target is STRUCTURE (see-through holes to a dark-not-zero interior), not
 tone. Technique bake-off (real cut holes + interior box vs normal+opacity vs hybrid) on a
 raking-light detail tile; I decide, raking acceptance render proves it.
+
+## GATE 5b (part 1) · depth-into-darkness BAKE-OFF · class GEOMETRY+MATERIAL · VERDICT
+
+Mesh lattice MEASURED first (2D FFT autocorr on rm44_front_A at 3.480 px/mm): triangle
+period P=2.87mm (half-period 1.44 confirms alternating up/down), row pitch R=2.59mm
+(equilateral check 0.87x2.97 agrees), full V repeat 5.17mm, open fraction ~0.5 LOW-CONF
+(threshold-circular · geometric open at 0.4-0.5mm web = 0.33-0.40 · refine at part wave).
+~7,500 holes per node face at true scale. Evidence rack-rm44-mesh-crop.png.
+
+Bake-off on a 200x120mm true-scale door tile + interior (box, fan, faint interior fill),
+judged under raking strip (~12deg) and 55deg grazing (_rack_bakeoff.py):
+- **A · REAL cut holes** (boolean 2 tri-prisms on ONE P x 2R cell -> array 69x23 = 25,392
+  tris, renders in ~4s): raking = crisp punched openings, web catches the rake, per-hole
+  interior variation once the interior was fed (ifill 3.5, fan at true ~20mm depth, interior
+  albedo 0.032) · grazing = holds the perforation read with true perspective compression ·
+  the EXACT test the Spark's displaced heightfield failed before its technique-class switch.
+- **B · alpha-mask shader**: the parity math produced zigzag banding (fragile), and the class
+  has no hole-wall geometry -> no grazing glints, no thickness parallax. Its one advantage
+  (cost) is moot at A's 25k tris.
+**VERDICT: A · real cut holes, cell-boolean + array.** Locked as the technique class
+(RACK-LOOP invariant 3). Iteration notes: first raking strip at 9W blew the exterior (same
+over-exposure class as the frame probe · trimmed to 2.4); fan blades must never cross the
+door plane (placement bug caught by eye). Evidence: bake-A-raking.png (acceptance-class),
+bake-A-graze.png, bake-B-raking.png (failure documented).
+
+## O_rack AUTOPSY · class REMEASURE (the oracle caught the driver)
+
+rack_verify.py (the numeric oracle for the Opus loop) armed on the frame render CAUGHT the
+gate-5a offset claim: "lit rail L~22 -> O_rack ~+6" came from a patch box CONTAMINATED by
+the brighter side-channel wall behind the rail. Clean flange-only box reads L16.6 in-rig vs
+reference L16.0 -> natural offset ~+0.6 ~= 0. Dark-regime L is compressive · a dark object
+largely TRACKS its flat-studio reference tone under the hero rig (the desktops' -12 was a
+bright-albedo phenomenon). **O_rack = 0.0 working value** (rack_verify default, autopsy note
+in-file); final derivation lands on the RM44 broad front face at the part wave. Gate now:
+powder_black dE 0.65 PASS · clip 0.000% · exit 0. The 5a NOTES claim stands SUPERSEDED by
+this entry.
+
+## HANDOFF · the loop goes to Opus
+
+render/RACK-LOOP.md written: invariants (pins never move · desktops closed · technique class
+locked · rig/O changes are LIGHTING commits), the one-iteration protocol, the per-part WORK
+QUEUE with acceptance numbers, escalation triggers, notes template. The oracle
+(rack_verify.py) is the judge; the driver returns for escalations, the panel, and the trio.
