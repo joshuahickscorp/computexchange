@@ -310,9 +310,22 @@ def add_bevel(m, radius=0.16, samples=4):
     # photoreal T7: a shader BEVEL rounds every edge at micron scale so no silhouette is
     # mathematically sharp · each edge catches a hairline highlight, killing the CAD look. Chains
     # any existing Normal (micro-bump) into the bevel so both survive.
+    # L19 (loop-16 edge tell, named 4-5x: "mathematically constant bevel highlight / continuous
+    # unbroken edge highlight") · the RADIUS is now modulated by a fine noise (~2mm features,
+    # 0.45x to 1.55x) so the hairline catch breaks and re-forms along the edge like real machining
+    # tolerance · the highlight sparkles instead of tracing one unbroken line.
     nt = m.node_tree; b = nt.nodes["Principled BSDF"]
     bev = nt.nodes.new("ShaderNodeBevel"); bev.samples = samples
     bev.inputs["Radius"].default_value = mm(radius)
+    _tc = nt.nodes.new("ShaderNodeTexCoord")
+    _nz = nt.nodes.new("ShaderNodeTexNoise")
+    _nz.inputs["Scale"].default_value = 1000.0 / (2.0 * S); _nz.inputs["Detail"].default_value = 2.0
+    nt.links.new(_tc.outputs["Object"], _nz.inputs["Vector"])
+    _mr = nt.nodes.new("ShaderNodeMapRange")
+    _mr.inputs["To Min"].default_value = mm(radius * 0.45)
+    _mr.inputs["To Max"].default_value = mm(radius * 1.55)
+    nt.links.new(_nz.outputs["Fac"], _mr.inputs["Value"])
+    nt.links.new(_mr.outputs["Result"], bev.inputs["Radius"])
     ni = b.inputs["Normal"]
     if ni.is_linked:
         nt.links.new(ni.links[0].from_socket, bev.inputs["Normal"])
@@ -1015,8 +1028,10 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
         #     hole edges organically.
         bez_w, bez_h, bez_r = mm(SPARK["bezel_w"]), mm(SPARK["bezel_h"]), mm(6.0)
         holes = [(sx * px, bez_w, bez_h, bez_r) for sx in (-1, 1)]
+        # L19 (loop-16 macro sub-tell: "smooth waxy metaball blobs · real foam has thin sharp
+        # webbing") · voxel 0.185 -> 0.14 so the remesh keeps the strut ridges crisp at f5.6 macro.
         foam = foam3d_field("dgx-spark-foam", 0, zc, ffx - mm(0.6), ffz - mm(0.8), mm(5.0),
-                            front_y - mm(0.6), pitch=mm(1.62), voxel=mm(0.185), holes=holes)
+                            front_y - mm(0.6), pitch=mm(1.62), voxel=mm(0.14), holes=holes)
         foam.data.materials.append(foam3d_material())
         foam_layers = [foam]
         # 3 · POLISHED pill plateaus (the shiny islands the reference shows) · a hair proud of the
