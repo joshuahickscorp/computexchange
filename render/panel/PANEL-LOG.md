@@ -315,3 +315,16 @@ Calibrated against the real controls' render-call rate. Two CONSECUTIVE clean pa
   blank is deliberate per L6 · logged, not chased).
 - PR-gate remains OPEN (no consecutive pass · loop 18 FAIL, loop 19 FAIL). Real progress: the
   single most-cited tell of the whole project (foam) now PASSES at macro distance.
+
+## Loop 20 (2026-07-05) · PR-GATE on SP11 wide-field foam · FAIL (harsh draw) · FOAM NON-UNIQUE
+- Razor-sharp panel draw: every clean-real control 0-1/5 -> threshold 1.20 (brutal · loop 19 was 3.80).
+  Against that my frames 5/5 fail. Panel variance remains enormous (the documented confound).
+- MILESTONE: the FOAM tell is NO LONGER UNIQUE on any gate frame. spark-front unique tells =
+  uniform/perfect (NOT foam), spark-detail = perfect/dof (NOT foam). SP10 (macro contrast) + SP11
+  (wide-field mottle) pushed the foam to REFERENCE PARITY · the real controls now draw "foam" as
+  often as mine. The single most-cited tell of the entire 20-loop project is neutralized.
+- Remaining unique tells: perfect/uniform (clean-product · partly FALSE-TELL, real Apple scores it),
+  dof (the macro bokeh reads "mathematically smooth" · a POST/camera item), port (studio ports read
+  as flat slots · the ST4 ortho item), shadow (pair contact).
+- PR-gate OPEN (18/19/20 all FAIL, no consecutive pass). Trajectory real: foam retired at macro
+  (L19) then at field (L20). Next levers named: DOF character (macro), studio port depth (ST4).
