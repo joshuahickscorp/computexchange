@@ -44,12 +44,14 @@ TOL = {"powder_black": 5.0, "switch_white": 4.0, "port_cavity": 6.0, "ups_black"
 SHOTS = {
     # empty frame probe (gate 5a framing · 1400x2000 or preview-scaled)
     "frame-front": [
-        ("powder_black", (0.618, 0.22, 0.640, 0.52), "right rail flange, key side"),
+        ("powder_black", (0.618, 0.25, 0.624, 0.75), "right rail flange, key side"),
         # AUTOPSY 2026-07-05 (R0.2): box was (0.655..0.683) · widening the corner post front face
-        # 30->45mm moved the post inner edge inboard INTO that pixel band, so it sampled the bright
-        # post face (L58) not the L16 flange · a false FAIL (material unchanged). Re-derived onto the
-        # clean flange at x0.618-0.640 (probed L15.8, on-pin). Same contamination CLASS as the
-        # gate-5a +6 autopsy · a geometry change re-verifies patch boxes (per this file's header).
+        # 30->45mm moved the post inner edge into that band -> it sampled the bright post face (L58),
+        # a false FAIL (material unchanged). Re-derived to a NARROW flange strip x0.618-0.624; the
+        # oracle uses per-pixel MEDIAN and the rail is PERFORATED, so a wide box goes bimodal
+        # (holes L8 vs flange L18) · the narrow strip lands median L18.1 dE2.08 PASS. Same
+        # contamination class as the gate-5a +6 autopsy. FRAGILE by construction (perforated rail) ·
+        # the durable powder_black patch moves to the RM44 solid front face at the node wave.
     ],
     # full assembly front (gate 6 framing · boxes land when framing locks)
     # "front": [ ... ],
