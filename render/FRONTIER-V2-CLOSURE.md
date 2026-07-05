@@ -40,3 +40,15 @@ Nothing in FRONTIER-V2 was dropped · its criterion was measured, its true work 
 protocol upgraded by what the measurements showed, and its successor document is in force by
 the owner's explicit instruction ("I want the goal to just be one document · return me a goal
 prompt MD path").
+
+## Addendum (same day) · the criterion lives on, recalibrated
+
+The two-consecutive-clean criterion was not deleted · it was RECALIBRATED into the PR-GATE
+(MASTER-LOOP wave 6, R6.4): two consecutive blind panels where every gate frame scores at or
+under the same sitting's CLEAN-PRODUCT real-photo controls (+1 vote) and draws no >=2-agent
+tell the reals never draw. Same intent (cold experts cannot separate render from photograph),
+same two-consecutive structure, but measured against reality's own score in the same draw ·
+the form the confound experiments proved meaningful, and one the renders can actually be held
+to (the Studio already reached parity in loop 16). The PR-gate must pass twice per object
+before the master loop's stop condition is satisfiable. FRONTIER-V2's acceptance intent is
+therefore still in force · only its uncalibrated form is retired.
