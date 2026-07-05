@@ -536,7 +536,11 @@ def build_crs354_switch(cx=0.0, cz=0.0):
             for zc in (z_top, z_bot):
                 cutters.append(box("pc", pw, mm(16), ph, (x, fy + mm(5), zc)))
                 centers.append((x, zc))
-    # join cutters into one mesh, boolean once
+    # join cutters into one mesh, boolean once. DESELECT first: bpy.ops.object.join() merges
+    # EVERY selected mesh into the active one · a caller may leave unrelated objects selected
+    # (e.g. assembly place_y leaves the last-placed node selected), which join would swallow +
+    # then remove with `joined`. Own the selection state here.
+    bpy.ops.object.select_all(action="DESELECT")
     bpy.context.view_layer.objects.active = cutters[0]
     for c in cutters[1:]: c.select_set(True)
     cutters[0].select_set(True); bpy.ops.object.join()
@@ -564,6 +568,7 @@ def build_crs354_switch(cx=0.0, cz=0.0):
     for zc in (z_top + mm(1), z_bot - mm(1)):
         cage_cut.append(box("qsfpc", mm(20.0), mm(16), mm(13.0), (qsfp_x0, fy + mm(5), zc)))
         lip = box("qsfp-lip", mm(20.8), mm(1.2), mm(13.8), (qsfp_x0, fy + mm(0.6), zc)); lip.data.materials.append(nickel); cage_lips.append(lip)
+    bpy.ops.object.select_all(action="DESELECT")
     bpy.context.view_layer.objects.active = cage_cut[0]
     for c in cage_cut[1:]: c.select_set(True)
     cage_cut[0].select_set(True); bpy.ops.object.join(); jc = cage_cut[0]
@@ -610,6 +615,33 @@ elif PART == "switch":
     switch_rig_camera(SHOT, (1900, 900))
     render_to(OUT + f"switch-{SHOT}.png")
     print("build_rack CRS354 switch proof done.")
+elif PART == "assembly":
+    # Wave 5 · POPULATED rack · place the built units by u_z() into the frame (fill map v2, the
+    # subset built so far: 3 nodes + switch · empty bays show the rails). One rig for the whole
+    # 2m rack (the frame rig · per-object-class tone · dark powder + the one white switch).
+    build_frame()
+    def place_y(parts, dy):
+        bpy.ops.object.select_all(action="DESELECT")
+        for p in parts:
+            try: p.select_set(True)
+            except Exception: pass
+        bpy.ops.transform.translate(value=(0, dy, 0))
+    NODE_DY, SW_DY = -0.253, -0.339      # align each unit FRONT to the front-rail plane (~-0.487)
+    for uu in (5, 10, 15):
+        place_y(build_rm44_node(0.0, u_z(uu) / 1000.0), NODE_DY)
+    place_y(build_crs354_switch(0.0, u_z(38) / 1000.0), SW_DY)
+    if arg("--debug", False):
+        for o in bpy.data.objects:
+            if o.type != "MESH": continue
+            if not any(k in o.name for k in ("rm44", "door", "crs", "body", "ear", "interior")): continue
+            zs = [(o.matrix_world @ v.co).z for v in o.data.vertices]
+            ys = [(o.matrix_world @ v.co).y for v in o.data.vertices]
+            print(f"[dbg] {o.name:22} z[{min(zs):.3f},{max(zs):.3f}] y[{min(ys):.3f},{max(ys):.3f}]")
+    aim = rack_rig()
+    res = (1400, 2000) if SHOT in ("front", "frame-front") else (1800, 2000)
+    rack_camera(aim, SHOT, res)
+    render_to(OUT + f"assembly-{SHOT}.png")
+    print("build_rack ASSEMBLY (populated) done.")
 else:
     build_frame()
     aim = rack_rig()

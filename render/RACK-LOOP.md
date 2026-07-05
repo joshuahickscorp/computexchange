@@ -124,8 +124,15 @@ an owner of this hardware finds nothing missing at any deliverable distance.
 ### Wave 5 · assembly (fill map v2 · REMEASURE commit adopts it into MEASUREMENTS.md first)
 - [ ] 5.1 REMEASURE · write fill map v2 (DETAIL-AUDIT sec 3: bottom-heavy, deliberate voids,
       network band TOP: duct U37 + switch U38 + shelf U40, honest U21-36 void run).
-- [ ] 5.2 GEOMETRY · place all units by u_z() · linked dupes for nodes. Accept: front + q34,
-      rack_verify ALL PASS both.
+- [~] 5.2 GEOMETRY · place all units by u_z() · 3 nodes (U5/10/15) + switch (U38) placed, fronts
+      flush to rail plane, front render verified (debug dump: 3 node bodies at z 0.278/0.500/0.722).
+      BUG FIXED: build_crs354_switch's bpy.ops.object.join() did not DESELECT first, so it swallowed
+      the last-placed node (still selected from place_y) into the port cutter + removed it · only 2 of
+      3 nodes drew · added select_all(DESELECT) at both join sites. STILL OPEN: q34 render + an HONEST
+      assembly tone patch · the frame-front rail box is node-contaminated in the populated frame (dark
+      holes L6.8 + bright ear L39 median to a coincidental L20.9) AND powder reads brighter under the
+      whole-frame rack_rig (ear L44) than the solo-node rig (L15.7 · rig-transplant confound). Durable
+      solid-powder assembly patch + its offset land with the tone-gate box at 5.3/6.2, not faked here.
 - [ ] 5.3 MATERIAL · variance: LED budget ~60% lit mixed green/amber 2-3 bright, node states
       A-on/B-off/C-on, seating jitter <=0.4deg, per-instance roughness/dust (handled-hardware
       law · every knob cites a gestalt photo). Accept: no two adjacent units identical + LED
