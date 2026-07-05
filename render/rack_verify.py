@@ -44,7 +44,12 @@ TOL = {"powder_black": 5.0, "switch_white": 4.0, "port_cavity": 6.0, "ups_black"
 SHOTS = {
     # empty frame probe (gate 5a framing · 1400x2000 or preview-scaled)
     "frame-front": [
-        ("powder_black", (0.655, 0.22, 0.683, 0.52), "right rail flange, key side"),
+        ("powder_black", (0.618, 0.22, 0.640, 0.52), "right rail flange, key side"),
+        # AUTOPSY 2026-07-05 (R0.2): box was (0.655..0.683) · widening the corner post front face
+        # 30->45mm moved the post inner edge inboard INTO that pixel band, so it sampled the bright
+        # post face (L58) not the L16 flange · a false FAIL (material unchanged). Re-derived onto the
+        # clean flange at x0.618-0.640 (probed L15.8, on-pin). Same contamination CLASS as the
+        # gate-5a +6 autopsy · a geometry change re-verifies patch boxes (per this file's header).
     ],
     # full assembly front (gate 6 framing · boxes land when framing locks)
     # "front": [ ... ],

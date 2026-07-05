@@ -155,3 +155,12 @@ rear channel, modeled ONLY if the locked orbit shows them (front-facing doctrine
 | lock_center | face-center x · ~9 dia | mm | med | rm44_front_A.jpg | rack-rm44-front-regions.png | x offset -0.8mm from center; z ~37mm below silhouette top (CONTAMINATED · see autopsy) |
 | face_height_read | 199.2 vs spec 176 | mm | autopsy | rm44_front_A.jpg | rack-rm44-front-regions.png | +23mm = the visible foreshortened TOP LID plane in the silhouette · NOT a scale error (W anchor clean) · lock z below FACE top ~ 37-23 = ~14mm APPROX |
 | door_seam | ~34 below silhouette top | mm | low | rm44_front_A.jpg | rack-rm44-front-regions.png | strongest upper horizontal gradient · re-derive after top-face contamination split |
+
+## R0.2 gate AUTOPSY (2026-07-05) · false-FAIL from a drifted patch box, corrected
+Commit a5564a4 (R0.2 post widening) shipped with a message claiming "rack_verify PASS" · it did
+NOT: powder_black read L58.2 dE42 FAIL. Cause: the wider 45mm post inner edge moved into the
+(0.655..0.683) patch band, sampling the bright post face, not the L16 rail flange. Material and
+tone UNCHANGED · a measurement artifact, the same class as the gate-5a +6 autopsy. FIX: patch box
+re-derived to x0.618-0.640 (clean flange, probed L15.8 · on the L16 pin) in rack_verify.py.
+Post-fix gate: powder_black on-pin, ALL PASS. Process note: R0.2's commit message was wrong to
+claim PASS pre-verified · this corrective commit sets the record straight (the geometry was fine).
