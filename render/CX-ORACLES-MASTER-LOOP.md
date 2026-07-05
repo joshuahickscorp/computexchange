@@ -160,9 +160,13 @@ contradict L15's direct verification · hence the RE-MEASURE tags).
       REAL foam's cell frequency at matched pixel scale across sth_front-1 + cl_front-foam
       FIRST, then one bounded change (pitch and/or voxel and/or strut sharpening) · Accept:
       FFT cell frequency of the render within 10% of the reals at matched scale, edges crisp.
-- [ ] POST-1 DRIVER DECISION · the post chain's uniform CA (+/-0.18%) was explicitly named
-      "a post-process giveaway" by two lenses in loop 18 · L9 forbids executor re-tuning ·
-      the DRIVER decides: reduce/remove CA or keep with rationale · log either way.
+      METHOD + gotchas already written: MEASUREMENTS.md "SP10 METHOD NOTE" (the sth refs are
+      VERTICAL · anchor on foam-field 46.34mm or a 30x40 plateau · two refs minimum · evidence
+      crops to measure_evidence/sp10/).
+- [x] POST-1 DRIVER DECISION · DECIDED AND APPLIED (2026-07-05, commit b4e904e): CA halved
+      to +/-0.07% (second panel naming = dial back, per the imperfection law) · post frames
+      regenerated from raws, checkpoint repacked, gate ALL PASS · L9 params updated in
+      post_chain.py, do not re-tune further without a third independent naming.
 
 ## PART 6 · RACK QUEUE (the gap · full detail in render/RACK-DETAIL-AUDIT.md sections 2-3,
 ## mirrored from RACK-LOOP.md v2 · run in the RACK worktree, rack_verify gates)
