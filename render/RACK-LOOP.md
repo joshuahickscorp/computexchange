@@ -62,7 +62,7 @@ an owner of this hardware finds nothing missing at any deliverable distance.
       outer width 600 +/- 2% on a fresh front render.
 - [~] W0.2 GEOMETRY · post faces to ~45mm DONE (gate PASS) · hinge/keeper DEFERRED to 3/4 hardware box
       Accept: post face ratio ~0.075 of width; silhouette no longer dead-straight.
-- [ ] W0.3 GEOMETRY · top front band to ~45mm; base band floats: 4 leveling feet (pad ~45mm,
+- [x] W0.3 GEOMETRY (DONE, gate PASS) · top front band to ~45mm; base band floats: 4 leveling feet (pad ~45mm,
       30mm floor gap) + twin casters inboard. Accept: light gap under base reads; feet at
       corner footprints.
 - [ ] W0.4 GEOMETRY · rear rail pair (holed, same pattern/c-c) at rear depth; corner gusset

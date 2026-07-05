@@ -177,7 +177,7 @@ Wave 0 · FRAME CORRECTIONS (built part is wrong before anything stacks):
       width 600 +/-2% on a fresh front.
 - [ ] R0.2 GEOMETRY · post faces ~45mm + 3 hinge bosses + latch keeper · Accept: face ratio
       ~0.075 of width, silhouette not dead-straight.
-- [ ] R0.3 GEOMETRY · top band ~45mm · 4 leveling feet (pad ~45mm, 30mm floor gap) + twin
+- [x] R0.3 GEOMETRY (DONE, gate PASS, floor reveal + feet + casters + roof band read) · top band ~45mm · 4 leveling feet (pad ~45mm, 30mm floor gap) + twin
       casters inboard · Accept: light gap under base reads.
 - [ ] R0.4 GEOMETRY · rear rail pair (holed, same pattern) at rear depth · corner gusset
       castle plates · brush strips · Accept: rear rails read between units from dead front.

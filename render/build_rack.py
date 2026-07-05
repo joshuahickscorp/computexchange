@@ -223,11 +223,29 @@ def build_frame():
     # and getting their proud-of-face Y right belongs with the 3/4 door-hardware pass. The post
     # FACE WIDENING (the graded S3 win) stands alone here · one clean measurable change.
 
-    # top cap + base plinth
+    # top cap + roof front band · W0.3 (audit: roof reads like a picture frame): a deeper 45mm
+    # front band gives the capped, heavy-browed top real cabinets show.
     cap = box("cap", W, D, mm(24.0), (0, 0, H - mm(12.0)))
     cap.data.materials.append(pc); parts.append(cap)
-    plinth = box("plinth", W - mm(8), D - mm(8), mm(PLINTH), (0, 0, mm(PLINTH) / 2.0))
+    roofband = box("roofband", W, mm(6.0), mm(45.0), (0, -(fy - mm(3)), H - mm(22.5)))
+    roofband.data.materials.append(pc); parts.append(roofband)
+
+    # base valance RAISED off the floor + 4 leveling feet + 2 casters · W0.3 (audit: "extruded
+    # from the floor"). The valance bottom lifts to FLOOR_GAP=32mm; feet/casters fill the reveal
+    # so a real dark floor gap reads head-on. Frame u_z unchanged (base structure stays; only the
+    # visible valance + feet are added below the existing geometry).
+    FG = mm(32.0)
+    plinth = box("plinth", W - mm(8), D - mm(8), mm(PLINTH) - FG, (0, 0, FG + (mm(PLINTH) - FG) / 2.0))
     plinth.data.materials.append(pc); parts.append(plinth)
+    foot_mat = principled("foot-steel", (0.35, 0.35, 0.37), 0.35, metallic=0.8)
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            ft = rounded_box("foot", mm(42.0), mm(42.0), FG, mm(6.0), seg=6)
+            ft.location = (sx * (fx - mm(40)), sy * (fy - mm(40)), FG / 2.0)
+            ft.data.materials.append(foot_mat); smooth(ft, 30); parts.append(ft)
+        cst = rounded_box("caster", mm(50.0), mm(24.0), FG - mm(4), mm(10.0), seg=8)
+        cst.location = (sx * (fx - mm(150)), -(fy - mm(60)), (FG - mm(4)) / 2.0)
+        cst.data.materials.append(interior_dark("caster-rubber")); smooth(cst, 30); parts.append(cst)
 
     # two side channels (0U gutters): solid dark walls from rail-outer to cabinet wall
     for sx in (-1, 1):
