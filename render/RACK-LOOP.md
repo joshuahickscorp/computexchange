@@ -68,8 +68,7 @@ an owner of this hardware finds nothing missing at any deliverable distance.
 - [~] W0.4 GEOMETRY · corner gussets DONE (gate PASS) · rear-rail HOLES deferred to assembly wave (see-through vs fragile flange patch) · corner gusset
       castle plates; brush strips inboard of posts. Accept: rear rails read between units
       from dead front.
-- [ ] W0.5 GEOMETRY · U-tick strip on rail flange (blank ticks, 1/U) + hole size verified
-      9.5mm in source. Accept: ticks resolve at 4K front.
+- [~] W0.5: hole size VERIFIED 9.5mm exact in source · U-tick strip DEFERRED to close-shot hardware box (blank ticks do not read at frame distance; flange geometry risks the patch)
 - [x] W0.6 MATERIAL (DONE, gate dE2.42 PASS, tone re-verified L18) · orange-peel powder micro-texture (NEW target · not bead-blast, not
       anodize · scale from enclosure-photos macro) + RE-MEASURE the frame render tone with
       rack_verify (my eye says grey, committed number says L22 · one of them autopsies).

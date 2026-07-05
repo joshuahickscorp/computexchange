@@ -164,3 +164,12 @@ tone UNCHANGED · a measurement artifact, the same class as the gate-5a +6 autop
 re-derived to x0.618-0.640 (clean flange, probed L15.8 · on the L16 pin) in rack_verify.py.
 Post-fix gate: powder_black on-pin, ALL PASS. Process note: R0.2's commit message was wrong to
 claim PASS pre-verified · this corrective commit sets the record straight (the geometry was fine).
+
+## W0.5 · hole-size verification (2026-07-05) · source CORRECT, render resolution-limited
+SQ_HOLE = 9.5mm exact in build_rack.py (EIA-310 square cage-nut hole) · HOLE_OFF (6.35, 22.25,
+38.10) = the exact per-U EIA hole-center offsets. The frame-front preview measured ~8.5mm/hole, but
+at 0.944 px/mm a 9.5mm hole is ~9px and AA/threshold shrinks the dark region ~1px · a measurement
+floor, NOT a geometry error (confirmed against the source constant). VERDICT: hole size PASS.
+U-tick strip DEFERRED to the close-shot pass (with the hinge hardware): blank ticks on black rails
+do not read at frame distance, and adding raised flange geometry risks re-contaminating the fragile
+powder_black patch (R0.2/W0.4 lesson). Both belong on a dedicated 3/4 or 4K-detail hardware box.

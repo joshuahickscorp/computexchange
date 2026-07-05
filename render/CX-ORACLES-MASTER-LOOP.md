@@ -154,7 +154,9 @@ contradict L15's direct verification · hence the RE-MEASURE tags).
       Accept: thin under-shadow band reads side-on.
 - [ ] SP9 VERIFY · pair relative scale: measured Spark:Studio width ratio within 3% of the
       perspective-corrected 0.761 · fix PAIR_SPAN/camera math if off, never device dims.
-- [ ] SP10 REMEASURE+GEOMETRY · foam spatial frequency at hero distance (PR-gate loop 18: MY
+- [x] SP10 (MATERIAL, loop 19): foam contrast 0.48->0.51 + deeper voids/crests · spark-detail macro 5/5->1/5 PASS (foam macro tell RETIRED) · wide-field still reads noise -> SP11
+- [ ] SP11 REMEASURE+GEOMETRY · foam WIDE-FIELD macro-scale variation (loop 19: detail passes, front/pair read 'noise-fill' · cells do not resolve at distance) · measure real block's large-scale density/tone mottling on sth_front-1 FIRST, add patchy field zones · Accept: spark-front foam not a unique >=2 tell in the PR-gate
+- [x] SP10-orig REMEASURE · foam spatial frequency at hero distance (PR-gate loop 18: MY
       foam reads "mushy, low-frequency" vs the real block's "crisp chaotic cells", judged
       side-by-side in-batch) · this is the flip-flop-guarded cell-scale live case: measure the
       REAL foam's cell frequency at matched pixel scale across sth_front-1 + cl_front-foam
