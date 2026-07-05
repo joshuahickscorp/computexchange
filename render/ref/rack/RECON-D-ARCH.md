@@ -88,6 +88,32 @@ Archetype A · air-cooled node hardware (real photos):
   incl. XE9680 (607-924mm square-hole) + EIA flange keep-out diagram (16.7mm flange depth,
   50mm height min) · delltechnologies.com asset PDF.
 
+## VERIFIED · clean product photography (downloaded + visually inspected, cached in the
+## session scratchpad imgcheck/)
+
+- APC NetShelter SX AR3140 (42U 750mm) vendor gallery, 1500x1500 WHITE BG, 21 sequential
+  images (cdn.blueally.com/apcguard/images/AR3140_gallery_1-21.jpg): door-closed 3/4 hero
+  (_1) · door OPEN empty rails 3/4 (_5, _7) · corner/top rail details (_8, _9) · POPULATED
+  rack w/ switches + PDU + patch cabling + finger ducts, door open (_3 · the strongest
+  single composition reference found this recon) · cable-manager macro (_4). Straight-on
+  double-door front: Newegg 16-225-128-02.jpg.
+- StarTech BLANKB1 blanking panel (Amazon m.media 1500px, white bg): 3/4 w/ powder-coat
+  texture + flange · MACRO of panel corner + cage nuts + screws · near-straight-on w/
+  mounting holes.
+- Tripp Lite SRCABLEDUCT1U 1U finger duct front (500x500) · APC AP8641 zero-U PDU strip
+  (334x320, low-med res · higher-res needs a manual browser pull of the 403-walled apc.com
+  page, gate-3 avenue).
+- Kendall Howard cage nuts, 1000x1000 white bg: pile macro (zinc texture) + single
+  straight-on macro (spring wings + thread).
+- Rittal/Vertiv OWN photography: 403/partner-gated, thumbnails only · use APC as the
+  enclosure photo donor (Vertiv still supplies the dimensioned drawings).
+- Tripp Lite SmartRack: FOUR genuine dimensioned submittal drawings fetched + parsed
+  (SR42UBWD, SR42UBCL, SR48UBDPWD, SR42UBDP48 · front/side/top/bottom views + USABLE
+  MOUNTING DEPTH cross-sections, dual mm/inch callouts · assets.tripplite.com) plus SR42UB /
+  SR48UB spec sheets (42U 1994x600x1092mm, 48U 2261mm). Third independent enclosure-drawing
+  source after Vertiv + APC · enclosure geometry is now over-determined, a luxury the
+  desktops never had.
+
 ## Recon notes
 
 Run 2026-07-04 under heavy transient API rate limiting; several worker fan-outs died and were
