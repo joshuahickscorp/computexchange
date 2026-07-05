@@ -1,5 +1,14 @@
 # render/RACK-LOOP.md · v2 · the goal-iterative loop (run this on Opus)
 
+> **OWNER REDIRECT 2026-07-05 · ARCHETYPE CHANGED.** The 42U NetShelter enclosed cabinet is
+> retired. New target: a **12U open-frame home GPU rig on casters** (~0.7m, waist-high · "some
+> people could have it at home") holding an **open row of 6 GPUs, fans out**. The beautiful
+> frame LANGUAGE is kept (posts/cap/rails/casters/gussets · the owner praised it), just shrunk
+> (RACK H700 D600 Ucount12) and OPENED (no side/back panels, no door · `OPEN=True`). This
+> SUPERSEDES the RM44-node / UPS / switch fill map below · those queue items (Waves 1-5) are
+> shelved. New content: GPU card model + 6-card row + mainboard tray + PSU + cabling. The tone
+> pins + rig get RE-CALIBRATED for the open rig (brighter GPU faces, not a dark cabinet).
+
 Purpose: everything taste-bearing is DECIDED: archetype (D-ARCH.md), dimensions + fill map
 (MEASUREMENTS.md RACK section · fill map v2 per RACK-DETAIL-AUDIT.md section 3), technique class
 (real cut holes, bake-off in RACK-NOTES.md), rig defaults + tone pins + numeric oracle

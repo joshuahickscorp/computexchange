@@ -1,4 +1,4 @@
-# build_rack.py · the THIRD oracle: a person-owned 42U homelab GPU rack.
+# build_rack.py · the THIRD oracle: a person-owned 12U open-frame home GPU rig (on casters).
 # Separate builder from build_scene.py (the CLOSED desktop masters) · helpers are COPIED in,
 # not imported, so the frozen file is never touched. Archetype: D-ARCH A-prosumer (see
 # render/ref/rack/D-ARCH.md). Every dimension traces to render/MEASUREMENTS.md (RACK section),
@@ -37,13 +37,17 @@ U = 44.45  # THE anchor · mm
 # proved the render at ~760mm vs the real NetShelter SX 600mm. Rails are anchored on HOLE_SPAN
 # (unchanged), so W drives only posts/walls/cap/plinth · at W=600 the rail-to-outer-edge lands
 # 67.4mm, matching the AR3140 ref's 67.5mm. AUTOPSY: 750 was a wide-variant assumption; the
-# archetype (D-ARCH A · NetShelter SX 42U) is the 600mm standard cabinet.
-RACK = dict(W=600.0, H=1991.0, D=1070.0, Ucount=42)
+# archetype: OWNER REDIRECT 2026-07-05 · from the 42U NetShelter cabinet to a HOME GPU RIG ·
+# a 12U open-frame rack on casters (~0.7m, waist-high · "some people could have it at home") ·
+# holds an open row of 6 GPUs. 19in width kept (standard rails), depth + height cut to home
+# scale, side/back panels + door dropped (OPEN frame · fans breathe, cards read).
+RACK = dict(W=600.0, H=700.0, D=600.0, Ucount=12)
+OPEN = True               # open 4-post frame (no side/back panels, no door hardware)
 PANEL_W = 482.6           # 19in ear-to-ear
 HOLE_SPAN = 465.12        # rail hole-center span
 SQ_HOLE = 9.5             # square cage-nut hole
 HOLE_OFF = (6.35, 22.25, 38.10)   # hole centers from each U boundary
-PLINTH = 100.0            # base below U1 (1991 - 42*44.45 = 124.1 total; plinth + cap)
+PLINTH = 90.0             # base below U1 (700 - 12*44.45 = 166.6 total; plinth + cap + caster gap)
 RAIL_DATUM = PLINTH       # z of the bottom of U1
 
 def u_z(n):
@@ -251,17 +255,45 @@ def build_side_panel(sx, pc):
     smooth(latch, 30); parts.append(latch)
     return parts
 
+def build_door_hardware(fx, fy, H, Ph, pc):
+    """R0.2 (the deferred half) · door-off frame hardware · 3 hinge bosses on the hinge-side
+    front post + a latch keeper on the latch-side post · breaks the dead-straight post
+    silhouette (the acceptance) and reads at 3/4 (q34), the pass this was held for. Proud of
+    the front plane toward -Y, ahead of the mounted units where real door gear lives."""
+    parts = []
+    ff = -fy                                    # front-post front face plane (y)
+    steel = principled("hinge-steel", (0.32, 0.32, 0.34), 0.36, metallic=0.8)
+    hx = -(fx - mm(6.0))                        # hinge side = left front post, outboard edge
+    for hz in (Ph + mm(250.0), H * 0.52, H - mm(320.0)):
+        brk = rounded_box("hinge-boss", mm(16.0), mm(22.0), mm(38.0), mm(3.0), seg=4)
+        brk.location = (hx, ff - mm(9.0), hz); brk.data.materials.append(pc)
+        smooth(brk, 30); parts.append(brk)
+        bpy.ops.mesh.primitive_cylinder_add(radius=mm(6.0), depth=mm(30.0), vertices=20,
+                                            location=(hx - mm(4.0), ff - mm(20.0), hz))
+        bar = bpy.context.active_object; bar.name = "hinge-barrel"
+        bar.data.materials.append(steel); smooth(bar, 30); parts.append(bar)
+    kx = (fx - mm(8.0))                         # latch side = right front post
+    kp = rounded_box("latch-keeper", mm(14.0), mm(16.0), mm(44.0), mm(3.0), seg=4)
+    kp.location = (kx, ff - mm(7.0), H * 0.5); kp.data.materials.append(pc)
+    smooth(kp, 30); parts.append(kp)
+    bpy.ops.mesh.primitive_cylinder_add(radius=mm(4.0), depth=mm(20.0), vertices=16,
+                                        location=(kx - mm(3.0), ff - mm(14.0), H * 0.5))
+    rl = bpy.context.active_object; rl.name = "latch-roller"
+    rl.data.materials.append(steel); smooth(rl, 30); parts.append(rl)
+    return parts
+
 def build_frame():
-    """Open 42U enclosure skeleton (door removed so the fill will read). Posts, top cap,
-    base plinth, two 0U side channels, four EIA rails (front pair holed), dark rear panel."""
+    """12U OPEN home-rig frame (owner redirect): 4 posts, top cap, low base on 4 casters, four
+    EIA rails (front pair holed). No side/back panels, no door (OPEN) so the 6-GPU row breathes
+    and reads. The enclosed-cabinet path (side panels + door hardware) stays gated behind OPEN."""
     W, H, D = mm(RACK["W"]), mm(RACK["H"]), mm(RACK["D"])
     fx, fy = W / 2.0, D / 2.0
     pc = powder_coat()
     dk = interior_dark()
     parts = []
 
-    # 4 corner posts · R0.2 (geo-audit S3): front FACE widened 30 -> 45mm (0.075 of 600mm width,
-    # the real NetShelter front vertical frame weight); depth kept 32mm (C-profile front leg).
+    # 4 corner posts · front FACE 45mm (0.075 of width, the real front vertical frame weight);
+    # depth 32mm (C-profile front leg).
     psx = mm(45.0); psy = mm(32.0)
     for sx in (-1, 1):
         for sy in (-1, 1):
@@ -269,10 +301,8 @@ def build_frame():
             p.location = (sx * (fx - psx / 2), sy * (fy - psy / 2), H / 2.0)
             p.data.materials.append(pc); smooth(p, 30); parts.append(p)
 
-    # R0.2 note · hinge bosses + latch keeper (door-off hardware, audit S2) DEFERRED to a
-    # dedicated closer-shot box: at dead-front frame distance they sit edge-on and do not read,
-    # and getting their proud-of-face Y right belongs with the 3/4 door-hardware pass. The post
-    # FACE WIDENING (the graded S3 win) stands alone here · one clean measurable change.
+    if not OPEN:   # door-off hinge bosses + latch keeper · only the enclosed-cabinet archetype
+        parts += build_door_hardware(fx, fy, H, mm(PLINTH), pc)
 
     # top cap + roof front band · W0.3 (audit: roof reads like a picture frame): a deeper 45mm
     # front band gives the capped, heavy-browed top real cabinets show.
@@ -281,37 +311,41 @@ def build_frame():
     roofband = box("roofband", W, mm(6.0), mm(45.0), (0, -(fy - mm(3)), H - mm(22.5)))
     roofband.data.materials.append(pc); parts.append(roofband)
 
-    # base valance RAISED off the floor + 4 leveling feet + 2 casters · W0.3 (audit: "extruded
-    # from the floor"). The valance bottom lifts to FLOOR_GAP=32mm; feet/casters fill the reveal
-    # so a real dark floor gap reads head-on. Frame u_z unchanged (base structure stays; only the
-    # visible valance + feet are added below the existing geometry).
-    FG = mm(32.0)
-    plinth = box("plinth", W - mm(8), D - mm(8), mm(PLINTH) - FG, (0, 0, FG + (mm(PLINTH) - FG) / 2.0))
+    # low base rail + 4 swivel casters · a rolling home rig (owner: "on casters"). FG is the
+    # floor gap the wheels lift it to; the base rail sits just above, posts land on it.
+    FG = mm(58.0)
+    plinth = box("plinth", W - mm(20), D - mm(20), mm(24.0), (0, 0, FG + mm(12.0)))
     plinth.data.materials.append(pc); parts.append(plinth)
-    foot_mat = principled("foot-steel", (0.35, 0.35, 0.37), 0.35, metallic=0.8)
+    wheel_mat = interior_dark("caster-wheel")
+    mnt_mat = principled("caster-mount", (0.30, 0.30, 0.32), 0.36, metallic=0.8)
     for sx in (-1, 1):
         for sy in (-1, 1):
-            ft = rounded_box("foot", mm(42.0), mm(42.0), FG, mm(6.0), seg=6)
-            ft.location = (sx * (fx - mm(40)), sy * (fy - mm(40)), FG / 2.0)
-            ft.data.materials.append(foot_mat); smooth(ft, 30); parts.append(ft)
-        cst = rounded_box("caster", mm(50.0), mm(24.0), FG - mm(4), mm(10.0), seg=8)
-        cst.location = (sx * (fx - mm(150)), -(fy - mm(60)), (FG - mm(4)) / 2.0)
-        cst.data.materials.append(interior_dark("caster-rubber")); smooth(cst, 30); parts.append(cst)
+            cx0, cy0 = sx * (fx - mm(52)), sy * (fy - mm(52))
+            mnt = rounded_box("caster-mount", mm(46), mm(46), mm(12), mm(3), seg=4)
+            mnt.location = (cx0, cy0, FG + mm(6)); mnt.data.materials.append(mnt_mat)
+            smooth(mnt, 30); parts.append(mnt)
+            fork = rounded_box("caster-fork", mm(30), mm(11), mm(30), mm(3), seg=4)
+            fork.location = (cx0, cy0 - mm(7), FG - mm(14)); fork.data.materials.append(mnt_mat)
+            smooth(fork, 30); parts.append(fork)
+            bpy.ops.mesh.primitive_cylinder_add(radius=FG / 2.2, depth=mm(20.0), vertices=28,
+                                                location=(cx0, cy0, FG / 2.2),
+                                                rotation=(0, math.radians(90), 0))
+            whl = bpy.context.active_object; whl.name = "caster-wheel"
+            whl.data.materials.append(wheel_mat); smooth(whl, 30); parts.append(whl)
 
-    # two side panels · recessed field + raised perimeter frame + latch (build_side_panel) ·
-    # the flat slab read as a dead CGI wall from the q34 hero angle · geometry carries the read.
-    for sx in (-1, 1):
-        parts += build_side_panel(sx, pc)
+    if not OPEN:   # side panels + rear panel · only the enclosed-cabinet archetype
+        for sx in (-1, 1):
+            parts += build_side_panel(sx, pc)
+        back = box("back", W - mm(20), mm(3.0), H - mm(PLINTH) - mm(40),
+                   (0, fy - mm(20), mm(PLINTH) + (H - mm(PLINTH) - mm(40)) / 2.0))
+        back.data.materials.append(dk); parts.append(back)
 
-    # dark rear interior panel (what shows through empty bays · the depth read)
-    back = box("back", W - mm(20), mm(3.0), H - mm(PLINTH) - mm(40),
-               (0, fy - mm(20), mm(PLINTH) + (H - mm(PLINTH) - mm(40)) / 2.0))
-    back.data.materials.append(dk); parts.append(back)
-
-    # 4 EIA rails · front pair carries the square holes; rear pair plain
+    # 4 EIA rails · front pair carries the square holes; rear pair plain · front rail 20mm behind
+    # the front post face (derives from D so the shrink stays coherent).
     rail_x = mm(HOLE_SPAN) / 2.0
+    front_ry = -(RACK["D"] / 2.0 - 20.0)
     for sx in (-1, 1):
-        r = rail_with_holes(sx * rail_x, f"rail-front-{sx}")
+        r = rail_with_holes(sx * rail_x, f"rail-front-{sx}", ry=front_ry)
         r.data.materials.append(pc); parts.append(r)
         # W0.4 · rear rail DEFERRED to the assembly wave: making it holed at the shared rail x put
         # its dark see-through holes directly behind the front rail, crashing the powder_black
@@ -346,18 +380,16 @@ def add_area(name, loc, size, energy, color=(1, 1, 1), sx=None, aim=None):
     return ob
 
 def rack_rig():
-    # A tall (~2m) dark object. Key camera-left high, a strong RIM behind-above drawing every
-    # edge + rail, a frontal fill the satin sheen reflects. Void-black world, matte floor.
-    # Energies scaled up for the metric ~2m object + the low (0.03) powder-coat albedo · these
-    # are FIRST-PROBE values; the in-rig tone read (frame-front) tunes them (dark-object risk).
-    aim = bpy.data.objects.new("Aim", None); aim.location = (0, 0, mm(950))
+    # Home GPU rig (~0.7m). Key camera-left high, a RIM behind-above drawing every edge + rail,
+    # a frontal fill the satin + GPU shrouds reflect. Void-black world, matte floor. Positions +
+    # energies scaled DOWN from the 2m-cabinet rig (~half distance -> ~quarter energy for equal
+    # illuminance) · FIRST-PROBE for the open rig (brighter GPU faces) · eyeball + clip-gate tune.
+    aim = bpy.data.objects.new("Aim", None); aim.location = (0, 0, mm(RACK["H"] / 2.0))
     bpy.context.collection.objects.link(aim)
-    # PROVEN frame-probe values (gate 5a): powder-coat lands lit-face L~22 (key side), shadow
-    # L~11, void-black separation clean, clip 0.000% peak 0.808. Refined per-part with node faces.
-    add_area("key", (-1.6, -2.0, 2.6), 1.4, float(arg("--key", 460)), (1.0, 0.99, 0.97), aim=aim)
-    add_area("rim", (1.2, 1.9, 2.5), 0.10, float(arg("--rim", 300)), (0.93, 0.96, 1.0), sx=1.8, aim=aim)
-    add_area("fill", (0.2, -2.4, 1.1), 2.2, float(arg("--fill", 175)), (0.97, 0.98, 1.0), aim=aim)
-    bpy.ops.mesh.primitive_plane_add(size=12.0, location=(0, 0, 0))
+    add_area("key", (-0.8, -1.0, 1.15), 0.7, float(arg("--key", 85)), (1.0, 0.99, 0.97), aim=aim)
+    add_area("rim", (0.6, 0.95, 1.1), 0.06, float(arg("--rim", 60)), (0.93, 0.96, 1.0), sx=0.9, aim=aim)
+    add_area("fill", (0.1, -1.2, 0.55), 1.1, float(arg("--fill", 30)), (0.97, 0.98, 1.0), aim=aim)
+    bpy.ops.mesh.primitive_plane_add(size=8.0, location=(0, 0, 0))
     fl = bpy.context.active_object; fl.name = "floor"
     fl.data.materials.append(principled("floor", (0.006, 0.006, 0.007), 0.62))
     return aim
@@ -367,7 +399,7 @@ def rack_camera(aim, shot, res):
     cd = bpy.data.cameras.new("cam"); cd.lens = 70.0; cd.sensor_width = 36.0
     cam = bpy.data.objects.new("cam", cd); bpy.context.collection.objects.link(cam); sc.camera = cam
     H = mm(RACK["H"])
-    dist = 4.6
+    dist = 2.05   # ~0.7m rig · was 4.6 for the 2m cabinet
     if shot in ("front", "frame-front"):
         yaw, elev = 0.0, 4.0
     else:  # q34
@@ -666,14 +698,14 @@ elif PART == "assembly":
             ys = [(o.matrix_world @ v.co).y for v in o.data.vertices]
             print(f"[dbg] {o.name:22} z[{min(zs):.3f},{max(zs):.3f}] y[{min(ys):.3f},{max(ys):.3f}]")
     aim = rack_rig()
-    res = (1400, 2000) if SHOT in ("front", "frame-front") else (1800, 2000)
+    res = (1500, 1650) if SHOT in ("front", "frame-front") else (1900, 1550)
     rack_camera(aim, SHOT, res)
     render_to(OUT + f"assembly-{SHOT}.png")
     print("build_rack ASSEMBLY (populated) done.")
 else:
     build_frame()
     aim = rack_rig()
-    res = (1400, 2000) if SHOT in ("front", "frame-front") else (1800, 2000)
+    res = (1500, 1650) if SHOT in ("front", "frame-front") else (1900, 1550)
     rack_camera(aim, SHOT, res)
     render_to(OUT + f"frame-{SHOT}.png")
     print("build_rack frame proof done.")
