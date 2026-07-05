@@ -144,3 +144,14 @@ jitter, wear) is the assembly wave's Problem-1 system.
 
 Front door: OPEN or REMOVED in the portraits (fill must read). Zero-U PDU + rear cabling:
 rear channel, modeled ONLY if the locked orbit shows them (front-facing doctrine).
+
+### RM44 node face · pixel rows (rm44_front_A.jpg, anchor W=440mm, 3.480 px/mm)
+
+| parameter | value | unit | conf | source | evidence | note |
+|---|---|---|---|---|---|---|
+| mesh_tri_period_H | 2.87 | mm | high | rm44_front_A.jpg | rack-rm44-mesh-crop.png | 2D FFT autocorr: fundamental 10px, half-period 5px (alternating up/down triangles) |
+| mesh_row_pitch | 2.59 | mm | high | rm44_front_A.jpg | rack-rm44-mesh-crop.png | 9px row; full V repeat 5.17mm (up-row/down-row) · equilateral check 0.87x2.97 OK |
+| mesh_open_fraction | ~0.5 | frac | LOW | rm44_front_A.jpg | rack-rm44-mesh-crop.png | threshold-circular read (shadowed web counts dark) · geometric open at web 0.4-0.5mm = 0.33-0.40 · refine against macro at part wave |
+| lock_center | face-center x · ~9 dia | mm | med | rm44_front_A.jpg | rack-rm44-front-regions.png | x offset -0.8mm from center; z ~37mm below silhouette top (CONTAMINATED · see autopsy) |
+| face_height_read | 199.2 vs spec 176 | mm | autopsy | rm44_front_A.jpg | rack-rm44-front-regions.png | +23mm = the visible foreshortened TOP LID plane in the silhouette · NOT a scale error (W anchor clean) · lock z below FACE top ~ 37-23 = ~14mm APPROX |
+| door_seam | ~34 below silhouette top | mm | low | rm44_front_A.jpg | rack-rm44-front-regions.png | strongest upper horizontal gradient · re-derive after top-face contamination split |
