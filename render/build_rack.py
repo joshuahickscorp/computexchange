@@ -896,6 +896,13 @@ def rack_rig():
     add_area("key", (-0.8, -1.0, 1.15), 1.05, float(arg("--key", 96)), (1.0, 0.99, 0.97), aim=aim)  # softbox >= the ~0.96m rig · panel-4 #3: the rig-alone frames read underexposed vs the trio · key 72->96 for a brighter, graded read
     add_area("rim", (0.6, 0.95, 1.1), 0.06, float(arg("--rim", 60)), (0.93, 0.96, 1.0), sx=0.9, aim=aim)
     add_area("fill", (0.1, -1.2, 0.55), 1.1, float(arg("--fill", 22)), (0.97, 0.98, 1.0), aim=aim)
+    # SIDE-shot relight (R2 · the rig-side audit frame read near-black · the front key/rim/fill all
+    # rake OFF the +X side face the side camera looks at). A camera-side softbox + low fill so the
+    # frame profile, the edge-on cards, and the R1 power-lead cascade to the base actually read. Gated
+    # on SHOT == "side" so the front/q34/rear/trio gates are untouched · this shot is clip-gated only.
+    if SHOT == "side":
+        add_area("side-key", (1.25, -0.55, 1.0), 0.7, float(arg("--sidekey", 66)), (1.0, 0.99, 0.97), aim=aim)
+        add_area("side-fill", (0.95, -1.0, 0.32), 0.95, float(arg("--sidefill", 16)), (0.97, 0.98, 1.0), aim=aim)
     bpy.ops.mesh.primitive_plane_add(size=8.0, location=(0, 0, 0))
     fl = bpy.context.active_object; fl.name = "floor"
     # floor · a hair reflective so the rig GROUNDS with a faint reflection (the #1 panel tell was
