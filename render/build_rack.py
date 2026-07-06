@@ -423,7 +423,7 @@ def _fan_blades(cx, yf, cz, r, nb, blade_mat):
     sweep (the leading edge trails back). Blades overlap by ~1.4x their pitch so you cannot see
     straight through to the well · fan axis = +Y, disc plane = world X-Z, pitched to blow toward -Y."""
     me = bpy.data.meshes.new("fan-rotor"); bm = bmesh.new()
-    r0   = mm(15.0)          # root radius (just outside the hub cap)
+    r0   = mm(12.0)          # root radius · roots tuck UNDER the 14mm hub cap (was 15 = a visible gap ring / hard seam · panel-3 #3)
     rtip = r - mm(3.0)       # tip radius (just inside the rim)
     Nsp  = 6                 # span stations (root -> tip)
     Nc   = 7                 # chord samples (leading -> trailing edge)
