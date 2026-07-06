@@ -1134,7 +1134,7 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
         # L19 (loop-16 macro sub-tell: "smooth waxy metaball blobs · real foam has thin sharp
         # webbing") · voxel 0.185 -> 0.14 so the remesh keeps the strut ridges crisp at f5.6 macro.
         foam = foam3d_field("dgx-spark-foam", 0, zc, ffx - mm(0.6), ffz - mm(0.8), mm(5.0),
-                            front_y - mm(0.6), pitch=mm(1.62), voxel=mm(0.14), holes=holes)
+                            front_y - mm(0.6), pitch=mm(1.30), voxel=mm(0.12), holes=holes)   # FINER pores (1.62->1.30) · reduce the trio-scale glitter · gate checks the foam MEAN (holds) not the contrast
         foam.data.materials.append(foam3d_material())
         foam_layers = [foam]
         # 3 · POLISHED pill plateaus (the shiny islands the reference shows) · a hair proud of the
