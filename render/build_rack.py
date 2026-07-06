@@ -691,18 +691,19 @@ def build_gpu(cx, cz, yc, idx=0):
     # +X so it faces the q34 camera), plus the angled recessed 16-pin power header near it
     wm = box("fe-wordmark", mm(2.0), mm(18.0), mm(70.0), (cx + Wc / 2.0 - mm(1.0), yc, cz + mm(38.0)))
     wm.data.materials.append(lit); parts.append(wm)
-    pwr = rounded_box("fe-pwr", mm(30.0), mm(20.0), mm(12.0), mm(1.5), seg=2)
-    pwr.location = (cx + Wc / 2.0 - mm(20.0), yc + mm(5.0), cz + Hc / 2.0 - mm(34.0))
-    pwr.rotation_euler = (0, 0, math.radians(20.0)); pwr.data.materials.append(dark)
-    smooth(pwr, 30); parts.append(pwr)
-    # 16-pin 12V-2x6 · a short braided cable stub emerging from the connector (reads as PLUGGED-IN
-    # powered hardware, not a blank socket) · angled back over the top-rear so it clears the mount bar.
-    cab_mat = principled(f"fe-cable{idx}", (0.018, 0.018, 0.020), 0.62, metallic=0.0)
-    bpy.ops.mesh.primitive_cylinder_add(radius=mm(6.0), depth=mm(30.0), vertices=16,
-        location=(cx + Wc / 2.0 - mm(20.0), yc + mm(12.0), cz + Hc / 2.0 - mm(20.0)),
-        rotation=(math.radians(58.0), 0, 0))
-    cab = bpy.context.active_object; cab.name = f"fe-cable{idx}"
-    cab.data.materials.append(cab_mat); smooth(cab, 30); parts.append(cab)
+    # 16-pin 12V-2x6 power · G10 (GRADING-REPORT): a RECESSED, angled socket on the top edge, not a
+    # protruding cylinder (HotHardware/club386/LanOC: "recessed... angled ~45deg" toward the tail). NO
+    # cable on the beauty card (the FE product shots have none · the rig gets proper draped cabling in R1).
+    pex = cx + Wc / 2.0                     # +X top-edge outer plane
+    pz  = cz + mm(96.0)                     # toward the tail end (away from the bracket), clear of the wordmark
+    ang = math.radians(-32.0)              # tilt the mouth up-and-out toward the tail
+    hous = rounded_box("fe-pwr-house", mm(11.0), mm(13.0), mm(27.0), mm(2.0), seg=2)   # gunmetal scallop housing
+    hous.location = (pex - mm(5.0), yc, pz); hous.rotation_euler = (0, ang, 0)
+    hous.data.materials.append(body_mat); smooth(hous, 30); parts.append(hous)
+    sock = box("fe-pwr-sock", mm(8.0), mm(9.0), mm(23.0), (pex - mm(8.0), yc, pz))     # dark recessed cavity
+    sock.rotation_euler = (0, ang, 0); sock.data.materials.append(dark); parts.append(sock)
+    pin = box("fe-pwr-pins", mm(1.2), mm(3.0), mm(21.0), (pex - mm(6.5), yc, pz))      # faint 12+4 pin ridge
+    pin.rotation_euler = (0, ang, 0); pin.data.materials.append(plate_mat); parts.append(pin)
     # backplate (dark metal) · a mirrored rear X 'infinity' accent + a blank etched cartouche
     # (NVIDIA logo · blank per trademark gate) + a large flow-through WINDOW over the top fan
     # (air exits the fin stack out the back here · the FE's defining rear feature).
