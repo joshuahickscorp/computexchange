@@ -121,6 +121,22 @@ tells + what I did (this wave, all gate-verified rig q34 raw clip 0.79-0.94% PAS
 Panel accuracy myths REFUTED this wave: none new (panel-4 was told the verified facts up front · it
 stayed on rendering-quality · confirms the sourced-references-win discipline).
 
+## PANEL 5 (workflow w1cxnxnrv · after the panel-4 wave) · the LED-GI BREAKTHROUGH
+Verdict still ~90% CG ("good render, not nearly-photo") · the recurring wall named again: (1) the LED
+rings cast ZERO near-field GI (all 3 panels), (2) material roughness uniformity, (3) grounding.
+- **[BREAKTHROUGH · DONE] LED near-field GI (panel-5's #1 highest-leverage).** The emissive-only ring
+  could not spill without clipping (gate tension). FIX that resolves it: a CO-LOCATED cool-white POINT
+  LIGHT at each fan ring · a light is NOT a camera-visible surface, so it casts the halo on the shroud +
+  rims the blades + spills to neighbours with ZERO added clip. Tuned 0.32W (lit but black blades stay
+  dark). Gate 0.788% PASS. The fans finally read as LIT · the loudest tell in every view, fixed.
+- **[DONE] Fan blades read flat (#2).** Thicker cambered foils (camber 0.14->0.17, thick 0.055->0.082) ·
+  + the new LED rim reveals the curvature · read as solid airfoils now.
+- **[NEXT] Grounding/contact shadows (#3).** panel-5 chair ranks it HIGH (panel-4 chair said it was fine
+  · panels disagree) · a tight occluded contact term under the casters/feet. Do next · measure.
+- **[GATED/ESCALATED] Spark foam (#4).** Same trio-scale glitter · see escalation below.
+- **[CHIPPED] Roughness uniformity (#5).** Split per-material rough + breakup · partly done (glossier
+  shroud, blade sheen, orange-peel, bevels) · the panel still wants more specular contrast between materials.
+
 ## ESCALATION (owner taste call · loop escalation rule) · the Spark trio-scale glitter
 The ONE remaining lever on the money-shot trio is the DGX Spark reading a touch glittery at trio scale.
 VERIFIED: the foam3d is ACCURATE metal foam + reads as real 3D pores at MACRO (front macro audit) · the
