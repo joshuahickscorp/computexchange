@@ -472,7 +472,7 @@ def _fan_blades(cx, yf, cz, r, nb, blade_mat):
     straight through to the well · fan axis = +Y, disc plane = world X-Z, pitched to blow toward -Y."""
     me = bpy.data.meshes.new("fan-rotor"); bm = bmesh.new()
     r0   = mm(12.0)          # root radius · roots tuck UNDER the 14mm hub cap (was 15 = a visible gap ring / hard seam · panel-3 #3)
-    rtip = r - mm(3.0)       # tip radius (just inside the rim)
+    rtip = r - mm(1.5)       # tip radius · G2: extended out so the tips REACH the rim ring (was r-3.0 = a 3mm floating-tip gap to the bezel/LED ring · real FE tips fuse into the ring)
     Nsp  = 6                 # span stations (root -> tip)
     Nc   = 7                 # chord samples (leading -> trailing edge)
     y0   = yf + mm(3.5)      # blade mid-plane depth (recessed behind the inlet rim)
@@ -562,6 +562,18 @@ def build_fan(cx, yf, cz, r, nb=9, blade_rgb=(0.105, 0.105, 0.115), emit_ring=Fa
     rm.data.materials.append(ring); smooth(rm, 30); parts.append(rm)
     # nb lofted-airfoil blades (real cambered/twisted/swept foils · one watertight mesh) · panel tell #3
     parts.append(_fan_blades(cx, yf, cz, r, nb, blade))
+    # BLADE-TIP RIM RING · G2 (GRADING-REPORT): the real FE fan fuses all blade tips into a smooth
+    # outer ring band ("a ring around it" · LanOC). Thin band at the tip radius (mirrors _fan_blades
+    # rtip = r-1.5) so the blades read as a ring-fan, not free-floating paddles. A dark GLOSSY grey (not
+    # the near-black blade plastic) so the band catches a subtle rim sheen + reads distinct from the well.
+    tipr = r - mm(1.5)
+    ring_blk = principled("fan-tipring-mat", (0.055, 0.057, 0.064), 0.34, metallic=0.0, coat=0.5)
+    bpy.ops.mesh.primitive_torus_add(major_radius=tipr, minor_radius=mm(1.4),
+        location=(cx, yf + mm(3.2), cz), rotation=(math.radians(90), 0, 0),
+        major_segments=64, minor_segments=12)
+    trg = bpy.context.active_object; trg.name = "fan-tipring"
+    trg.scale = (1.0, 0.60, 1.0); bpy.ops.object.transform_apply(scale=True)   # flatten toward a band, not a round tube
+    trg.data.materials.append(ring_blk); smooth(trg, 40); parts.append(trg)
     bpy.ops.mesh.primitive_cylinder_add(radius=mm(14.0), depth=mm(9.0), vertices=28,
         location=(cx, yf + mm(1.5), cz), rotation=(math.radians(90), 0, 0))
     hb = bpy.context.active_object; hb.name = "fan-hub"; hb.data.materials.append(ring)
