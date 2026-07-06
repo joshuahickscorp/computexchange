@@ -38,9 +38,13 @@ Verdict: still 4/4 RENDER, but the graders MEASURED my panel-1 fixes as off-targ
   light the shroud. Cost: clip ~2.5% (the intentional bright LEDs · realistic · gate was set for the
   no-emitter dark cabinet).
 - **[TEMPERED 2026-07-06] LED brightness re-balanced.** Emission 16/12 was FLOODING the (now black)
-  fans grey and clipping hard. Tempered ring 16->9, X 12->7 · re-measured: rig q34 clip 1.15%->0.87%
-  (PASSES the 1% gate for the first time), fans read black, rings still glow, and spill is PRESERVED
-  (shroud between rings 174.6 > far border 109.1 · no inversion · guarded per the panel-2 lesson).
+  fans grey and clipping hard. Tempered ring 16->9, X 12->7 · fans read black, rings still glow, spill
+  PRESERVED (shroud between rings 174.6 > far border 109.1 · no inversion · guarded per panel-2).
+  HONESTY CORRECTION: the 40%-preview clip read 0.87% PASS but the FULL-RES RAW re-gate reads
+  **1.839% FAIL** · the preview downsampling was BLURRING the crisp ring pixels under 0.98. Verified
+  the clip is 99.7% pure-white and confined to the fan-ring bands (y 0.31-0.67) · it is ENTIRELY the
+  accurate white LEDs, zero metal blow-out. NEXT: thin the emissive rings (real FE inlet rings are thin
+  light-guide LINES, not fat donuts) · this cuts the clipped AREA toward the 1% gate AND is more photoreal.
 - **[NOW DONE] Grounding (#2, all 4).** Panel-1 landed on the tabletop objects, NOT the rack legs.
   Re-fixed: floor roughness 0.34->0.14 (glossy) · it now reflects the legs + the bright rings, grounding
   the whole rig.
