@@ -475,10 +475,21 @@ def build_fan(cx, yf, cz, r, nb=9, blade_rgb=(0.105, 0.105, 0.115), emit_ring=Fa
     well = principled("fan-well", (0.012, 0.012, 0.014), 0.55)
     ring = principled("fan-ring", (0.03, 0.03, 0.033), 0.42, metallic=0.35)
     blade = principled("fan-blade", blade_rgb, 0.54, metallic=0.0, coat=0.14)   # SATIN black plastic · matte so the low albedo reads dark (a glossy coat reflected the bright LEDs grey)
-    bpy.ops.mesh.primitive_cylinder_add(radius=r - mm(1.5), depth=mm(12.0), vertices=44,
-        location=(cx, yf + mm(7.0), cz), rotation=(math.radians(90), 0, 0))
+    bpy.ops.mesh.primitive_cylinder_add(radius=r - mm(1.5), depth=mm(26.0), vertices=44,
+        location=(cx, yf + mm(14.0), cz), rotation=(math.radians(90), 0, 0))
     w = bpy.context.active_object; w.name = "fan-well"; w.data.materials.append(well)
     smooth(w, 30); parts.append(w)
+    # DEEP dark heatsink fins filling the well behind the blades (panel-4 #1: the fan reads as a solid
+    # disc on a flat lit gray plate · a real FE is a deep FINNED cavity you look INTO). Vertical fins,
+    # each sized to the circular chord, set back so the blade gaps reveal dark receding fin depth.
+    fin_dark = principled("fan-hsfin", (0.008, 0.008, 0.010), 0.62, metallic=0.55)   # near-black · renders darker than the lit blades so the gaps read as DEEP cavity, not a gray plate
+    nf = 17; rr_in = r - mm(4.0)
+    for k in range(nf):
+        fxr = (2.0 * (k + 0.5) / nf - 1.0) * rr_in
+        half_h = math.sqrt(max(rr_in * rr_in - fxr * fxr, 0.0))
+        if half_h < mm(3): continue
+        fin = box("fan-hsfin", mm(0.8), mm(18.0), 2.0 * half_h, (cx + fxr, yf + mm(13.0), cz))
+        fin.data.materials.append(fin_dark); parts.append(fin)
     bpy.ops.mesh.primitive_cylinder_add(radius=r, depth=mm(4.0), vertices=44,
         location=(cx, yf + mm(0.5), cz), rotation=(math.radians(90), 0, 0))
     rm = bpy.context.active_object; rm.name = "fan-rim"
@@ -518,7 +529,7 @@ def build_gpu(cx, cz, yc, idx=0):
     Wc, Hc, Tc = mm(137.0), mm(304.0), mm(40.0)
     parts = []
     body_mat = machined_metal(f"fe-body{idx}", (0.128, 0.135, 0.150), 0.60, metallic=0.9)   # darker gunmetal · panel-3 #5 + reviews ("matte DARK gunmetal") · 0.165 read light/silver under the cool key
-    fin_mat = principled(f"fe-fin{idx}", (0.082, 0.086, 0.098), 0.50, metallic=0.9)
+    fin_mat = principled(f"fe-fin{idx}", (0.030, 0.032, 0.038), 0.50, metallic=0.9)   # darker · the finstack backing behind the fans was a lit mid-gray 'plate' (panel-4 #1) · now a dark cavity backing
     xacc_mat = principled(f"fe-x{idx}", (0.14, 0.15, 0.16), 0.40, metallic=0.9)
     plate_mat = machined_metal(f"fe-plate{idx}", (0.10, 0.104, 0.113), 0.45, metallic=0.9)
     brk_mat = principled(f"fe-brk{idx}", (0.078, 0.078, 0.078), 0.50, metallic=0.9)
