@@ -813,13 +813,17 @@ def build_mac_studio(loc_x=0.0, yaw_deg=0.0):
     vent.name = "mac-vent-mesh"
     vent.data.materials.append(perforated_band()); smooth(vent, 60)   # the exhaust perforation field
     body.data.materials.append(principled("mac-rear-port", (0.028, 0.028, 0.031), 0.55, metallic=0.2))  # 3
-    rpz = zlift + mm(12.0)
-    rports = [(10.0, 10.0, -70.0),
-              (9.0, 3.6, -55.0), (9.0, 3.6, -44.0), (9.0, 3.6, -33.0), (9.0, 3.6, -22.0),
-              (13.0, 5.5, -7.0), (13.0, 5.5, 8.0),
-              (15.0, 6.5, 26.0),
-              (12.5, 11.5, 44.0),
-              (6.0, 6.0, 60.0)]
+    rpz = zlift + mm(23.0)   # M2/M3: port-row centers ~23mm above the desk (was 12 · cut the bottom edge)
+    # M2 (GRADING-REPORT) · correct order L->R facing the rear (sourced mm map -> x-center, center=0):
+    # 4x TB5 (VERTICAL) · RJ-45 · AC inlet (DEAD CENTER) · 2x USB-A (VERTICAL) · HDMI · 3.5mm jack ·
+    # power button (far right). Vertical ports have h>w. Was: power far-left + horizontal TB5 (wrong).
+    rports = [(3.4, 9.0, -68.5), (3.4, 9.0, -58.5), (3.4, 9.0, -48.5), (3.4, 9.0, -38.5),  # 4x TB5 vertical
+              (13.0, 12.0, -24.5),                     # RJ-45
+              (10.0, 10.0, 0.0),                       # AC inlet · dead center
+              (5.0, 12.0, 21.5), (5.0, 12.0, 33.5),    # 2x USB-A vertical
+              (15.0, 6.5, 50.5),                       # HDMI horizontal
+              (5.5, 5.5, 67.5),                        # 3.5mm jack
+              (10.0, 10.0, 81.5)]                      # power button · far right
     rcut = [cutter_box(mm(w_), mm(6.0), mm(h_), mm(1.0), (mm(xc), rear_y - mm(2.0), rpz))
             for (w_, h_, xc) in rports]   # AUTOPSY: rounding the square ports to r~w/2 corrupted the
     # body (degenerate-tangent boolean choke · even r-0.35-under did not clear it) · reverted to the
