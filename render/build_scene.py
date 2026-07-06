@@ -1217,6 +1217,23 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
             back.data.materials.append(champagne_gold(pore_darken=True))
             foam_layers.append(back)
 
+    # REAR I/O (researched · render/DGX-SPARK-360-SPEC.md) · recessed port cavities cut into the
+    # champagne rear face (y = +D/2), a single row left -> right: power, 4x USB-C, 2x USB-A, HDMI,
+    # RJ-45, 2x QSFP56. Blank cavities per the trademark gate · reads as the real port bank at 360.
+    rear_y = D / 2.0
+    body.data.materials.append(principled("spark-port", (0.028, 0.022, 0.013), 0.55, metallic=0.25))  # 4
+    port_z = H * 0.42
+    port_specs = [(8.0, 8.0, -63.0),
+                  (8.5, 3.6, -51.0), (8.5, 3.6, -41.0), (8.5, 3.6, -31.0), (8.5, 3.6, -21.0),
+                  (12.0, 5.2, -9.0), (12.0, 5.2, 4.0),
+                  (14.0, 6.0, 19.0),
+                  (12.0, 11.0, 33.0),
+                  (16.0, 9.0, 47.0), (16.0, 9.0, 62.0)]
+    port_cutters = [cutter_box(mm(pw_), mm(6.0), mm(ph_), mm(1.0), (mm(pxc), rear_y - mm(2.0), port_z))
+                    for (pw_, ph_, pxc) in port_specs]
+    port_boxes = apply_boolean(body, port_cutters)
+    assign_interior(body, port_boxes, 4, ymin=rear_y - mm(6.5))
+
     group = [body] + foam_layers + tubs
     for ob in group:
         ob.rotation_euler.z = math.radians(yaw_deg)

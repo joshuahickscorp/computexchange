@@ -25,6 +25,8 @@ with the tab notch; QSFP = larger rectangular cages. Keep the rear face champagn
 - NVIDIA DGX Spark Quick Start Guide (PDF): https://www.nvidia.com/content/dam/en-zz/Solutions/dgx-spark/DGX-Spark-Quick-Start-Guide.pdf
 
 ## TODO for 360
-- [ ] build the rear I/O row (above) into build_dgx_spark, render rear + rear-q34, verify.
+- [x] build the rear I/O row into build_dgx_spark (11 recessed cavities: power/4x USB-C/2x USB-A/
+      HDMI/RJ-45/2x QSFP) · verified via _audit_desktop.py (rear-q34): reads as the real port bank.
+      Refine later: differentiate port sizes more (USB-C vs QSFP) for a dedicated rear hero.
 - [ ] verify sides + top from references (the foam-texture wrap, any vents).
 - [ ] confirm every body dimension against a source (150/150/50.5).
