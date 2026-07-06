@@ -29,6 +29,22 @@ Spark FRONT pods/bezels already glossier (0.30) than the matte shell (0.50) = S1
 bead-blast already isotropic (noise roughness, no brushed grain) with the L5 grunge-removal locked in;
 LED near-field GI already solved with co-located point lights.
 
+- **G18 · see-through read · ATTEMPTED + AUTOPSIED (reverted, mechanism kept opt-in).** A dim
+  camera-invisible backlight behind the card row PASSED the clip gate (rig-q34 0.691%) but did NOT
+  deliver: from the front q34 the fan faces fully occlude the rear flow-through windows, so it only
+  spilled a soft glow onto the base/tray and eroded the void-black premium look. G18's real payoff is
+  a REAR-view / deep-pass concern (or a between-card sightline the packed 6-wide rig doesn't afford
+  head-on). Kept as an opt-in `--flow N` mechanism, default OFF · the front/q34/trio heroes are
+  unchanged (rig-q34 restored to 0.719% PASS).
+
+REMAINING FACETS + honest triage (from GRADING-REPORT §1.2/§2.2/§3.2 · baseline grades are pre-impl):
+G17 audit coverage → resolved this pass (both black frames fixed). M1/M2/M7/Studio-front → already
+correct. G14 shroud cut-lines + G11 center-slot vents = reference-locked GEOMETRY detail (needs the
+TPU/LanOC macro fetched + traced · a focused geometry pass, not a blind tweak). G16 blade coat 0.30
+vs spec 0.35 = marginal. G6 LED loop = largely done (G5 arms already reach the rims). M9 Studio
+top-plate + Spark foam depth + floor blur = OWNER decisions (do not churn). Softbox/env reflection =
+owner-REJECTED (do not re-try).
+
 HONEST LIMIT (this is where confident bounded work asymptotes · the next tier is the deep pass):
 the remaining lift is measured/scanned PBR on the die-cast shroud, molded blades, and anodized fins —
 exactly the reference-locked material framework scaffolded for the Fable→Opus flow in
