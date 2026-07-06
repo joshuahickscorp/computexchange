@@ -1,3 +1,35 @@
+# Wave 6 · deep-material continuation (2026-07-06)
+
+Picked up the loop on the owner's #1 priority — make the 5090 gunmetal read as photoreal as the
+Studio bead-blast + Spark foam. Each change bounded, cited, gate-verified:
+- **GPU · curvature-driven edge machining (the #1 gunmetal tell).** The die-cast shroud read as one
+  uniform anodize · a real cast shroud is matte on the broad faces but its machined chamfers expose
+  brighter, smoother bare aluminium. Drove an edge factor off geometry Pointiness in `machined_metal()`
+  so ONLY the thin convex sliver drops roughness (-0.12) + lifts albedo (toward base x2, capped 0.30
+  mix). Applies to the shroud + fan rings + center bar together. Rig q34 clip 0.719% PASS (was 0.720),
+  trio q34 0.643% PASS. Baked into the trio + rig + gpu-front heroes; contact sheet rebuilt.
+- **Studio · dark connector inserts in the 11 rear port pockets (M2).** `assign_interior` didn't catch
+  the pocket walls on the fillet body so they read alu-lined; recessed a dark insert in each so every
+  port reads as a dark recess. Verified with `_rear_detail.py` (lit head-on rear).
+- **Refreshed the stale desktop rear audit tiles** (Studio tile still showed the pre-M1 circular vent)
+  → now rectangular vent + dark ports (Studio) and rear foam band + I/O plate (Spark).
+
+VERIFIED-ALREADY-CORRECT this pass (checked against spec/report, no change needed · do not re-open):
+FE fan blades + hub caps are already at the spec-corrected near-black (blade 0.050, hub 0.042 · they
+read grey only because of the studio key + LED point-light fill, which is how the real FE photographs);
+Spark FRONT pods/bezels already glossier (0.30) than the matte shell (0.50) = S13-front done; Studio
+bead-blast already isotropic (noise roughness, no brushed grain) with the L5 grunge-removal locked in;
+LED near-field GI already solved with co-located point lights.
+
+HONEST LIMIT (this is where confident bounded work asymptotes · the next tier is the deep pass):
+the remaining lift is measured/scanned PBR on the die-cast shroud, molded blades, and anodized fins —
+exactly the reference-locked material framework scaffolded for the Fable→Opus flow in
+`~/Downloads/cx-render-handoff/ASCENSION-{HANDOFF,GOAL-PROMPT}.md`. Owner-escalated / do-NOT-churn
+stands: Spark foam DEPTH (tone-pinned), floor reflection blur, Studio top-logo plate. Owner-REJECTED
+stands: studio softbox/env reflection (void-black is the chosen premium look · do not re-try).
+
+---
+
 # Wave 3 · GRADING-REPORT-driven GPU geometry pass (2026-07-06, Opus loop)
 
 Driven by ~/Downloads/cx-render-handoff/GRADING-REPORT.md (sourced facet grades). Worked the
