@@ -85,7 +85,10 @@ RACK / 6x RTX 5090 FE   front [x]  q34 [x]  rear-q34 [x]  side [x]  top [x]  mac
   (--part gpu). fans read as real fans, Dark Gun Metal tone, wired base (mobo + PSU + riser ribbons).
   rig renders from every angle (rack_camera: front/q34/side/rear/rearq34/top). Hero post-chain (--post).
   open (polish only): card TOP-edge exhaust-vent slots + 16-pin read · fin detail in the rear window ·
-  short-end I-O bracket (3x DP + 1x HDMI) · optional handled-hardware wear · optional room/env reflect.
+  short-end I-O bracket (3x DP + 1x HDMI) · optional handled-hardware wear.
+  DECISION (flip-flop guard · do NOT re-try): a subtle ambient-env reflection (world 0.006 -> 0.022)
+  was tested on the card q34 and REJECTED · it flattened the dramatic dark-object-on-void contrast
+  that gives these product shots their premium punch. The calibrated VOID-BLACK look stands.
 DGX SPARK               front [x]  q34 [x]  rear [x]  side [x]  top [x]  macro [~]  · 360-COMPLETE
   rear port bank + clean champagne sides + foam/vent top all verified. open (polish): differentiate
   rear port sizes for a dedicated rear macro. audit: render/_audit_desktop.py --which spark --yaw N.
