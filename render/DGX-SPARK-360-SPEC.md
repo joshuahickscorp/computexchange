@@ -25,11 +25,12 @@ with the tab notch; QSFP = larger rectangular cages. Keep the rear face champagn
 - NVIDIA DGX Spark Quick Start Guide (PDF): https://www.nvidia.com/content/dam/en-zz/Solutions/dgx-spark/DGX-Spark-Quick-Start-Guide.pdf
 
 ## TODO for 360
-- [x] build the rear I/O row into build_dgx_spark (11 recessed cavities: power/4x USB-C/2x USB-A/
-      HDMI/RJ-45/2x QSFP) · verified via _audit_desktop.py (rear-q34): reads as the real port bank.
-      Refine later: differentiate port sizes more (USB-C vs QSFP) for a dedicated rear hero.
-- [x] verify sides + top · audited (side yaw 90): clean champagne sides (correct · plain metal),
-      foam-texture top + vent panel already built. Spark is 360-complete (front/rear/sides/top).
+- [ ] REAR I/O CORRECTION (2026-07-06 · GRADING-REPORT): the Spark has NO USB-A anywhere. The real
+      rear (NVIDIA QSG p.5, L->R) is: power button · POWER USB-C · 3x USB-C · HDMI · RJ-45 · 2x QSFP
+      = 8 cavities in a polished inset plate, on a metal-FOAM rear face. The old "[x] 11 cavities incl.
+      2x USB-A" was wrong on both counts (invented USB-A + smooth rear). Rebuild per S1/S2.
+- [ ] TOP IS WRONG (S3): the real top is BLANK matte champagne (STH top photo · no dark panel, no
+      groove). The built dark recessed vent panel is invented · remove it. Untick the "360-complete".
 - [ ] confirm every body dimension against a source (150/150/50.5).
 
 ## FRONT/REAR = METAL FOAM (RESOLVED 2026-07-06 · the existing foam3d is CORRECT · do NOT rebuild)
