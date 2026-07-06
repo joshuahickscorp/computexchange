@@ -22,6 +22,7 @@ def _arg(name, d=None):
 SHOT = str(_arg("--shot", "q34"))
 PREVIEW = bool(_arg("--preview", False))
 POST = bool(_arg("--post", False))
+HIRES = bool(_arg("--hires", False))   # definitive hero: bigger res + more samples
 
 def load(path, argv_after, name):
     """exec a builder file into its own namespace with a no-op dispatch · returns the namespace."""
@@ -37,7 +38,8 @@ def load(path, argv_after, name):
 
 # load both builders (neither builds a scene or renders under these args)
 SCN = load(SCENE_PATH, ["--only", "none"] + (["--preview"] if PREVIEW else []), "scene_defs")
-RK = load(RACK_PATH, ["--part", "defs"] + (["--preview"] if PREVIEW else []) + (["--post"] if POST else []), "rack_defs")
+RK = load(RACK_PATH, ["--part", "defs"] + (["--preview"] if PREVIEW else []) + (["--post"] if POST else [])
+          + (["--samples", "820"] if HIRES else []), "rack_defs")
 
 # --- build the shared scene via the rack's setup, then the rack itself ---
 sc = RK["reset_scene"]()
@@ -95,7 +97,7 @@ ax, ay, az = aim.location
 cam.location = (ax + dist * math.cos(el) * math.sin(ya), ay - dist * math.cos(el) * math.cos(ya), az + dist * math.sin(el))
 c = cam.constraints.new("TRACK_TO"); c.target = aim; c.track_axis = "TRACK_NEGATIVE_Z"; c.up_axis = "UP_Y"
 cd.dof.use_dof = True; cd.dof.focus_object = aim; cd.dof.aperture_fstop = 14.0
-sc.render.resolution_x, sc.render.resolution_y = (2000, 1600)
+sc.render.resolution_x, sc.render.resolution_y = (2880, 2304) if HIRES else (2000, 1600)
 
 out = "render/rack_previews/trio-" + SHOT + ".png"
 RK["render_to"](out)
