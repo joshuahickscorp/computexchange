@@ -17,7 +17,34 @@ gate-verified · rig q34 clip 0.720% PASS (better than the 0.798% baseline):
   fingers/riser read.
 - **build fix** · guarded BevelModifier.clamp_overlap (crashed the rig/trio on this Blender build).
 
+## Wave 4 · Studio + Spark + rig + a CRITICAL trio fix (same loop)
+Worked the rest of the priority order (model-refinement worktree for the desktops · this worktree for
+the rig/trio). Spec files corrected FIRST where flagged.
+- **Studio M1** · rear vent = RECTANGULAR ~173x53mm perforation field (was a circle · Apple press image).
+- **Studio M2/M3** · rear port row rebuilt to the sourced mm-map (4x TB5, RJ-45, AC inlet DEAD CENTER,
+  2x USB-A, HDMI, jack, power button) + raised to 23mm.
+- **CRITICAL FIX** · the M1 vent used a ROUNDED cutter that degenerate-tangent choked the fillet body's
+  EXACT boolean and COLLAPSED it to a flat plate (the LAWS' documented failure · it hid in the dark rear
+  audits + rendered the Studio as an upright slab in the TRIO money shot). Fixed with a SHARP (r=0)
+  recess cutter. Body intact + the full port row now reads. Trio re-rendered + correct.
+- **Spark S3** · blank champagne top (removed an invented dark vent panel · STH photo).
+- **Spark S2** · rear I/O = 9 cavities (power, 4x USB-C vertical, HDMI, RJ-45, 2x QSFP) · removed 2
+  invented USB-A (NVIDIA QSG).
+- **Spark S1** · rear is metal FOAM (was smooth champagne) · a proud foam3d field over the upper rear,
+  reusing the gated foam3d material (spark_foam pin holds) · lower strip = the champagne I/O plate.
+- **Rig R1** · 12V-2x6 power leads from each card to the PSU (NURBS+bevel) · the rig is wired now
+  (subtle from the front · the tight 6mm card gaps hide leads head-on · reads at q34).
+- LESSON (re-logged): ALWAYS check Studio/Spark body integrity from a LIT front/q34 after ANY rear
+  boolean · a bad cutter collapses the body + hides in the dark rear. Sharp cutters for big recesses.
+
 ## Honest next (loop open · GPU facets remaining, then the other objects)
+- REFRESH the individual max-quality portraits (mac-studio / dgx-spark front/q34/detail) to bank the
+  Studio-body fix + S3 blank top + Spark rear foam · the TRIO hero is already re-rendered + committed.
+- Studio: M7 lower-front intake band read, M8 bottom face (unbuilt), M5/M6 front-port polish, M10 radii.
+- Spark: S4 crisp ~1mm edges (currently soap-bar), S5 flat inset foam framing, S6 pod sizing, S7 green
+  logo plate, S12 bottom face. Rear foam refinement: a rounded-rect plate island in FULL foam (vs the
+  current foam-upper / champagne-lower split).
+- Rig: R2 riser slot bodies over the raw gold fingers · R3 frame fasteners.
 - GPU still open (lower grades): G6 illumination-motif merge (ring+X continuous loop), G3 hub flatten,
   G16 blade material (kill foil-facet highlights), G11 edge louvers, G14 shroud cut-lines, G13/G15
   proportion+material verify, G18 see-through backlight in the rig.
