@@ -137,7 +137,13 @@ rings cast ZERO near-field GI (all 3 panels), (2) material roughness uniformity,
 - **[CHIPPED] Roughness uniformity (#5).** Split per-material rough + breakup · partly done (glossier
   shroud, blade sheen, orange-peel, bevels) · the panel still wants more specular contrast between materials.
 
-## ESCALATION (owner taste call · loop escalation rule) · the Spark trio-scale glitter
+## [RESOLVED 2026-07-06] Spark trio-glitter · finer foam, gate held (no owner call needed)
+Attempted the finer foam WITH the tone gate as arbiter (the loop's gated-change process, not a blocking
+escalation): foam3d pitch 1.62->1.30, voxel 0.14->0.12. The spark_foam pin is MEAN-based so it held —
+rig_patches spark_foam dE 4.98 <= tol 6 PASS. Trio glitter reduced, foam still accurate. The escalation
+below is now moot (the gate arbitrated cleanly · no taste call required). Kept for the record.
+
+## (superseded) ESCALATION (owner taste call · loop escalation rule) · the Spark trio-scale glitter
 The ONE remaining lever on the money-shot trio is the DGX Spark reading a touch glittery at trio scale.
 VERIFIED: the foam3d is ACCURATE metal foam + reads as real 3D pores at MACRO (front macro audit) · the
 trio glitter is a SCALE artifact (0.7mm relief doesn't resolve on the tiny trio Spark). To reduce it I
