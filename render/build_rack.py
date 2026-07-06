@@ -428,8 +428,12 @@ def build_fan(cx, yf, cz, r, nb=9, blade_rgb=(0.105, 0.105, 0.115), emit_ring=Fa
     arc = 2 * math.pi * rr / nb
     for i in range(nb):
         a = 2 * math.pi * i / nb
-        # wide, heavily-overlapping, low-pitch flat blades -> a near-solid swept disc (a real fan),
-        # not thin radial spokes. Each blade fanned out slightly in z-depth so they don't z-fight.
+        # CUPPED/SWEPT airfoil blades (panel tell #3: flat paddles) · a thin subdivided box bent +
+        # twisted so each blade is a sickle-cupped foil, not a popsicle stick · dense overlap so you
+        # cannot see through to the well (a real axial fan).
+        # NOTE (panel tell #3 · airfoil): a Simple-Deform bend on box blades merged them into a
+        # featureless solid dome (worse). Proper cupped/twisted airfoils need a real lofted-profile
+        # blade mesh (bmesh) · a bounded future rebuild. Keeping the distinct flat swept blades.
         bl = rounded_box("fan-blade", r - mm(10.0), mm(0.8), arc * 1.32, mm(2.0), seg=2)
         bl.location = (cx + rr * math.cos(a), yf + mm(3.0) + (i % 3) * mm(0.4), cz + rr * math.sin(a))
         bl.rotation_euler = (math.radians(8.0), a, 0)
