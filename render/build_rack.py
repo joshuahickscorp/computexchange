@@ -846,9 +846,9 @@ elif PART == "gpu":
     build_gpu(0.0, 0.0, 0.0, idx=0)
     aim = bpy.data.objects.new("Aim", None); aim.location = (0, 0, 0)
     bpy.context.collection.objects.link(aim)
-    add_area("key", (-0.55, -0.7, 0.6), 0.4, float(arg("--key", 60)), (1.0, 0.99, 0.97), aim=aim)
-    add_area("rim", (0.5, 0.6, 0.55), 0.04, float(arg("--rim", 42)), (0.93, 0.96, 1.0), sx=0.5, aim=aim)
-    add_area("fill", (0.1, -0.75, 0.2), 0.7, float(arg("--fill", 20)), (0.97, 0.98, 1.0), aim=aim)
+    add_area("key", (-0.55, -0.7, 0.6), 0.4, float(arg("--key", 42)), (1.0, 0.99, 0.97), aim=aim)
+    add_area("rim", (0.5, 0.6, 0.55), 0.04, float(arg("--rim", 30)), (0.93, 0.96, 1.0), sx=0.5, aim=aim)
+    add_area("fill", (0.1, -0.75, 0.2), 0.7, float(arg("--fill", 12)), (0.97, 0.98, 1.0), aim=aim)
     bpy.ops.mesh.primitive_plane_add(size=4.0, location=(0, 0, -0.17))
     _fl = bpy.context.active_object; _fl.data.materials.append(principled("floor", (0.006, 0.006, 0.007), 0.62))
     _sc = bpy.context.scene
