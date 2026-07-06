@@ -661,7 +661,7 @@ def rack_rig():
     # illuminance) · FIRST-PROBE for the open rig (brighter GPU faces) · eyeball + clip-gate tune.
     aim = bpy.data.objects.new("Aim", None); aim.location = (0, 0, mm(RACK["H"] / 2.0))
     bpy.context.collection.objects.link(aim)
-    add_area("key", (-0.8, -1.0, 1.15), 0.7, float(arg("--key", 72)), (1.0, 0.99, 0.97), aim=aim)
+    add_area("key", (-0.8, -1.0, 1.15), 1.05, float(arg("--key", 72)), (1.0, 0.99, 0.97), aim=aim)  # softbox >= the ~0.96m rig (0.7->1.05) · panel-3 lighting: a large soft key so the specular gradient travels across the shroud metal (same energy = clip-neutral)
     add_area("rim", (0.6, 0.95, 1.1), 0.06, float(arg("--rim", 52)), (0.93, 0.96, 1.0), sx=0.9, aim=aim)
     add_area("fill", (0.1, -1.2, 0.55), 1.1, float(arg("--fill", 16)), (0.97, 0.98, 1.0), aim=aim)
     bpy.ops.mesh.primitive_plane_add(size=8.0, location=(0, 0, 0))
