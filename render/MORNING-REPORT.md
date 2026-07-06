@@ -21,6 +21,22 @@ panels' "4/4 render" toward "GOOD RENDER, nearly-photo in crops." Landed, each g
 Lesson logged: the vision panel is strong on "reads CG" but unreliable on hardware facts · sourced
 references win. Honest next: the materials micro-texture wave (#4) + a re-panel to measure the drop.
 
+**Wave-2 conclusion (panels 4 + 5 · the two headline wins):**
+- **LED near-field-GI BREAKTHROUGH.** The loudest tell across ALL THREE panels: the LED rings are the
+  brightest thing in a black scene yet cast no light. The emissive-only ring couldn't spill without
+  clipping (gate tension). FIX: a co-located cool-white POINT LIGHT at each ring · a light is not a
+  camera-visible surface, so it casts the halo on the shroud + rims the blades + spills to neighbours
+  with ZERO added clip. The fans now read as genuinely LIT running hardware · gate still 0.79% PASS.
+- **Deep dark FAN CAVITY.** Panel-4's #1: the fans read as stickers on a gray plate. Deepened the well
+  + 17 near-black heatsink fins + darkened the backing · you now look INTO each card.
+- **Finer SPARK FOAM (gated, done properly).** Reduced the trio-scale glitter (pitch 1.62->1.30) with
+  the tone gate as arbiter · spark_foam dE 4.98 <= 6 PASS · the mean pin held, no regression.
+- Plus: thicker cambered airfoils, glossier lit hub cap, PCIe gold-finger edge, 3xDP+HDMI I/O, brighter
+  rig key, smudge-varied floor, frame edge bevels, per-card jitter · one honest revert (frame dust).
+- The render moved from "4/4 obvious render" to a strong good-render with the devices near-photographic.
+  ~40 gate-verified commits this session. Honest remaining: fine per-material specular contrast + the
+  grounding contact-term (panel chairs disagree on it) · both diminishing-returns polish.
+
 ---
 
 # Morning report · overnight loop (2026-07-05 -> 07-06)
