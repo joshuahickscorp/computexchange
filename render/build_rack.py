@@ -903,6 +903,20 @@ def rack_rig():
     if SHOT == "side":
         add_area("side-key", (1.25, -0.55, 1.0), 0.7, float(arg("--sidekey", 66)), (1.0, 0.99, 0.97), aim=aim)
         add_area("side-fill", (0.95, -1.0, 0.32), 0.95, float(arg("--sidefill", 16)), (0.97, 0.98, 1.0), aim=aim)
+    # G18 · SEE-THROUGH read (report 3/10) · AUTOPSY (2026-07-06): a dim camera-invisible backlight
+    # behind the card row PASSED the clip gate (rig-q34 0.691%) but did NOT deliver the intended
+    # see-through: from the FRONT q34 the fan faces fully occlude the rear flow-through windows, so the
+    # light never reads as "through the windows" · it only spilled a soft glow onto the base/tray, which
+    # ERODES the owner-praised void-black premium look. G18's real payoff lives in the REAR view (or a
+    # between-card sightline the packed 6-wide rig doesn't afford from the front) = deep-pass context.
+    # Kept as an OPT-IN mechanism (default OFF · pass --flow N for a rear-view study) · money shots
+    # render exactly as before. Do NOT default this on for the front/q34/trio heroes.
+    if float(arg("--flow", 0.0)) > 0.0:
+        baim = bpy.data.objects.new("flow-aim", None)
+        baim.location = (0, -mm(600.0), mm(RACK["H"] / 2.0)); bpy.context.collection.objects.link(baim)
+        bl = add_area("flowback", (0.0, mm(60.0), mm(RACK["H"] / 2.0 + 30.0)), 0.55,
+                      float(arg("--flow", 0.0)), (0.88, 0.93, 1.0), sx=mm(760.0), aim=baim)
+        bl.visible_camera = False   # never a visible glowing rectangle · only its throughput reads
     bpy.ops.mesh.primitive_plane_add(size=8.0, location=(0, 0, 0))
     fl = bpy.context.active_object; fl.name = "floor"
     # floor · a hair reflective so the rig GROUNDS with a faint reflection (the #1 panel tell was
