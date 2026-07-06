@@ -31,3 +31,15 @@ with the tab notch; QSFP = larger rectangular cages. Keep the rear face champagn
 - [x] verify sides + top · audited (side yaw 90): clean champagne sides (correct · plain metal),
       foam-texture top + vent panel already built. Spark is 360-complete (front/rear/sides/top).
 - [ ] confirm every body dimension against a source (150/150/50.5).
+
+## FRONT/REAR MESH · "cheese-grater" (research 2026-07 · fixes the panel's 'procedural glitter' tell)
+The gold front is NOT a random speckle/foam · it is a STRUCTURED organic lattice of airflow holes —
+the miniaturised DGX Station / Mac-Pro "cheese-grater". Reviews: "gold-speckled metallic finish",
+"cheese-grater gold front", "organic mesh for the front and rear, modeled after the DGX-1". For
+photoreal the front must read as a PRECISE REPEATING 3D hole array (hemispherical/tapered dimples in
+a hex or organic pattern, each catching a rim of key light on its lip), gold ANODISED ALUMINIUM
+(warm metallic), NOT procedural glitter. Also present: miniature hand-hold cutouts (a nod to the big
+DGX handles) + an NVIDIA green logo badge (blank per the trademark gate). Both FRONT and REAR are mesh.
+- Sources: StorageReview (cheese-grater, gold-speckled), TheRegister first-look, Exxact/SabrePC (all-gold
+  chassis + organic mesh front+rear, DGX-1 lineage). · NEXT SPARK PASS: replace the speckle look with a
+  real dimple-lattice mesh material/geometry · touch the gated Spark only with care (measure before/after).
