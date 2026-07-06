@@ -66,10 +66,13 @@ rear I/O and the Studio's rear port array — research the EXACT layout before m
   `--only {studio|spark|pair} --shot {front|q34|detail} [--preview]` · measurements in
   `render/MEASUREMENTS.md` · audit `render/GEOMETRY-AUDIT.md`. **build_mac_studio(loc_x, yaw_deg)**
   and **build_dgx_spark(loc_x, yaw_deg)** are the entry builders.
-- **Scale trio** (`render/build_trio.py`, rack-oracle — FINISH THIS EARLY): it execs build_scene.py
-  with `--only none` and build_rack.py with `--part defs` (both no-op their dispatch) to load both
-  builders into one scene, builds the rack, then lifts the Studio+Spark onto the rack cap (z += 0.700).
-  `--shot {front|q34}`.
+- **Scale trio** (`render/build_trio.py`, rack-oracle — **DOES NOT EXIST YET, WRITE IT EARLY** with
+  this recipe): exec build_scene.py with argv `--only none` and build_rack.py with `--part defs` (both
+  no-op their dispatch) into two namespaces to load both builders into one scene; set each namespace's
+  `__file__` to the real path so the foam/mesh caches resolve. Then: rack `reset_scene()`+`enable_gpu()`,
+  `build_frame()`, `build_gpu_row()`; snapshot-diff around `build_mac_studio(loc_x,yaw)` and
+  `build_dgx_spark(loc_x,yaw)` to grab their objects and lift them onto the rack cap (`z += RACK["H"]/1000`,
+  ~0.700 m), Studio + Spark side by side centred on the top; one trio rig + camera; render. `--shot {front|q34}`.
 - **cwd resets between Bash calls** — always `cd` into the worktree or use absolute paths.
 - **GPU / render cost:** run only ONE Blender render at a time (concurrent GPU jobs OOM). The lit
   5090 rig full render is ~15-18 min; iterate at preview (40 samples, 40%) and reserve full 512-sample
