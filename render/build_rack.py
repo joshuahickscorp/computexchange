@@ -655,6 +655,14 @@ def build_gpu(cx, cz, yc, idx=0):
     pwr.location = (cx + Wc / 2.0 - mm(20.0), yc + mm(5.0), cz + Hc / 2.0 - mm(34.0))
     pwr.rotation_euler = (0, 0, math.radians(20.0)); pwr.data.materials.append(dark)
     smooth(pwr, 30); parts.append(pwr)
+    # 16-pin 12V-2x6 · a short braided cable stub emerging from the connector (reads as PLUGGED-IN
+    # powered hardware, not a blank socket) · angled back over the top-rear so it clears the mount bar.
+    cab_mat = principled(f"fe-cable{idx}", (0.018, 0.018, 0.020), 0.62, metallic=0.0)
+    bpy.ops.mesh.primitive_cylinder_add(radius=mm(6.0), depth=mm(30.0), vertices=16,
+        location=(cx + Wc / 2.0 - mm(20.0), yc + mm(12.0), cz + Hc / 2.0 - mm(20.0)),
+        rotation=(math.radians(58.0), 0, 0))
+    cab = bpy.context.active_object; cab.name = f"fe-cable{idx}"
+    cab.data.materials.append(cab_mat); smooth(cab, 30); parts.append(cab)
     # backplate (dark metal) · a mirrored rear X 'infinity' accent + a blank etched cartouche
     # (NVIDIA logo · blank per trademark gate) + a large flow-through WINDOW over the top fan
     # (air exits the fin stack out the back here · the FE's defining rear feature).
