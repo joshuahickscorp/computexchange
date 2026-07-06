@@ -803,15 +803,22 @@ def build_mac_studio(loc_x=0.0, yaw_deg=0.0):
     # field ~173 x 53 mm (NOT a circle · corrected from Apple's 2025 back press image), upper portion,
     # ~5mm below the top roll, entirely above the port row. Then the lower port row (M2). Blank (D2 gate).
     rear_y = D / 2.0
-    vent_z = zlift + mm(63.0)
-    vent_w, vent_h, vent_r = mm(173.0), mm(53.0), mm(6.0)
-    vcut = cutter_box(vent_w, mm(7.0), vent_h, vent_r, (0, rear_y - mm(2.5), vent_z))
-    vcut.name = "mac-vent-cut"
-    apply_boolean(body, [vcut])                       # a shallow RECTANGULAR recess in the rear
-    vent = cutter_box(vent_w - mm(3.0), mm(1.5), vent_h - mm(3.0), vent_r - mm(1.0),
-                      (0, rear_y - mm(4.6), vent_z))
-    vent.name = "mac-vent-mesh"
-    vent.data.materials.append(perforated_band()); smooth(vent, 60)   # the exhaust perforation field
+    # vent_z lowered from 63 to 56 so the field TOP (56+25=81mm) clears the 8.27mm top-edge fillet
+    # (starts ~87mm) · a cut into the fillet was breaking the body mesh (collapsed to 0 polys · the
+    # same fillet-break the Spark foam code warns about). Height trimmed 53->50 for margin.
+    vent_z = zlift + mm(56.0)
+    vent_w, vent_h, vent_r = mm(173.0), mm(50.0), mm(6.0)
+    if not arg("--novent", False):
+        # SHARP recess cutter (r=0) · the AUTOPSY below documents that ROUNDED cutters degenerate-tangent
+        # choke this fillet body + collapse it · a sharp box subtracts cleanly. The visible perforated
+        # mesh (rounded, below) hides the sharp recess corners. Shallow 5mm (was 7 · less into the body).
+        vcut = cutter_box(vent_w, mm(5.0), vent_h, mm(0.0), (0, rear_y - mm(1.5), vent_z))
+        vcut.name = "mac-vent-cut"
+        apply_boolean(body, [vcut])                       # a shallow RECTANGULAR recess in the rear
+        vent = cutter_box(vent_w - mm(3.0), mm(1.5), vent_h - mm(3.0), vent_r - mm(1.0),
+                          (0, rear_y - mm(4.6), vent_z))
+        vent.name = "mac-vent-mesh"
+        vent.data.materials.append(perforated_band()); smooth(vent, 60)   # the exhaust perforation field
     body.data.materials.append(principled("mac-rear-port", (0.028, 0.028, 0.031), 0.55, metallic=0.2))  # 3
     rpz = zlift + mm(23.0)   # M2/M3: port-row centers ~23mm above the desk (was 12 · cut the bottom edge)
     # M2 (GRADING-REPORT) · correct order L->R facing the rear (sourced mm map -> x-center, center=0):
@@ -824,14 +831,14 @@ def build_mac_studio(loc_x=0.0, yaw_deg=0.0):
               (15.0, 6.5, 50.5),                       # HDMI horizontal
               (5.5, 5.5, 67.5),                        # 3.5mm jack
               (10.0, 10.0, 81.5)]                      # power button · far right
-    rcut = [cutter_box(mm(w_), mm(6.0), mm(h_), mm(1.0), (mm(xc), rear_y - mm(2.0), rpz))
+    rcut = [] if arg("--noports", False) else [cutter_box(mm(w_), mm(6.0), mm(h_), mm(1.0), (mm(xc), rear_y - mm(2.0), rpz))
             for (w_, h_, xc) in rports]   # AUTOPSY: rounding the square ports to r~w/2 corrupted the
     # body (degenerate-tangent boolean choke · even r-0.35-under did not clear it) · reverted to the
     # known-good rounded-rect cut. A round jack/inlet is not worth a body regression.
     rbox = apply_boolean(body, rcut)
     assign_interior(body, rbox, 3, ymin=rear_y - mm(6.5))
 
-    group = [body, led, foot, vent] + tongues
+    group = [body, led, foot] + ([vent] if not arg("--novent", False) else []) + tongues
     for ob in group:
         ob.rotation_euler.z = math.radians(yaw_deg)
         x, y = ob.location.x, ob.location.y
