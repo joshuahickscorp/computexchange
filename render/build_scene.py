@@ -1257,12 +1257,13 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
     rear_y = D / 2.0
     body.data.materials.append(principled("spark-port", (0.028, 0.022, 0.013), 0.55, metallic=0.25))  # 4
     port_z = H * 0.42
-    port_specs = [(8.0, 8.0, -63.0),
-                  (8.5, 3.6, -51.0), (8.5, 3.6, -41.0), (8.5, 3.6, -31.0), (8.5, 3.6, -21.0),
-                  (12.0, 5.2, -9.0), (12.0, 5.2, 4.0),
-                  (14.0, 6.0, 19.0),
-                  (12.0, 11.0, 33.0),
-                  (16.0, 9.0, 47.0), (16.0, 9.0, 62.0)]
+    # S2 (GRADING-REPORT) · real rear I/O (NVIDIA QSG p.5, L->R): power button · PD USB-C · 3x USB-C ·
+    # HDMI · RJ-45 · 2x QSFP = 9 cavities. NO USB-A (the old 2x USB-A were invented). USB-C are VERTICAL.
+    port_specs = [(6.0, 6.0, -63.0),                                                             # power button
+                  (4.0, 9.0, -49.0), (4.0, 9.0, -39.0), (4.0, 9.0, -29.0), (4.0, 9.0, -19.0),    # PD + 3x USB-C vertical
+                  (14.0, 6.0, -3.0),                                                             # HDMI horizontal
+                  (12.0, 11.0, 13.0),                                                            # RJ-45
+                  (16.0, 11.0, 47.0), (16.0, 11.0, 62.0)]                                        # 2x QSFP (twin cages, far right)
     port_cutters = [cutter_box(mm(pw_), mm(6.0), mm(ph_), mm(1.0), (mm(pxc), rear_y - mm(2.0), port_z))
                     for (pw_, ph_, pxc) in port_specs]
     port_boxes = apply_boolean(body, port_cutters)
