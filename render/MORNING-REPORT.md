@@ -37,10 +37,18 @@ is always a next).
 - Hero post-chain (`--post`): a subtle bloom so the lit rings read as real LEDs + a hair of CA. The
   numeric gate always reads the raw pre-post frame.
 
-## Honest next (open · the loop continues)
-- Rack: the card top-edge exhaust vents + I-O bracket detail (mostly hidden in the packed row);
-  a fan-hub logo; optional subtle dust/wear on the handled frame; a room/context ground if wanted.
-- Desktops: rear port-size differentiation for a dedicated rear macro; the Studio ST front-verify
-  items (corner facet, base reveal, port depth) from the older audit.
-- A dedicated true-macro of one 5090 card; the site scroll choreography for the trio.
-- Nothing is claimed "done" that isn't · every hero above is committed + gate-clean (clip PASS).
+## State: comprehensive · all 3 objects 360-COMPLETE
+- **RTX 5090 card**: front/q34/rear/side/top/macro all built + rendered · real fans · Dark Gun Metal ·
+  glowing accents · top/bottom exhaust fin combs · rear X + cartouche + flow-through window.
+- **6x RTX 5090 rig**: renders from every angle · wired base (mobo + PSU + riser ribbons) · post bloom.
+- **DGX Spark**: 360-complete · rear port bank + the twin QSFP metal cages · clean sides · foam/vent top.
+- **Mac Studio**: 360-complete · rear circular perforated vent + port row (round AC inlet + jack) ·
+  aluminium sides · aperture top.
+- **Scale trio**: q34 + front heroes, full quality + bloom. **Contact sheet** rebuilt.
+
+## Honest remaining (all polish · none hero-facing · loop stays open)
+- Card 16-pin power-header read + short-end I-O bracket connector shapes (mostly hidden in the packed
+  row). Optional handled-hardware wear on the frame. Env-reflection was TESTED + REJECTED (void-black
+  is more premium · see OVERNIGHT-LOOP.md · do not re-try). The frame profile is owner-praised · unchanged.
+- Nothing is claimed done that isn't · every hero is committed + gate-clean (clip PASS) · ~32 commits,
+  no AI attribution, blank trademarks throughout.
