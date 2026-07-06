@@ -501,6 +501,14 @@ def build_fan(cx, yf, cz, r, nb=9, blade_rgb=(0.105, 0.105, 0.115), emit_ring=Fa
     well = principled("fan-well", (0.012, 0.012, 0.014), 0.55)
     ring = principled("fan-ring", (0.03, 0.03, 0.033), 0.42, metallic=0.35)
     blade = principled("fan-blade", blade_rgb, 0.54, metallic=0.0, coat=0.14)   # SATIN black plastic · matte so the low albedo reads dark (a glossy coat reflected the bright LEDs grey)
+    # subtle radial-ish roughness break-up so the blades aren't DEAD-uniform matte (panel-4: 'zero
+    # specular response') · a faint sheen variation reads as molded plastic, not clay. Object-space noise.
+    _bt = blade.node_tree; _bb = _bt.nodes["Principled BSDF"]
+    _btc = _bt.nodes.new("ShaderNodeTexCoord")
+    _bn = _bt.nodes.new("ShaderNodeTexNoise"); _bn.inputs["Scale"].default_value = 220.0; _bn.inputs["Detail"].default_value = 3.0
+    _bt.links.new(_btc.outputs["Object"], _bn.inputs["Vector"])
+    _bmr = _bt.nodes.new("ShaderNodeMapRange"); _bmr.inputs["To Min"].default_value = 0.40; _bmr.inputs["To Max"].default_value = 0.60
+    _bt.links.new(_bn.outputs["Fac"], _bmr.inputs["Value"]); _bt.links.new(_bmr.outputs["Result"], _bb.inputs["Roughness"])
     bpy.ops.mesh.primitive_cylinder_add(radius=r - mm(1.5), depth=mm(26.0), vertices=44,
         location=(cx, yf + mm(14.0), cz), rotation=(math.radians(90), 0, 0))
     w = bpy.context.active_object; w.name = "fan-well"; w.data.materials.append(well)
