@@ -628,11 +628,14 @@ def build_gpu(cx, cz, yc, idx=0):
         for k in range(-6, 7):
             fr = box("fe-topfin", Wc - 2 * bw - mm(4), mm(2.0), mm(3.0), (cx, yc + k * mm(2.7), ez))
             fr.data.materials.append(fin_mat); parts.append(fr)
-    # two fans (9 blades, BLACK plastic) with the FE lit inlet rings. Reviews call the FE fans flatly
+    # two fans (7 blades, BLACK plastic) with the FE lit inlet rings. Reviews call the FE fans flatly
     # "black" · 0.110 read medium-grey · 0.050 is a proper black plastic (glossy coat keeps the spec/
     # edge highlights so the blades still read against the dark well). RTX5090FE-SPEC.md.
+    # BLADE COUNT · G1 (GRADING-REPORT): real FE fans have SEVEN large wide-chord blades, not 9 · the
+    # chord auto-widens 9/7 = 1.28x since chord_of scales with the 2pi/nb pitch. Sources: LanOC
+    # ("7 large axial blades"), club386 ("seven thick blades"), Overclocking.com.
     for fz in (zt, zb):
-        parts += build_fan(cx, yf, fz, fan_r, nb=9, blade_rgb=(0.050, 0.052, 0.060), emit_ring=True)
+        parts += build_fan(cx, yf, fz, fan_r, nb=7, blade_rgb=(0.050, 0.052, 0.060), emit_ring=True)
     # X 'infinity' accent on the center bar (2 crossing diagonals) + its lit edges
     for sgn in (1, -1):
         xb = rounded_box("fe-xbar", mm(78.0), mm(3.0), mm(10.0), mm(2.0), seg=2)
