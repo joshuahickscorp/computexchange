@@ -727,13 +727,22 @@ def build_gpu(cx, cz, yc, idx=0):
         rxb.data.materials.append(xacc_mat); smooth(rxb, 30); parts.append(rxb)
     cart = box("fe-cartouche", mm(30.0), mm(1.2), mm(12.0), (cx, ybx + mm(0.4), cz))
     cart.data.materials.append(principled(f"fe-cart{idx}", (0.09, 0.093, 0.10), 0.42, metallic=0.85)); parts.append(cart)
-    # bottom · PCIe bracket (4 connector cutouts, NO vent grille per FE) + riser stub
-    brk = box("fe-bracket", Wc, mm(2.0), mm(16.0), (cx, yf + mm(4.0), cz - Hc / 2.0 - mm(7.0)))
+    # bottom · PCIe bracket · G12 (GRADING-REPORT): SOLID dark-matte plate, NO vent grille (the FE
+    # flow-through means no bracket perforations · HotHardware/HWCooling), 3x DisplayPort + 1x HDMI as
+    # recessed cavities, plus the 2 mounting screws (HWCooling: "fixed with a pair of screws").
+    bkz = cz - Hc / 2.0 - mm(7.0)
+    brk = box("fe-bracket", Wc, mm(2.0), mm(16.0), (cx, yf + mm(4.0), bkz))
     brk.data.materials.append(brk_mat); parts.append(brk)
-    # real FE I/O = 3x DisplayPort + 1x HDMI (the HDMI is the wider/shorter port, here at the far right)
+    # real FE I/O = 3x DisplayPort + 1x HDMI · recessed INTO the bracket plane (was floating proud)
     for j, (pw, ph) in enumerate([(mm(18.0), mm(8.0)), (mm(18.0), mm(8.0)), (mm(18.0), mm(8.0)), (mm(22.0), mm(6.5))]):
-        io = box("fe-io", pw, mm(3.5), ph, (cx - mm(48.0) + j * mm(30.0), yf + mm(2.0), cz - Hc / 2.0 - mm(7.0)))
+        io = box("fe-io", pw, mm(2.6), ph, (cx - mm(48.0) + j * mm(30.0), yf + mm(4.2), bkz))
         io.data.materials.append(dark); parts.append(io)
+    # 2 bracket mounting screws at the ends (small recessed heads)
+    for sx in (cx - Wc / 2.0 + mm(7.0), cx + Wc / 2.0 - mm(7.0)):
+        bpy.ops.mesh.primitive_cylinder_add(radius=mm(2.4), depth=mm(2.0), vertices=16,
+            location=(sx, yf + mm(3.4), bkz), rotation=(math.radians(90), 0, 0))
+        sc = bpy.context.active_object; sc.name = "fe-brk-screw"
+        sc.data.materials.append(plate_mat); smooth(sc, 30); parts.append(sc)
     # PCIe gold-finger contact edge · THE recognizable 'this is a real GPU' cue (panel-3 #5). A dark
     # PCB edge protruding below the shroud with a gold contact strip + the PCIe key notch.
     pcb = box(f"fe-pcb{idx}", mm(120.0), mm(1.7), mm(11.0), (cx, yc, cz - Hc / 2.0 - mm(13.0)))
