@@ -757,6 +757,18 @@ def build_gpu(cx, cz, yc, idx=0):
     riser.data.materials.append(principled(f"fe-riserc{idx}", (0.03, 0.03, 0.033), 0.5)); parts.append(riser)
     return parts
 
+def _cable(name, pts, thick, mat):
+    """A sleeved round cable through control points (NURBS + bevel). For the rig power leads (R1)."""
+    cu = bpy.data.curves.new(name, "CURVE"); cu.dimensions = "3D"
+    cu.bevel_depth = thick; cu.bevel_resolution = 4; cu.resolution_u = 10
+    sp = cu.splines.new("NURBS"); sp.points.add(len(pts) - 1)
+    for i, (x, y, z) in enumerate(pts):
+        sp.points[i].co = (x, y, z, 1.0)
+    sp.order_u = min(4, len(pts)); sp.use_endpoint_u = True
+    ob = bpy.data.objects.new(name, cu); bpy.context.collection.objects.link(ob)
+    ob.data.materials.append(mat)
+    return ob
+
 def build_gpu_row():
     """6 GPUs hung from a top mounting bar, fan-faces forward · a mobo tray + PSU at the base
     (the riser-mounted open-rig look). Owner spec: 'open row of 6 cards, fans out'."""
@@ -804,6 +816,22 @@ def build_gpu_row():
         rib = box("riser-ribbon", mm(56.0), mm(1.4), mm(150.0), (rx, yc + mm(58.0), cz - mm(190.0)))
         rib.rotation_euler = (math.radians(52.0), 0, 0)   # card bottom (front) -> mobo slot (rear, down)
         rib.data.materials.append(rib_mat); parts.append(rib)
+    # POWER CABLES · R1 (GRADING-REPORT): six 575W cards MUST have visible 12V-2x6 power leads · a
+    # cable-less rig reads as a mockup ("what powers these?"). One sleeved lead from each card's top-edge
+    # connector (built in build_gpu at cx+68.5, top-rear), drooping back + down toward the PSU/tray.
+    cab_mat = principled("gpu-pwr-cable", (0.020, 0.020, 0.023), 0.52, metallic=0.0)   # matte sleeved black
+    Wc2 = mm(68.5)                       # card half-width (137/2) · the +X top edge with the connector
+    conn_z = cz + mm(96.0)               # connector height (matches build_gpu pz = cz+96 on the +X edge)
+    for i in range(n):
+        dx, dz = jit[i]
+        card_x = x0 + i * pitch + mm(dx)
+        czc = cz + mm(dz)
+        pts = [(card_x + Wc2 - mm(3), yc, czc + mm(96.0)),                 # at the recessed socket (+X top)
+               (card_x + Wc2 + mm(9), yc + mm(12), czc + mm(103.0)),       # emerge +X, up + BACK (+Y)
+               (card_x + Wc2 - mm(6), yc + mm(80), czc + mm(48.0)),        # arc BACK over the top-rear edge
+               (card_x + mm(4), mm(64.0), tray_z + mm(150.0)),             # drape down toward the mobo (behind)
+               (card_x - mm(10), mm(34.0), tray_z + mm(30.0))]             # into the PSU/tray zone at the base
+        parts.append(_cable(f"gpu-cable{i}", pts, mm(3.4), cab_mat))
     return parts
 
 # ---- rig · dark-object hero (edge + sheen carve the black out of void black) --------------
