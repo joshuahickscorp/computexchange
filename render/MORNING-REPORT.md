@@ -15,9 +15,12 @@ is always a next).
   frame-of-reference hero the owner asked for.
 
 ## Hero images to look at (render/rack_previews/)
+- **DELIVERABLES-CONTACT-SHEET.png** · START HERE · every hero in one grid (trio, rig, card 360,
+  desktop rears). Rebuild anytime with `python3 render/_contact_sheet.py`.
 - **trio-q34.png / trio-front.png** · the scale trio (the money shot) · full quality + bloom.
 - **gpurig-q34.png / gpurig-front.png** · the 6x RTX 5090 rig alone · full quality + bloom.
-- (single-card 360: gpu-front/rear/rearq34/top via `--part gpu`.)
+- **gpu-macro.png** · the 5090 card macro (glowing X + ring, shallow DOF). Full card 360 via `--part gpu`.
+- Desktop rears: model-refinement `render/previews/audit-{spark,studio}-rearq34.png`.
 
 ## 360-degree coverage (the loop's core mandate)
 - **RTX 5090 card**: front + q34 + rear all built (rear = mirrored X accent + blank cartouche +
