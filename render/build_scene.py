@@ -799,20 +799,19 @@ def build_mac_studio(loc_x=0.0, yaw_deg=0.0):
     foot.data.materials.append(principled("mac-foot-mat", (0.02, 0.02, 0.022), 0.5, metallic=0.2))
     smooth(foot, 40)
 
-    # REAR (researched · render/MAC-STUDIO-360-SPEC.md) · the big circular perforated exhaust vent
-    # (upper) + a lower port row: power, 4x TB5, 2x USB-A, HDMI, RJ-45, 3.5mm jack. Blank (D2 gate).
+    # REAR (render/MAC-STUDIO-360-SPEC.md) · M1 (GRADING-REPORT): a RECTANGULAR hex-perforation exhaust
+    # field ~173 x 53 mm (NOT a circle · corrected from Apple's 2025 back press image), upper portion,
+    # ~5mm below the top roll, entirely above the port row. Then the lower port row (M2). Blank (D2 gate).
     rear_y = D / 2.0
-    vent_z = zlift + mm(56.0)
-    bpy.ops.mesh.primitive_cylinder_add(radius=mm(38.0), depth=mm(7.0), vertices=64,
-                                        rotation=(math.radians(90), 0, 0),
-                                        location=(0, rear_y - mm(2.5), vent_z))
-    vcut = bpy.context.active_object; vcut.name = "mac-vent-cut"
-    apply_boolean(body, [vcut])                       # a shallow circular recess in the rear
-    bpy.ops.mesh.primitive_cylinder_add(radius=mm(36.0), depth=mm(1.5), vertices=64,
-                                        rotation=(math.radians(90), 0, 0),
-                                        location=(0, rear_y - mm(4.8), vent_z))
-    vent = bpy.context.active_object; vent.name = "mac-vent-mesh"
-    vent.data.materials.append(perforated_band()); smooth(vent, 60)   # the exhaust mesh disc
+    vent_z = zlift + mm(63.0)
+    vent_w, vent_h, vent_r = mm(173.0), mm(53.0), mm(6.0)
+    vcut = cutter_box(vent_w, mm(7.0), vent_h, vent_r, (0, rear_y - mm(2.5), vent_z))
+    vcut.name = "mac-vent-cut"
+    apply_boolean(body, [vcut])                       # a shallow RECTANGULAR recess in the rear
+    vent = cutter_box(vent_w - mm(3.0), mm(1.5), vent_h - mm(3.0), vent_r - mm(1.0),
+                      (0, rear_y - mm(4.6), vent_z))
+    vent.name = "mac-vent-mesh"
+    vent.data.materials.append(perforated_band()); smooth(vent, 60)   # the exhaust perforation field
     body.data.materials.append(principled("mac-rear-port", (0.028, 0.028, 0.031), 0.55, metallic=0.2))  # 3
     rpz = zlift + mm(12.0)
     rports = [(10.0, 10.0, -70.0),
