@@ -28,5 +28,6 @@ with the tab notch; QSFP = larger rectangular cages. Keep the rear face champagn
 - [x] build the rear I/O row into build_dgx_spark (11 recessed cavities: power/4x USB-C/2x USB-A/
       HDMI/RJ-45/2x QSFP) · verified via _audit_desktop.py (rear-q34): reads as the real port bank.
       Refine later: differentiate port sizes more (USB-C vs QSFP) for a dedicated rear hero.
-- [ ] verify sides + top from references (the foam-texture wrap, any vents).
+- [x] verify sides + top · audited (side yaw 90): clean champagne sides (correct · plain metal),
+      foam-texture top + vent panel already built. Spark is 360-complete (front/rear/sides/top).
 - [ ] confirm every body dimension against a source (150/150/50.5).
