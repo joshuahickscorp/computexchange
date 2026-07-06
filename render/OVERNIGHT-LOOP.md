@@ -80,12 +80,12 @@ rear I/O and the Studio's rear port array — research the EXACT layout before m
 
 ## Per-object angle checklist (update as you go)
 ```
-RACK / 6x RTX 5090 FE   front [x]  q34 [x]  rear-q34 [x]  side [~]  top [~]  macro [~]
-  single-card 360 audit rig added (--part gpu · front/q34/rear/rearq34/top/side/bottom). Card BACK
-  built: mirrored rear X + blank cartouche + flow-through window. STILL open: fan blades read thin at
-  macro (fuller/curved) · single-card rig too bright (dark-gunmetal tone) · card TOP-edge exhaust
-  vents + make wordmark/16-pin read · fin-stack visible through the rear window · short-end I-O bracket
-  (3x DP + 1x HDMI) detail · riser cables tray->cards · real mobo + PSU + cabling · tone/room grounding.
+RACK / 6x RTX 5090 FE   front [x]  q34 [x]  rear-q34 [x]  side [x]  top [x]  macro [x]  · 360-COMPLETE
+  card: front/q34/rear (X + cartouche + flow-through window)/macro/side/top all built + rendered
+  (--part gpu). fans read as real fans, Dark Gun Metal tone, wired base (mobo + PSU + riser ribbons).
+  rig renders from every angle (rack_camera: front/q34/side/rear/rearq34/top). Hero post-chain (--post).
+  open (polish only): card TOP-edge exhaust-vent slots + 16-pin read · fin detail in the rear window ·
+  short-end I-O bracket (3x DP + 1x HDMI) · optional handled-hardware wear · optional room/env reflect.
 DGX SPARK               front [x]  q34 [x]  rear [x]  side [x]  top [x]  macro [~]  · 360-COMPLETE
   rear port bank + clean champagne sides + foam/vent top all verified. open (polish): differentiate
   rear port sizes for a dedicated rear macro. audit: render/_audit_desktop.py --which spark --yaw N.

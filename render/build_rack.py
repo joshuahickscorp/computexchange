@@ -588,10 +588,9 @@ def rack_camera(aim, shot, res):
     cam = bpy.data.objects.new("cam", cd); bpy.context.collection.objects.link(cam); sc.camera = cam
     H = mm(RACK["H"])
     dist = 2.5    # wide (~0.86m) 6-GPU rig · was 4.6 for the 2m cabinet
-    if shot in ("front", "frame-front"):
-        yaw, elev = 0.0, 4.0
-    else:  # q34
-        yaw, elev = 32.0, 8.0
+    yaw, elev = {"front": (0.0, 4.0), "frame-front": (0.0, 4.0), "q34": (32.0, 8.0),
+                 "side": (90.0, 6.0), "rear": (180.0, 4.0), "rearq34": (212.0, 9.0),
+                 "top": (18.0, 55.0)}.get(shot, (32.0, 8.0))
     ya, el = math.radians(yaw), math.radians(elev)
     ax, ay, az = aim.location
     cam.location = (ax + dist * math.cos(el) * math.sin(ya),
