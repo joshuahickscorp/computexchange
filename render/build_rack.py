@@ -504,7 +504,7 @@ def build_fan(cx, yf, cz, r, nb=9, blade_rgb=(0.105, 0.105, 0.115), emit_ring=Fa
             location=(cx, yf - mm(0.5), cz), rotation=(math.radians(90), 0, 0),
             major_segments=48, minor_segments=8)
         er = bpy.context.active_object; er.name = "fan-inlet-lit"
-        er.data.materials.append(emissive("fan-inlet-lit-mat", (0.86, 0.92, 1.0), 16.0))  # true LED · lights the adjacent shroud (panel-measured spill)
+        er.data.materials.append(emissive("fan-inlet-lit-mat", (0.86, 0.92, 1.0), 9.0))  # true LED · lights the adjacent shroud but no longer FLOODS the black fans grey (temper 16->9 · re-measure spill)
         smooth(er, 30); parts.append(er)
     return parts
 
@@ -521,7 +521,7 @@ def build_gpu(cx, cz, yc, idx=0):
     plate_mat = machined_metal(f"fe-plate{idx}", (0.10, 0.104, 0.113), 0.45, metallic=0.9)
     brk_mat = principled(f"fe-brk{idx}", (0.078, 0.078, 0.078), 0.50, metallic=0.9)
     dark = principled(f"fe-dark{idx}", (0.02, 0.02, 0.022), 0.6)
-    lit = emissive(f"fe-lit{idx}", (0.86, 0.92, 1.0), 12.0)   # true LED · lights the shroud (panel-measured)
+    lit = emissive(f"fe-lit{idx}", (0.86, 0.92, 1.0), 7.0)   # true LED · lights the shroud (temper 12->7 with the rings)
     yf = yc - Tc / 2.0
     fan_r = mm(57.0)                          # ~115mm dia
     zt, zb = cz + mm(78.0), cz - mm(78.0)     # the two fan centers (one at each end)

@@ -37,6 +37,10 @@ Verdict: still 4/4 RENDER, but the graders MEASURED my panel-1 fixes as off-targ
   emission 4->16, X 3.2->12 · now measured adjacent ~76 > far ~66 (inversion corrected). The rings
   light the shroud. Cost: clip ~2.5% (the intentional bright LEDs · realistic · gate was set for the
   no-emitter dark cabinet).
+- **[TEMPERED 2026-07-06] LED brightness re-balanced.** Emission 16/12 was FLOODING the (now black)
+  fans grey and clipping hard. Tempered ring 16->9, X 12->7 · re-measured: rig q34 clip 1.15%->0.87%
+  (PASSES the 1% gate for the first time), fans read black, rings still glow, and spill is PRESERVED
+  (shroud between rings 174.6 > far border 109.1 · no inversion · guarded per the panel-2 lesson).
 - **[NOW DONE] Grounding (#2, all 4).** Panel-1 landed on the tabletop objects, NOT the rack legs.
   Re-fixed: floor roughness 0.34->0.14 (glossy) · it now reflects the legs + the bright rings, grounding
   the whole rig.
