@@ -174,7 +174,16 @@ def powder_coat(name="powder-black", base=(0.028, 0.028, 0.030), rough=0.52):
     mapr = nt.nodes.new("ShaderNodeMapRange")
     mapr.inputs["To Min"].default_value = rough - 0.04; mapr.inputs["To Max"].default_value = rough + 0.04
     nt.links.new(n.outputs["Fac"], mapr.inputs["Value"])
-    nt.links.new(mapr.outputs["Result"], b.inputs["Roughness"])
+    # large-scale (low-freq) roughness ZONING on top of the fine orange-peel · panel-6 #3: the frame
+    # read as one uniform matte value · real powder-coated steel varies satin/matte across a face.
+    # Roughness-only (albedo untouched · tone gate holds).
+    lf = nt.nodes.new("ShaderNodeTexNoise"); lf.inputs["Scale"].default_value = 3.2; lf.inputs["Detail"].default_value = 2.0
+    nt.links.new(tc.outputs["Object"], lf.inputs["Vector"])
+    lfr = nt.nodes.new("ShaderNodeMapRange"); lfr.inputs["To Min"].default_value = -0.06; lfr.inputs["To Max"].default_value = 0.09
+    nt.links.new(lf.outputs["Fac"], lfr.inputs["Value"])
+    radd = nt.nodes.new("ShaderNodeMath"); radd.operation = "ADD"; radd.use_clamp = True
+    nt.links.new(mapr.outputs["Result"], radd.inputs[0]); nt.links.new(lfr.outputs["Result"], radd.inputs[1])
+    nt.links.new(radd.outputs["Value"], b.inputs["Roughness"])
     # W0.6 · authentic orange-peel = a VORONOI cell layer (the characteristic peel dimples) over
     # the fine noise · two scales give the real spatially-varying satin break-up that a single
     # noise lacked. Albedo + roughness CENTER unchanged (tone gate holds · verified dE2.08).
