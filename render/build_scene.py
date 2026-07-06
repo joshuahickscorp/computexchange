@@ -1213,6 +1213,17 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
             ys = [(isl.matrix_world @ v.co).y for v in isl.data.vertices]
             print(f"[island {sx}] polys={len(mi)} mat0={mi.count(0)} mat1={mi.count(1)}"
                   f" y[{min(ys)*1000:.1f},{max(ys)*1000:.1f}]mm loc={tuple(round(c*1000,1) for c in isl.location)}")
+        # NVIDIA green logo badge · S7 (GRADING-REPORT): the LEFT front carries the green NVIDIA eye mark
+        # + a 90deg-rotated wordmark (STH/ChargerLAB · "the lower air intake is marked with the NVIDIA
+        # logo"). Blank green-tinted plates per the trademark gate (shapes + placement only, no glyphs),
+        # proud of the foam on the lower-left front.
+        nv_green = principled("spark-nv-green", (0.24, 0.44, 0.02), 0.38, metallic=0.0)
+        eye = rounded_box("spark-nv-eye", mm(7.0), mm(1.3), mm(7.0), mm(1.6), 0, 0, seg_corner=6)
+        eye.location = (-px + mm(6.0), front_y - mm(1.5), zc - mm(15.0))
+        eye.data.materials.append(nv_green); smooth(eye, 20); tubs.append(eye)
+        word = rounded_box("spark-nv-word", mm(2.4), mm(1.1), mm(12.0), mm(1.0), 0, 0, seg_corner=3)
+        word.location = (-px + mm(12.0), front_y - mm(1.4), zc - mm(15.0))
+        word.data.materials.append(nv_green); smooth(word, 20); tubs.append(word)
     else:
         # wave 5b · two-scale displacement for size VARIANCE (coarse 2.15mm cells subdivided by
         # a finer 1.30mm strut network · fixes the uniform single-scale reptile-skin look) plus
