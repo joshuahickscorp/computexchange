@@ -107,6 +107,11 @@ SCALE TRIO              first render [x]  → build_trio.py works (rack base + S
 - **One bounded change per commit.** Honest messages. Tick the item. No batching unrelated changes.
 - **Verify before claiming PASS** — the tool's real exit code, the actual render. The R0.2 false-PASS
   lesson: never write "gate PASS" without reading it.
+- **After any BOOLEAN cut, check body integrity from a LIT angle** (not just the dark rear-3/4). Lesson
+  2026-07-06: rounding rear ports to r~=w/2 made degenerate tangent verts the EXACT solver choked on,
+  which COLLAPSED the Mac Studio body to a flat plate · the dark rear audit hid it · it only showed in
+  the lit trio hero. Round cuts: keep r a hair under half, and re-render a lit front/q34 to confirm the
+  body is intact before committing.
 - **Autopsy on any overturned pin/value** (write why the old value was wrong). **Flip-flop guard:**
   re-measure against 2 references before re-changing a value you already changed once.
 - **Clean premium products stay clean** — added imperfection reads FAKE on a Studio/Spark/GPU shroud.
