@@ -1,8 +1,15 @@
 # Morning report · overnight loop (2026-07-05 -> 07-06)
 
-Ran the OVERNIGHT-LOOP (render -> edit -> audit -> commit) on all three oracles. ~22 clean commits,
+Ran the OVERNIGHT-LOOP (render -> edit -> audit -> commit) on all three oracles. ~40 clean commits,
 no AI attribution, blank trademarks throughout. Honest state below · the loop is still open (there
 is always a next).
+
+**Photoreal push (later in the night):** machined-metal microtexture + bright edge-bevel highlights
+on the card shroud, a hero vignette + subtle chromatic aberration on top of the ring bloom, glossy
+plastic fan blades, and a DEFINITIVE hi-res trio hero (2880x2304, 820 spp). Also caught + fixed a
+real regression: a "round the rear ports" change had COLLAPSED the Mac Studio body (degenerate
+boolean) · it was hidden in the dark rear audit and only showed in the lit hero · reverted + a
+lit-angle body-integrity check is now codified in OVERNIGHT-LOOP.md.
 
 ## The headline: the RTX 5090 rig + the scale trio
 - **The rack's GPU is now the real NVIDIA RTX 5090 Founders Edition**, researched from the web
