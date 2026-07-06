@@ -886,7 +886,7 @@ def spark_top_vent():
     return add_bevel(m)   # photoreal T7 · hairline edge (chains the weave bump into the bevel)
 
 
-def foam3d_material(base=(0.575, 0.483, 0.308), ao_fac=0.86, ao_dist=1.4, rough=0.40):
+def foam3d_material(base=(0.575, 0.483, 0.308), ao_fac=0.86, ao_dist=1.4, rough=0.40):   # AUTOPSY (panel-6 #2 · deeper pore AO · REVERTED): ao 0.86->0.93 crushed the pores darker but overshot the tone pin (spark_foam L 34.7->32.5, dE 4.98->6.11 FAIL) · the foam is at its GATED depth limit · deepening the recesses darkens the mean past the target · the panel's 'more depth' conflicts with the mean pin · leave at 0.86 (dE 4.98 PASS, accurate 3D foam)
     # SP10 attempt 2 (attempt 1 cancelled itself: base lift raised the mean as fast as deeper AO
     # raised the spread · std/mean flat at 0.482 vs pin 0.60). Now: voids MUCH deeper (ao 0.86,
     # reach 1.4mm) and base near-original · spread UP, mean DOWN, and the gate mean has been
