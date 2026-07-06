@@ -689,7 +689,10 @@ def build_gpu(cx, cz, yc, idx=0):
     bpy.context.collection.objects.link(xgo); parts.append(xgo)
     # top-edge wordmark · a blank lit strip on the 'top edge' (a vertical side edge when portrait,
     # +X so it faces the q34 camera), plus the angled recessed 16-pin power header near it
-    wm = box("fe-wordmark", mm(2.0), mm(18.0), mm(70.0), (cx + Wc / 2.0 - mm(1.0), yc, cz + mm(38.0)))
+    # top-edge GEFORCE RTX wordmark · G9 (GRADING-REPORT): a THIN backlit text-height strip on the
+    # central third of the top edge (blank per trademark gate), not the old 18x70mm glowing tile that
+    # blew out the side view. Backlit cool white, flush-inset. Sources: club386/TheFPSReview (backlit).
+    wm = box("fe-wordmark", mm(1.2), mm(4.5), mm(54.0), (cx + Wc / 2.0 - mm(0.6), yc, cz + mm(6.0)))
     wm.data.materials.append(lit); parts.append(wm)
     # 16-pin 12V-2x6 power · G10 (GRADING-REPORT): a RECESSED, angled socket on the top edge, not a
     # protruding cylinder (HotHardware/club386/LanOC: "recessed... angled ~45deg" toward the tail). NO
