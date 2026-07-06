@@ -521,7 +521,7 @@ def build_fan(cx, yf, cz, r, nb=9, blade_rgb=(0.105, 0.105, 0.115), emit_ring=Fa
     front-face plane. emit_ring adds the 5090 FE's cool-white lit inlet ring around the fan."""
     parts = []
     well = principled("fan-well", (0.012, 0.012, 0.014), 0.55)
-    ring = principled("fan-ring", (0.03, 0.03, 0.033), 0.42, metallic=0.35)
+    ring = machined_metal("fan-ring", (0.03, 0.03, 0.033), 0.42, metallic=0.5)   # machined-metal bezel/rim/hub · same micro-texture + edge bevel as the shroud (was flat principled) · consistent metal read around each fan
     blade = principled("fan-blade", blade_rgb, 0.44, metallic=0.0, coat=0.30)   # glossy-ish black ABS (panel-6 #1: dead matte 'clay') · lower rough + a tight clearcoat so a NARROW bright spec streak travels the blade (real molded fan plastic) · the LED glow is a light object now, not the emissive flood that greyed it
     # roughness micro-texture + bump so the blade faces catch a MOVING highlight, not one flat value
     # (panel-6 #1: 'no micro-normal detail') · object-space so it rides the geometry.
