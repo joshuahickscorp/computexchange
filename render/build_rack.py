@@ -1157,16 +1157,24 @@ elif PART == "gpu":
     add_area("key", (-0.55, -0.7, 0.6), 0.4, float(arg("--key", 42)), (1.0, 0.99, 0.97), aim=aim)
     add_area("rim", (0.5, 0.6, 0.55), 0.04, float(arg("--rim", 30)), (0.93, 0.96, 1.0), sx=0.5, aim=aim)
     add_area("fill", (0.1, -0.75, 0.2), 0.7, float(arg("--fill", 12)), (0.97, 0.98, 1.0), aim=aim)
-    bpy.ops.mesh.primitive_plane_add(size=4.0, location=(0, 0, -0.17))
-    _fl = bpy.context.active_object; _fl.data.materials.append(principled("floor", (0.006, 0.006, 0.007), 0.62))
+    # G17 · bottom-shot relight: the underside (bracket/fingers/riser) sits near the floor · at elev -60
+    # the camera dropped UNDER the floor plane, which then occluded everything (a solid-black frame). For
+    # the bottom shot, skip the floor and add an under-fill so the PCIe end reads.
+    if SHOT == "bottom":
+        add_area("underfill", (0.0, -0.5, -0.8), 0.6, 15.0, (1.0, 0.99, 0.97), aim=aim)
+    else:
+        bpy.ops.mesh.primitive_plane_add(size=4.0, location=(0, 0, -0.17))
+        _fl = bpy.context.active_object; _fl.data.materials.append(principled("floor", (0.006, 0.006, 0.007), 0.62))
     _sc = bpy.context.scene
     _cd = bpy.data.cameras.new("cam"); _cd.lens = 85.0; _cd.sensor_width = 36.0
     _cam = bpy.data.objects.new("cam", _cd); bpy.context.collection.objects.link(_cam); _sc.camera = _cam
     _dist = 0.30 if SHOT == "macro" else 0.66
     _shots = {"front": (0, 3), "q34": (32, 10), "rear": (180, 3), "rearq34": (212, 12),
-              "top": (0, 72), "side": (90, 5), "bottom": (0, -60), "macro": (18, 7)}
+              "top": (0, 72), "side": (90, 5), "bottom": (22, -42), "macro": (18, 7)}
     if SHOT == "macro":
         aim.location = (0.0, 0.0, mm(34.0))   # feature-aimed between the X accent + the top fan
+    if SHOT == "bottom":
+        aim.location = (0.0, 0.0, -mm(150.0))   # aim at the PCIe bracket / gold-finger end
     _yaw, _elev = _shots.get(SHOT, (32, 10))
     _ya, _el = math.radians(_yaw), math.radians(_elev)
     ax, ay, az = aim.location
