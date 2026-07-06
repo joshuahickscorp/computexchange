@@ -21,6 +21,7 @@ def _arg(name, d=None):
     return d
 SHOT = str(_arg("--shot", "q34"))
 PREVIEW = bool(_arg("--preview", False))
+POST = bool(_arg("--post", False))
 
 def load(path, argv_after, name):
     """exec a builder file into its own namespace with a no-op dispatch · returns the namespace."""
@@ -36,7 +37,7 @@ def load(path, argv_after, name):
 
 # load both builders (neither builds a scene or renders under these args)
 SCN = load(SCENE_PATH, ["--only", "none"] + (["--preview"] if PREVIEW else []), "scene_defs")
-RK = load(RACK_PATH, ["--part", "defs"] + (["--preview"] if PREVIEW else []), "rack_defs")
+RK = load(RACK_PATH, ["--part", "defs"] + (["--preview"] if PREVIEW else []) + (["--post"] if POST else []), "rack_defs")
 
 # --- build the shared scene via the rack's setup, then the rack itself ---
 sc = RK["reset_scene"]()

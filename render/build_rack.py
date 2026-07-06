@@ -21,6 +21,8 @@ def arg(name, default=None):
     return default
 
 PREVIEW = bool(arg("--preview", False))
+POST = bool(arg("--post", False))   # hero-only compositor: subtle fog-glow bloom on the lit rings +
+# vignette. Applied AFTER the numeric gate (the gate always reads the raw, pre-post frame).
 SHOT = str(arg("--shot", "q34"))
 SAMPLES = int(arg("--samples", 96 if PREVIEW else 512))
 OUT = str(arg("--out", "render/rack_previews/"))
@@ -578,8 +580,30 @@ def rack_camera(aim, shot, res):
     cd.dof.use_dof = True; cd.dof.focus_object = aim; cd.dof.aperture_fstop = 16.0
     sc.render.resolution_x, sc.render.resolution_y = res
 
+def setup_post(sc):
+    """Hero post-chain (compositor) · a subtle FOG-GLOW bloom so the lit inlet rings + X read as
+    real LEDs with a soft halo, plus a gentle vignette. Photographic finish · never on gate frames."""
+    sc.use_nodes = True
+    nt = sc.node_tree
+    for n in list(nt.nodes):
+        nt.nodes.remove(n)
+    rl = nt.nodes.new("CompositorNodeRLayers")
+    glare = nt.nodes.new("CompositorNodeGlare")
+    glare.glare_type = "FOG_GLOW"; glare.quality = "HIGH"; glare.threshold = 0.82; glare.size = 6
+    try: glare.mix = -0.55   # keep the bloom subtle (blend toward the original)
+    except Exception: pass
+    lens = nt.nodes.new("CompositorNodeLensdist")
+    try: lens.inputs["Dispersion"].default_value = 0.004   # a hair of chromatic aberration at the edge
+    except Exception: pass
+    comp = nt.nodes.new("CompositorNodeComposite")
+    nt.links.new(rl.outputs["Image"], glare.inputs["Image"])
+    nt.links.new(glare.outputs["Image"], lens.inputs["Image"])
+    nt.links.new(lens.outputs["Image"], comp.inputs["Image"])
+
 def render_to(path):
     sc = bpy.context.scene; sc.render.filepath = path
+    if POST:
+        setup_post(sc)
     t0 = time.time(); bpy.ops.render.render(write_still=True)
     print(f"rendered {path} in {time.time()-t0:.1f}s ({sc.cycles.samples} spp, {sc.render.resolution_percentage}%)")
 
