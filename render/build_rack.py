@@ -753,7 +753,21 @@ def build_gpu(cx, cz, yc, idx=0):
     for gx, gw in ((cx - mm(34.0), mm(48.0)), (cx + mm(30.0), mm(56.0))):   # two finger banks split by the PCIe key notch
         gf = box("fe-goldfinger", gw, mm(1.9), mm(6.0), (gx, yc, cz - Hc / 2.0 - mm(17.0)))
         gf.data.materials.append(gold); parts.append(gf)
-    riser = box("fe-riser", mm(96.0), mm(20.0), mm(15.0), (cx, yc, cz - Hc / 2.0 - mm(24.0)))
+    # PCIe x16 SLOT connector · R2 (GRADING-REPORT): the card seats INTO a slot, not floating on bare
+    # fingers. Two black rails straddle the PCB edge (the slot gap the gold fingers sit in) + end caps +
+    # a retention latch at one end · then the riser board/adapter below it (the open-rig riser look).
+    slot_mat = principled(f"fe-slot{idx}", (0.022, 0.022, 0.026), 0.5, metallic=0.2)
+    slot_z = cz - Hc / 2.0 - mm(18.0)
+    for sy in (yc - mm(1.7), yc + mm(1.7)):    # two rails straddling the ~1.7mm PCB (the slot gap)
+        rail = box("fe-slot-rail", mm(92.0), mm(1.6), mm(9.0), (cx, sy, slot_z))
+        rail.data.materials.append(slot_mat); parts.append(rail)
+    for ex in (cx - mm(47.0), cx + mm(47.0)):  # connector end caps (close the slot ends)
+        cap = box("fe-slot-cap", mm(4.0), mm(5.2), mm(9.0), (ex, yc, slot_z))
+        cap.data.materials.append(slot_mat); parts.append(cap)
+    latch = rounded_box("fe-slot-latch", mm(5.0), mm(5.0), mm(7.0), mm(1.0), seg=2)   # retention clip
+    latch.location = (cx + mm(51.0), yc, slot_z - mm(1.0)); latch.data.materials.append(slot_mat)
+    smooth(latch, 20); parts.append(latch)
+    riser = box("fe-riser", mm(96.0), mm(20.0), mm(12.0), (cx, yc, cz - Hc / 2.0 - mm(28.0)))  # riser board/adapter below the slot
     riser.data.materials.append(principled(f"fe-riserc{idx}", (0.03, 0.03, 0.033), 0.5)); parts.append(riser)
     return parts
 
