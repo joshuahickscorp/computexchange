@@ -245,6 +245,28 @@ def machined_metal(name, base, rough, metallic=0.9):
     bump = nt.nodes.new("ShaderNodeBump")
     bump.inputs["Strength"].default_value = 0.04; bump.inputs["Distance"].default_value = mm(0.02)
     nt.links.new(nb.outputs["Fac"], bump.inputs["Height"]); nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
+    # CURVATURE-DRIVEN EDGE MACHINING (ASCENSION #1b · the biggest gunmetal tell): a real die-cast
+    # shroud reads matte anodize on the broad faces but its machined chamfers expose brighter, smoother
+    # bare aluminium. Drive it off geometry Pointiness (convex edges sit above the 0.5 flat value) so
+    # ONLY the thin edge sliver smooths + brightens · broad faces are untouched, and edges are a tiny
+    # pixel fraction so the tone pins + clip gate hold. This is what makes cast metal read 'machined'.
+    geo = nt.nodes.new("ShaderNodeNewGeometry")
+    ef = nt.nodes.new("ShaderNodeMapRange")            # isolate the convex chamfer sliver -> 0..1
+    ef.inputs["From Min"].default_value = 0.52; ef.inputs["From Max"].default_value = 0.62
+    ef.inputs["To Min"].default_value = 0.0; ef.inputs["To Max"].default_value = 1.0
+    nt.links.new(geo.outputs["Pointiness"], ef.inputs["Value"])
+    edrop = nt.nodes.new("ShaderNodeMath"); edrop.operation = "MULTIPLY"   # edges read smoother (bare alu)
+    nt.links.new(ef.outputs["Result"], edrop.inputs[0]); edrop.inputs[1].default_value = 0.12
+    rsub = nt.nodes.new("ShaderNodeMath"); rsub.operation = "SUBTRACT"; rsub.use_clamp = True
+    nt.links.new(radd.outputs["Value"], rsub.inputs[0]); nt.links.new(edrop.outputs["Value"], rsub.inputs[1])
+    nt.links.new(rsub.outputs["Value"], b.inputs["Roughness"])            # re-route roughness through the edge drop
+    emx = nt.nodes.new("ShaderNodeMath"); emx.operation = "MULTIPLY"       # edges a hair brighter, capped low
+    nt.links.new(ef.outputs["Result"], emx.inputs[0]); emx.inputs[1].default_value = 0.30
+    ecol = nt.nodes.new("ShaderNodeMixRGB")
+    ecol.inputs["Color1"].default_value = (*base, 1.0)
+    ecol.inputs["Color2"].default_value = (min(base[0] * 2.0, 1.0), min(base[1] * 2.0, 1.0), min(base[2] * 2.0, 1.0), 1.0)
+    nt.links.new(emx.outputs["Value"], ecol.inputs["Fac"])
+    nt.links.new(ecol.outputs["Color"], b.inputs["Base Color"])
     return add_bevel(m, radius=0.35)   # rounded-shading edges catch a bright micro-bevel highlight (real metal)
 
 def floor_mat(name="floor"):
