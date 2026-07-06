@@ -628,8 +628,12 @@ def build_gpu(cx, cz, yc, idx=0):
         ("edge-r", bw, Hc, cx + Wc / 2.0 - bw / 2, cz)):
         eb = rounded_box("fe-" + nm, w, Tc, h, mm(4.0), seg=4)
         eb.location = (lx, yc, lz); eb.data.materials.append(body_mat); smooth(eb, 30); parts.append(eb)
+    # center module · G4 (GRADING-REPORT): the real FE two-tone is a BLACK center section with a
+    # gunmetal OUTER frame + X (club386, LanOC) · the builder had the center in gunmetal body_mat
+    # (inverted). Black die-cast center now, so the gunmetal X + lit strips pop against it.
+    center_mat = machined_metal(f"fe-center{idx}", (0.034, 0.036, 0.042), 0.46, metallic=0.85)
     cbar = rounded_box("fe-centerbar", Wc, Tc, mm(48.0), mm(3.0), seg=3)
-    cbar.location = (cx, yc, cz); cbar.data.materials.append(body_mat); smooth(cbar, 30); parts.append(cbar)
+    cbar.location = (cx, yc, cz); cbar.data.materials.append(center_mat); smooth(cbar, 30); parts.append(cbar)
     # flow-through fin stack behind each fan · G7 (GRADING-REPORT): the real FE rear windows reveal the
     # fin EDGES receding into the card, dished concave where the fan sits ("vertical heatsink fins that
     # are all black" · LanOC; "concave right where the fans are located"). Vertical black fins with gaps,
