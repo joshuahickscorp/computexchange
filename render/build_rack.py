@@ -643,10 +643,20 @@ def setup_post(sc):
     lens = nt.nodes.new("CompositorNodeLensdist")
     try: lens.inputs["Dispersion"].default_value = 0.004   # a hair of chromatic aberration at the edge
     except Exception: pass
+    # subtle vignette · real lenses darken the frame corners (was promised, never built)
+    mask = nt.nodes.new("CompositorNodeEllipseMask"); mask.width = 1.15; mask.height = 1.15
+    vblur = nt.nodes.new("CompositorNodeBlur"); vblur.filter_type = "FAST_GAUSS"; vblur.size_x = 240; vblur.size_y = 240
+    vmap = nt.nodes.new("CompositorNodeMapRange")
+    vmap.inputs["To Min"].default_value = 0.80; vmap.inputs["To Max"].default_value = 1.0
+    vig = nt.nodes.new("CompositorNodeMixRGB"); vig.blend_type = "MULTIPLY"; vig.inputs["Fac"].default_value = 1.0
     comp = nt.nodes.new("CompositorNodeComposite")
     nt.links.new(rl.outputs["Image"], glare.inputs["Image"])
     nt.links.new(glare.outputs["Image"], lens.inputs["Image"])
-    nt.links.new(lens.outputs["Image"], comp.inputs["Image"])
+    nt.links.new(mask.outputs["Mask"], vblur.inputs["Image"])
+    nt.links.new(vblur.outputs["Image"], vmap.inputs["Value"])
+    nt.links.new(lens.outputs["Image"], vig.inputs[1])
+    nt.links.new(vmap.outputs["Value"], vig.inputs[2])
+    nt.links.new(vig.outputs["Image"], comp.inputs["Image"])
 
 def render_to(path):
     sc = bpy.context.scene; sc.render.filepath = path
