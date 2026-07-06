@@ -80,10 +80,12 @@ rear I/O and the Studio's rear port array — research the EXACT layout before m
 
 ## Per-object angle checklist (update as you go)
 ```
-RACK / 6x RTX 5090 FE   front [x]  q34 [x]  rear-q34 [ ]  side [ ]  top [ ]  macro [ ]
-  open: riser cables tray->cards · real mobo + PSU + cabling on the tray · card BACK (rear X +
-  flow-through window) · card TOP edge (wordmark, angled 16-pin, exhaust vents) · card short-end I-O
-  bracket (3x DP + 1x HDMI) · fin-stack detail · frame cable management · tone / room grounding.
+RACK / 6x RTX 5090 FE   front [x]  q34 [x]  rear-q34 [x]  side [~]  top [~]  macro [~]
+  single-card 360 audit rig added (--part gpu · front/q34/rear/rearq34/top/side/bottom). Card BACK
+  built: mirrored rear X + blank cartouche + flow-through window. STILL open: fan blades read thin at
+  macro (fuller/curved) · single-card rig too bright (dark-gunmetal tone) · card TOP-edge exhaust
+  vents + make wordmark/16-pin read · fin-stack visible through the rear window · short-end I-O bracket
+  (3x DP + 1x HDMI) detail · riser cables tray->cards · real mobo + PSU + cabling · tone/room grounding.
 DGX SPARK               front [x]  q34 [~]  rear [ ]  side [ ]  top [ ]  macro [~]
   open: RESEARCH + build the exact REAR I-O (Spark has a specific port layout) · sides · top · confirm
   every dimension from a source · final materials from 360.

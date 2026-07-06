@@ -478,9 +478,23 @@ def build_gpu(cx, cz, yc, idx=0):
     pwr.location = (cx + Wc / 2.0 - mm(20.0), yc + mm(5.0), cz + Hc / 2.0 - mm(34.0))
     pwr.rotation_euler = (0, 0, math.radians(20.0)); pwr.data.materials.append(dark)
     smooth(pwr, 30); parts.append(pwr)
-    # backplate (dark metal · rear X + flow-through window live at the macro wave)
-    bp = box("fe-backplate", Wc - mm(4), mm(2.0), Hc - mm(6), (cx, yc + Tc / 2.0 + mm(1.0), cz))
+    # backplate (dark metal) · a mirrored rear X 'infinity' accent + a blank etched cartouche
+    # (NVIDIA logo · blank per trademark gate) + a large flow-through WINDOW over the top fan
+    # (air exits the fin stack out the back here · the FE's defining rear feature).
+    by = yc + Tc / 2.0 + mm(1.0)
+    bp = box("fe-backplate", Wc - mm(4), mm(2.5), Hc - mm(6), (cx, by, cz))
+    win = box("fe-bpwin", mm(98.0), mm(20.0), mm(98.0), (cx, by, zt))
+    bpy.context.view_layer.objects.active = bp
+    mdw = bp.modifiers.new("w", "BOOLEAN"); mdw.operation = "DIFFERENCE"; mdw.solver = "EXACT"; mdw.object = win
+    bpy.ops.object.modifier_apply(modifier=mdw.name); bpy.data.objects.remove(win, do_unlink=True)
     bp.data.materials.append(plate_mat); parts.append(bp)
+    ybx = by + mm(2.0)
+    for sgn in (1, -1):
+        rxb = rounded_box("fe-rearx", mm(80.0), mm(3.0), mm(9.0), mm(2.0), seg=2)
+        rxb.location = (cx, ybx, cz); rxb.rotation_euler = (0, math.radians(sgn * 33.0), 0)
+        rxb.data.materials.append(xacc_mat); smooth(rxb, 30); parts.append(rxb)
+    cart = box("fe-cartouche", mm(30.0), mm(1.2), mm(12.0), (cx, ybx + mm(0.4), cz))
+    cart.data.materials.append(principled(f"fe-cart{idx}", (0.09, 0.093, 0.10), 0.42, metallic=0.85)); parts.append(cart)
     # bottom · PCIe bracket (4 connector cutouts, NO vent grille per FE) + riser stub
     brk = box("fe-bracket", Wc, mm(2.0), mm(16.0), (cx, yf + mm(4.0), cz - Hc / 2.0 - mm(7.0)))
     brk.data.materials.append(brk_mat); parts.append(brk)
@@ -825,6 +839,30 @@ elif PART == "switch":
     switch_rig_camera(SHOT, (1900, 900))
     render_to(OUT + f"switch-{SHOT}.png")
     print("build_rack CRS354 switch proof done.")
+elif PART == "gpu":
+    # ONE RTX 5090 FE · 360 audit rig (front/q34/rear/rearq34/top/side/bottom · SHOT selects).
+    build_gpu(0.0, 0.0, 0.0, idx=0)
+    aim = bpy.data.objects.new("Aim", None); aim.location = (0, 0, 0)
+    bpy.context.collection.objects.link(aim)
+    add_area("key", (-0.55, -0.7, 0.6), 0.4, float(arg("--key", 60)), (1.0, 0.99, 0.97), aim=aim)
+    add_area("rim", (0.5, 0.6, 0.55), 0.04, float(arg("--rim", 42)), (0.93, 0.96, 1.0), sx=0.5, aim=aim)
+    add_area("fill", (0.1, -0.75, 0.2), 0.7, float(arg("--fill", 20)), (0.97, 0.98, 1.0), aim=aim)
+    bpy.ops.mesh.primitive_plane_add(size=4.0, location=(0, 0, -0.17))
+    _fl = bpy.context.active_object; _fl.data.materials.append(principled("floor", (0.006, 0.006, 0.007), 0.62))
+    _sc = bpy.context.scene
+    _cd = bpy.data.cameras.new("cam"); _cd.lens = 85.0; _cd.sensor_width = 36.0
+    _cam = bpy.data.objects.new("cam", _cd); bpy.context.collection.objects.link(_cam); _sc.camera = _cam
+    _dist = 0.66
+    _shots = {"front": (0, 3), "q34": (32, 10), "rear": (180, 3), "rearq34": (212, 12),
+              "top": (0, 72), "side": (90, 5), "bottom": (0, -60)}
+    _yaw, _elev = _shots.get(SHOT, (32, 10))
+    _ya, _el = math.radians(_yaw), math.radians(_elev)
+    _cam.location = (_dist * math.cos(_el) * math.sin(_ya), -_dist * math.cos(_el) * math.cos(_ya), _dist * math.sin(_el))
+    _c = _cam.constraints.new("TRACK_TO"); _c.target = aim; _c.track_axis = "TRACK_NEGATIVE_Z"; _c.up_axis = "UP_Y"
+    _cd.dof.use_dof = True; _cd.dof.focus_object = aim; _cd.dof.aperture_fstop = 8.0
+    _sc.render.resolution_x, _sc.render.resolution_y = (1500, 1800)
+    render_to(OUT + f"gpu-{SHOT}.png")
+    print("build_rack single 5090 FE done.")
 elif PART == "gpurig":
     # THE HOME GPU RIG (owner redirect) · open frame + a row of 6 GPUs, fans out.
     build_frame()
