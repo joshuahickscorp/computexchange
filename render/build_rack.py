@@ -41,7 +41,7 @@ U = 44.45  # THE anchor · mm
 # a 12U open-frame rack on casters (~0.7m, waist-high · "some people could have it at home") ·
 # holds an open row of 6 GPUs. 19in width kept (standard rails), depth + height cut to home
 # scale, side/back panels + door dropped (OPEN frame · fans breathe, cards read).
-RACK = dict(W=860.0, H=700.0, D=480.0, Ucount=12)
+RACK = dict(W=960.0, H=700.0, D=480.0, Ucount=12)
 OPEN = True               # open 4-post frame (no side/back panels, no door hardware)
 GPU_RIG = True            # 6-GPU open rig: cards hang from a top bar (no 19in rails), mobo tray + PSU
 PANEL_W = 482.6           # 19in ear-to-ear
@@ -361,95 +361,134 @@ def build_frame():
             gus.data.materials.append(pc); smooth(gus, 30); parts.append(gus)
     return parts
 
-# ---- the 6-GPU rig (owner redirect · the hero content) ------------------------------------
-def build_fan(cx, yf, cz, r, btint=0.0):
+# ---- the 6-GPU rig · NVIDIA RTX 5090 Founders Edition (see render/ref/rack/RTX5090FE-SPEC.md) --
+def emissive(name, color, strength):
+    """A constant emitter · the 5090 FE's static white illumination (wordmark / X accents / inlet
+    rings). Handles both the new (Emission Color/Strength) and legacy (Emission) socket names."""
+    m = bpy.data.materials.new(name); m.use_nodes = True
+    b = m.node_tree.nodes["Principled BSDF"]
+    b.inputs["Base Color"].default_value = (*color, 1)
+    try:
+        b.inputs["Emission Color"].default_value = (*color, 1)
+        b.inputs["Emission Strength"].default_value = strength
+    except KeyError:
+        try:
+            b.inputs["Emission"].default_value = (*color, 1)
+            b.inputs["Emission Strength"].default_value = strength
+        except KeyError:
+            pass
+    return m
+
+def build_fan(cx, yf, cz, r, nb=9, blade_rgb=(0.105, 0.105, 0.115), emit_ring=False):
     """One axial fan on a GPU front face (blows toward -Y, the viewer). Recessed dark well +
-    bezel ring + hub + hub sticker + 9 broad swept blades that nearly fill the disc (the real
-    fan read · they overlap and catch the key). yf = shroud front-face plane. btint = per-card
-    blade-tone variance so the six fans are not identical."""
+    bezel ring + hub + hub sticker + nb broad swept blades that nearly fill the disc. yf = shroud
+    front-face plane. emit_ring adds the 5090 FE's cool-white lit inlet ring around the fan."""
     parts = []
-    well = principled("fan-well", (0.015, 0.015, 0.017), 0.55)
+    well = principled("fan-well", (0.012, 0.012, 0.014), 0.55)
     ring = principled("fan-ring", (0.03, 0.03, 0.033), 0.42, metallic=0.35)
-    blade = principled("fan-blade", (0.105 + btint, 0.105 + btint, 0.115 + btint), 0.40, metallic=0.15)
-    bpy.ops.mesh.primitive_cylinder_add(radius=r - mm(1.5), depth=mm(11.0), vertices=40,
-        location=(cx, yf + mm(6.5), cz), rotation=(math.radians(90), 0, 0))
+    blade = principled("fan-blade", blade_rgb, 0.55, metallic=0.05)
+    bpy.ops.mesh.primitive_cylinder_add(radius=r - mm(1.5), depth=mm(12.0), vertices=44,
+        location=(cx, yf + mm(7.0), cz), rotation=(math.radians(90), 0, 0))
     w = bpy.context.active_object; w.name = "fan-well"; w.data.materials.append(well)
     smooth(w, 30); parts.append(w)
-    bpy.ops.mesh.primitive_cylinder_add(radius=r, depth=mm(4.0), vertices=40,
+    bpy.ops.mesh.primitive_cylinder_add(radius=r, depth=mm(4.0), vertices=44,
         location=(cx, yf + mm(0.5), cz), rotation=(math.radians(90), 0, 0))
     rm = bpy.context.active_object; rm.name = "fan-rim"
-    bpy.ops.mesh.primitive_cylinder_add(radius=r - mm(3.5), depth=mm(8.0), vertices=40,
+    bpy.ops.mesh.primitive_cylinder_add(radius=r - mm(3.5), depth=mm(8.0), vertices=44,
         location=(cx, yf + mm(0.5), cz), rotation=(math.radians(90), 0, 0))
     inr = bpy.context.active_object
     bpy.context.view_layer.objects.active = rm
     md = rm.modifiers.new("h", "BOOLEAN"); md.operation = "DIFFERENCE"; md.solver = "EXACT"; md.object = inr
     bpy.ops.object.modifier_apply(modifier=md.name); bpy.data.objects.remove(inr, do_unlink=True)
     rm.data.materials.append(ring); smooth(rm, 30); parts.append(rm)
-    nb = 9; rr = (mm(13.0) + r) / 2.0
+    rr = (mm(16.0) + r) / 2.0
+    arc = 2 * math.pi * rr / nb
     for i in range(nb):
         a = 2 * math.pi * i / nb
-        bl = rounded_box("fan-blade", r - mm(14.0), mm(1.6), mm(24.0), mm(3.0), seg=2)
-        bl.location = (cx + rr * math.cos(a), yf + mm(3.8), cz + rr * math.sin(a))
-        bl.rotation_euler = (math.radians(11.0), a, math.radians(32.0))
+        bl = rounded_box("fan-blade", r - mm(19.0), mm(1.1), arc * 0.62, mm(1.2), seg=2)
+        bl.location = (cx + rr * math.cos(a), yf + mm(4.2), cz + rr * math.sin(a))
+        bl.rotation_euler = (math.radians(24.0), a, 0)
         bl.data.materials.append(blade); smooth(bl, 30); parts.append(bl)
-    bpy.ops.mesh.primitive_cylinder_add(radius=mm(13.0), depth=mm(9.0), vertices=28,
+    bpy.ops.mesh.primitive_cylinder_add(radius=mm(14.0), depth=mm(9.0), vertices=28,
         location=(cx, yf + mm(1.5), cz), rotation=(math.radians(90), 0, 0))
     hb = bpy.context.active_object; hb.name = "fan-hub"; hb.data.materials.append(ring)
     smooth(hb, 30); parts.append(hb)
-    bpy.ops.mesh.primitive_cylinder_add(radius=mm(8.5), depth=mm(1.2), vertices=24,
+    bpy.ops.mesh.primitive_cylinder_add(radius=mm(9.0), depth=mm(1.2), vertices=24,
         location=(cx, yf - mm(0.6), cz), rotation=(math.radians(90), 0, 0))
     st = bpy.context.active_object; st.name = "fan-sticker"
     st.data.materials.append(principled("fan-sticker", (0.05, 0.05, 0.055), 0.32, metallic=0.2))
     smooth(st, 30); parts.append(st)
+    if emit_ring:   # the 5090 FE lit inlet ring (static cool white)
+        bpy.ops.mesh.primitive_torus_add(major_radius=r + mm(1.0), minor_radius=mm(1.3),
+            location=(cx, yf - mm(0.5), cz), rotation=(math.radians(90), 0, 0),
+            major_segments=48, minor_segments=8)
+        er = bpy.context.active_object; er.name = "fan-inlet-lit"
+        er.data.materials.append(emissive("fan-inlet-lit-mat", (0.93, 0.957, 1.0), 2.6))
+        smooth(er, 30); parts.append(er)
     return parts
 
 def build_gpu(cx, cz, yc, idx=0):
-    """One triple-fan graphics card, PORTRAIT (standing) + fan-face forward (-Y). ~305mm tall ·
-    the card the owner wants to SEE. Shroud + backplate + 3 fans + fin/power top + PCIe bracket
-    and gold-finger stub at the bottom (riser mount). Per-index material so the row isn't clones."""
-    Wc, Hc, Tc = mm(118.0), mm(285.0), mm(52.0)
+    """NVIDIA RTX 5090 Founders Edition · PORTRAIT (standing), fan-face forward (-Y). Dark Gun
+    Metal monochrome, 137w x 304h x 40t (2-slot). Two ~115mm 7-blade fans at the two ends over
+    flow-through fin stacks, an X 'infinity' accent between them, static cool-white lit inlet
+    rings + X + a top-edge wordmark. Bracket + angled 16-pin + backplate. render/ref/rack/RTX5090FE-SPEC.md."""
+    Wc, Hc, Tc = mm(137.0), mm(304.0), mm(40.0)
     parts = []
-    tint = 0.004 * ((idx % 3) - 1)   # tiny per-card shroud variance (not clones)
-    shroud_mat = principled(f"gpu-shroud{idx}", (0.030 + tint, 0.030 + tint, 0.035 + tint), 0.40, metallic=0.45)
-    plate_mat = principled(f"gpu-plate{idx}", (0.16, 0.16, 0.175), 0.34, metallic=0.85)
-    dark = principled(f"gpu-dark{idx}", (0.02, 0.02, 0.022), 0.6)
+    body_mat = principled(f"fe-body{idx}", (0.165, 0.173, 0.188), 0.60, metallic=0.9)
+    fin_mat = principled(f"fe-fin{idx}", (0.082, 0.086, 0.098), 0.50, metallic=0.9)
+    xacc_mat = principled(f"fe-x{idx}", (0.14, 0.15, 0.16), 0.40, metallic=0.9)
+    plate_mat = principled(f"fe-plate{idx}", (0.10, 0.104, 0.113), 0.45, metallic=0.9)
+    brk_mat = principled(f"fe-brk{idx}", (0.078, 0.078, 0.078), 0.50, metallic=0.9)
+    dark = principled(f"fe-dark{idx}", (0.02, 0.02, 0.022), 0.6)
+    lit = emissive(f"fe-lit{idx}", (0.93, 0.957, 1.0), 2.3)
     yf = yc - Tc / 2.0
-    sh = rounded_box("gpu-shroud", Wc, Tc, Hc, mm(4.0), seg=4)
-    sh.location = (cx, yc, cz); sh.data.materials.append(shroud_mat); smooth(sh, 30); parts.append(sh)
-    bp = rounded_box("gpu-backplate", Wc - mm(3), mm(2.0), Hc - mm(4), mm(2.0), seg=3)
-    bp.location = (cx, yc + Tc / 2.0 + mm(1.0), cz); bp.data.materials.append(plate_mat); smooth(bp, 30); parts.append(bp)
-    # front-face relief · a raised perimeter lip + 2 inter-fan ridges make a recessed 3-fan
-    # channel, so the shroud reads as a real card (not a flat slab) and the lips catch the key.
-    lip_y = yf - mm(2.0)
+    fan_r = mm(57.0)                          # ~115mm dia
+    zt, zb = cz + mm(78.0), cz - mm(78.0)     # the two fan centers (one at each end)
+    # shroud as a FRAME: perimeter border + a center bar · the two ends are the open flow-through
+    # zones (fin stacks + fans fill them). bw = border width.
+    bw = mm(11.0)
     for nm, w, h, lx, lz in (
-        ("lip-top", Wc, mm(9.0), cx, cz + Hc / 2.0 - mm(5.0)),
-        ("lip-bot", Wc, mm(9.0), cx, cz - Hc / 2.0 + mm(5.0)),
-        ("lip-l", mm(9.0), Hc, cx - Wc / 2.0 + mm(5.0), cz),
-        ("lip-r", mm(9.0), Hc, cx + Wc / 2.0 - mm(5.0), cz)):
-        lp = rounded_box("gpu-" + nm, w, mm(4.0), h, mm(1.5), seg=3)
-        lp.location = (lx, lip_y, lz); lp.data.materials.append(shroud_mat); smooth(lp, 30); parts.append(lp)
-    for dz in (mm(46.0), -mm(46.0)):
-        rg = rounded_box("gpu-ridge", Wc - mm(22.0), mm(4.0), mm(7.0), mm(1.5), seg=2)
-        rg.location = (cx, lip_y, cz + dz); rg.data.materials.append(shroud_mat); smooth(rg, 30); parts.append(rg)
-    # 3 fans recessed in the channel · per-card blade-tone variance (not clones)
-    btint = 0.012 * ((idx % 3) - 1)
-    for dz in (mm(92.0), 0.0, -mm(92.0)):
-        parts += build_fan(cx, yf, cz + dz, mm(40.0), btint=btint)
-    # a small blank brand plate on the bottom lip (brushed, subtly proud · every card cites a
-    # real GPU shroud that carries a logo strip here · blank per trademark gate)
-    plate = box("gpu-brandplate", mm(46.0), mm(2.0), mm(9.0), (cx, yf - mm(3.5), cz - Hc / 2.0 + mm(6.0)))
-    plate.data.materials.append(principled(f"gpu-brand{idx}", (0.10, 0.10, 0.112), 0.34, metallic=0.7)); parts.append(plate)
-    fins = box("gpu-fins", Wc - mm(8), Tc - mm(8), mm(8.0), (cx, yc, cz + Hc / 2.0 + mm(3.0)))
-    fins.data.materials.append(dark); parts.append(fins)
-    pwr = rounded_box("gpu-pwr", mm(26.0), mm(16.0), mm(11.0), mm(1.5), seg=2)
-    pwr.location = (cx + Wc / 4.0, yc + mm(4.0), cz + Hc / 2.0 + mm(10.0)); pwr.data.materials.append(dark)
+        ("edge-top", Wc, bw, cx, cz + Hc / 2.0 - bw / 2),
+        ("edge-bot", Wc, bw, cx, cz - Hc / 2.0 + bw / 2),
+        ("edge-l", bw, Hc, cx - Wc / 2.0 + bw / 2, cz),
+        ("edge-r", bw, Hc, cx + Wc / 2.0 - bw / 2, cz)):
+        eb = rounded_box("fe-" + nm, w, Tc, h, mm(4.0), seg=4)
+        eb.location = (lx, yc, lz); eb.data.materials.append(body_mat); smooth(eb, 30); parts.append(eb)
+    cbar = rounded_box("fe-centerbar", Wc, Tc, mm(48.0), mm(3.0), seg=3)
+    cbar.location = (cx, yc, cz); cbar.data.materials.append(body_mat); smooth(cbar, 30); parts.append(cbar)
+    # dark fin block behind each fan (flow-through end · silhouette mass + dark backing)
+    for fz in (zt, zb):
+        fin = box("fe-finstack", Wc - 2 * bw, Tc - mm(6), fan_r * 2, (cx, yc + mm(4), fz))
+        fin.data.materials.append(fin_mat); parts.append(fin)
+    # two fans (7 blades, near-black) with the FE lit inlet rings
+    for fz in (zt, zb):
+        parts += build_fan(cx, yf, fz, fan_r, nb=7, blade_rgb=(0.110, 0.114, 0.125), emit_ring=True)
+    # X 'infinity' accent on the center bar (2 crossing diagonals) + its lit edges
+    for sgn in (1, -1):
+        xb = rounded_box("fe-xbar", mm(78.0), mm(3.0), mm(10.0), mm(2.0), seg=2)
+        xb.location = (cx, yf - mm(2.0), cz); xb.rotation_euler = (0, math.radians(sgn * 33.0), 0)
+        xb.data.materials.append(xacc_mat); smooth(xb, 30); parts.append(xb)
+        xl = box("fe-xlit", mm(78.0), mm(1.0), mm(2.2), (cx, yf - mm(3.6), cz))
+        xl.rotation_euler = (0, math.radians(sgn * 33.0), 0); xl.data.materials.append(lit); parts.append(xl)
+    # top-edge wordmark · a blank lit strip on the 'top edge' (a vertical side edge when portrait,
+    # +X so it faces the q34 camera), plus the angled recessed 16-pin power header near it
+    wm = box("fe-wordmark", mm(2.0), mm(18.0), mm(70.0), (cx + Wc / 2.0 - mm(1.0), yc, cz + mm(38.0)))
+    wm.data.materials.append(lit); parts.append(wm)
+    pwr = rounded_box("fe-pwr", mm(30.0), mm(20.0), mm(12.0), mm(1.5), seg=2)
+    pwr.location = (cx + Wc / 2.0 - mm(20.0), yc + mm(5.0), cz + Hc / 2.0 - mm(34.0))
+    pwr.rotation_euler = (0, 0, math.radians(20.0)); pwr.data.materials.append(dark)
     smooth(pwr, 30); parts.append(pwr)
-    # bottom · dark PCB edge + dark PCIe riser connector · NO bright bracket (it read as a white
-    # band). The gold fingers sit INSIDE the riser slot, barely seen · risers get wired at 5.x.
-    pcb = box("gpu-pcb", Wc - mm(4), Tc - mm(14), mm(7.0), (cx, yc, cz - Hc / 2.0 - mm(3.0)))
-    pcb.data.materials.append(principled(f"gpu-pcb{idx}", (0.02, 0.028, 0.022), 0.6)); parts.append(pcb)
-    riser = box("gpu-riser", mm(94.0), mm(22.0), mm(16.0), (cx, yc, cz - Hc / 2.0 - mm(13.0)))
-    riser.data.materials.append(principled(f"gpu-riser{idx}", (0.03, 0.03, 0.033), 0.5)); parts.append(riser)
+    # backplate (dark metal · rear X + flow-through window live at the macro wave)
+    bp = box("fe-backplate", Wc - mm(4), mm(2.0), Hc - mm(6), (cx, yc + Tc / 2.0 + mm(1.0), cz))
+    bp.data.materials.append(plate_mat); parts.append(bp)
+    # bottom · PCIe bracket (4 connector cutouts, NO vent grille per FE) + riser stub
+    brk = box("fe-bracket", Wc, mm(2.0), mm(16.0), (cx, yf + mm(4.0), cz - Hc / 2.0 - mm(7.0)))
+    brk.data.materials.append(brk_mat); parts.append(brk)
+    for j in range(4):
+        io = box("fe-io", mm(20.0), mm(3.0), mm(9.0), (cx - mm(48.0) + j * mm(30.0), yf + mm(2.0), cz - Hc / 2.0 - mm(7.0)))
+        io.data.materials.append(dark); parts.append(io)
+    riser = box("fe-riser", mm(96.0), mm(20.0), mm(15.0), (cx, yc, cz - Hc / 2.0 - mm(15.0)))
+    riser.data.materials.append(principled(f"fe-riserc{idx}", (0.03, 0.03, 0.033), 0.5)); parts.append(riser)
     return parts
 
 def build_gpu_row():
@@ -458,12 +497,12 @@ def build_gpu_row():
     W, H, D = mm(RACK["W"]), mm(RACK["H"]), mm(RACK["D"])
     fx, fy = W / 2.0, D / 2.0
     parts = []
-    n = 6; pitch = mm(124.0)
+    n = 6; pitch = mm(143.0)
     yc = -fy + mm(110.0)
     cz = mm(PLINTH) + mm(300.0)
     x0 = -pitch * (n - 1) / 2.0
-    bar = box("gpu-mountbar", pitch * (n - 1) + mm(150), mm(30.0), mm(28.0),
-              (0, yc + mm(6.0), cz + mm(285.0) / 2.0 + mm(20.0)))
+    bar = box("gpu-mountbar", pitch * (n - 1) + mm(160), mm(30.0), mm(28.0),
+              (0, yc + mm(6.0), cz + mm(304.0) / 2.0 + mm(20.0)))
     bar.data.materials.append(principled("gpu-bar", (0.055, 0.055, 0.062), 0.38, metallic=0.8)); parts.append(bar)
     for i in range(n):
         parts += build_gpu(x0 + i * pitch, cz, yc, idx=i)
