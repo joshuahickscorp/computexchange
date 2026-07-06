@@ -799,6 +799,28 @@ def build_mac_studio(loc_x=0.0, yaw_deg=0.0):
     foot.data.materials.append(principled("mac-foot-mat", (0.02, 0.02, 0.022), 0.5, metallic=0.2))
     smooth(foot, 40)
 
+    # BOTTOM FACE · M8 (GRADING-REPORT): the concentric underside · a flat central alu disc (embossed
+    # wordmark/regs · blank per gate) + a rubber foot ring + a perforated INTAKE ANNULUS (O157-179mm,
+    # "1500+ holes at 45deg" · Instrumental) whose outer edge sits ~9mm inboard of the side wall (so it
+    # is NOT visible from front/side · matches the reference). Flat proud discs (NO body boolean · the
+    # fillet body collapses on cuts · see the vent AUTOPSY). perforated_band needs an X-Z face so the
+    # annulus uses a dark matte band (reads as the recessed perforated zone at the bottom's low visibility).
+    m8_alu = blasted_aluminum()
+    bz = -mm(0.3)   # just below the foot bottom (z=0), facing down
+    bpy.ops.mesh.primitive_cylinder_add(radius=mm(89.5), depth=mm(0.8), vertices=96, location=(0, 0, bz))
+    perf = bpy.context.active_object; perf.name = "mac-bottom-intake"
+    perf.data.materials.append(principled("mac-bottom-intake-mat", (0.028, 0.028, 0.031), 0.62, metallic=0.15)); smooth(perf, 60)
+    bpy.ops.mesh.primitive_cylinder_add(radius=mm(76.0), depth=mm(1.0), vertices=96, location=(0, 0, bz - mm(0.1)))
+    cdisc = bpy.context.active_object; cdisc.name = "mac-bottom-disc"
+    cdisc.data.materials.append(m8_alu)
+    bpy.ops.mesh.primitive_torus_add(major_radius=mm(74.0), minor_radius=mm(1.6), location=(0, 0, bz - mm(0.5)),
+                                     major_segments=96, minor_segments=8)
+    fring = bpy.context.active_object; fring.name = "mac-foot-ring"
+    fring.data.materials.append(principled("mac-footring", (0.03, 0.03, 0.032), 0.7, metallic=0.0)); smooth(fring, 30)
+    ken = rounded_box("mac-kensington", mm(7.0), mm(3.0), mm(1.4), mm(1.4), 0, 0, seg_corner=4)
+    ken.location = (mm(72.0), mm(72.0), bz); ken.data.materials.append(cavity)
+    m8_parts = [perf, cdisc, fring, ken]
+
     # REAR (render/MAC-STUDIO-360-SPEC.md) · M1 (GRADING-REPORT): a RECTANGULAR hex-perforation exhaust
     # field ~173 x 53 mm (NOT a circle · corrected from Apple's 2025 back press image), upper portion,
     # ~5mm below the top roll, entirely above the port row. Then the lower port row (M2). Blank (D2 gate).
@@ -838,7 +860,7 @@ def build_mac_studio(loc_x=0.0, yaw_deg=0.0):
     rbox = apply_boolean(body, rcut)
     assign_interior(body, rbox, 3, ymin=rear_y - mm(6.5))
 
-    group = [body, led, foot] + ([vent] if not arg("--novent", False) else []) + tongues
+    group = [body, led, foot] + ([vent] if not arg("--novent", False) else []) + tongues + m8_parts
     for ob in group:
         ob.rotation_euler.z = math.radians(yaw_deg)
         x, y = ob.location.x, ob.location.y
