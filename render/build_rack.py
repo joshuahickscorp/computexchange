@@ -41,8 +41,9 @@ U = 44.45  # THE anchor · mm
 # a 12U open-frame rack on casters (~0.7m, waist-high · "some people could have it at home") ·
 # holds an open row of 6 GPUs. 19in width kept (standard rails), depth + height cut to home
 # scale, side/back panels + door dropped (OPEN frame · fans breathe, cards read).
-RACK = dict(W=600.0, H=700.0, D=600.0, Ucount=12)
+RACK = dict(W=860.0, H=700.0, D=480.0, Ucount=12)
 OPEN = True               # open 4-post frame (no side/back panels, no door hardware)
+GPU_RIG = True            # 6-GPU open rig: cards hang from a top bar (no 19in rails), mobo tray + PSU
 PANEL_W = 482.6           # 19in ear-to-ear
 HOLE_SPAN = 465.12        # rail hole-center span
 SQ_HOLE = 9.5             # square cage-nut hole
@@ -340,21 +341,16 @@ def build_frame():
                    (0, fy - mm(20), mm(PLINTH) + (H - mm(PLINTH) - mm(40)) / 2.0))
         back.data.materials.append(dk); parts.append(back)
 
-    # 4 EIA rails · front pair carries the square holes; rear pair plain · front rail 20mm behind
-    # the front post face (derives from D so the shrink stays coherent).
-    rail_x = mm(HOLE_SPAN) / 2.0
-    front_ry = -(RACK["D"] / 2.0 - 20.0)
-    for sx in (-1, 1):
-        r = rail_with_holes(sx * rail_x, f"rail-front-{sx}", ry=front_ry)
-        r.data.materials.append(pc); parts.append(r)
-        # W0.4 · rear rail DEFERRED to the assembly wave: making it holed at the shared rail x put
-        # its dark see-through holes directly behind the front rail, crashing the powder_black
-        # median (L18->L7) · the fragile perforated-flange patch cannot survive it, and the durable
-        # patch (RM44 solid face) does not exist yet. On the POPULATED rack the rear rail reads
-        # between real units and the patch lives on a unit · correct place for this. Plain bar for now.
-        rr = box(f"rail-rear-{sx}", mm(30), mm(2), H - mm(PLINTH) - mm(40),
-                 (sx * rail_x, fy - mm(120), mm(PLINTH) + (H - mm(PLINTH) - mm(40)) / 2.0))
-        rr.data.materials.append(pc); parts.append(rr)
+    if not GPU_RIG:   # 4 EIA 19in rails · only the standard rackmount archetype (the GPU rig
+        # hangs its cards from a top bar instead · see build_gpu_row).
+        rail_x = mm(HOLE_SPAN) / 2.0
+        front_ry = -(RACK["D"] / 2.0 - 20.0)
+        for sx in (-1, 1):
+            r = rail_with_holes(sx * rail_x, f"rail-front-{sx}", ry=front_ry)
+            r.data.materials.append(pc); parts.append(r)
+            rr = box(f"rail-rear-{sx}", mm(30), mm(2), H - mm(PLINTH) - mm(40),
+                     (sx * rail_x, fy - mm(120), mm(PLINTH) + (H - mm(PLINTH) - mm(40)) / 2.0))
+            rr.data.materials.append(pc); parts.append(rr)
 
     # W0.4 · corner gusset 'castle' plates · small perforated brackets tying post to top/base,
     # visible at all four post ends in the refs · breaks the bare post-to-cap junction.
@@ -363,6 +359,92 @@ def build_frame():
             gus = rounded_box("gusset", mm(40.0), mm(30.0), mm(50.0), mm(3.0), seg=4)
             gus.location = (sx * (fx - psx / 2), -(fy - psy - mm(8)), zc)
             gus.data.materials.append(pc); smooth(gus, 30); parts.append(gus)
+    return parts
+
+# ---- the 6-GPU rig (owner redirect · the hero content) ------------------------------------
+def build_fan(cx, yf, cz, r):
+    """One axial fan on a GPU front face (blows toward -Y, the viewer). Recessed dark well +
+    bezel ring + hub + radial blades · the signature GPU read. yf = shroud front-face plane."""
+    parts = []
+    well = principled("fan-well", (0.015, 0.015, 0.017), 0.55)
+    ring = principled("fan-ring", (0.03, 0.03, 0.033), 0.42, metallic=0.35)
+    blade = principled("fan-blade", (0.06, 0.06, 0.066), 0.44, metallic=0.10)
+    bpy.ops.mesh.primitive_cylinder_add(radius=r - mm(1.5), depth=mm(11.0), vertices=40,
+        location=(cx, yf + mm(6.5), cz), rotation=(math.radians(90), 0, 0))
+    w = bpy.context.active_object; w.name = "fan-well"; w.data.materials.append(well)
+    smooth(w, 30); parts.append(w)
+    bpy.ops.mesh.primitive_cylinder_add(radius=r, depth=mm(4.0), vertices=40,
+        location=(cx, yf + mm(0.5), cz), rotation=(math.radians(90), 0, 0))
+    rm = bpy.context.active_object; rm.name = "fan-rim"
+    bpy.ops.mesh.primitive_cylinder_add(radius=r - mm(3.5), depth=mm(8.0), vertices=40,
+        location=(cx, yf + mm(0.5), cz), rotation=(math.radians(90), 0, 0))
+    inr = bpy.context.active_object
+    bpy.context.view_layer.objects.active = rm
+    md = rm.modifiers.new("h", "BOOLEAN"); md.operation = "DIFFERENCE"; md.solver = "EXACT"; md.object = inr
+    bpy.ops.object.modifier_apply(modifier=md.name); bpy.data.objects.remove(inr, do_unlink=True)
+    rm.data.materials.append(ring); smooth(rm, 30); parts.append(rm)
+    bpy.ops.mesh.primitive_cylinder_add(radius=mm(13.0), depth=mm(9.0), vertices=28,
+        location=(cx, yf + mm(2.0), cz), rotation=(math.radians(90), 0, 0))
+    hb = bpy.context.active_object; hb.name = "fan-hub"; hb.data.materials.append(ring)
+    smooth(hb, 30); parts.append(hb)
+    nb = 7; rr = (mm(13.0) + r) / 2.0
+    for i in range(nb):
+        a = 2 * math.pi * i / nb
+        bl = rounded_box("fan-blade", r - mm(17.0), mm(1.4), mm(15.0), mm(0.5), seg=2)
+        bl.location = (cx + rr * math.cos(a), yf + mm(4.5), cz + rr * math.sin(a))
+        bl.rotation_euler = (0, a, math.radians(20.0))
+        bl.data.materials.append(blade); smooth(bl, 30); parts.append(bl)
+    return parts
+
+def build_gpu(cx, cz, yc, idx=0):
+    """One triple-fan graphics card, PORTRAIT (standing) + fan-face forward (-Y). ~305mm tall ·
+    the card the owner wants to SEE. Shroud + backplate + 3 fans + fin/power top + PCIe bracket
+    and gold-finger stub at the bottom (riser mount). Per-index material so the row isn't clones."""
+    Wc, Hc, Tc = mm(118.0), mm(285.0), mm(52.0)
+    parts = []
+    tint = 0.004 * ((idx % 3) - 1)   # tiny per-card shroud variance (not clones)
+    shroud_mat = principled(f"gpu-shroud{idx}", (0.030 + tint, 0.030 + tint, 0.035 + tint), 0.40, metallic=0.45)
+    plate_mat = principled(f"gpu-plate{idx}", (0.16, 0.16, 0.175), 0.34, metallic=0.85)
+    brk_mat = principled(f"gpu-brk{idx}", (0.52, 0.52, 0.54), 0.30, metallic=0.9)
+    dark = principled(f"gpu-dark{idx}", (0.02, 0.02, 0.022), 0.6)
+    yf = yc - Tc / 2.0
+    sh = rounded_box("gpu-shroud", Wc, Tc, Hc, mm(4.0), seg=4)
+    sh.location = (cx, yc, cz); sh.data.materials.append(shroud_mat); smooth(sh, 30); parts.append(sh)
+    bp = rounded_box("gpu-backplate", Wc - mm(3), mm(2.0), Hc - mm(4), mm(2.0), seg=3)
+    bp.location = (cx, yc + Tc / 2.0 + mm(1.0), cz); bp.data.materials.append(plate_mat); smooth(bp, 30); parts.append(bp)
+    for dz in (mm(92.0), 0.0, -mm(92.0)):
+        parts += build_fan(cx, yf, cz + dz, mm(41.0))
+    fins = box("gpu-fins", Wc - mm(8), Tc - mm(8), mm(8.0), (cx, yc, cz + Hc / 2.0 + mm(3.0)))
+    fins.data.materials.append(dark); parts.append(fins)
+    pwr = rounded_box("gpu-pwr", mm(26.0), mm(16.0), mm(11.0), mm(1.5), seg=2)
+    pwr.location = (cx + Wc / 4.0, yc + mm(4.0), cz + Hc / 2.0 + mm(10.0)); pwr.data.materials.append(dark)
+    smooth(pwr, 30); parts.append(pwr)
+    brk = box("gpu-bracket", Wc, mm(2.0), mm(18.0), (cx, yf + mm(6.0), cz - Hc / 2.0 - mm(8.0)))
+    brk.data.materials.append(brk_mat); parts.append(brk)
+    fng = box("gpu-fingers", mm(88.0), Tc - mm(20), mm(14.0), (cx, yc, cz - Hc / 2.0 - mm(6.0)))
+    fng.data.materials.append(principled(f"gpu-gold{idx}", (0.62, 0.5, 0.18), 0.35, metallic=0.85)); parts.append(fng)
+    return parts
+
+def build_gpu_row():
+    """6 GPUs hung from a top mounting bar, fan-faces forward · a mobo tray + PSU at the base
+    (the riser-mounted open-rig look). Owner spec: 'open row of 6 cards, fans out'."""
+    W, H, D = mm(RACK["W"]), mm(RACK["H"]), mm(RACK["D"])
+    fx, fy = W / 2.0, D / 2.0
+    parts = []
+    n = 6; pitch = mm(124.0)
+    yc = -fy + mm(110.0)
+    cz = mm(PLINTH) + mm(300.0)
+    x0 = -pitch * (n - 1) / 2.0
+    bar = box("gpu-mountbar", pitch * (n - 1) + mm(150), mm(30.0), mm(28.0),
+              (0, yc + mm(6.0), cz + mm(285.0) / 2.0 + mm(20.0)))
+    bar.data.materials.append(principled("gpu-bar", (0.055, 0.055, 0.062), 0.38, metallic=0.8)); parts.append(bar)
+    for i in range(n):
+        parts += build_gpu(x0 + i * pitch, cz, yc, idx=i)
+    tray = box("mobo-tray", W - mm(160), D - mm(120), mm(4.0), (0, mm(10.0), mm(PLINTH) + mm(95.0)))
+    tray.data.materials.append(principled("mobo-tray-mat", (0.11, 0.11, 0.12), 0.5, metallic=0.6)); parts.append(tray)
+    psu = rounded_box("psu", mm(150.0), mm(86.0), mm(150.0), mm(3.0), seg=3)
+    psu.location = (-fx + mm(150), mm(30.0), mm(PLINTH) + mm(63.0))
+    psu.data.materials.append(principled("psu-mat", (0.035, 0.035, 0.04), 0.40, metallic=0.4)); smooth(psu, 30); parts.append(psu)
     return parts
 
 # ---- rig · dark-object hero (edge + sheen carve the black out of void black) --------------
@@ -386,9 +468,9 @@ def rack_rig():
     # illuminance) · FIRST-PROBE for the open rig (brighter GPU faces) · eyeball + clip-gate tune.
     aim = bpy.data.objects.new("Aim", None); aim.location = (0, 0, mm(RACK["H"] / 2.0))
     bpy.context.collection.objects.link(aim)
-    add_area("key", (-0.8, -1.0, 1.15), 0.7, float(arg("--key", 85)), (1.0, 0.99, 0.97), aim=aim)
-    add_area("rim", (0.6, 0.95, 1.1), 0.06, float(arg("--rim", 60)), (0.93, 0.96, 1.0), sx=0.9, aim=aim)
-    add_area("fill", (0.1, -1.2, 0.55), 1.1, float(arg("--fill", 30)), (0.97, 0.98, 1.0), aim=aim)
+    add_area("key", (-0.8, -1.0, 1.15), 0.7, float(arg("--key", 72)), (1.0, 0.99, 0.97), aim=aim)
+    add_area("rim", (0.6, 0.95, 1.1), 0.06, float(arg("--rim", 52)), (0.93, 0.96, 1.0), sx=0.9, aim=aim)
+    add_area("fill", (0.1, -1.2, 0.55), 1.1, float(arg("--fill", 16)), (0.97, 0.98, 1.0), aim=aim)
     bpy.ops.mesh.primitive_plane_add(size=8.0, location=(0, 0, 0))
     fl = bpy.context.active_object; fl.name = "floor"
     fl.data.materials.append(principled("floor", (0.006, 0.006, 0.007), 0.62))
@@ -399,7 +481,7 @@ def rack_camera(aim, shot, res):
     cd = bpy.data.cameras.new("cam"); cd.lens = 70.0; cd.sensor_width = 36.0
     cam = bpy.data.objects.new("cam", cd); bpy.context.collection.objects.link(cam); sc.camera = cam
     H = mm(RACK["H"])
-    dist = 2.05   # ~0.7m rig · was 4.6 for the 2m cabinet
+    dist = 2.5    # wide (~0.86m) 6-GPU rig · was 4.6 for the 2m cabinet
     if shot in ("front", "frame-front"):
         yaw, elev = 0.0, 4.0
     else:  # q34
@@ -675,6 +757,15 @@ elif PART == "switch":
     switch_rig_camera(SHOT, (1900, 900))
     render_to(OUT + f"switch-{SHOT}.png")
     print("build_rack CRS354 switch proof done.")
+elif PART == "gpurig":
+    # THE HOME GPU RIG (owner redirect) · open frame + a row of 6 GPUs, fans out.
+    build_frame()
+    build_gpu_row()
+    aim = rack_rig()
+    res = (2000, 1500) if SHOT in ("front", "frame-front") else (2000, 1500)
+    rack_camera(aim, SHOT, res)
+    render_to(OUT + f"gpurig-{SHOT}.png")
+    print("build_rack GPU RIG (6 cards) done.")
 elif PART == "assembly":
     # Wave 5 · POPULATED rack · place the built units by u_z() into the frame (fill map v2, the
     # subset built so far: 3 nodes + switch · empty bays show the rails). One rig for the whole
