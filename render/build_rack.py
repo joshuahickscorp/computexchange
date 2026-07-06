@@ -372,7 +372,7 @@ def build_frame():
         for sy in (-1, 1):
             p = rounded_box("post", psx, psy, H, mm(2.0), seg=4)
             p.location = (sx * (fx - psx / 2), sy * (fy - psy / 2), H / 2.0)
-            p.data.materials.append(pc); smooth(p, 30); parts.append(p)
+            p.data.materials.append(pc); bevel_mod(p, width=1.2); parts.append(p)   # bevel the post top/bottom edges too · softens the post-cap/plinth junction (panel-6 #3)
 
     if not OPEN:   # door-off hinge bosses + latch keeper · only the enclosed-cabinet archetype
         parts += build_door_hardware(fx, fy, H, mm(PLINTH), pc)
