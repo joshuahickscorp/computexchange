@@ -223,6 +223,19 @@ def machined_metal(name, base, rough, metallic=0.9):
     nt.links.new(nb.outputs["Fac"], bump.inputs["Height"]); nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
     return add_bevel(m, radius=0.35)   # rounded-shading edges catch a bright micro-bevel highlight (real metal)
 
+def floor_mat(name="floor"):
+    """Near-black studio floor that GROUNDS the rig via a soft reflection · panel-4 #4: a perfect
+    uniform mirror reads CG. A large-scale smudge noise varies the roughness (0.13 sharp patches ->
+    0.42 hazed patches) so the reflection locally blurs like a real handled floor, not a mirror."""
+    m = principled(name, (0.006, 0.006, 0.007), 0.20, metallic=0.0)
+    nt = m.node_tree; b = nt.nodes["Principled BSDF"]
+    tc = nt.nodes.new("ShaderNodeTexCoord")
+    n = nt.nodes.new("ShaderNodeTexNoise"); n.inputs["Scale"].default_value = 2.6; n.inputs["Detail"].default_value = 2.0
+    nt.links.new(tc.outputs["Object"], n.inputs["Vector"])
+    mr = nt.nodes.new("ShaderNodeMapRange"); mr.inputs["To Min"].default_value = 0.13; mr.inputs["To Max"].default_value = 0.42
+    nt.links.new(n.outputs["Fac"], mr.inputs["Value"]); nt.links.new(mr.outputs["Result"], b.inputs["Roughness"])
+    return m
+
 def interior_dark(name="interior"):
     # cavity interior · albedo NEVER 0 so wall gradients read (desktop wave-2 lesson).
     return principled(name, (0.020, 0.020, 0.022), 0.80, metallic=0.0)
@@ -684,7 +697,7 @@ def rack_rig():
     fl = bpy.context.active_object; fl.name = "floor"
     # floor · a hair reflective so the rig GROUNDS with a faint reflection (the #1 panel tell was
     # 'it floats') · stays near-black so the premium void look holds · the reflection reads the weight.
-    fl.data.materials.append(principled("floor", (0.006, 0.006, 0.007), 0.14, metallic=0.0))  # glossy · catches leg + ring reflections
+    fl.data.materials.append(floor_mat())  # grounds via a soft smudge-varied reflection (panel-4 #4 · not a perfect mirror)
     return aim
 
 def rack_camera(aim, shot, res):

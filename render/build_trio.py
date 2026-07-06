@@ -83,10 +83,7 @@ area("rim", (1.0, 1.3, 1.35), 0.08, 95, (0.93, 0.96, 1.0), sx=1.2)
 area("fill", (0.2, -1.7, 0.7), 1.5, 34, (0.97, 0.98, 1.0))
 bpy.ops.mesh.primitive_plane_add(size=12.0, location=(0, 0, 0))
 fl = bpy.context.active_object; fl.name = "floor"
-fm = bpy.data.materials.new("floor"); fm.use_nodes = True
-fb = fm.node_tree.nodes["Principled BSDF"]
-fb.inputs["Base Color"].default_value = (0.006, 0.006, 0.007, 1); fb.inputs["Roughness"].default_value = 0.14  # glossy · reflects the rig legs + LEDs to ground it (panel 2)
-fl.data.materials.append(fm)
+fl.data.materials.append(RK["floor_mat"]())  # smudge-varied reflection · grounds without a perfect-mirror CG tell (panel-4 #4)
 
 cd = bpy.data.cameras.new("cam"); cd.lens = 66.0; cd.sensor_width = 36.0
 cam = bpy.data.objects.new("cam", cd); bpy.context.collection.objects.link(cam); sc.camera = cam
