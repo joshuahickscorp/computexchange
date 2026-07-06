@@ -188,6 +188,10 @@ def powder_coat(name="powder-black", base=(0.028, 0.028, 0.030), rough=0.52):
     bump.inputs["Distance"].default_value = mm(0.04)
     nt.links.new(mixb.outputs["Color"], bump.inputs["Height"])
     nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
+    # AUTOPSY (panel-5 #6 · up-facing dust · REVERTED): a Z-normal dust mask lifting the base toward a
+    # grey dust colour over-lightened the frame HORIZONTALS (top cap, mid-shelf, top rail) · under the
+    # brightened key they read as a grey material change, not subtle dust · cheapened the premium
+    # void-black frame. The 'clean premium' law wins · do NOT re-add visible frame dust on this hero.
     return add_bevel(m, radius=0.7)   # was 0.20 · panel-4: razor-sharp mitered edges read CG · a 0.7mm shading bevel lets the frame tube edges catch a thin specular highlight line (real powder-coated steel has a small edge radius)
 
 def machined_metal(name, base, rough, metallic=0.9):
