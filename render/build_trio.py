@@ -85,7 +85,7 @@ bpy.ops.mesh.primitive_plane_add(size=12.0, location=(0, 0, 0))
 fl = bpy.context.active_object; fl.name = "floor"
 fm = bpy.data.materials.new("floor"); fm.use_nodes = True
 fb = fm.node_tree.nodes["Principled BSDF"]
-fb.inputs["Base Color"].default_value = (0.007, 0.007, 0.008, 1); fb.inputs["Roughness"].default_value = 0.34  # faint reflection grounds it (panel: 'it floats')
+fb.inputs["Base Color"].default_value = (0.006, 0.006, 0.007, 1); fb.inputs["Roughness"].default_value = 0.14  # glossy · reflects the rig legs + LEDs to ground it (panel 2)
 fl.data.materials.append(fm)
 
 cd = bpy.data.cameras.new("cam"); cd.lens = 66.0; cd.sensor_width = 36.0
