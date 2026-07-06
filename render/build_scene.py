@@ -171,9 +171,14 @@ STUDIO = {
     "usbc_left_x":  -66.16,  # usbc_left_x_from_center
     "usbc_right_x": -51.36,  # usbc_right_x_from_center
     "sd_w":          26.85,  # sd_slot_width · horizontal
-    "sd_h":           2.50,  # sd_slot_height
+    "sd_h":           2.25,  # sd_slot_height · GEO-AUDIT: two units measured h/w 0.081-0.084 on
+                             # apple_front (was 2.50 = 0.093, read 25-45% too tall at 4K). AUTOPSY:
+                             # the 2.50 pin bundled the entry chamfer shadow into the aperture.
     "sd_x":         -24.41,  # sd_center_x_from_center
-    "led_x":         87.70,  # led_x_from_center
+    "led_x":         64.60,  # led_x_from_center · GEO-AUDIT: apple_front puts the LED 0.172 W from
+                             # the right edge (~33.9mm) = 64.6 from center, ON THE FLAT FACE.
+                             # AUTOPSY of old 87.70: that x sits 10.8mm from the edge, i.e. on the
+                             # 31.4mm corner ARC · the pin was measured through corner foreshortening.
     "led_d":          2.94,  # led_diameter (approx, glow-inclusive)
     "port_row_z":    24.36,  # port_row_center_from_base (above the device bottom)
     "led_z":         27.50,  # led_from_base
@@ -310,9 +315,22 @@ def add_bevel(m, radius=0.16, samples=4):
     # photoreal T7: a shader BEVEL rounds every edge at micron scale so no silhouette is
     # mathematically sharp · each edge catches a hairline highlight, killing the CAD look. Chains
     # any existing Normal (micro-bump) into the bevel so both survive.
+    # L19 (loop-16 edge tell, named 4-5x: "mathematically constant bevel highlight / continuous
+    # unbroken edge highlight") · the RADIUS is now modulated by a fine noise (~2mm features,
+    # 0.45x to 1.55x) so the hairline catch breaks and re-forms along the edge like real machining
+    # tolerance · the highlight sparkles instead of tracing one unbroken line.
     nt = m.node_tree; b = nt.nodes["Principled BSDF"]
     bev = nt.nodes.new("ShaderNodeBevel"); bev.samples = samples
     bev.inputs["Radius"].default_value = mm(radius)
+    _tc = nt.nodes.new("ShaderNodeTexCoord")
+    _nz = nt.nodes.new("ShaderNodeTexNoise")
+    _nz.inputs["Scale"].default_value = 1000.0 / (2.0 * S); _nz.inputs["Detail"].default_value = 2.0
+    nt.links.new(_tc.outputs["Object"], _nz.inputs["Vector"])
+    _mr = nt.nodes.new("ShaderNodeMapRange")
+    _mr.inputs["To Min"].default_value = mm(radius * 0.45)
+    _mr.inputs["To Max"].default_value = mm(radius * 1.55)
+    nt.links.new(_nz.outputs["Fac"], _mr.inputs["Value"])
+    nt.links.new(_mr.outputs["Result"], bev.inputs["Radius"])
     ni = b.inputs["Normal"]
     if ni.is_linked:
         nt.links.new(ni.links[0].from_socket, bev.inputs["Normal"])
@@ -598,6 +616,16 @@ def champagne_gold(rough=0.28, pore_darken=False):
     # FINAL WAVE (commit C): the device had DE-GOLDED to bone (wave-4 re-pin + 5c overshot). Pinned
     # to sth_front-1 (b29): visibly gold, calmer than the storagereview brass (b42.8). Foam struts
     # override this in the pore_darken branch.
+    if not pore_darken:
+        # low-freq roughness zoning on the SMOOTH gold sides/bezels · panel-6 #5: they read as one
+        # uniform satin · real anodized alu varies satin/matte across a face. Roughness-only (the
+        # spark_champ tone pin is albedo-based · untouched · holds).
+        nt = m.node_tree; b = nt.nodes["Principled BSDF"]
+        tcv = nt.nodes.new("ShaderNodeTexCoord")
+        rn = nt.nodes.new("ShaderNodeTexNoise"); rn.inputs["Scale"].default_value = 4.0; rn.inputs["Detail"].default_value = 2.0
+        nt.links.new(tcv.outputs["Object"], rn.inputs["Vector"])
+        rmr = nt.nodes.new("ShaderNodeMapRange"); rmr.inputs["To Min"].default_value = rough - 0.06; rmr.inputs["To Max"].default_value = rough + 0.08
+        nt.links.new(rn.outputs["Fac"], rmr.inputs["Value"]); nt.links.new(rmr.outputs["Result"], b.inputs["Roughness"])
     if pore_darken:
         nt = m.node_tree
         b = nt.nodes["Principled BSDF"]
@@ -693,7 +721,9 @@ def build_mac_studio(loc_x=0.0, yaw_deg=0.0):
     intake = mm(STUDIO["intake_band"])
     body = rounded_box("mac-studio", W, D, Htot,
                        mm(STUDIO["corner_R"]), mm(STUDIO["top_fillet_build"]), intake,
-                       seg_corner=48, seg_fillet=12)
+                       seg_corner=64, seg_fillet=24)  # GEO-AUDIT: 48/12 left a visible straight
+                             # facet where the plan corner turns through the top silhouette (the
+                             # "chamfer" tell, confirmed by eye on the side frame). Pure mesh density.
     zlift = mm(STUDIO["reveal_gap"])   # wave 6 base reveal: lift the body onto a recessed foot
     body.location = (0, 0, zlift)
     bpy.context.view_layer.update()
@@ -722,9 +752,13 @@ def build_mac_studio(loc_x=0.0, yaw_deg=0.0):
                            mm(STUDIO["sd_h"]) / 2.0, (mm(STUDIO["sd_x"]), yc, pz)))   # horizontal stadium
     boxes = apply_boolean(body, cutters)
     assign_interior(body, boxes, 1, ymin=front_y + mm(0.3))
-    # intake band = the lower `intake` mm (bottom fillet) carries the perforated mesh
+    # intake band = the perforated mesh zone. GEO-AUDIT (S4): apple_front reads a ~12.4mm band
+    # (0.13 of the 95mm height, 9-10 hole rows). The old threshold `intake + 0.3` (8.85mm WORLD z)
+    # silently lost the 2.5mm zlift, rendering only ~6.3mm of band (~half the reference) · the
+    # perforations must also climb past the fillet tangent onto the lower wall (ref: first row
+    # ~1.5mm below the tangent, no blank lip, no hard seam).
     for poly in body.data.polygons:
-        if (body.matrix_world @ poly.center).z < intake + mm(0.3):
+        if (body.matrix_world @ poly.center).z < zlift + mm(12.4):
             poly.material_index = 2
     smooth(body, 40)
 
@@ -744,7 +778,9 @@ def build_mac_studio(loc_x=0.0, yaw_deg=0.0):
     # minimal depth cue that kills the flat-black decal read.
     lip = rounded_box("sd-lip", mm(STUDIO["sd_w"] - 3.0), mm(1.4), mm(0.6),
                       mm(0.3), mm(0.2), mm(0.2), seg_corner=6, seg_fillet=2)
-    lip.location = (mm(STUDIO["sd_x"]), front_y + mm(2.4), pz - mm(STUDIO["sd_h"] / 2.0))
+    # GEO-AUDIT (S2 "bright strip in SD aperture"): the lip at 2.4mm caught the key light · the real
+    # slot reads uniformly dark inside. Recess it past 3.4mm so the aperture self-shadows.
+    lip.location = (mm(STUDIO["sd_x"]), front_y + mm(3.4), pz - mm(STUDIO["sd_h"] / 2.0))
     lip.data.materials.append(tongue_mat)
     tongues.append(lip)
 
@@ -763,7 +799,78 @@ def build_mac_studio(loc_x=0.0, yaw_deg=0.0):
     foot.data.materials.append(principled("mac-foot-mat", (0.02, 0.02, 0.022), 0.5, metallic=0.2))
     smooth(foot, 40)
 
-    group = [body, led, foot] + tongues
+    # BOTTOM FACE · M8 (GRADING-REPORT): the concentric underside · a flat central alu disc (embossed
+    # wordmark/regs · blank per gate) + a rubber foot ring + a perforated INTAKE ANNULUS (O157-179mm,
+    # "1500+ holes at 45deg" · Instrumental) whose outer edge sits ~9mm inboard of the side wall (so it
+    # is NOT visible from front/side · matches the reference). Flat proud discs (NO body boolean · the
+    # fillet body collapses on cuts · see the vent AUTOPSY). perforated_band needs an X-Z face so the
+    # annulus uses a dark matte band (reads as the recessed perforated zone at the bottom's low visibility).
+    m8_alu = blasted_aluminum()
+    bz = -mm(0.3)   # just below the foot bottom (z=0), facing down
+    bpy.ops.mesh.primitive_cylinder_add(radius=mm(89.5), depth=mm(0.8), vertices=96, location=(0, 0, bz))
+    perf = bpy.context.active_object; perf.name = "mac-bottom-intake"
+    perf.data.materials.append(principled("mac-bottom-intake-mat", (0.028, 0.028, 0.031), 0.62, metallic=0.15)); smooth(perf, 60)
+    bpy.ops.mesh.primitive_cylinder_add(radius=mm(76.0), depth=mm(1.0), vertices=96, location=(0, 0, bz - mm(0.1)))
+    cdisc = bpy.context.active_object; cdisc.name = "mac-bottom-disc"
+    cdisc.data.materials.append(m8_alu)
+    bpy.ops.mesh.primitive_torus_add(major_radius=mm(74.0), minor_radius=mm(1.6), location=(0, 0, bz - mm(0.5)),
+                                     major_segments=96, minor_segments=8)
+    fring = bpy.context.active_object; fring.name = "mac-foot-ring"
+    fring.data.materials.append(principled("mac-footring", (0.03, 0.03, 0.032), 0.7, metallic=0.0)); smooth(fring, 30)
+    ken = rounded_box("mac-kensington", mm(7.0), mm(3.0), mm(1.4), mm(1.4), 0, 0, seg_corner=4)
+    ken.location = (mm(72.0), mm(72.0), bz); ken.data.materials.append(cavity)
+    m8_parts = [perf, cdisc, fring, ken]
+
+    # REAR (render/MAC-STUDIO-360-SPEC.md) · M1 (GRADING-REPORT): a RECTANGULAR hex-perforation exhaust
+    # field ~173 x 53 mm (NOT a circle · corrected from Apple's 2025 back press image), upper portion,
+    # ~5mm below the top roll, entirely above the port row. Then the lower port row (M2). Blank (D2 gate).
+    rear_y = D / 2.0
+    # vent_z lowered from 63 to 56 so the field TOP (56+25=81mm) clears the 8.27mm top-edge fillet
+    # (starts ~87mm) · a cut into the fillet was breaking the body mesh (collapsed to 0 polys · the
+    # same fillet-break the Spark foam code warns about). Height trimmed 53->50 for margin.
+    vent_z = zlift + mm(56.0)
+    vent_w, vent_h, vent_r = mm(173.0), mm(50.0), mm(6.0)
+    if not arg("--novent", False):
+        # SHARP recess cutter (r=0) · the AUTOPSY below documents that ROUNDED cutters degenerate-tangent
+        # choke this fillet body + collapse it · a sharp box subtracts cleanly. The visible perforated
+        # mesh (rounded, below) hides the sharp recess corners. Shallow 5mm (was 7 · less into the body).
+        vcut = cutter_box(vent_w, mm(5.0), vent_h, mm(0.0), (0, rear_y - mm(1.5), vent_z))
+        vcut.name = "mac-vent-cut"
+        apply_boolean(body, [vcut])                       # a shallow RECTANGULAR recess in the rear
+        vent = cutter_box(vent_w - mm(3.0), mm(1.5), vent_h - mm(3.0), vent_r - mm(1.0),
+                          (0, rear_y - mm(4.6), vent_z))
+        vent.name = "mac-vent-mesh"
+        vent.data.materials.append(perforated_band()); smooth(vent, 60)   # the exhaust perforation field
+    body.data.materials.append(principled("mac-rear-port", (0.028, 0.028, 0.031), 0.55, metallic=0.2))  # 3
+    rpz = zlift + mm(23.0)   # M2/M3: port-row centers ~23mm above the desk (was 12 · cut the bottom edge)
+    # M2 (GRADING-REPORT) · correct order L->R facing the rear (sourced mm map -> x-center, center=0):
+    # 4x TB5 (VERTICAL) · RJ-45 · AC inlet (DEAD CENTER) · 2x USB-A (VERTICAL) · HDMI · 3.5mm jack ·
+    # power button (far right). Vertical ports have h>w. Was: power far-left + horizontal TB5 (wrong).
+    rports = [(3.4, 9.0, -68.5), (3.4, 9.0, -58.5), (3.4, 9.0, -48.5), (3.4, 9.0, -38.5),  # 4x TB5 vertical
+              (13.0, 12.0, -24.5),                     # RJ-45
+              (10.0, 10.0, 0.0),                       # AC inlet · dead center
+              (5.0, 12.0, 21.5), (5.0, 12.0, 33.5),    # 2x USB-A vertical
+              (15.0, 6.5, 50.5),                       # HDMI horizontal
+              (5.5, 5.5, 67.5),                        # 3.5mm jack
+              (10.0, 10.0, 81.5)]                      # power button · far right
+    rcut = [] if arg("--noports", False) else [cutter_box(mm(w_), mm(6.0), mm(h_), mm(1.0), (mm(xc), rear_y - mm(2.0), rpz))
+            for (w_, h_, xc) in rports]   # AUTOPSY: rounding the square ports to r~w/2 corrupted the
+    # body (degenerate-tangent boolean choke · even r-0.35-under did not clear it) · reverted to the
+    # known-good rounded-rect cut. A round jack/inlet is not worth a body regression.
+    rbox = apply_boolean(body, rcut)
+    assign_interior(body, rbox, 3, ymin=rear_y - mm(6.5))
+    # DARK connector inserts · the pocket walls read alu-lined (assign_interior does not fully catch
+    # them on this fillet body) · real rear ports are DARK recesses. A dark insert recessed in each
+    # pocket makes every port read as a dark connector (sourced: real ports dark · GRADING-REPORT M2).
+    port_dark = principled("mac-port-dark", (0.020, 0.020, 0.023), 0.50, metallic=0.20)
+    rport_inserts = []
+    if not arg("--noports", False):
+        for (w_, h_, xc) in rports:
+            ins = rounded_box("mac-port-ins", mm(w_ - 0.8), mm(3.2), mm(h_ - 0.8), mm(0.7), 0, 0, seg_corner=4)
+            ins.location = (mm(xc), rear_y - mm(3.9), rpz - mm(h_ - 0.8) / 2.0)   # recessed inside the pocket
+            ins.data.materials.append(port_dark); smooth(ins, 20); rport_inserts.append(ins)
+
+    group = [body, led, foot] + ([vent] if not arg("--novent", False) else []) + tongues + m8_parts + rport_inserts
     for ob in group:
         ob.rotation_euler.z = math.radians(yaw_deg)
         x, y = ob.location.x, ob.location.y
@@ -810,12 +917,32 @@ def spark_top_vent():
     nt.links.new(mapp.outputs["Vector"], wave.inputs["Vector"])
     bump = nt.nodes.new("ShaderNodeBump"); bump.inputs["Strength"].default_value = 0.22
     bump.inputs["Distance"].default_value = mm(0.5)
+    # GEO-AUDIT fix (spark-top S4 "zipper ribbing") · the weave bump wrapped the sloped RECESS WALL,
+    # embossing regular teeth along the recess boundary that read as a ratchet line. Gate the bump
+    # strength by the face normal: weave lives ONLY on the horizontal panel floor (|Nz| ~ 1), the
+    # wall and border stay geometrically smooth. Acceptance: rib count on the wall = zero.
+    geo = nt.nodes.new("ShaderNodeNewGeometry")
+    sep = nt.nodes.new("ShaderNodeSeparateXYZ")
+    nt.links.new(geo.outputs["Normal"], sep.inputs["Vector"])
+    zabs = nt.nodes.new("ShaderNodeMath"); zabs.operation = "ABSOLUTE"
+    nt.links.new(sep.outputs["Z"], zabs.inputs[0])
+    zgate = nt.nodes.new("ShaderNodeMath"); zgate.operation = "GREATER_THAN"
+    zgate.inputs[1].default_value = 0.985
+    nt.links.new(zabs.outputs[0], zgate.inputs[0])
+    smul = nt.nodes.new("ShaderNodeMath"); smul.operation = "MULTIPLY"
+    smul.inputs[1].default_value = 0.22
+    nt.links.new(zgate.outputs[0], smul.inputs[0])
+    nt.links.new(smul.outputs[0], bump.inputs["Strength"])
     nt.links.new(wave.outputs["Fac"], bump.inputs["Height"])
     nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
     return add_bevel(m)   # photoreal T7 · hairline edge (chains the weave bump into the bevel)
 
 
-def foam3d_material(base=(0.560, 0.470, 0.300), ao_fac=0.54, ao_dist=1.2, rough=0.40):
+def foam3d_material(base=(0.575, 0.483, 0.308), ao_fac=0.86, ao_dist=1.4, rough=0.40):   # AUTOPSY (panel-6 #2 · deeper pore AO · REVERTED): ao 0.86->0.93 crushed the pores darker but overshot the tone pin (spark_foam L 34.7->32.5, dE 4.98->6.11 FAIL) · the foam is at its GATED depth limit · deepening the recesses darkens the mean past the target · the panel's 'more depth' conflicts with the mean pin · leave at 0.86 (dE 4.98 PASS, accurate 3D foam)
+    # SP10 attempt 2 (attempt 1 cancelled itself: base lift raised the mean as fast as deeper AO
+    # raised the spread · std/mean flat at 0.482 vs pin 0.60). Now: voids MUCH deeper (ao 0.86,
+    # reach 1.4mm) and base near-original · spread UP, mean DOWN, and the gate mean has been
+    # ABOVE its L-target all along so the darkening moves TOWARD the tone pin too.
     # material for the REAL 3D foam · the deep pores go dark on their OWN (geometry self-shadow), so
     # unlike the displaced-heightfield material this needs BRIGHT struts + GENTLE AO to bring the
     # patch mean back up to the spark_foam pin (the gate is senior · tuned via rig_patches).
@@ -827,9 +954,50 @@ def foam3d_material(base=(0.560, 0.470, 0.300), ao_fac=0.54, ao_dist=1.2, rough=
     mr.inputs["From Max"].default_value = 0.58; mr.inputs["To Min"].default_value = rough + 0.06
     mr.inputs["To Max"].default_value = rough - 0.10
     nt.links.new(geo.outputs["Pointiness"], mr.inputs["Value"]); nt.links.new(mr.outputs["Result"], b.inputs["Roughness"])
+    # L20 · per-strut COLOR variation (panel loop-17: "flat matte gold, no per-cell tonal variation";
+    # the real foam control was explicitly credited with "per-cell tonal variation"). A large-scale
+    # object-space noise mixes the gold strut-to-strut between a warmer-bright and a cooler-dark tone,
+    # centered on `base` so the spark_foam patch mean holds the pin (gate stays senior). Feeds the AO
+    # multiply in place of the old flat constant.
+    tcc = nt.nodes.new("ShaderNodeTexCoord")
+    cvar = nt.nodes.new("ShaderNodeTexNoise"); cvar.inputs["Scale"].default_value = 1000.0 / (8.0 * S)
+    cvar.inputs["Detail"].default_value = 2.0; cvar.inputs["Roughness"].default_value = 0.6
+    nt.links.new(tcc.outputs["Object"], cvar.inputs["Vector"])
+    cmix = nt.nodes.new("ShaderNodeMixRGB")
+    cmix.inputs["Color1"].default_value = (base[0] - 0.10, base[1] - 0.09, base[2] - 0.06, 1)  # cool/dark strut
+    cmix.inputs["Color2"].default_value = (base[0] + 0.09, base[1] + 0.075, base[2] + 0.05, 1)  # warm/bright strut
+    nt.links.new(cvar.outputs["Fac"], cmix.inputs["Fac"])
+    # SP10 attempt 3 · CREST BRIGHTEN (the reference macro's "bright crisp struts"): convex
+    # crest tops (high Pointiness) get a bright warm-gold boost · raises the strut-void SPREAD
+    # with little mean movement (crests are a small area fraction).
+    crest = nt.nodes.new("ShaderNodeMapRange"); crest.clamp = True
+    crest.inputs["From Min"].default_value = 0.56; crest.inputs["From Max"].default_value = 0.72
+    crest.inputs["To Min"].default_value = 0.0; crest.inputs["To Max"].default_value = 0.55
+    nt.links.new(geo.outputs["Pointiness"], crest.inputs["Value"])
+    cbright = nt.nodes.new("ShaderNodeMixRGB")
+    cbright.inputs["Color2"].default_value = (min(1, base[0]*1.55), min(1, base[1]*1.55), min(1, base[2]*1.5), 1)
+    nt.links.new(cmix.outputs["Color"], cbright.inputs["Color1"])
+    nt.links.new(crest.outputs["Result"], cbright.inputs["Fac"])
+    # SP11 (PR-gate loop 19: foam FIELD reads "noise-fill / tiles unnaturally" at WIDE distance while
+    # the macro passes 1/5) · real reticulated blocks show LARGE-SCALE density/tone zones. A ~40mm
+    # object-space noise multiplies the foam brightness 0.86..1.14 so lighter/darker patches read
+    # across the field at portrait distance · breaks the uniform-speckle read. Mean held (multiplier
+    # averages ~1.0 · gate arbitrates). Cells + strut colour (SP10) unchanged · this is a NEW scale.
+    fvar = nt.nodes.new("ShaderNodeTexNoise"); fvar.inputs["Scale"].default_value = 1000.0 / (40.0 * S)
+    fvar.inputs["Detail"].default_value = 3.0; fvar.inputs["Roughness"].default_value = 0.65
+    nt.links.new(tcc.outputs["Object"], fvar.inputs["Vector"])
+    fmap = nt.nodes.new("ShaderNodeMapRange"); fmap.inputs["From Min"].default_value = 0.30
+    fmap.inputs["From Max"].default_value = 0.70; fmap.inputs["To Min"].default_value = 0.86
+    fmap.inputs["To Max"].default_value = 1.14; fmap.clamp = True
+    nt.links.new(fvar.outputs["Fac"], fmap.inputs["Value"])
+    fmot = nt.nodes.new("ShaderNodeMixRGB"); fmot.blend_type = "MULTIPLY"; fmot.inputs["Fac"].default_value = 1.0
+    nt.links.new(cbright.outputs["Color"], fmot.inputs["Color1"])
+    fmc = nt.nodes.new("ShaderNodeCombineXYZ")
+    nt.links.new(fmap.outputs["Result"], fmc.inputs["X"]); nt.links.new(fmap.outputs["Result"], fmc.inputs["Y"]); nt.links.new(fmap.outputs["Result"], fmc.inputs["Z"])
+    nt.links.new(fmc.outputs["Vector"], fmot.inputs["Color2"])
     ao = nt.nodes.new("ShaderNodeAmbientOcclusion"); ao.inputs["Distance"].default_value = mm(ao_dist); ao.samples = 8
     aom = nt.nodes.new("ShaderNodeMixRGB"); aom.blend_type = "MULTIPLY"; aom.inputs["Fac"].default_value = ao_fac
-    aom.inputs["Color1"].default_value = (*base, 1)
+    nt.links.new(fmot.outputs["Color"], aom.inputs["Color1"])   # SP11 · mottled color into the AO multiply
     nt.links.new(ao.outputs["Color"], aom.inputs["Color2"]); nt.links.new(aom.outputs["Color"], b.inputs["Base Color"])
     # L14 · CRYSTALLINE STRUT SURFACE · real sintered/cast metal foam struts are rough and faceted,
     # not the smooth blobs the voxel remesh leaves · a fine high-freq bump breaks the "procedural
@@ -939,8 +1107,12 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
     (not resting on foam). Champagne anodized shell; smooth sides; the top (150 x 150) carries a
     recessed vent panel. Rear skipped. Trademark gate: caps stay blank (D2 · no logo, ever)."""
     W = mm(SPARK["width"]); D = mm(SPARK["depth"]); H = mm(SPARK["height"])
-    r = mm(SPARK["edge_R"])
-    body = rounded_box("dgx-spark", W, D, H, r, r, r, seg_corner=24, seg_fillet=8)
+    # S4 (GRADING-REPORT): the real Spark is a CRISP machined brick (~1mm arrises · ChargerLAB/STH
+    # teardown), not the soap-bar the 6.09mm fillet gave. Reduced to 2.5mm (crisp but keeps enough
+    # relief that the foam recess does not break the corner). corner_R stays a touch larger for the
+    # plan corners; the smaller top/bottom fillet is what kills the soap-bar read.
+    r = mm(2.5)
+    body = rounded_box("dgx-spark", W, D, H, mm(3.0), r, r, seg_corner=24, seg_fillet=8)
     bpy.context.view_layer.update()
     body.data.materials.append(champagne_gold(0.50))                       # 0 shell
     body.data.materials.append(principled("spark-pill-wall", (0.40, 0.27, 0.085), 0.72, metallic=0.1))  # 1 inner wall
@@ -965,19 +1137,11 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
         assign_interior(body, boxes, 1, ymin=front_y + mm(0.3))
     smooth(body, 40)
 
-    # top recessed vent panel (seen in 3/4 + top): a shallow rounded-rect pocket in the top face
-    tp = cutter_box(mm(SPARK["top_panel_w"]), mm(SPARK["top_panel_h"]), mm(3.0), mm(8.0),
-                    (0, 0, H + mm(1.5) - mm(3.0) / 2.0), seg=16)  # wave 4b tighter border radius
-    # (cut from the top; cutter_box origin logic handles the z placement)
-    tbox = apply_boolean(body, [tp])
-    assign_interior(body, tbox, 2)      # top recessed panel -> dedicated dark vent material
-
-    # exhaust slot (wave 8, closing the 4b defer): a thin recessed slot along the front edge of
-    # the vent panel, per cl_side-profile. Wide in x, thin in y, shallow into the top.
-    es = cutter_box(mm(SPARK["top_panel_w"] * 0.66), mm(2.2), mm(2.6), mm(1.1),
-                    (0, -mm(SPARK["top_panel_h"] / 2.0) + mm(7.0), H + mm(1.5) - mm(2.6) / 2.0), seg=6)
-    ebox = apply_boolean(body, [es])
-    assign_interior(body, ebox, 2)
+    # TOP FACE · S3 (GRADING-REPORT): the real DGX Spark top is BLANK matte champagne · no dark inset
+    # panel, no groove (STH top-down photo · "on the sides and top, the system is just flat"). The
+    # earlier recessed dark vent panel + exhaust slot were INVENTED · removed. The only real top breaks
+    # are the recessed foam-edge intake strips at the front/rear edges (a later refinement). Keep the
+    # top as the champagne shell material.
 
     # champagne tub floors sitting recessed at the back of each pocket, blank
     tubs = []
@@ -1015,8 +1179,10 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
         #     hole edges organically.
         bez_w, bez_h, bez_r = mm(SPARK["bezel_w"]), mm(SPARK["bezel_h"]), mm(6.0)
         holes = [(sx * px, bez_w, bez_h, bez_r) for sx in (-1, 1)]
+        # L19 (loop-16 macro sub-tell: "smooth waxy metaball blobs · real foam has thin sharp
+        # webbing") · voxel 0.185 -> 0.14 so the remesh keeps the strut ridges crisp at f5.6 macro.
         foam = foam3d_field("dgx-spark-foam", 0, zc, ffx - mm(0.6), ffz - mm(0.8), mm(5.0),
-                            front_y - mm(0.6), pitch=mm(1.62), voxel=mm(0.185), holes=holes)
+                            front_y - mm(0.6), pitch=mm(1.30), voxel=mm(0.12), holes=holes)   # FINER pores (1.62->1.30) · reduce the trio-scale glitter · gate checks the foam MEAN (holds) not the contrast
         foam.data.materials.append(foam3d_material())
         foam_layers = [foam]
         # 3 · POLISHED pill plateaus (the shiny islands the reference shows) · a hair proud of the
@@ -1057,6 +1223,17 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
             ys = [(isl.matrix_world @ v.co).y for v in isl.data.vertices]
             print(f"[island {sx}] polys={len(mi)} mat0={mi.count(0)} mat1={mi.count(1)}"
                   f" y[{min(ys)*1000:.1f},{max(ys)*1000:.1f}]mm loc={tuple(round(c*1000,1) for c in isl.location)}")
+        # NVIDIA green logo badge · S7 (GRADING-REPORT): the LEFT front carries the green NVIDIA eye mark
+        # + a 90deg-rotated wordmark (STH/ChargerLAB · "the lower air intake is marked with the NVIDIA
+        # logo"). Blank green-tinted plates per the trademark gate (shapes + placement only, no glyphs),
+        # proud of the foam on the lower-left front.
+        nv_green = principled("spark-nv-green", (0.24, 0.44, 0.02), 0.38, metallic=0.0)
+        eye = rounded_box("spark-nv-eye", mm(7.0), mm(1.3), mm(7.0), mm(1.6), 0, 0, seg_corner=6)
+        eye.location = (-px + mm(6.0), front_y - mm(1.5), zc - mm(15.0))
+        eye.data.materials.append(nv_green); smooth(eye, 20); tubs.append(eye)
+        word = rounded_box("spark-nv-word", mm(2.4), mm(1.1), mm(12.0), mm(1.0), 0, 0, seg_corner=3)
+        word.location = (-px + mm(12.0), front_y - mm(1.4), zc - mm(15.0))
+        word.data.materials.append(nv_green); smooth(word, 20); tubs.append(word)
     else:
         # wave 5b · two-scale displacement for size VARIANCE (coarse 2.15mm cells subdivided by
         # a finer 1.30mm strut network · fixes the uniform single-scale reptile-skin look) plus
@@ -1127,6 +1304,54 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
                                hole_pad=6.0, width=mm(90))  # center-only · never reaches the pills
             back.data.materials.append(champagne_gold(pore_darken=True))
             foam_layers.append(back)
+
+    # REAR I/O (researched · render/DGX-SPARK-360-SPEC.md) · recessed port cavities cut into the
+    # champagne rear face (y = +D/2), a single row left -> right: power, 4x USB-C, 2x USB-A, HDMI,
+    # RJ-45, 2x QSFP56. Blank cavities per the trademark gate · reads as the real port bank at 360.
+    rear_y = D / 2.0
+    body.data.materials.append(principled("spark-port", (0.028, 0.022, 0.013), 0.55, metallic=0.25))  # 4
+    port_z = H * 0.42
+    # S2 (GRADING-REPORT) · real rear I/O (NVIDIA QSG p.5, L->R): power button · PD USB-C · 3x USB-C ·
+    # HDMI · RJ-45 · 2x QSFP = 9 cavities. NO USB-A (the old 2x USB-A were invented). USB-C are VERTICAL.
+    port_specs = [(6.0, 6.0, -63.0),                                                             # power button
+                  (4.0, 9.0, -49.0), (4.0, 9.0, -39.0), (4.0, 9.0, -29.0), (4.0, 9.0, -19.0),    # PD + 3x USB-C vertical
+                  (14.0, 6.0, -3.0),                                                             # HDMI horizontal
+                  (12.0, 11.0, 13.0),                                                            # RJ-45
+                  (16.0, 11.0, 47.0), (16.0, 11.0, 62.0)]                                        # 2x QSFP (twin cages, far right)
+    port_cutters = [cutter_box(mm(pw_), mm(6.0), mm(ph_), mm(1.0), (mm(pxc), rear_y - mm(2.0), port_z))
+                    for (pw_, ph_, pxc) in port_specs]
+    port_boxes = apply_boolean(body, port_cutters)
+    assign_interior(body, port_boxes, 4, ymin=rear_y - mm(6.5))
+    # REAR METAL FOAM · S1 (GRADING-REPORT): the real Spark rear is ALSO metal foam (LMSYS: "both front
+    # and rear panels employ metal foam"; STH rear photos) with the polished I/O plate inset LOW. Add a
+    # proud foam field over the UPPER rear (above the port strip); the lower strip stays champagne = the
+    # I/O plate. Reuses the gated foam3d material so the spark_foam tone pin holds. (rear_foam appended
+    # to foam_layers below · the port cavities sit clear beneath it.)
+    rear_foam = foam3d_field("dgx-spark-foam-rear", 0, mm(38.0), ffx, mm(22.0), mm(5.0),
+                             rear_y - mm(4.4), pitch=mm(1.30), voxel=mm(0.12), seed=23)
+    rear_foam.data.materials.append(foam3d_material())
+    foam_layers.append(rear_foam)
+    # QSFP cage lips · the twin metal cages proud of the rear face (the Spark's most recognizable
+    # rear feature · ConnectX-7 200GbE) · a thin metal frame around each of the two QSFP openings.
+    cage_mat = principled("spark-qsfp-cage", (0.30, 0.30, 0.32), 0.42, metallic=0.8)
+    for qx in (47.0, 62.0):
+        for bw_, bh_, ox, oz in ((18.0, 2.0, 0.0, 5.5), (18.0, 2.0, 0.0, -5.5),
+                                 (2.0, 11.0, -8.5, 0.0), (2.0, 11.0, 8.5, 0.0)):
+            lip = cutter_box(mm(bw_), mm(2.0), mm(bh_), mm(0.4), (mm(qx + ox), rear_y + mm(0.8), port_z + mm(oz)))
+            lip.name = "spark-cage-lip"; lip.data.materials.append(cage_mat); tubs.append(lip)
+
+    # BOTTOM FACE · S12 (GRADING-REPORT): a magnetically-attached rounded-square non-slip base cover
+    # (~18mm corner radius · the only plastic part · StorageReview) + a front intake slot with rounded
+    # ends (dust-filtered · ChargerLAB/STH). Regulatory print is INSIDE the cover (not visible · gate).
+    # Separate proud plates (no body boolean · the bottom is rarely seen · built for 360 completeness).
+    cover = rounded_box("spark-basecover", mm(122.0), mm(122.0), mm(1.6), mm(18.0), 0, 0, seg_corner=20)
+    cover.location = (0, 0, -mm(0.6))   # a hair proud below the body bottom (bottom at z=0)
+    cover.data.materials.append(principled("spark-basecover-mat", (0.043, 0.041, 0.038), 0.74, metallic=0.0))
+    smooth(cover, 30); tubs.append(cover)
+    islot = rounded_box("spark-intake", mm(96.0), mm(5.0), mm(1.4), mm(2.4), 0, 0, seg_corner=6)
+    islot.location = (0, front_y + mm(13.0), -mm(0.2))   # machined intake slot along the FRONT-bottom edge
+    islot.data.materials.append(principled("spark-intake-mat", (0.018, 0.018, 0.020), 0.6))
+    tubs.append(islot)
 
     group = [body] + foam_layers + tubs
     for ob in group:

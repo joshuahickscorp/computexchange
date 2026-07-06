@@ -278,3 +278,53 @@ Calibrated against the real controls' render-call rate. Two CONSECUTIVE clean pa
   remesh at 0.185mm rounds the strut ridges. Defined fix: finer voxel (~0.13mm) for a crisper web ·
   queued as the next FOAM-GEO-MAP commit IF the grader keeps the gate open after ruling on 10e.
   Not speculative tuning · a named, mechanistic, reference-checked defect with a one-parameter fix.
+
+## Loop 18 (2026-07-05) · THE PR-GATE, EXECUTED · FAIL
+- The recalibrated FRONTIER-V2 criterion (PR-GATE, _pr_gate.py, rule fixed at commit 8294af7
+  BEFORE any run) was executed on the current deliverable frames (L20 + geo-pass-1 · never
+  previously panel-tested). Sanity: loops 16-17 retro-fail the gate too (it is a real bar).
+- RESULT: FAIL. Gate frames 5/5/5/5 render-calls vs clean-real mean 1.0 (threshold 2.0).
+  The real Apple press photo drew 5/5 render AGAIN (4th consecutive demonstration · the
+  clean-product confound is stable across sittings).
+- Unique >=2 tells vs reals: foam (mushy/low-frequency vs the real foam's "crisp chaotic
+  cells" · agents compared DIRECTLY against the in-batch real Spark photos), reflect.
+  New actionable evidence: (1) foam spatial frequency/edge crispness at hero distance is now
+  the named delta vs reality (goes to the SP queue as the flip-flop-guarded cell-scale case ·
+  measure real foam cell frequency at matched scale FIRST); (2) the post chain's uniform CA
+  fringing was explicitly called "a post-process giveaway" by two lenses (POST param review
+  is a DRIVER decision per L9 · logged, not changed); (3) studio port interior depth named
+  again at front distance (ties to the ST4 ortho verification).
+- DISPOSITION: the PR-gate remains the master loop's stop condition (wave 6 R6.4) · unmet,
+  open, with a concrete evidence trail feeding SP10/POST-1 queue items. No claim of
+  completion is made.
+
+## Loop 19 (2026-07-05) · PR-GATE on SP10 contrast-fixed foam + POST-1 · FAIL overall, macro WON
+- clean-real controls: spark-foam 4/5, spark-side 3/5, studio-apple 4/5, studio-wiki 3/5, sth2 0/5
+  -> threshold 3.80 (strong clean-product confound this sitting · real Apple studio photo 4/5 render).
+- Gate frames: **spark-detail 1/5 render = PASS** (was 5/5 in loop 18 · the SP10 contrast fix
+  RETIRED the foam macro tell, validated), spark-front 5/5, pair 5/5, studio-front 5/5 (unique
+  tell 'repeat' = the speaker grille reads procedural). VERDICT FAIL (3 frames over threshold).
+- KEY FINDING: SP10 split the foam tell by DISTANCE. Up close (detail macro) the deeper voids +
+  brighter crests now read as real reticulated foam (1/5). At WIDE distance (front/pair) the whole
+  foam FIELD still reads "noise-fill / tiles unnaturally" · the cells no longer resolve individually
+  so the eye sees an averaged procedural speckle. NEXT LEVER (SP11): large-scale field variation
+  visible at wide distance (patchy density/tone zones across the foam field, not just per-cell) ·
+  measure the real block's macro-scale mottling on sth_front-1 first (flip-flop guard).
+- Also named: studio 'repeat' (grille perforation regularity · a STUDIO geometry item, ST queue),
+  and the blank trademark-gated pill recesses read as "non-functional concept" (a FALSE-TELL: the
+  blank is deliberate per L6 · logged, not chased).
+- PR-gate remains OPEN (no consecutive pass · loop 18 FAIL, loop 19 FAIL). Real progress: the
+  single most-cited tell of the whole project (foam) now PASSES at macro distance.
+
+## Loop 20 (2026-07-05) · PR-GATE on SP11 wide-field foam · FAIL (harsh draw) · FOAM NON-UNIQUE
+- Razor-sharp panel draw: every clean-real control 0-1/5 -> threshold 1.20 (brutal · loop 19 was 3.80).
+  Against that my frames 5/5 fail. Panel variance remains enormous (the documented confound).
+- MILESTONE: the FOAM tell is NO LONGER UNIQUE on any gate frame. spark-front unique tells =
+  uniform/perfect (NOT foam), spark-detail = perfect/dof (NOT foam). SP10 (macro contrast) + SP11
+  (wide-field mottle) pushed the foam to REFERENCE PARITY · the real controls now draw "foam" as
+  often as mine. The single most-cited tell of the entire 20-loop project is neutralized.
+- Remaining unique tells: perfect/uniform (clean-product · partly FALSE-TELL, real Apple scores it),
+  dof (the macro bokeh reads "mathematically smooth" · a POST/camera item), port (studio ports read
+  as flat slots · the ST4 ortho item), shadow (pair contact).
+- PR-gate OPEN (18/19/20 all FAIL, no consecutive pass). Trajectory real: foam retired at macro
+  (L19) then at field (L20). Next levers named: DOF character (macro), studio port depth (ST4).

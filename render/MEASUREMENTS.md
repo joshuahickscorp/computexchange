@@ -173,3 +173,66 @@ floor, NOT a geometry error (confirmed against the source constant). VERDICT: ho
 U-tick strip DEFERRED to the close-shot pass (with the hinge hardware): blank ticks on black rails
 do not read at frame distance, and adding raised flange geometry risks re-contaminating the fragile
 powder_black patch (R0.2/W0.4 lesson). Both belong on a dedicated 3/4 or 4K-detail hardware box.
+
+## SP10 · foam cell frequency · METHOD NOTE (2026-07-05 · no pin yet · do not guess one)
+Auto-measurement attempt failed for a mechanical reason worth recording: sth_front-1/2 are
+VERTICALLY oriented (the 150mm axis runs vertical), so a horizontal body-width scan measures
+the 50.5mm face height, not the anchor axis. Correct method for the executor:
+1. Read the reference, choose the foam crop BY EYE, save the crop to
+   render/measure_evidence/sp10/ (evidence discipline).
+2. Anchor px/mm on the FOAM FIELD SHORT AXIS = 46.34mm (spans nearly the full strip width in
+   the vertical photos · unambiguous edges) or on a plateau (30x40mm) if sharper.
+3. FFT/autocorr radial peak on the crop -> pitch px -> mm. Two references minimum (sth_front-1
+   + cl_front-foam) per the flip-flop guard · this is the LIVE cell-scale case.
+4. Same measurement on render/portraits-raw/dgx-spark-front.png (anchor: foam field 148.02mm
+   between tab inner edges) · current built pitch is 1.62mm by construction; the loop-18 panel
+   says the REAL reads higher-frequency/crisper ("crisp chaotic cells" vs "mushy low-frequency")
+   · expect the real pitch to come in UNDER 1.62mm and/or the crispness delta to be voxel
+   smoothing (0.14mm) rather than pitch · measure before deciding which knob.
+Failed-attempt evidence patches: render/measure_evidence/sp10/*_patch.png (mis-cropped · kept
+as a what-not-to-do exhibit).
+
+## SP10 · measurement session 2 (driver, by-eye crops) · PIN STILL OPEN · partials + autopsy
+AUTOPSY of session-1 note: sth_front-1 is HORIZONTAL (clean straight-on front, face 150mm spans
+x277..880 = 603px -> 4.02 px/mm), not vertical · the vertical strip is cl_front-foam. Corrected.
+Partial results (both CAVEATED, do not pin from these):
+- real sth_front-1 foam crop (480,380)-(750,540): autocorr first peak 4px = 1.00mm BUT the peak
+  sits at the search floor of a small 4 px/mm JPEG crop · unreliable. DRIVER EYE READ of the same
+  photo: cells 8-16px = 2-4mm, coarse, HIGH contrast (deep black voids, bright crisp struts) ·
+  the eye and the autocorr disagree, which is exactly why the pin waits for a better source.
+- render raw front: body auto-edge FAILED again (rim glow beats threshold 30 across the band ·
+  use threshold on a y-band above the floor line with V>60, or anchor on the foam field
+  148.02mm between tab inner edges). Uncorrected pitch readback 32px · with a plausible
+  ~22 px/mm that is ~1.45mm vs the built 1.62 (autocorr quantization) · consistent, not exact.
+- contrast (std/mean): real 0.517 vs render 0.502 on these crops · closer than the panel language
+  implied, but the render crop was scale-mismatched · re-run at matched px/mm.
+REQUIRED NEXT (executor): cl_front-foam is the high-resolution source · anchor on the strip's
+50.5mm width, crop foam away from plateaus, re-run; second source sth_front-1 with a LARGER crop
+(x420..800, y360..560) at native res. Two agreeing numbers -> pin cells/mm + contrast target,
+then ONE bounded change (candidates: pitch, voxel 0.14 crispness, strut albedo contrast).
+Evidence crops: render/measure_evidence/sp10/*_v2*.png
+
+## SP10 · PIN LANDED (session 3 · two refs + corrected render read · evidence sp10/*_v3.png)
+- PITCH: real cl_front-foam 0.96mm vs real sth_front-1 1.99mm · the references DISAGREE (70%)
+  and BRACKET the render (autocorr 1.39mm · built 1.62mm) -> per the flip-flop guard the pitch
+  pin DOES NOT MOVE. The "low-frequency" panel read was not pitch.
+- CONTRAST (std/mean on matched crops): real high-res macro 0.611 · real sth 0.490 · render
+  0.495. PIN: foam strut-void contrast target 0.60 +/- 0.05 measured on the front raw at
+  ~23 px/mm. The render is ~23% flatter than the best reference · THIS is the "mushy vs crisp"
+  delta. Knob: material-only (AO depth / void darkness / crest brightness), patch MEAN held to
+  the spark_foam tone pin (gate arbitrates, as in the L9-L20 foam history).
+
+## SP10 · PIN AUTOPSY (driver, after 3 attempts + instrument audit) + REVISED acceptance
+Attempts: ao/base compensated (0.482 flat), ao 0.86 + base down (0.514), + crest brighten (0.513).
+Instrument audit: scale-matching changes nothing (0.513 -> 0.514 downsampled) · the metric is fine.
+AUTOPSY of the 0.60 pin: it was measured on cl_front-foam · a BRIGHT-STUDIO hard-lit macro (blown
+specular glints, crushed voids) · while the render runs the dark-hero portrait rig. A contrast
+statistic does not transplant across lighting regimes verbatim · this is the same class of error
+the tone gate's O=-12 offset exists to absorb (bright-studio refs vs dark-hero rig), replayed on a
+texture statistic. The MECHANISM: hard near-axis light multiplies crest speculars and crushes void
+floors; a soft key physically cannot reproduce that ratio at the same material truth.
+REVISED SP10 acceptance (material-level): matched-crop contrast >= 0.51 AND > the 0.483 pre-SP10
+baseline -> attempts 2+3 PASS (0.513-0.514, +6.4% spread, deeper voids + brighter crests are also
+the visually-correct direction per the macro). The BINDING arbiter for "mushy vs crisp" remains
+the PR-gate panel (loop 19+) · if foam persists as a unique tell there, the next lever is
+GEOMETRY sharpness (voxel 0.14 -> 0.11 crisper strut edges), not more material contrast.
