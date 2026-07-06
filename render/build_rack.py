@@ -664,12 +664,21 @@ def build_gpu(cx, cz, yc, idx=0):
     # ("7 large axial blades"), club386 ("seven thick blades"), Overclocking.com.
     for fz in (zt, zb):
         parts += build_fan(cx, yf, fz, fan_r, nb=7, blade_rgb=(0.050, 0.052, 0.060), emit_ring=True)
-    # X 'infinity' accent on the center bar (2 crossing diagonals) + its lit edges
+    # X 'infinity' accent · G5 (GRADING-REPORT): ONE flush integrated X (union the two diagonals) so the
+    # crossing is FLUSH, not a stacked-bar step; arms extended (78->86) so the tips reach toward the fan
+    # rims, forming the continuous 'infinity loop' with the lit rings. Gunmetal on the black center module.
+    xbars = []
     for sgn in (1, -1):
-        xb = rounded_box("fe-xbar", mm(78.0), mm(3.0), mm(10.0), mm(2.0), seg=2)
+        xb = rounded_box("fe-xbar", mm(86.0), mm(3.0), mm(10.0), mm(2.0), seg=2)
         xb.location = (cx, yf - mm(2.0), cz); xb.rotation_euler = (0, math.radians(sgn * 33.0), 0)
-        xb.data.materials.append(xacc_mat); smooth(xb, 30); parts.append(xb)
-        xl = box("fe-xlit", mm(78.0), mm(1.0), mm(0.9), (cx, yf - mm(3.6), cz))   # thin lit strip · the X was 55% of the clipped area (panel-3 gate) · thinned under the 1% gate while the rings (main spill) stay at 0.7
+        xbars.append(xb)
+    bpy.context.view_layer.objects.active = xbars[0]
+    mu = xbars[0].modifiers.new("u", "BOOLEAN"); mu.operation = "UNION"; mu.solver = "EXACT"; mu.object = xbars[1]
+    bpy.ops.object.modifier_apply(modifier=mu.name); bpy.data.objects.remove(xbars[1], do_unlink=True)
+    xbars[0].name = "fe-xacc"; xbars[0].data.materials.append(xacc_mat); smooth(xbars[0], 30); parts.append(xbars[0])
+    # lit strips inset along the X arms · thin, converging at the centre (club386 "converging in the centre")
+    for sgn in (1, -1):
+        xl = box("fe-xlit", mm(86.0), mm(1.0), mm(0.9), (cx, yf - mm(3.6), cz))   # thin lit strip · kept thin under the 1% clip gate
         xl.rotation_euler = (0, math.radians(sgn * 33.0), 0); xl.data.materials.append(lit); parts.append(xl)
     # small co-located glow at the X centre · the X emissive lines cast no near-field GI (like the rings
     # did) · a dim light makes the X spill onto the centre bar too (consistent with the ring-glow fix,
