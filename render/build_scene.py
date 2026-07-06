@@ -811,10 +811,10 @@ def build_mac_studio(loc_x=0.0, yaw_deg=0.0):
               (15.0, 6.5, 26.0),
               (12.5, 11.5, 44.0),
               (6.0, 6.0, 60.0)]
-    rcut = [cutter_box(mm(w_), mm(6.0), mm(h_),
-                       mm(min(w_, h_) / 2.0) if w_ == h_ else mm(1.0),   # square ports (AC inlet, 3.5mm jack) -> round
-                       (mm(xc), rear_y - mm(2.0), rpz))
-            for (w_, h_, xc) in rports]
+    rcut = [cutter_box(mm(w_), mm(6.0), mm(h_), mm(1.0), (mm(xc), rear_y - mm(2.0), rpz))
+            for (w_, h_, xc) in rports]   # AUTOPSY: rounding the square ports to r~w/2 corrupted the
+    # body (degenerate-tangent boolean choke · even r-0.35-under did not clear it) · reverted to the
+    # known-good rounded-rect cut. A round jack/inlet is not worth a body regression.
     rbox = apply_boolean(body, rcut)
     assign_interior(body, rbox, 3, ymin=rear_y - mm(6.5))
 
