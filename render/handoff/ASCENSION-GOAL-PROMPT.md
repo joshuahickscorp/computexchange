@@ -165,62 +165,23 @@ against references.** Escalate any genuine limit in writing and move on; never f
 
 ## THE PROMPT (paste this into a fresh FABLE chat)
 
+The `/goal` field has a ~4000-character limit, so the full doctrine cannot be inlined. The prompt below
+is a SHORT pointer: it tells Fable to READ the two documents (this file's sections 0-6 + the handoff),
+which hold the complete instructions, and carries only the must-not-lose constraints inline as
+insurance. Paste this verbatim:
+
 ```
-/goal You are a FABLE ARCHITECT session. Your ONLY job is to produce the DOCTRINE and build the
-SCAFFOLDING for the 8→10 photoreal-material ascension of three rendered products (6× RTX 5090 FE in a
-GPU rig, Mac Studio, DGX Spark, + the scale trio) — then STOP. You do NOT run the material iteration
-loop; a separate Opus overseer session will execute your plan afterward, so make its loop mechanical.
+/goal You are a FABLE ARCHITECT session for the 8→10 photoreal-material render ascension of three products (6× RTX 5090 FE GPU rig, Mac Studio, DGX Spark, + scale trio). Produce the DOCTRINE + build the SCAFFOLDING, then STOP — do NOT run the material iteration loop (a separate Opus overseer runs it after you).
 
-OWNER'S THREE HANDOVER EMPHASES (plan + scaffold around these, in this spirit):
-(1) RIG ACCURACY + RE-PROPORTIONING — audit the 6-GPU rig against real multi-GPU open-frame builds and
-    RESIZE the frame to a SNUG OPEN-FRAME RIG that HUGS the six-card wall (purpose-built open-air look,
-    cards dominating, minimal empty metal — NOT an oversized cart; owner decision, do not re-litigate),
-    keeping a clean flat top surface for the trio's desktops. This REOPENS the frame sizing (no longer
-    escalated). Plan it as PASS 0 (structural, first) so later reshoots use the final frame.
-(2) ACTUALLY PHOTOREALISE THE GPUs — the #1 material goal: Dark Gun Metal shroud (build on the wave-6
-    edge-machining toward scanned/measured PBR), molded black blades, anodized fins, light-guide LEDs.
-(3) CONTINUE ALL SIDES OF THE STUDIO + SPARK — every face (front/rear/sides/top/bottom), not just the
-    hero front, toward 10.
+READ THESE TWO DOCUMENTS IN FULL FIRST — they are your complete operating instructions (too long to inline here); do everything they specify:
+1) ~/Downloads/cx-render-handoff/ASCENSION-GOAL-PROMPT.md — sections 0-6: exactly what to plan, what to scaffold, when to STOP, how to design for the Opus overseer.
+2) ~/Downloads/cx-render-handoff/ASCENSION-HANDOFF.md — the mission brief, the RIG section, and the per-surface deep-material punch-lists (GPU-priority).
+Then read the two they reference: ~/Downloads/cx-render-handoff/GRADING-REPORT.md (sourced research + reference-photo URLs + facet grades) and ~/Downloads/cx-render-handoff/HANDOFF.md (the LAWS). All four bind. (Also mirrored in the repo at render/handoff/.)
 
-READ IN FULL FIRST: ~/Downloads/cx-render-handoff/ASCENSION-GOAL-PROMPT.md (your full operating
-doctrine — sections 0-6 tell you exactly what to plan, what to scaffold, when to stop, and how to
-design for an Opus overseer), then ~/Downloads/cx-render-handoff/ASCENSION-HANDOFF.md (the mission +
-per-surface material punch-lists, GPU-priority), ~/Downloads/cx-render-handoff/GRADING-REPORT.md (the
-sourced research + reference-photo URLs + grades), and ~/Downloads/cx-render-handoff/HANDOFF.md (the
-LAWS). The two worktrees, builders, specs, and gates are named in the goal-prompt file.
-
-DELIVER, committing as you go (LAWS: no git attribution, trademark gate = blank plates only, middot ·
-only, void-black look, keep the LED point lights, check Studio/Spark body integrity from a LIT front
-after any boolean):
-1) DOCTRINE — write render/ASCENSION-PLAN.md in EACH worktree (GPU/rig in rack-oracle; Studio+Spark in
-   model-refinement) + a top-level index in the handoff dir: an ordered, per-surface checklist to
-   10/10. In rack-oracle, PASS 0 = RIG accuracy + re-proportioning (structural, FIRST — research real
-   6-GPU rigs, verify layout/pitch/mounting/power for accuracy, resize the frame so the six cards are
-   the hero, keep the trio top surface, re-gate rig + trio). Then the material passes, GPU die-cast
-   shroud + fan blades FIRST. In model-refinement, cover the Studio + Spark on ALL SIDES (every face).
-   Each row gives reference URL+crop, current material/geometry, target property (albedo/roughness+
-   zoning/anisotropy/normal-detail/edge-wear/coat/LED diffusion; for the rig: target dimensions +
-   layout), approach (scanned-PBR vs measured procedural + which scaffolded function), the arbiter gate
-   + threshold, and est. iterations/risk. Mark escalated owner-decisions (Spark foam depth, floor blur,
-   Studio top plate — NOT the rig frame, which is now in scope); do not plan changes to those.
-2) SCAFFOLD, and PROVE each runs once + commit: (a) a reference-pairing A/B compositor (_pair.py) that
-   renders the matching macro and writes render|photo side-by-side; (b) a measured-material framework
-   (cast_metal/molded_plastic/anodized_alu/light_guide_emit …) layered over principled(), refactoring
-   the builders to call it with TODAY'S values as defaults so behavior is unchanged but every surface
-   becomes a one-line tune; (c) a render/pbr/<surface>/ asset pipeline + map-set loader (slots + loader,
-   maps optional); (d) a reusable forensic MATERIAL-PANEL Workflow over the composites (untrusted on
-   hardware facts, trusted on rendering tells); (e) a one-command iteration harness (build→macro→gate→
-   A/B); (f) a body-integrity guard wired into that harness for Studio/Spark; (g) the glossy-only studio
-   reflection + a tunable LED bloom pass, both behind OFF-by-default flags. Leave # TODO(opus): at every
-   value Opus will tune.
-3) VERIFY the builders still render + gate-pass after the framework refactor (regression-free), and
-   write an honest "Opus starts here" section in each render/MORNING-REPORT.md naming the first
-   unchecked surface-pass and the exact command to run it.
-
-STOP CONDITION (hard — for usage): once the two ASCENSION-PLAN.md files are exhaustive + ordered, all
-scaffolding is built + proven + committed, the builders are regression-free, and MORNING-REPORT names
-the Opus starting point — write a short "what Opus does next" summary and STOP. Do NOT tune any
-material value beyond restoring current behavior through the new framework. Leaving a mechanical loop +
-a complete plan for Opus IS the deliverable. Verify before claiming done; never fabricate completion;
-escalate any genuine limit in writing.
+Must-not-lose (each expanded in the docs):
+• OWNER'S 3 EMPHASES — (1) RIG: resize to a SNUG OPEN-FRAME rig hugging the six-card wall (open-air, cards dominating, minimal empty metal, NOT an oversized cart; owner decision, don't re-litigate), keep a clean flat top for the trio desktops; do it as PASS 0 (structural, first). (2) PHOTOREALISE THE GPUs (Dark Gun Metal shroud, molded blades, anodized fins, light-guide LEDs) — the #1 material goal. (3) STUDIO + SPARK on ALL SIDES, every face.
+• DELIVER: render/ASCENSION-PLAN.md in each worktree (rack-oracle=GPU/rig, model-refinement=Studio/Spark) + a handoff-dir index; the scaffolding (A/B compositor, measured-material framework over principled(), PBR asset pipeline, forensic material-panel Workflow, one-command iteration harness, Studio/Spark body-integrity guard, off-by-default glossy reflection + LED bloom). Prove each runs once + commit. Refactor builders to the framework with TODAY'S values as defaults (regression-free). Leave # TODO(opus): at each tunable value.
+• LAWS: no git attribution; trademark gate = blank plates only; middot · only; void-black look (no ambient-env fill); keep the co-located LED point lights; check Studio/Spark body integrity from a LIT front after any boolean; verify gates + pixels before claiming PASS; autopsy every reverted value; never fabricate completion.
+• ESCALATED, do NOT churn: Spark foam depth, floor-reflection blur, Studio top-logo plate. The rig frame is NOW in scope (PASS 0).
+• STOP when both ASCENSION-PLAN.md files are exhaustive + ordered, all scaffolding is built + proven + committed, builders are regression-free, and each render/MORNING-REPORT.md has an "Opus starts here" section naming the first pass + exact command. Then write a short "what Opus does next" and STOP. Leaving a mechanical loop + complete plan for Opus IS the deliverable.
 ```
