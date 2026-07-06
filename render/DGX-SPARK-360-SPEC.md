@@ -32,14 +32,23 @@ with the tab notch; QSFP = larger rectangular cages. Keep the rear face champagn
       foam-texture top + vent panel already built. Spark is 360-complete (front/rear/sides/top).
 - [ ] confirm every body dimension against a source (150/150/50.5).
 
-## FRONT/REAR MESH · "cheese-grater" (research 2026-07 · fixes the panel's 'procedural glitter' tell)
-The gold front is NOT a random speckle/foam · it is a STRUCTURED organic lattice of airflow holes —
-the miniaturised DGX Station / Mac-Pro "cheese-grater". Reviews: "gold-speckled metallic finish",
-"cheese-grater gold front", "organic mesh for the front and rear, modeled after the DGX-1". For
-photoreal the front must read as a PRECISE REPEATING 3D hole array (hemispherical/tapered dimples in
-a hex or organic pattern, each catching a rim of key light on its lip), gold ANODISED ALUMINIUM
-(warm metallic), NOT procedural glitter. Also present: miniature hand-hold cutouts (a nod to the big
-DGX handles) + an NVIDIA green logo badge (blank per the trademark gate). Both FRONT and REAR are mesh.
-- Sources: StorageReview (cheese-grater, gold-speckled), TheRegister first-look, Exxact/SabrePC (all-gold
-  chassis + organic mesh front+rear, DGX-1 lineage). · NEXT SPARK PASS: replace the speckle look with a
-  real dimple-lattice mesh material/geometry · touch the gated Spark only with care (measure before/after).
+## FRONT/REAR = METAL FOAM (RESOLVED 2026-07-06 · the existing foam3d is CORRECT · do NOT rebuild)
+DISPUTE RESOLVED against the Chargerlab teardown: the gold front is genuinely **METAL FOAM** — "the
+front of the chassis features metal foam decoration... two metal foam front/back panels, strikingly
+similar to the NVIDIA DGX A100 and H100 ... a SOLID POROUS METAL STRUCTURE rather than a perforated
+mesh design." So:
+- The gated `foam3d` geometry+material (open-cell metal foam) is ACCURATE · KEEP it · do NOT rework it
+  into a cheese-grater hole-lattice (that would be a REGRESSION · the DGX-1/Station grater is a
+  different, larger product).
+- OVERRULED (2 wrong claims): (1) my own earlier "cheese-grater" note above · WRONG · conflated the
+  gold-speckled foam + the DGX-Station lineage with a machined grille. (2) the forensic panel
+  (w5oyz13ew) "rebuild the front as a countersunk-hole lattice" · WRONG · the real front is porous
+  foam, which legitimately looks gold-speckled · the panel also mis-called the real hand-hold cutouts
+  "fabricated ovals". The vision panel is unreliable on hardware-accuracy facts (also wrong on the
+  5090 LEDs + the Studio proportions) · trust the sourced teardown.
+- Source: Chargerlab teardown https://www.chargerlab.com/teardown-of-nvidia-dgx-spark-4tb/ ·
+  corroborated StorageReview (gold-speckled metallic finish + hand-hold cutouts + green logo badge).
+- Present + correct: metal-foam front (+ rear), miniature hand-hold cutouts (DGX-handle nod), green
+  logo badge (blank per trademark gate), air intakes top+bottom. The ONLY open polish: the foam
+  MATERIAL could read a hair less "sparkly" and more matte-porous · but it is gated/pinned (SP10/SP11)
+  and accurate · touch only with a measured before/after, never a wholesale rebuild.
