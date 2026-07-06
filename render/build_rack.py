@@ -574,7 +574,7 @@ def build_gpu(cx, cz, yc, idx=0):
     rings + X + a top-edge wordmark. Bracket + angled 16-pin + backplate. render/ref/rack/RTX5090FE-SPEC.md."""
     Wc, Hc, Tc = mm(137.0), mm(304.0), mm(40.0)
     parts = []
-    body_mat = machined_metal(f"fe-body{idx}", (0.128, 0.135, 0.150), 0.50, metallic=0.9)   # darker gunmetal, a touch GLOSSIER (0.60->0.50) so the shroud catches a sharper spec than the matte blades · material contrast (panel-4 #5)
+    body_mat = machined_metal(f"fe-body{idx}", (0.128, 0.135, 0.150), 0.42, metallic=0.9)   # gunmetal · glossier still (0.60->0.50->0.42, monotonic toward the panel's ~0.4 ask) · a tight bright die-cast-metal spec that clearly reads as METAL vs the matte frame + matte blades (material identity · panel-5 #5)
     fin_mat = principled(f"fe-fin{idx}", (0.030, 0.032, 0.038), 0.50, metallic=0.9)   # darker · the finstack backing behind the fans was a lit mid-gray 'plate' (panel-4 #1) · now a dark cavity backing
     xacc_mat = principled(f"fe-x{idx}", (0.14, 0.15, 0.16), 0.40, metallic=0.9)
     plate_mat = machined_metal(f"fe-plate{idx}", (0.10, 0.104, 0.113), 0.45, metallic=0.9)
