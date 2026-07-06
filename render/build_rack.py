@@ -207,7 +207,7 @@ def machined_metal(name, base, rough, metallic=0.9):
     bump = nt.nodes.new("ShaderNodeBump")
     bump.inputs["Strength"].default_value = 0.04; bump.inputs["Distance"].default_value = mm(0.02)
     nt.links.new(nb.outputs["Fac"], bump.inputs["Height"]); nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
-    return m
+    return add_bevel(m, radius=0.35)   # rounded-shading edges catch a bright micro-bevel highlight (real metal)
 
 def interior_dark(name="interior"):
     # cavity interior · albedo NEVER 0 so wall gradients read (desktop wave-2 lesson).
