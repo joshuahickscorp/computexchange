@@ -90,7 +90,8 @@ DGX SPARK               front [x]  q34 [~]  rear [ ]  side [ ]  top [ ]  macro [
 MAC STUDIO              front [x]  q34 [~]  rear [ ]  side [ ]  top [~]  macro [~]
   open: ST verify items (corner facet, base reveal, port depth) · RESEARCH + build the exact REAR port
   array for the current M-series Studio · verify all angles.
-SCALE TRIO              first render [ ]  → finish build_trio.py, hero q34+front, then site-scroll notes.
+SCALE TRIO              first render [x]  → build_trio.py works (rack base + Studio + Spark on cap,
+  true scale). Next: full-quality q34+front heroes, tune desktop placement/lighting, site-scroll notes.
 ```
 
 ## Laws (never violate)
