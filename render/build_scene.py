@@ -1094,19 +1094,11 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
         assign_interior(body, boxes, 1, ymin=front_y + mm(0.3))
     smooth(body, 40)
 
-    # top recessed vent panel (seen in 3/4 + top): a shallow rounded-rect pocket in the top face
-    tp = cutter_box(mm(SPARK["top_panel_w"]), mm(SPARK["top_panel_h"]), mm(3.0), mm(8.0),
-                    (0, 0, H + mm(1.5) - mm(3.0) / 2.0), seg=16)  # wave 4b tighter border radius
-    # (cut from the top; cutter_box origin logic handles the z placement)
-    tbox = apply_boolean(body, [tp])
-    assign_interior(body, tbox, 2)      # top recessed panel -> dedicated dark vent material
-
-    # exhaust slot (wave 8, closing the 4b defer): a thin recessed slot along the front edge of
-    # the vent panel, per cl_side-profile. Wide in x, thin in y, shallow into the top.
-    es = cutter_box(mm(SPARK["top_panel_w"] * 0.66), mm(2.2), mm(2.6), mm(1.1),
-                    (0, -mm(SPARK["top_panel_h"] / 2.0) + mm(7.0), H + mm(1.5) - mm(2.6) / 2.0), seg=6)
-    ebox = apply_boolean(body, [es])
-    assign_interior(body, ebox, 2)
+    # TOP FACE · S3 (GRADING-REPORT): the real DGX Spark top is BLANK matte champagne · no dark inset
+    # panel, no groove (STH top-down photo · "on the sides and top, the system is just flat"). The
+    # earlier recessed dark vent panel + exhaust slot were INVENTED · removed. The only real top breaks
+    # are the recessed foam-edge intake strips at the front/rear edges (a later refinement). Keep the
+    # top as the champagne shell material.
 
     # champagne tub floors sitting recessed at the back of each pocket, blank
     tubs = []
