@@ -401,13 +401,15 @@ def build_fan(cx, yf, cz, r, nb=9, blade_rgb=(0.105, 0.105, 0.115), emit_ring=Fa
     md = rm.modifiers.new("h", "BOOLEAN"); md.operation = "DIFFERENCE"; md.solver = "EXACT"; md.object = inr
     bpy.ops.object.modifier_apply(modifier=md.name); bpy.data.objects.remove(inr, do_unlink=True)
     rm.data.materials.append(ring); smooth(rm, 30); parts.append(rm)
-    rr = (mm(16.0) + r) / 2.0
+    rr = (mm(12.0) + r) / 2.0
     arc = 2 * math.pi * rr / nb
     for i in range(nb):
         a = 2 * math.pi * i / nb
-        bl = rounded_box("fan-blade", r - mm(19.0), mm(1.1), arc * 0.62, mm(1.2), seg=2)
-        bl.location = (cx + rr * math.cos(a), yf + mm(4.2), cz + rr * math.sin(a))
-        bl.rotation_euler = (math.radians(24.0), a, 0)
+        # wide, heavily-overlapping, low-pitch flat blades -> a near-solid swept disc (a real fan),
+        # not thin radial spokes. Each blade fanned out slightly in z-depth so they don't z-fight.
+        bl = rounded_box("fan-blade", r - mm(10.0), mm(0.8), arc * 1.32, mm(2.0), seg=2)
+        bl.location = (cx + rr * math.cos(a), yf + mm(3.0) + (i % 3) * mm(0.4), cz + rr * math.sin(a))
+        bl.rotation_euler = (math.radians(8.0), a, 0)
         bl.data.materials.append(blade); smooth(bl, 30); parts.append(bl)
     bpy.ops.mesh.primitive_cylinder_add(radius=mm(14.0), depth=mm(9.0), vertices=28,
         location=(cx, yf + mm(1.5), cz), rotation=(math.radians(90), 0, 0))
@@ -462,7 +464,7 @@ def build_gpu(cx, cz, yc, idx=0):
         fin.data.materials.append(fin_mat); parts.append(fin)
     # two fans (7 blades, near-black) with the FE lit inlet rings
     for fz in (zt, zb):
-        parts += build_fan(cx, yf, fz, fan_r, nb=7, blade_rgb=(0.110, 0.114, 0.125), emit_ring=True)
+        parts += build_fan(cx, yf, fz, fan_r, nb=9, blade_rgb=(0.110, 0.114, 0.125), emit_ring=True)
     # X 'infinity' accent on the center bar (2 crossing diagonals) + its lit edges
     for sgn in (1, -1):
         xb = rounded_box("fe-xbar", mm(78.0), mm(3.0), mm(10.0), mm(2.0), seg=2)
