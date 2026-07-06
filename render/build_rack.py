@@ -427,6 +427,19 @@ def emissive(name, color, strength):
             b.inputs["Emission Strength"].default_value = strength
         except KeyError:
             pass
+    # subtle along-length intensity ripple so the LED strip isn't a perfectly uniform tube · a real
+    # diffused LED bar shows faint per-LED brightness variation (panel-4 #2). Modulates around the same
+    # supra-white level (clip-neutral).
+    try:
+        nt = m.node_tree; tc = nt.nodes.new("ShaderNodeTexCoord")
+        nz = nt.nodes.new("ShaderNodeTexNoise"); nz.inputs["Scale"].default_value = 46.0; nz.inputs["Detail"].default_value = 2.0
+        nt.links.new(tc.outputs["Object"], nz.inputs["Vector"])
+        mr = nt.nodes.new("ShaderNodeMapRange")
+        mr.inputs["To Min"].default_value = strength * 0.80; mr.inputs["To Max"].default_value = strength * 1.12
+        nt.links.new(nz.outputs["Fac"], mr.inputs["Value"])
+        nt.links.new(mr.outputs["Result"], b.inputs["Emission Strength"])
+    except Exception as e:
+        print("emissive ripple skip:", e)
     return m
 
 def _fan_blades(cx, yf, cz, r, nb, blade_mat):
