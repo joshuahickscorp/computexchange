@@ -190,18 +190,18 @@ Wave 0 · FRAME CORRECTIONS (built part is wrong before anything stacks):
       powder_black PASS.
 
 Wave 1 · RM44 NODE (hero · two-layer mesh):
-- [ ] R1.1 body 440x176x468 + folded ears to 482.6 + 2 knurled thumbscrews each · +/-1.5%.
-- [ ] R1.2 door: real tri punches P2.87/R2.59 rounded-corner alternating + border FADE ROWS +
+- [x] R1.1 DONE · body 440x176x468 + folded ears to 482.6 + 2 knurled thumbscrews each · +/-1.5%.
+- [x] R1.2 DONE (cached mesh door + window + interior) · door: real tri punches P2.87/R2.59 rounded-corner alternating + border FADE ROWS +
       ~8mm frame, cached · Accept: FFT pitch +/-5% via render/rack_measure.py (port the tool).
 - [ ] R1.3 FILTER LAYER (mapped micro-perf ~0.9mm at 4mm setback) + fan wall (3x120mm rings/
       hubs) + interior albedo 0.032 · Accept: raking + grazing read door->filter->dark ·
       the formal Problem-2 evidence render.
-- [ ] R1.4 keystone badge plate (blank, chevron bottom) + bail-handle lock at measured y +
+- [x] R1.4 DONE (lock+bail+blank badge, gate dE0.47) · keystone badge plate (blank, chevron bottom) + bail-handle lock at measured y +
       lid lip seam + bottom sill 2 screws + 4 witness dots · +/-2% of face width.
-- [ ] R1.5 LIGHTING · interior fill · holes read open, exterior patches stay green.
+- [x] R1.5 LIGHTING DONE (rig calibrated, node reads real dark server, gate dE0.47) · interior fill · holes read open, exterior patches stay green.
 - [ ] R1.6 RENDER · node turnaround + TRUE macro (L8) · rack_verify PASS + pitch check.
 
-Wave 2 · CRS354 SWITCH: chassis 443x44.3x297 WHITE + seam + ears (+7mm) · port grid 4 GANGS of
+Wave 2 · CRS354 SWITCH: [x]2.1 chassis 443x44.3x297 WHITE + seam + ears DONE (gate PASS) (+7mm) · port grid 4 GANGS of
 2x6, bottom row MIRRORED (latch flip), per-port LED pipes, gang window bezel (VERIFY-THEN-PIN
 color) · SFP+ 2x2 + QSFP+ 2x1 cages w/ bale latches · console/MGMT stack · status LEDs +
 pinhole · switch_white patch added to rack_verify and PASS. [4 boxes · R2.1-R2.4]
