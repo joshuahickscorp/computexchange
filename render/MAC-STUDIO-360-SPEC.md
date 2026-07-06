@@ -26,6 +26,8 @@ vent as a recessed perforated circle. Blank, no text (trademark gate). Keep the 
 - Tom's Hardware review: https://www.tomshardware.com/desktops/mini-pcs/apple-mac-studio-early-2025-review
 
 ## TODO for 360
-- [ ] build the rear: circular perforated exhaust vent + the lower port row (above); render rear + rear-q34.
+- [x] build the rear: circular perforated exhaust vent (recessed disc + perforated_band mesh) + the
+      lower port row (power, 4x TB5, 2x USB-A, HDMI, RJ-45, 3.5mm). Verified via _audit_desktop.py
+      (rear-q34): reads as the real Mac Studio back. Refine later: port-size differentiation.
 - [ ] verify sides + top (the top has the aperture/vent detail already) from references.
 - [ ] confirm body dimensions (197/197/95) against Apple's spec.

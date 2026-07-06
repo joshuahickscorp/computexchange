@@ -789,7 +789,34 @@ def build_mac_studio(loc_x=0.0, yaw_deg=0.0):
     foot.data.materials.append(principled("mac-foot-mat", (0.02, 0.02, 0.022), 0.5, metallic=0.2))
     smooth(foot, 40)
 
-    group = [body, led, foot] + tongues
+    # REAR (researched · render/MAC-STUDIO-360-SPEC.md) · the big circular perforated exhaust vent
+    # (upper) + a lower port row: power, 4x TB5, 2x USB-A, HDMI, RJ-45, 3.5mm jack. Blank (D2 gate).
+    rear_y = D / 2.0
+    vent_z = zlift + mm(56.0)
+    bpy.ops.mesh.primitive_cylinder_add(radius=mm(38.0), depth=mm(7.0), vertices=64,
+                                        rotation=(math.radians(90), 0, 0),
+                                        location=(0, rear_y - mm(2.5), vent_z))
+    vcut = bpy.context.active_object; vcut.name = "mac-vent-cut"
+    apply_boolean(body, [vcut])                       # a shallow circular recess in the rear
+    bpy.ops.mesh.primitive_cylinder_add(radius=mm(36.0), depth=mm(1.5), vertices=64,
+                                        rotation=(math.radians(90), 0, 0),
+                                        location=(0, rear_y - mm(4.8), vent_z))
+    vent = bpy.context.active_object; vent.name = "mac-vent-mesh"
+    vent.data.materials.append(perforated_band()); smooth(vent, 60)   # the exhaust mesh disc
+    body.data.materials.append(principled("mac-rear-port", (0.028, 0.028, 0.031), 0.55, metallic=0.2))  # 3
+    rpz = zlift + mm(12.0)
+    rports = [(10.0, 10.0, -70.0),
+              (9.0, 3.6, -55.0), (9.0, 3.6, -44.0), (9.0, 3.6, -33.0), (9.0, 3.6, -22.0),
+              (13.0, 5.5, -7.0), (13.0, 5.5, 8.0),
+              (15.0, 6.5, 26.0),
+              (12.5, 11.5, 44.0),
+              (6.0, 6.0, 60.0)]
+    rcut = [cutter_box(mm(w_), mm(6.0), mm(h_), mm(1.0), (mm(xc), rear_y - mm(2.0), rpz))
+            for (w_, h_, xc) in rports]
+    rbox = apply_boolean(body, rcut)
+    assign_interior(body, rbox, 3, ymin=rear_y - mm(6.5))
+
+    group = [body, led, foot, vent] + tongues
     for ob in group:
         ob.rotation_euler.z = math.radians(yaw_deg)
         x, y = ob.location.x, ob.location.y
