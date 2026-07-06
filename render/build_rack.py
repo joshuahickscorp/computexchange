@@ -438,11 +438,12 @@ def build_fan(cx, yf, cz, r, nb=9, blade_rgb=(0.105, 0.105, 0.115), emit_ring=Fa
         location=(cx, yf + mm(1.5), cz), rotation=(math.radians(90), 0, 0))
     hb = bpy.context.active_object; hb.name = "fan-hub"; hb.data.materials.append(ring)
     smooth(hb, 30); parts.append(hb)
-    bpy.ops.mesh.primitive_cylinder_add(radius=mm(9.0), depth=mm(1.2), vertices=24,
-        location=(cx, yf - mm(0.6), cz), rotation=(math.radians(90), 0, 0))
-    st = bpy.context.active_object; st.name = "fan-sticker"
-    st.data.materials.append(principled("fan-sticker", (0.05, 0.05, 0.055), 0.32, metallic=0.2))
-    smooth(st, 30); parts.append(st)
+    bpy.ops.mesh.primitive_uv_sphere_add(radius=mm(9.0), segments=24, ring_count=12,
+        location=(cx, yf + mm(1.0), cz))
+    dome = bpy.context.active_object; dome.name = "fan-hubcap"
+    dome.scale = (1.0, 0.30, 1.0); bpy.ops.object.transform_apply(scale=True)   # shallow dome toward the viewer
+    dome.data.materials.append(principled("fan-hubcap", (0.05, 0.05, 0.055), 0.30, metallic=0.3))
+    smooth(dome, 40); parts.append(dome)
     if emit_ring:   # the 5090 FE lit inlet ring (static cool white)
         bpy.ops.mesh.primitive_torus_add(major_radius=r + mm(1.0), minor_radius=mm(1.3),
             location=(cx, yf - mm(0.5), cz), rotation=(math.radians(90), 0, 0),
