@@ -37,6 +37,29 @@ the rig/trio). Spec files corrected FIRST where flagged.
 - LESSON (re-logged): ALWAYS check Studio/Spark body integrity from a LIT front/q34 after ANY rear
   boolean · a bad cutter collapses the body + hides in the dark rear. Sharp cutters for big recesses.
 
+## Wave 5 · polish + escalation of genuine limits (same loop)
+Worked remaining facets by ascending grade. Committed:
+- **G3** flat hub cap · **G11** angled exhaust louvers (top/bottom edges) · **S12** Spark bottom
+  (non-slip cover + intake slot) · **M8** Studio bottom (concentric intake annulus + foot ring +
+  Kensington) · **S4** Spark crisp machined-brick edges (6.09->2.5mm fillet) · **S7** Spark NVIDIA
+  green logo badge (blank green plates) · **S5/S10** foam inset ~3.5mm shell bands (foam no longer
+  peeks side-on · overrides the spec's older edge-to-edge per the sourced dossier).
+- **M5 verified already-correct** (flip-flop guard): the front USB-C dims 2.62x8.47 ARE the true
+  measured USB-C size ("settled, two photographers") · the report's "too thin, widen to 3x9" was a
+  mis-impression · do NOT widen.
+
+## ESCALATED / genuine limits (per the methodology's escalate-and-move-on clause · NOT churned)
+These facets cannot reach 9+ via safe bounded changes · they need the owner or scanned PBR:
+- **Owner decisions (3, standing)**: Spark foam DEPTH (gated at its tone limit · SP10/SP11), floor
+  reflection blur-vs-crisp, Studio TOP logo plate (trademark gate vs Apple silhouette · M9).
+- **Frame fasteners (R3)**: the frame is OWNER-PRAISED unchanged + no cited photo for bolt placement
+  (the LAW requires each knob cite a photo) · left clean.
+- **Material asymptote (report-acknowledged)**: the last mile on the procedural GPU shroud/blade
+  materials (G15/G16), the champagne tone (S11), and the foam (S8, gate-pinned at limit) wants
+  scanned/measured PBR · bounded tweaks risk the tone gates + flip-flops · left at the gated pins.
+- **G6 illumination merge / G14 shroud cut-lines**: subtle, gate-sensitive (LED clip) · low leverage
+  vs regression risk · deferred to a careful gated pass, not churned in bulk.
+
 ## Honest next (loop open · GPU facets remaining, then the other objects)
 - REFRESH the individual max-quality portraits (mac-studio / dgx-spark front/q34/detail) to bank the
   Studio-body fix + S3 blank top + Spark rear foam · the TRIO hero is already re-rendered + committed.
