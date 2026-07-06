@@ -405,24 +405,42 @@ def build_gpu(cx, cz, yc, idx=0):
     tint = 0.004 * ((idx % 3) - 1)   # tiny per-card shroud variance (not clones)
     shroud_mat = principled(f"gpu-shroud{idx}", (0.030 + tint, 0.030 + tint, 0.035 + tint), 0.40, metallic=0.45)
     plate_mat = principled(f"gpu-plate{idx}", (0.16, 0.16, 0.175), 0.34, metallic=0.85)
-    brk_mat = principled(f"gpu-brk{idx}", (0.52, 0.52, 0.54), 0.30, metallic=0.9)
     dark = principled(f"gpu-dark{idx}", (0.02, 0.02, 0.022), 0.6)
     yf = yc - Tc / 2.0
     sh = rounded_box("gpu-shroud", Wc, Tc, Hc, mm(4.0), seg=4)
     sh.location = (cx, yc, cz); sh.data.materials.append(shroud_mat); smooth(sh, 30); parts.append(sh)
     bp = rounded_box("gpu-backplate", Wc - mm(3), mm(2.0), Hc - mm(4), mm(2.0), seg=3)
     bp.location = (cx, yc + Tc / 2.0 + mm(1.0), cz); bp.data.materials.append(plate_mat); smooth(bp, 30); parts.append(bp)
+    # front-face relief · a raised perimeter lip + 2 inter-fan ridges make a recessed 3-fan
+    # channel, so the shroud reads as a real card (not a flat slab) and the lips catch the key.
+    lip_y = yf - mm(2.0)
+    for nm, w, h, lx, lz in (
+        ("lip-top", Wc, mm(9.0), cx, cz + Hc / 2.0 - mm(5.0)),
+        ("lip-bot", Wc, mm(9.0), cx, cz - Hc / 2.0 + mm(5.0)),
+        ("lip-l", mm(9.0), Hc, cx - Wc / 2.0 + mm(5.0), cz),
+        ("lip-r", mm(9.0), Hc, cx + Wc / 2.0 - mm(5.0), cz)):
+        lp = rounded_box("gpu-" + nm, w, mm(4.0), h, mm(1.5), seg=3)
+        lp.location = (lx, lip_y, lz); lp.data.materials.append(shroud_mat); smooth(lp, 30); parts.append(lp)
+    for dz in (mm(46.0), -mm(46.0)):
+        rg = rounded_box("gpu-ridge", Wc - mm(22.0), mm(4.0), mm(7.0), mm(1.5), seg=2)
+        rg.location = (cx, lip_y, cz + dz); rg.data.materials.append(shroud_mat); smooth(rg, 30); parts.append(rg)
+    # brushed-metal accent bar just inside the left lip · a soft highlight breaks the flat shroud
+    acc = box("gpu-accent", mm(5.0), mm(3.0), Hc - mm(34.0), (cx - Wc / 2.0 + mm(11.0), yf - mm(2.5), cz))
+    acc.data.materials.append(principled(f"gpu-acc{idx}", (0.20, 0.20, 0.22), 0.32, metallic=0.85)); parts.append(acc)
+    # 3 fans recessed in the channel
     for dz in (mm(92.0), 0.0, -mm(92.0)):
-        parts += build_fan(cx, yf, cz + dz, mm(41.0))
+        parts += build_fan(cx, yf, cz + dz, mm(40.0))
     fins = box("gpu-fins", Wc - mm(8), Tc - mm(8), mm(8.0), (cx, yc, cz + Hc / 2.0 + mm(3.0)))
     fins.data.materials.append(dark); parts.append(fins)
     pwr = rounded_box("gpu-pwr", mm(26.0), mm(16.0), mm(11.0), mm(1.5), seg=2)
     pwr.location = (cx + Wc / 4.0, yc + mm(4.0), cz + Hc / 2.0 + mm(10.0)); pwr.data.materials.append(dark)
     smooth(pwr, 30); parts.append(pwr)
-    brk = box("gpu-bracket", Wc, mm(2.0), mm(18.0), (cx, yf + mm(6.0), cz - Hc / 2.0 - mm(8.0)))
-    brk.data.materials.append(brk_mat); parts.append(brk)
-    fng = box("gpu-fingers", mm(88.0), Tc - mm(20), mm(14.0), (cx, yc, cz - Hc / 2.0 - mm(6.0)))
-    fng.data.materials.append(principled(f"gpu-gold{idx}", (0.62, 0.5, 0.18), 0.35, metallic=0.85)); parts.append(fng)
+    # bottom · dark PCB edge + dark PCIe riser connector · NO bright bracket (it read as a white
+    # band). The gold fingers sit INSIDE the riser slot, barely seen · risers get wired at 5.x.
+    pcb = box("gpu-pcb", Wc - mm(4), Tc - mm(14), mm(7.0), (cx, yc, cz - Hc / 2.0 - mm(3.0)))
+    pcb.data.materials.append(principled(f"gpu-pcb{idx}", (0.02, 0.028, 0.022), 0.6)); parts.append(pcb)
+    riser = box("gpu-riser", mm(94.0), mm(22.0), mm(16.0), (cx, yc, cz - Hc / 2.0 - mm(13.0)))
+    riser.data.materials.append(principled(f"gpu-riser{idx}", (0.03, 0.03, 0.033), 0.5)); parts.append(riser)
     return parts
 
 def build_gpu_row():
@@ -441,7 +459,7 @@ def build_gpu_row():
     for i in range(n):
         parts += build_gpu(x0 + i * pitch, cz, yc, idx=i)
     tray = box("mobo-tray", W - mm(160), D - mm(120), mm(4.0), (0, mm(10.0), mm(PLINTH) + mm(95.0)))
-    tray.data.materials.append(principled("mobo-tray-mat", (0.11, 0.11, 0.12), 0.5, metallic=0.6)); parts.append(tray)
+    tray.data.materials.append(principled("mobo-tray-mat", (0.055, 0.055, 0.062), 0.55, metallic=0.3)); parts.append(tray)
     psu = rounded_box("psu", mm(150.0), mm(86.0), mm(150.0), mm(3.0), seg=3)
     psu.location = (-fx + mm(150), mm(30.0), mm(PLINTH) + mm(63.0))
     psu.data.materials.append(principled("psu-mat", (0.035, 0.035, 0.04), 0.40, metallic=0.4)); smooth(psu, 30); parts.append(psu)
