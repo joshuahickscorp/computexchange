@@ -634,8 +634,9 @@ def build_gpu(cx, cz, yc, idx=0):
     # bottom · PCIe bracket (4 connector cutouts, NO vent grille per FE) + riser stub
     brk = box("fe-bracket", Wc, mm(2.0), mm(16.0), (cx, yf + mm(4.0), cz - Hc / 2.0 - mm(7.0)))
     brk.data.materials.append(brk_mat); parts.append(brk)
-    for j in range(4):
-        io = box("fe-io", mm(20.0), mm(3.0), mm(9.0), (cx - mm(48.0) + j * mm(30.0), yf + mm(2.0), cz - Hc / 2.0 - mm(7.0)))
+    # real FE I/O = 3x DisplayPort + 1x HDMI (the HDMI is the wider/shorter port, here at the far right)
+    for j, (pw, ph) in enumerate([(mm(18.0), mm(8.0)), (mm(18.0), mm(8.0)), (mm(18.0), mm(8.0)), (mm(22.0), mm(6.5))]):
+        io = box("fe-io", pw, mm(3.5), ph, (cx - mm(48.0) + j * mm(30.0), yf + mm(2.0), cz - Hc / 2.0 - mm(7.0)))
         io.data.materials.append(dark); parts.append(io)
     # PCIe gold-finger contact edge · THE recognizable 'this is a real GPU' cue (panel-3 #5). A dark
     # PCB edge protruding below the shroud with a gold contact strip + the PCIe key notch.
