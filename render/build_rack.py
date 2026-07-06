@@ -188,6 +188,27 @@ def powder_coat(name="powder-black", base=(0.028, 0.028, 0.030), rough=0.52):
     nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
     return add_bevel(m)
 
+def machined_metal(name, base, rough, metallic=0.9):
+    """Real machined/anodized aluminium · a fine micro-bump (machining grain) + spatially-varying
+    roughness so the surface reads as metal-with-microtexture, not a perfect CG plane (the #1
+    photoreal tell · a flawless surface is what screams 'render'). Subtle · albedo unchanged."""
+    m = principled(name, base, rough, metallic=metallic)
+    nt = m.node_tree; b = nt.nodes["Principled BSDF"]
+    tc = nt.nodes.new("ShaderNodeTexCoord")
+    nr = nt.nodes.new("ShaderNodeTexNoise")
+    nr.inputs["Scale"].default_value = 13.0; nr.inputs["Detail"].default_value = 3.0
+    nt.links.new(tc.outputs["Object"], nr.inputs["Vector"])
+    mr = nt.nodes.new("ShaderNodeMapRange")
+    mr.inputs["To Min"].default_value = max(0.05, rough - 0.07); mr.inputs["To Max"].default_value = rough + 0.07
+    nt.links.new(nr.outputs["Fac"], mr.inputs["Value"]); nt.links.new(mr.outputs["Result"], b.inputs["Roughness"])
+    nb = nt.nodes.new("ShaderNodeTexNoise")
+    nb.inputs["Scale"].default_value = 680.0; nb.inputs["Detail"].default_value = 2.0
+    nt.links.new(tc.outputs["Object"], nb.inputs["Vector"])
+    bump = nt.nodes.new("ShaderNodeBump")
+    bump.inputs["Strength"].default_value = 0.04; bump.inputs["Distance"].default_value = mm(0.02)
+    nt.links.new(nb.outputs["Fac"], bump.inputs["Height"]); nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
+    return m
+
 def interior_dark(name="interior"):
     # cavity interior · albedo NEVER 0 so wall gradients read (desktop wave-2 lesson).
     return principled(name, (0.020, 0.020, 0.022), 0.80, metallic=0.0)
@@ -438,10 +459,10 @@ def build_gpu(cx, cz, yc, idx=0):
     rings + X + a top-edge wordmark. Bracket + angled 16-pin + backplate. render/ref/rack/RTX5090FE-SPEC.md."""
     Wc, Hc, Tc = mm(137.0), mm(304.0), mm(40.0)
     parts = []
-    body_mat = principled(f"fe-body{idx}", (0.165, 0.173, 0.188), 0.60, metallic=0.9)
+    body_mat = machined_metal(f"fe-body{idx}", (0.165, 0.173, 0.188), 0.60, metallic=0.9)
     fin_mat = principled(f"fe-fin{idx}", (0.082, 0.086, 0.098), 0.50, metallic=0.9)
     xacc_mat = principled(f"fe-x{idx}", (0.14, 0.15, 0.16), 0.40, metallic=0.9)
-    plate_mat = principled(f"fe-plate{idx}", (0.10, 0.104, 0.113), 0.45, metallic=0.9)
+    plate_mat = machined_metal(f"fe-plate{idx}", (0.10, 0.104, 0.113), 0.45, metallic=0.9)
     brk_mat = principled(f"fe-brk{idx}", (0.078, 0.078, 0.078), 0.50, metallic=0.9)
     dark = principled(f"fe-dark{idx}", (0.02, 0.02, 0.022), 0.6)
     lit = emissive(f"fe-lit{idx}", (0.93, 0.957, 1.0), 2.3)
