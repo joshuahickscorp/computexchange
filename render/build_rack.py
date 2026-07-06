@@ -409,7 +409,7 @@ def build_fan(cx, yf, cz, r, nb=9, blade_rgb=(0.105, 0.105, 0.115), emit_ring=Fa
     parts = []
     well = principled("fan-well", (0.012, 0.012, 0.014), 0.55)
     ring = principled("fan-ring", (0.03, 0.03, 0.033), 0.42, metallic=0.35)
-    blade = principled("fan-blade", blade_rgb, 0.55, metallic=0.05)
+    blade = principled("fan-blade", blade_rgb, 0.42, metallic=0.05, coat=0.35)   # glossy plastic sheen (real fan blades)
     bpy.ops.mesh.primitive_cylinder_add(radius=r - mm(1.5), depth=mm(12.0), vertices=44,
         location=(cx, yf + mm(7.0), cz), rotation=(math.radians(90), 0, 0))
     w = bpy.context.active_object; w.name = "fan-well"; w.data.materials.append(well)
