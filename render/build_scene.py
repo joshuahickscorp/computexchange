@@ -1268,6 +1268,15 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
                     for (pw_, ph_, pxc) in port_specs]
     port_boxes = apply_boolean(body, port_cutters)
     assign_interior(body, port_boxes, 4, ymin=rear_y - mm(6.5))
+    # REAR METAL FOAM · S1 (GRADING-REPORT): the real Spark rear is ALSO metal foam (LMSYS: "both front
+    # and rear panels employ metal foam"; STH rear photos) with the polished I/O plate inset LOW. Add a
+    # proud foam field over the UPPER rear (above the port strip); the lower strip stays champagne = the
+    # I/O plate. Reuses the gated foam3d material so the spark_foam tone pin holds. (rear_foam appended
+    # to foam_layers below · the port cavities sit clear beneath it.)
+    rear_foam = foam3d_field("dgx-spark-foam-rear", 0, mm(38.0), ffx, mm(22.0), mm(5.0),
+                             rear_y - mm(4.4), pitch=mm(1.30), voxel=mm(0.12), seed=23)
+    rear_foam.data.materials.append(foam3d_material())
+    foam_layers.append(rear_foam)
     # QSFP cage lips · the twin metal cages proud of the rear face (the Spark's most recognizable
     # rear feature · ConnectX-7 200GbE) · a thin metal frame around each of the two QSFP openings.
     cage_mat = principled("spark-qsfp-cage", (0.30, 0.30, 0.32), 0.42, metallic=0.8)
