@@ -121,6 +121,24 @@ tells + what I did (this wave, all gate-verified rig q34 raw clip 0.79-0.94% PAS
 Panel accuracy myths REFUTED this wave: none new (panel-4 was told the verified facts up front · it
 stayed on rendering-quality · confirms the sourced-references-win discipline).
 
+## PANEL 6 (workflow wij9xzfs8 · after the LED-GLOW + finer-foam wave) · the LED TELL DROPPED OFF
+Verdict still ~90% CG BUT the LED emission is NO LONGER in the top tells (it was #1 across panels 3/4/5) ·
+the co-located-light fix WORKED · measured win. The tells are now ALL 'material CG clay':
+1. **[DONE] Fan blade/hub material (new #1).** Was dead-matte 'clay'. Fixed: glossy-ish ABS · roughness
+   0.54->0.44 + clearcoat 0.14->0.30 (narrow bright spec streak, real molded plastic) + a fine bump for
+   micro-normal detail + tightened the break-up. Blades stay black. Gate 0.798% PASS.
+2. **[GATED] Spark foam depth (#2).** Wants MORE pore depth/AO · but the foam3d is gated + just made finer
+   (gate held) · pushing deeper displacement risks the tone pin · leave it.
+3. **[DONE-partial] Frame steel (#3).** Added large-scale roughness ZONING (satin/matte varies across a
+   face). Open: weld fillets at the tube joints (fiddly geometry · low ROI over the 0.7mm shader bevel).
+4. **[DONE] Shroud metal (#5).** Glossier 0.50->0.42 · reads clearly as die-cast metal vs the matte frame.
+5. **[GATED] Studio anisotropic brush (#4) + Spark gold sides roughness (#5).** Both gated masters · the
+   Studio already has bead-blast (loop-9) · touch only with care.
+6. **[DISPUTED] Floor/caster grounding (#6).** panel-6 wants a tighter contact + CRISPER reflection · but
+   panel-4/5 wanted the floor smudge-BLURRED · the panels CONFLICT on the floor · not flip-flopping it.
+Honest state: the render is meaningfully more photoreal (LEDs behave as light, blades read as plastic,
+shroud reads as metal) · the remaining wall is the universal 'material identity' asymptote + gated parts.
+
 ## PANEL 5 (workflow w1cxnxnrv · after the panel-4 wave) · the LED-GI BREAKTHROUGH
 Verdict still ~90% CG ("good render, not nearly-photo") · the recurring wall named again: (1) the LED
 rings cast ZERO near-field GI (all 3 panels), (2) material roughness uniformity, (3) grounding.
