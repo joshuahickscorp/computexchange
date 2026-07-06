@@ -442,7 +442,7 @@ def _fan_blades(cx, yf, cz, r, nb, blade_mat):
         for sidx in range(Nsp):
             t = sidx / (Nsp - 1)
             rad = r0 + (rtip - r0) * t
-            phi = a0 + 0.52 * (t ** 1.4)                    # sickle sweep (LE trails back with span)
+            phi = a0 + 0.30 * (t ** 1.3)                    # GENTLE sickle sweep · panel-3 read 0.52 as too-curled 'scythe' blades · real FE blades are shallow-swept
             pitch = math.radians(38.0 - 22.0 * t)           # twist: steep AoA at root -> shallow at tip
             chord = chord_of(t, rad)
             cp, sp = math.cos(pitch), math.sin(pitch)
