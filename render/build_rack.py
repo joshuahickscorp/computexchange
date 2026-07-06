@@ -504,15 +504,19 @@ def build_fan(cx, yf, cz, r, nb=9, blade_rgb=(0.105, 0.105, 0.115), emit_ring=Fa
     parts = []
     well = principled("fan-well", (0.012, 0.012, 0.014), 0.55)
     ring = principled("fan-ring", (0.03, 0.03, 0.033), 0.42, metallic=0.35)
-    blade = principled("fan-blade", blade_rgb, 0.54, metallic=0.0, coat=0.14)   # SATIN black plastic · matte so the low albedo reads dark (a glossy coat reflected the bright LEDs grey)
-    # subtle radial-ish roughness break-up so the blades aren't DEAD-uniform matte (panel-4: 'zero
-    # specular response') · a faint sheen variation reads as molded plastic, not clay. Object-space noise.
+    blade = principled("fan-blade", blade_rgb, 0.44, metallic=0.0, coat=0.30)   # glossy-ish black ABS (panel-6 #1: dead matte 'clay') · lower rough + a tight clearcoat so a NARROW bright spec streak travels the blade (real molded fan plastic) · the LED glow is a light object now, not the emissive flood that greyed it
+    # roughness micro-texture + bump so the blade faces catch a MOVING highlight, not one flat value
+    # (panel-6 #1: 'no micro-normal detail') · object-space so it rides the geometry.
     _bt = blade.node_tree; _bb = _bt.nodes["Principled BSDF"]
     _btc = _bt.nodes.new("ShaderNodeTexCoord")
     _bn = _bt.nodes.new("ShaderNodeTexNoise"); _bn.inputs["Scale"].default_value = 220.0; _bn.inputs["Detail"].default_value = 3.0
     _bt.links.new(_btc.outputs["Object"], _bn.inputs["Vector"])
-    _bmr = _bt.nodes.new("ShaderNodeMapRange"); _bmr.inputs["To Min"].default_value = 0.40; _bmr.inputs["To Max"].default_value = 0.60
+    _bmr = _bt.nodes.new("ShaderNodeMapRange"); _bmr.inputs["To Min"].default_value = 0.32; _bmr.inputs["To Max"].default_value = 0.54
     _bt.links.new(_bn.outputs["Fac"], _bmr.inputs["Value"]); _bt.links.new(_bmr.outputs["Result"], _bb.inputs["Roughness"])
+    _bfn = _bt.nodes.new("ShaderNodeTexNoise"); _bfn.inputs["Scale"].default_value = 320.0; _bfn.inputs["Detail"].default_value = 2.0
+    _bt.links.new(_btc.outputs["Object"], _bfn.inputs["Vector"])
+    _bbmp = _bt.nodes.new("ShaderNodeBump"); _bbmp.inputs["Strength"].default_value = 0.10; _bbmp.inputs["Distance"].default_value = mm(0.03)
+    _bt.links.new(_bfn.outputs["Fac"], _bbmp.inputs["Height"]); _bt.links.new(_bbmp.outputs["Normal"], _bb.inputs["Normal"])
     bpy.ops.mesh.primitive_cylinder_add(radius=r - mm(1.5), depth=mm(26.0), vertices=44,
         location=(cx, yf + mm(14.0), cz), rotation=(math.radians(90), 0, 0))
     w = bpy.context.active_object; w.name = "fan-well"; w.data.materials.append(well)
