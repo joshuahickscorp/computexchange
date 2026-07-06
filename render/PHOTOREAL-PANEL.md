@@ -102,6 +102,25 @@ airfoil blades + grounding + bead-blast Studio are acknowledged as real gains. R
 8. **Floor/bg · [LOW].** Floor is featureless black glass · give it a dark dielectric (rough ~0.3) with
    faint smudges + a slight vertical near-black->less-black background gradient. (Contact shadows already OK.)
 
+## PANEL 4 (workflow w8sp521x8 · after the LED/fan/shroud/lighting wave) · MEASURED THE DROP
+Verdict moved: prior panels "4/4 render" -> now "GOOD RENDER, short of nearly-photo · trio-q34 the
+strongest frame · the Spark foam + Studio slab NEARLY read as photographed." Real progress. Ranked new
+tells + what I did (this wave, all gate-verified rig q34 raw clip 0.79-0.94% PASS):
+1. **[DONE] Fans read as solid discs on a lit gray plate (consensus #1).** Fixed: deepened the well
+   12->26mm + 17 near-black heatsink fins + darkened the finstack backing 0.082->0.030 · the blade gaps
+   now reveal DARK receding fin depth (you look INTO the card).
+2. **[DONE] LED strips razor-uniform, weak GI.** Raised the indirect clamp (GI spill) earlier + now a
+   subtle along-length emission ripple (0.80-1.12x) so they read as diffused strips. (KEEP the LEDs · verified real.)
+3. **[DONE] Rig-alone frames underexposed vs the trio.** rack_rig key 72->96, rim 52->60, fill 16->22.
+4. **[DONE] Floor a perfect mirror.** floor_mat() smudge-varied roughness 0.13->0.42 · reflection blurs.
+5. **[DONE-ish] Bevel-less razor frame edges.** powder_coat shading bevel 0.20->0.70mm · edges catch a line.
+6. **[OPEN · MED] Material contrast.** blades/shroud/hub share one plastic · split finishes (matte blades +
+   glossier hub + distinct shroud). Small remaining materials polish.
+7. **[GATED] Spark foam is a flat 2D texture (no self-shadow relief).** Panel wants pore depth · the
+   foam3d is accurate + gated (SP10/SP11) · touch only with a measured before/after · deferred with care.
+Panel accuracy myths REFUTED this wave: none new (panel-4 was told the verified facts up front · it
+stayed on rendering-quality · confirms the sourced-references-win discipline).
+
 ## Execution order (this wave · rack-weighted, but advance a desktop too)
 A. LED GI realism (keep · #1 valid core) + gate: thin the X lit bar (it is 55% of the clip) → under 1%.
 B. Fan refine (#3): less sweep + smaller hub + root fillet.
