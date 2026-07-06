@@ -49,6 +49,18 @@ Verdict: still 4/4 RENDER, but the graders MEASURED my panel-1 fixes as off-targ
   it is ACCURATE to the real DGX Spark (foam front, smooth sides) but the foam MATERIAL could read
   more like real foam. The Spark is gated/proven · touch only with care.
 
+## Grounded next changes (web reference pass 2026-07-06) · queued behind the current reshoot
+- **Black fans.** Reviews call the FE fans flatly "black" (NoobFeed, PC Gamer); the render at blade
+  albedo 0.110 reads medium-GREY. Correct down to ~0.050 · the glossy coat keeps edge/spec highlights
+  so blades still read against the dark well. (Spec updated: RTX5090FE-SPEC.md.)
+- **LEDs are ACCURATE · keep them.** Confirmed the real FE lights the inlet rings + X (both sides) +
+  side logo + top logo, static cool-white, non-adjustable. So the rings/X in the model are correct,
+  NOT artistic licence · the clip at the emitter is photographically honest. Temper only the razor
+  thinness if it still reads game-y, do NOT remove.
+- **Spark cheese-grater (tell #5).** The gold front is a STRUCTURED dimple-lattice (mini DGX Station /
+  Mac-Pro grater), not random glitter · a real hole-array + gold anodised alu. Queued for the Spark
+  worktree (touch the gated Spark with care · DGX-SPARK-360-SPEC.md has the research).
+
 ## Next when the loop resumes here
 Two hard tells remain: the **airfoil blade-mesh rebuild (#3)** and **material texture/grime (#4)**.
 These are real waves, not tweaks - reaching 4/4-photo is a large effort. Re-run the panel after each

@@ -23,7 +23,10 @@ reference design (model this, not an AIB card). Full research: task wyf4ukki4 ou
 Deliberately DARK, near-monochrome, all-metal, MATTE. NO silver/chrome edges (that was 40-series).
 Keep the whole card dark. Per-surface PBR (RGB 0-1 linear · placements high-conf, exact nums med):
 - shroud frame/body: (0.165, 0.173, 0.188) gunmetal · rough 0.60 · metallic 0.9 (machined alu)
-- fans + center caps: (0.110, 0.114, 0.125) near-black · rough 0.60 · metallic 0.0 (matte plastic)
+- fans + center caps: (0.110, 0.114, 0.125) -> CORRECT DOWN to ~(0.050, 0.052, 0.060). Reviews call
+  the fans flatly "black" (NoobFeed, PC Gamer 2026-07 pass) and the render at 0.110 read medium-GREY,
+  not black · a proper black plastic is ~0.03-0.06 linear · the glossy coat still gives edge/spec
+  highlights so the blades read against the dark well. rough 0.55 · metallic 0.0 · coat 0.35 (matte plastic)
 - heatsink fins: (0.082, 0.086, 0.098) black · rough 0.50 · metallic 0.90 (anodized alu)
 - X / infinity accents: (0.14, 0.15, 0.16) · rough 0.40 · metallic 0.90 (slightly glossier, catches key)
 - PCI bracket: (0.078, 0.078, 0.078) black · rough 0.50 · metallic 0.90 (anti-fingerprint)
@@ -34,6 +37,10 @@ Keep the whole card dark. Per-surface PBR (RGB 0-1 linear · placements high-con
   bracket sits BETWEEN the two fans on the front. Corners more rounded than the 4090.
 - **Static white illumination** (non-RGB, always on · model emissive): (1) wordmark on the TOP
   EDGE, (2) the V/X accents on both faces, (3) rings around the fan inlets on both faces.
+  CONFIRMED 2026-07 (NVIDIA GeForce forums + TechPowerUp pictures): the FE genuinely lights the
+  GeForce RTX side logo, the air-inlet rings (both sides), the X (both sides), and the top logo ·
+  static cool-white, NON-adjustable, cannot be turned off. So the lit rings + X + wordmark in the
+  model are ACCURATE to the real card · KEEP them (do not remove · they are not artistic licence).
 
 ## Trademark gate · logos/wordmarks = BLANK plates only (shape + placement, no glyphs)
 - top-edge "GeForce RTX" wordmark: a blank recessed backlit strip (emissive cool white), centered.
