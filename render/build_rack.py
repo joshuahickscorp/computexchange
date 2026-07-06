@@ -140,7 +140,9 @@ def bevel_mod(ob, width=1.6, segs=2):
     steel-tube chamfer that catches a thin highlight line, beyond what the shading-only bevel gives."""
     bpy.context.view_layer.objects.active = ob
     bm = ob.modifiers.new("bev", "BEVEL"); bm.width = mm(width); bm.segments = segs
-    bm.limit_method = "ANGLE"; bm.angle_limit = math.radians(40); bm.clamp_overlap = True
+    bm.limit_method = "ANGLE"; bm.angle_limit = math.radians(40)
+    try: bm.clamp_overlap = True   # attribute absent on some Blender builds · bevel still applies without it
+    except (AttributeError, TypeError): pass
     bpy.ops.object.modifier_apply(modifier=bm.name); smooth(ob, 40)
     return ob
 
