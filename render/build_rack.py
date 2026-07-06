@@ -362,13 +362,15 @@ def build_frame():
     return parts
 
 # ---- the 6-GPU rig (owner redirect · the hero content) ------------------------------------
-def build_fan(cx, yf, cz, r):
+def build_fan(cx, yf, cz, r, btint=0.0):
     """One axial fan on a GPU front face (blows toward -Y, the viewer). Recessed dark well +
-    bezel ring + hub + radial blades · the signature GPU read. yf = shroud front-face plane."""
+    bezel ring + hub + hub sticker + 9 broad swept blades that nearly fill the disc (the real
+    fan read · they overlap and catch the key). yf = shroud front-face plane. btint = per-card
+    blade-tone variance so the six fans are not identical."""
     parts = []
     well = principled("fan-well", (0.015, 0.015, 0.017), 0.55)
     ring = principled("fan-ring", (0.03, 0.03, 0.033), 0.42, metallic=0.35)
-    blade = principled("fan-blade", (0.06, 0.06, 0.066), 0.44, metallic=0.10)
+    blade = principled("fan-blade", (0.105 + btint, 0.105 + btint, 0.115 + btint), 0.40, metallic=0.15)
     bpy.ops.mesh.primitive_cylinder_add(radius=r - mm(1.5), depth=mm(11.0), vertices=40,
         location=(cx, yf + mm(6.5), cz), rotation=(math.radians(90), 0, 0))
     w = bpy.context.active_object; w.name = "fan-well"; w.data.materials.append(well)
@@ -383,17 +385,22 @@ def build_fan(cx, yf, cz, r):
     md = rm.modifiers.new("h", "BOOLEAN"); md.operation = "DIFFERENCE"; md.solver = "EXACT"; md.object = inr
     bpy.ops.object.modifier_apply(modifier=md.name); bpy.data.objects.remove(inr, do_unlink=True)
     rm.data.materials.append(ring); smooth(rm, 30); parts.append(rm)
-    bpy.ops.mesh.primitive_cylinder_add(radius=mm(13.0), depth=mm(9.0), vertices=28,
-        location=(cx, yf + mm(2.0), cz), rotation=(math.radians(90), 0, 0))
-    hb = bpy.context.active_object; hb.name = "fan-hub"; hb.data.materials.append(ring)
-    smooth(hb, 30); parts.append(hb)
-    nb = 7; rr = (mm(13.0) + r) / 2.0
+    nb = 9; rr = (mm(13.0) + r) / 2.0
     for i in range(nb):
         a = 2 * math.pi * i / nb
-        bl = rounded_box("fan-blade", r - mm(17.0), mm(1.4), mm(15.0), mm(0.5), seg=2)
-        bl.location = (cx + rr * math.cos(a), yf + mm(4.5), cz + rr * math.sin(a))
-        bl.rotation_euler = (0, a, math.radians(20.0))
+        bl = rounded_box("fan-blade", r - mm(14.0), mm(1.6), mm(24.0), mm(3.0), seg=2)
+        bl.location = (cx + rr * math.cos(a), yf + mm(3.8), cz + rr * math.sin(a))
+        bl.rotation_euler = (math.radians(11.0), a, math.radians(32.0))
         bl.data.materials.append(blade); smooth(bl, 30); parts.append(bl)
+    bpy.ops.mesh.primitive_cylinder_add(radius=mm(13.0), depth=mm(9.0), vertices=28,
+        location=(cx, yf + mm(1.5), cz), rotation=(math.radians(90), 0, 0))
+    hb = bpy.context.active_object; hb.name = "fan-hub"; hb.data.materials.append(ring)
+    smooth(hb, 30); parts.append(hb)
+    bpy.ops.mesh.primitive_cylinder_add(radius=mm(8.5), depth=mm(1.2), vertices=24,
+        location=(cx, yf - mm(0.6), cz), rotation=(math.radians(90), 0, 0))
+    st = bpy.context.active_object; st.name = "fan-sticker"
+    st.data.materials.append(principled("fan-sticker", (0.05, 0.05, 0.055), 0.32, metallic=0.2))
+    smooth(st, 30); parts.append(st)
     return parts
 
 def build_gpu(cx, cz, yc, idx=0):
@@ -424,9 +431,14 @@ def build_gpu(cx, cz, yc, idx=0):
     for dz in (mm(46.0), -mm(46.0)):
         rg = rounded_box("gpu-ridge", Wc - mm(22.0), mm(4.0), mm(7.0), mm(1.5), seg=2)
         rg.location = (cx, lip_y, cz + dz); rg.data.materials.append(shroud_mat); smooth(rg, 30); parts.append(rg)
-    # 3 fans recessed in the channel
+    # 3 fans recessed in the channel · per-card blade-tone variance (not clones)
+    btint = 0.012 * ((idx % 3) - 1)
     for dz in (mm(92.0), 0.0, -mm(92.0)):
-        parts += build_fan(cx, yf, cz + dz, mm(40.0))
+        parts += build_fan(cx, yf, cz + dz, mm(40.0), btint=btint)
+    # a small blank brand plate on the bottom lip (brushed, subtly proud · every card cites a
+    # real GPU shroud that carries a logo strip here · blank per trademark gate)
+    plate = box("gpu-brandplate", mm(46.0), mm(2.0), mm(9.0), (cx, yf - mm(3.5), cz - Hc / 2.0 + mm(6.0)))
+    plate.data.materials.append(principled(f"gpu-brand{idx}", (0.10, 0.10, 0.112), 0.34, metallic=0.7)); parts.append(plate)
     fins = box("gpu-fins", Wc - mm(8), Tc - mm(8), mm(8.0), (cx, yc, cz + Hc / 2.0 + mm(3.0)))
     fins.data.materials.append(dark); parts.append(fins)
     pwr = rounded_box("gpu-pwr", mm(26.0), mm(16.0), mm(11.0), mm(1.5), seg=2)
