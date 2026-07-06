@@ -813,7 +813,9 @@ import os as _os
 _os.makedirs(OUT, exist_ok=True)
 sc = reset_scene(); enable_gpu(sc)
 PART = str(arg("--part", "frame"))
-if PART == "node":
+if PART == "defs":
+    pass   # exec-only: load the builders (no scene, no render) · used by build_trio.py
+elif PART == "node":
     build_rm44_node()
     node_rig_camera(SHOT, (1800, 1400))
     render_to(OUT + f"node-{SHOT}.png")
