@@ -1293,6 +1293,19 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
             lip = cutter_box(mm(bw_), mm(2.0), mm(bh_), mm(0.4), (mm(qx + ox), rear_y + mm(0.8), port_z + mm(oz)))
             lip.name = "spark-cage-lip"; lip.data.materials.append(cage_mat); tubs.append(lip)
 
+    # BOTTOM FACE · S12 (GRADING-REPORT): a magnetically-attached rounded-square non-slip base cover
+    # (~18mm corner radius · the only plastic part · StorageReview) + a front intake slot with rounded
+    # ends (dust-filtered · ChargerLAB/STH). Regulatory print is INSIDE the cover (not visible · gate).
+    # Separate proud plates (no body boolean · the bottom is rarely seen · built for 360 completeness).
+    cover = rounded_box("spark-basecover", mm(122.0), mm(122.0), mm(1.6), mm(18.0), 0, 0, seg_corner=20)
+    cover.location = (0, 0, -mm(0.6))   # a hair proud below the body bottom (bottom at z=0)
+    cover.data.materials.append(principled("spark-basecover-mat", (0.043, 0.041, 0.038), 0.74, metallic=0.0))
+    smooth(cover, 30); tubs.append(cover)
+    islot = rounded_box("spark-intake", mm(96.0), mm(5.0), mm(1.4), mm(2.4), 0, 0, seg_corner=6)
+    islot.location = (0, front_y + mm(13.0), -mm(0.2))   # machined intake slot along the FRONT-bottom edge
+    islot.data.materials.append(principled("spark-intake-mat", (0.018, 0.018, 0.020), 0.6))
+    tubs.append(islot)
+
     group = [body] + foam_layers + tubs
     for ob in group:
         ob.rotation_euler.z = math.radians(yaw_deg)
