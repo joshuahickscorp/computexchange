@@ -135,6 +135,15 @@ def smooth(ob, deg=30.0):
     bpy.context.view_layer.objects.active = ob; ob.select_set(True)
     bpy.ops.object.shade_auto_smooth(angle=math.radians(deg)); ob.select_set(False)
 
+def bevel_mod(ob, width=1.6, segs=2):
+    """Small GEOMETRY bevel on a box's sharp edges (panel-6 #3: razor-CAD frame edges) · a real
+    steel-tube chamfer that catches a thin highlight line, beyond what the shading-only bevel gives."""
+    bpy.context.view_layer.objects.active = ob
+    bm = ob.modifiers.new("bev", "BEVEL"); bm.width = mm(width); bm.segments = segs
+    bm.limit_method = "ANGLE"; bm.angle_limit = math.radians(40); bm.clamp_overlap = True
+    bpy.ops.object.modifier_apply(modifier=bm.name); smooth(ob, 40)
+    return ob
+
 def apply_mod(ob):
     bpy.context.view_layer.objects.active = ob
     for m in list(ob.modifiers):
@@ -371,7 +380,7 @@ def build_frame():
     # top cap + roof front band · W0.3 (audit: roof reads like a picture frame): a deeper 45mm
     # front band gives the capped, heavy-browed top real cabinets show.
     cap = box("cap", W, D, mm(24.0), (0, 0, H - mm(12.0)))
-    cap.data.materials.append(pc); parts.append(cap)
+    cap.data.materials.append(pc); bevel_mod(cap); parts.append(cap)
     roofband = box("roofband", W, mm(6.0), mm(45.0), (0, -(fy - mm(3)), H - mm(22.5)))
     roofband.data.materials.append(pc); parts.append(roofband)
 
@@ -379,7 +388,7 @@ def build_frame():
     # floor gap the wheels lift it to; the base rail sits just above, posts land on it.
     FG = mm(58.0)
     plinth = box("plinth", W - mm(20), D - mm(20), mm(24.0), (0, 0, FG + mm(12.0)))
-    plinth.data.materials.append(pc); parts.append(plinth)
+    plinth.data.materials.append(pc); bevel_mod(plinth); parts.append(plinth)
     wheel_mat = interior_dark("caster-wheel")
     mnt_mat = principled("caster-mount", (0.30, 0.30, 0.32), 0.36, metallic=0.8)
     for sx in (-1, 1):
