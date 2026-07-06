@@ -652,11 +652,13 @@ def build_gpu(cx, cz, yc, idx=0):
         # a dark floor a bit deeper so the gaps between fins read as a receding cavity, not open sky
         back = box("fe-finfloor", Wc - 2 * bw, mm(2.0), fan_r * 2, (cx, yc + mm(6.0), fz))
         back.data.materials.append(principled(f"fe-finfloor{idx}", (0.010, 0.010, 0.012), 0.6)); parts.append(back)
-    # exhaust fin comb on the TOP + BOTTOM short-ends · the aluminium fin edges the FE vents through
-    # (reads from the top/bottom views · thin ridges across the width, spaced along the depth).
-    for ez, zend in ((cz + Hc / 2.0 - mm(1.0), 1), (cz - Hc / 2.0 + mm(1.0), -1)):
+    # ANGLED exhaust LOUVERS on the TOP + BOTTOM short-ends · G11 (GRADING-REPORT): the real FE vents
+    # through angled covers that direct exhaust up-and-back at ~20-30deg (GamersNexus schlieren), not flat
+    # ridges. Thin slats tilted ~26deg across the width, spaced along the depth · reads from top/bottom.
+    for ez, zend in ((cz + Hc / 2.0 - mm(2.0), 1), (cz - Hc / 2.0 + mm(2.0), -1)):
         for k in range(-6, 7):
-            fr = box("fe-topfin", Wc - 2 * bw - mm(4), mm(2.0), mm(3.0), (cx, yc + k * mm(2.7), ez))
+            fr = box("fe-topfin", Wc - 2 * bw - mm(4), mm(1.5), mm(5.0), (cx, yc + k * mm(2.7), ez))
+            fr.rotation_euler = (math.radians(zend * 26.0), 0, 0)   # angled louver slat (directs exhaust)
             fr.data.materials.append(fin_mat); parts.append(fr)
     # two fans (7 blades, BLACK plastic) with the FE lit inlet rings. Reviews call the FE fans flatly
     # "black" · 0.110 read medium-grey · 0.050 is a proper black plastic (glossy coat keeps the spec/
