@@ -1,3 +1,34 @@
+# Wave 3 · GRADING-REPORT-driven GPU geometry pass (2026-07-06, Opus loop)
+
+Driven by ~/Downloads/cx-render-handoff/GRADING-REPORT.md (sourced facet grades). Worked the
+lowest-graded GPU facets first (the owner-flagged last mile · FE geometry). Each one bounded +
+gate-verified · rig q34 clip 0.720% PASS (better than the 0.798% baseline):
+- **G1 · 7 blades not 9** · real FE fans have seven wide-chord blades (LanOC/club386). Chord
+  auto-widened 1.28x. Preview clip 3.04% -> 1.41%.
+- **G2 · blade-tip rim ring** · extended tips to reach a glossy dark rim band · reads as a ring-fan.
+- **G7 · double flow-through rear** · TWO open windows (was one over a solid box) revealing real
+  vertical fin combs · the FE's defining rear feature · rear clip 0.000% PASS.
+- **G4 · black center module** · was inverted (gunmetal center) · now black center + gunmetal frame.
+- **G5 · single flush X** · unioned the two crossing bars (was a stacked-bar step) · arms reach the rims.
+- **G9 · thin wordmark strip** · was an 18x70mm glowing tile blowing the side (2.62%->0.63% PASS).
+- **G10 · recessed angled 12V-2x6** · was a protruding cylinder cable · now a recessed scallop socket.
+- **G12 · bracket ports recessed + 2 screws** · solid no-vent bracket confirmed.
+- **G17 · fixed the black bottom audit shot** · camera dropped under the floor · now the bracket/
+  fingers/riser read.
+- **build fix** · guarded BevelModifier.clamp_overlap (crashed the rig/trio on this Blender build).
+
+## Honest next (loop open · GPU facets remaining, then the other objects)
+- GPU still open (lower grades): G6 illumination-motif merge (ring+X continuous loop), G3 hub flatten,
+  G16 blade material (kill foil-facet highlights), G11 edge louvers, G14 shroud cut-lines, G13/G15
+  proportion+material verify, G18 see-through backlight in the rig.
+- NOT yet started: Mac Studio (M1 rear vent = rectangular ~173x53mm field NOT a circle · M2 rear port
+  order · spec file MAC-STUDIO-360-SPEC.md must be corrected FIRST), DGX Spark (S1 rear foam+I-O plate ·
+  S3 blank champagne top · spec DGX-SPARK-360-SPEC.md USB-A line is wrong), rig R1 power cabling/PSU.
+- The single-card front/q34 clip ~1.38% is inherent to the two big lit rings + X filling the frame
+  (not a regression · baseline was 3%+) · the governing gate is the RIG q34 (0.720% PASS).
+
+---
+
 # Wave 2 · photoreal push (2026-07-06, later) · driven by a 5-lens forensic panel
 
 Ran a 5-lens forensic panel (workflow w5oyz13ew · materials/lighting/geometry/gestalt/accuracy +
