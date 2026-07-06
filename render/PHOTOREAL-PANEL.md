@@ -10,10 +10,12 @@ task w3csvvvaf. This is the loop's panel mandate (L12) applied to the rig.
    rack_rig floor + the trio floor.
 2. **[DONE]** LEDs glow but EMIT NO LIGHT (all 4 lenses). Fix applied: boosted the emissive rings +
    X (2.6->4.0, 2.3->3.2) so they cast a real GI wash onto the shroud/frame · clip re-gated 0.70% PASS.
-3. **[DEFERRED · needs real rebuild]** Fan blades are FLAT PADDLES, not airfoils (macro + gestalt).
-   A Simple-Deform bend on box blades merged them into a solid dome (worse). The real fix is a lofted
-   airfoil blade MESH (bmesh: sickle sweep + root-to-tip twist + chord taper), denser overlap. Bounded
-   but non-trivial · do it as its own wave.
+3. **[DONE · real bmesh rebuild]** Fan blades were FLAT PADDLES, not airfoils (macro + gestalt).
+   FIXED: `_fan_blades()` now lofts each blade as a real cambered foil across 6 span stations —
+   chord taper (root->mid bulge->tip), root-to-tip twist (38deg AoA at hub -> 16deg at tip), sickle
+   sweep (LE trails back), ~1.4x-pitch overlap so you cannot see through to the well. One watertight
+   mesh per rotor. Verified at macro + card-front + rig-q34: reads as a genuine 5090 FE dual-fan
+   rotor. Clip-neutral (blades are dark/recessed · the 1.15% rig clip is the LED rings, unchanged).
 4. **[TODO]** One flat CLAY material on everything — no dust/fingerprints/edge-wear, roughness uniform.
    Fix: split BSDFs further + a subtle grime/dust layer (dust in fan corners, faint smudges on the
    Studio aluminium, edge wear on frame corners). The rack is HANDLED hardware · honest wear allowed.

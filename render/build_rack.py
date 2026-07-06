@@ -402,6 +402,57 @@ def emissive(name, color, strength):
             pass
     return m
 
+def _fan_blades(cx, yf, cz, r, nb, blade_mat):
+    """One lofted-airfoil bladed rotor as a SINGLE watertight mesh (panel tell #3: flat paddles).
+    Each blade is a real cambered foil lofted across 6 span stations: chord taper (root->mid bulge->
+    tip), root-to-tip twist (high angle-of-attack at the hub, shallow at the tip), and a sickle
+    sweep (the leading edge trails back). Blades overlap by ~1.4x their pitch so you cannot see
+    straight through to the well · fan axis = +Y, disc plane = world X-Z, pitched to blow toward -Y."""
+    me = bpy.data.meshes.new("fan-rotor"); bm = bmesh.new()
+    r0   = mm(15.0)          # root radius (just outside the hub cap)
+    rtip = r - mm(3.0)       # tip radius (just inside the rim)
+    Nsp  = 6                 # span stations (root -> tip)
+    Nc   = 7                 # chord samples (leading -> trailing edge)
+    y0   = yf + mm(3.5)      # blade mid-plane depth (recessed behind the inlet rim)
+    pitch_ang = 2 * math.pi / nb
+    def chord_of(t, rad):
+        base = 1.42 * pitch_ang * rad                       # ~1.4x the blade pitch -> overlap
+        return base * (0.72 + 0.42 * math.sin(math.pi * (0.12 + 0.76 * t)))  # root->mid bulge->tip taper
+    def airfoil(u):          # u in [-0.5,0.5] chord fraction -> (mean-camber, half-thickness), chord-fractions
+        s = max(1.0 - (2.0 * u) ** 2, 0.0)                  # 1 at mid-chord, 0 at the edges
+        return 0.14 * s, 0.055 * s ** 0.7                   # cambered bow + a thin lens thickness
+    cs = [-0.5 + k / (Nc - 1) for k in range(Nc)]           # leading -> trailing
+    for i in range(nb):
+        a0 = 2 * math.pi * i / nb
+        rings = []
+        for sidx in range(Nsp):
+            t = sidx / (Nsp - 1)
+            rad = r0 + (rtip - r0) * t
+            phi = a0 + 0.52 * (t ** 1.4)                    # sickle sweep (LE trails back with span)
+            pitch = math.radians(38.0 - 22.0 * t)           # twist: steep AoA at root -> shallow at tip
+            chord = chord_of(t, rad)
+            cp, sp = math.cos(pitch), math.sin(pitch)
+            tx, tz = -math.sin(phi), math.cos(phi)          # tangential (chord) unit in the X-Z disc plane
+            bx, bz = cx + rad * math.cos(phi), cz + rad * math.sin(phi)
+            pts = [(u * chord, (c + h) * chord) for u in cs for c, h in [airfoil(u)]]          # upper surface
+            pts += [(u * chord, (c - h) * chord) for u in reversed(cs[1:-1]) for c, h in [airfoil(u)]]  # lower
+            ring = [bm.verts.new((bx + tx * (al * cp), y0 + al * sp + yaf, bz + tz * (al * cp)))
+                    for al, yaf in pts]
+            rings.append(ring)
+        P = len(rings[0])
+        for sidx in range(Nsp - 1):
+            A, B = rings[sidx], rings[sidx + 1]
+            for k in range(P):
+                k2 = (k + 1) % P
+                bm.faces.new((A[k], A[k2], B[k2], B[k]))
+        bm.faces.new(tuple(rings[0]))                       # cap root
+        bm.faces.new(tuple(reversed(rings[-1])))            # cap tip
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    bm.to_mesh(me); bm.free()
+    ob = bpy.data.objects.new("fan-rotor", me); bpy.context.collection.objects.link(ob)
+    ob.data.materials.append(blade_mat); smooth(ob, 40)
+    return ob
+
 def build_fan(cx, yf, cz, r, nb=9, blade_rgb=(0.105, 0.105, 0.115), emit_ring=False):
     """One axial fan on a GPU front face (blows toward -Y, the viewer). Recessed dark well +
     bezel ring + hub + hub sticker + nb broad swept blades that nearly fill the disc. yf = shroud
@@ -424,20 +475,8 @@ def build_fan(cx, yf, cz, r, nb=9, blade_rgb=(0.105, 0.105, 0.115), emit_ring=Fa
     md = rm.modifiers.new("h", "BOOLEAN"); md.operation = "DIFFERENCE"; md.solver = "EXACT"; md.object = inr
     bpy.ops.object.modifier_apply(modifier=md.name); bpy.data.objects.remove(inr, do_unlink=True)
     rm.data.materials.append(ring); smooth(rm, 30); parts.append(rm)
-    rr = (mm(12.0) + r) / 2.0
-    arc = 2 * math.pi * rr / nb
-    for i in range(nb):
-        a = 2 * math.pi * i / nb
-        # CUPPED/SWEPT airfoil blades (panel tell #3: flat paddles) · a thin subdivided box bent +
-        # twisted so each blade is a sickle-cupped foil, not a popsicle stick · dense overlap so you
-        # cannot see through to the well (a real axial fan).
-        # NOTE (panel tell #3 · airfoil): a Simple-Deform bend on box blades merged them into a
-        # featureless solid dome (worse). Proper cupped/twisted airfoils need a real lofted-profile
-        # blade mesh (bmesh) · a bounded future rebuild. Keeping the distinct flat swept blades.
-        bl = rounded_box("fan-blade", r - mm(10.0), mm(0.8), arc * 1.32, mm(2.0), seg=2)
-        bl.location = (cx + rr * math.cos(a), yf + mm(3.0) + (i % 3) * mm(0.4), cz + rr * math.sin(a))
-        bl.rotation_euler = (math.radians(8.0), a, 0)
-        bl.data.materials.append(blade); smooth(bl, 30); parts.append(bl)
+    # nb lofted-airfoil blades (real cambered/twisted/swept foils · one watertight mesh) · panel tell #3
+    parts.append(_fan_blades(cx, yf, cz, r, nb, blade))
     bpy.ops.mesh.primitive_cylinder_add(radius=mm(14.0), depth=mm(9.0), vertices=28,
         location=(cx, yf + mm(1.5), cz), rotation=(math.radians(90), 0, 0))
     hb = bpy.context.active_object; hb.name = "fan-hub"; hb.data.materials.append(ring)
