@@ -200,7 +200,19 @@ def machined_metal(name, base, rough, metallic=0.9):
     nt.links.new(tc.outputs["Object"], nr.inputs["Vector"])
     mr = nt.nodes.new("ShaderNodeMapRange")
     mr.inputs["To Min"].default_value = max(0.05, rough - 0.07); mr.inputs["To Max"].default_value = rough + 0.07
-    nt.links.new(nr.outputs["Fac"], mr.inputs["Value"]); nt.links.new(mr.outputs["Result"], b.inputs["Roughness"])
+    nt.links.new(nr.outputs["Fac"], mr.inputs["Value"])
+    # large-scale HANDLING smudge (panel tell #4: uniform roughness = 'clay'). A soft cm-scale
+    # blotch that adds/subtracts a little roughness so the key light glances off the flat faces
+    # UNEVENLY, like real handled hardware · albedo untouched (keeps the premium dark look).
+    sm = nt.nodes.new("ShaderNodeTexNoise")
+    sm.inputs["Scale"].default_value = 6.5; sm.inputs["Detail"].default_value = 3.0   # dm-cm handling blotches
+    nt.links.new(tc.outputs["Object"], sm.inputs["Vector"])
+    smr = nt.nodes.new("ShaderNodeMapRange")
+    smr.inputs["To Min"].default_value = -0.06; smr.inputs["To Max"].default_value = 0.085
+    nt.links.new(sm.outputs["Fac"], smr.inputs["Value"])
+    radd = nt.nodes.new("ShaderNodeMath"); radd.operation = "ADD"; radd.use_clamp = True
+    nt.links.new(mr.outputs["Result"], radd.inputs[0]); nt.links.new(smr.outputs["Result"], radd.inputs[1])
+    nt.links.new(radd.outputs["Value"], b.inputs["Roughness"])
     nb = nt.nodes.new("ShaderNodeTexNoise")
     nb.inputs["Scale"].default_value = 680.0; nb.inputs["Detail"].default_value = 2.0
     nt.links.new(tc.outputs["Object"], nb.inputs["Vector"])
