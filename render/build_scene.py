@@ -859,8 +859,18 @@ def build_mac_studio(loc_x=0.0, yaw_deg=0.0):
     # known-good rounded-rect cut. A round jack/inlet is not worth a body regression.
     rbox = apply_boolean(body, rcut)
     assign_interior(body, rbox, 3, ymin=rear_y - mm(6.5))
+    # DARK connector inserts · the pocket walls read alu-lined (assign_interior does not fully catch
+    # them on this fillet body) · real rear ports are DARK recesses. A dark insert recessed in each
+    # pocket makes every port read as a dark connector (sourced: real ports dark · GRADING-REPORT M2).
+    port_dark = principled("mac-port-dark", (0.020, 0.020, 0.023), 0.50, metallic=0.20)
+    rport_inserts = []
+    if not arg("--noports", False):
+        for (w_, h_, xc) in rports:
+            ins = rounded_box("mac-port-ins", mm(w_ - 0.8), mm(3.2), mm(h_ - 0.8), mm(0.7), 0, 0, seg_corner=4)
+            ins.location = (mm(xc), rear_y - mm(3.9), rpz - mm(h_ - 0.8) / 2.0)   # recessed inside the pocket
+            ins.data.materials.append(port_dark); smooth(ins, 20); rport_inserts.append(ins)
 
-    group = [body, led, foot] + ([vent] if not arg("--novent", False) else []) + tongues + m8_parts
+    group = [body, led, foot] + ([vent] if not arg("--novent", False) else []) + tongues + m8_parts + rport_inserts
     for ob in group:
         ob.rotation_euler.z = math.radians(yaw_deg)
         x, y = ob.location.x, ob.location.y
