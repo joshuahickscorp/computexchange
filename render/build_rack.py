@@ -637,7 +637,15 @@ def build_gpu(cx, cz, yc, idx=0):
     for j in range(4):
         io = box("fe-io", mm(20.0), mm(3.0), mm(9.0), (cx - mm(48.0) + j * mm(30.0), yf + mm(2.0), cz - Hc / 2.0 - mm(7.0)))
         io.data.materials.append(dark); parts.append(io)
-    riser = box("fe-riser", mm(96.0), mm(20.0), mm(15.0), (cx, yc, cz - Hc / 2.0 - mm(15.0)))
+    # PCIe gold-finger contact edge · THE recognizable 'this is a real GPU' cue (panel-3 #5). A dark
+    # PCB edge protruding below the shroud with a gold contact strip + the PCIe key notch.
+    pcb = box(f"fe-pcb{idx}", mm(120.0), mm(1.7), mm(11.0), (cx, yc, cz - Hc / 2.0 - mm(13.0)))
+    pcb.data.materials.append(principled(f"fe-pcbm{idx}", (0.016, 0.024, 0.018), 0.52, metallic=0.0)); parts.append(pcb)
+    gold = principled(f"fe-gold{idx}", (0.63, 0.48, 0.17), 0.28, metallic=1.0)
+    for gx, gw in ((cx - mm(34.0), mm(48.0)), (cx + mm(30.0), mm(56.0))):   # two finger banks split by the PCIe key notch
+        gf = box("fe-goldfinger", gw, mm(1.9), mm(6.0), (gx, yc, cz - Hc / 2.0 - mm(17.0)))
+        gf.data.materials.append(gold); parts.append(gf)
+    riser = box("fe-riser", mm(96.0), mm(20.0), mm(15.0), (cx, yc, cz - Hc / 2.0 - mm(24.0)))
     riser.data.materials.append(principled(f"fe-riserc{idx}", (0.03, 0.03, 0.033), 0.5)); parts.append(riser)
     return parts
 
