@@ -66,7 +66,9 @@ def reset_scene():
     sc.cycles.use_adaptive_sampling = True
     sc.cycles.adaptive_threshold = 0.005
     sc.cycles.use_denoising = True
-    sc.cycles.sample_clamp_indirect = 8.0   # kill cavity fireflies (L13 desktop lesson · a rack is all cavities)
+    sc.cycles.sample_clamp_indirect = 16.0   # was 8.0 · panel-3 (all lenses): the LEDs deposited zero GI
+    # spill · the 8.0 indirect clamp was SUPPRESSING the emitter bounce onto the shroud/blades. Raise it
+    # so the accurate LEDs actually wash cool light onto the neighbouring metal · OIDN handles fireflies.
     try:
         sc.cycles.denoiser = "OPENIMAGEDENOISE"
         sc.cycles.denoising_input_passes = "RGB_ALBEDO_NORMAL"
@@ -500,11 +502,11 @@ def build_fan(cx, yf, cz, r, nb=9, blade_rgb=(0.105, 0.105, 0.115), emit_ring=Fa
     dome.data.materials.append(principled("fan-hubcap", (0.05, 0.05, 0.055), 0.30, metallic=0.3))
     smooth(dome, 40); parts.append(dome)
     if emit_ring:   # the 5090 FE lit inlet ring (static cool white)
-        bpy.ops.mesh.primitive_torus_add(major_radius=r + mm(1.0), minor_radius=mm(1.3),
+        bpy.ops.mesh.primitive_torus_add(major_radius=r + mm(1.0), minor_radius=mm(0.6),
             location=(cx, yf - mm(0.5), cz), rotation=(math.radians(90), 0, 0),
             major_segments=48, minor_segments=8)
         er = bpy.context.active_object; er.name = "fan-inlet-lit"
-        er.data.materials.append(emissive("fan-inlet-lit-mat", (0.86, 0.92, 1.0), 9.0))  # true LED · lights the adjacent shroud but no longer FLOODS the black fans grey (temper 16->9 · re-measure spill)
+        er.data.materials.append(emissive("fan-inlet-lit-mat", (0.86, 0.92, 1.0), 9.0))  # true LED · THIN light-guide line (minor 1.3->0.6): real FE inlet rings are thin lines · thinner supra-white ring cuts the clipped-pixel AREA under the 1% gate · emission 9 held, raised indirect clamp preserves the cool spill
         smooth(er, 30); parts.append(er)
     return parts
 
@@ -557,7 +559,7 @@ def build_gpu(cx, cz, yc, idx=0):
         xb = rounded_box("fe-xbar", mm(78.0), mm(3.0), mm(10.0), mm(2.0), seg=2)
         xb.location = (cx, yf - mm(2.0), cz); xb.rotation_euler = (0, math.radians(sgn * 33.0), 0)
         xb.data.materials.append(xacc_mat); smooth(xb, 30); parts.append(xb)
-        xl = box("fe-xlit", mm(78.0), mm(1.0), mm(2.2), (cx, yf - mm(3.6), cz))
+        xl = box("fe-xlit", mm(78.0), mm(1.0), mm(0.9), (cx, yf - mm(3.6), cz))   # thin lit strip · the X was 55% of the clipped area (panel-3 gate) · thinned under the 1% gate while the rings (main spill) stay at 0.7
         xl.rotation_euler = (0, math.radians(sgn * 33.0), 0); xl.data.materials.append(lit); parts.append(xl)
     # top-edge wordmark · a blank lit strip on the 'top edge' (a vertical side edge when portrait,
     # +X so it faces the q34 camera), plus the angled recessed 16-pin power header near it

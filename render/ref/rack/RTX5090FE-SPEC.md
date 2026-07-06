@@ -37,10 +37,16 @@ Keep the whole card dark. Per-surface PBR (RGB 0-1 linear · placements high-con
   bracket sits BETWEEN the two fans on the front. Corners more rounded than the 4090.
 - **Static white illumination** (non-RGB, always on · model emissive): (1) wordmark on the TOP
   EDGE, (2) the V/X accents on both faces, (3) rings around the fan inlets on both faces.
-  CONFIRMED 2026-07 (NVIDIA GeForce forums + TechPowerUp pictures): the FE genuinely lights the
-  GeForce RTX side logo, the air-inlet rings (both sides), the X (both sides), and the top logo ·
-  static cool-white, NON-adjustable, cannot be turned off. So the lit rings + X + wordmark in the
-  model are ACCURATE to the real card · KEEP them (do not remove · they are not artistic licence).
+  CONFIRMED 2026-07 (NVIDIA GeForce forums + TechPowerUp review + TEARDOWN photos + OC3D + NoobFeed ·
+  5 sources): the FE genuinely lights the GeForce RTX side logo, the air-inlet area, the X (front +
+  near the power connector), and the top logo · static WHITE, non-RGB, NON-adjustable, cannot be
+  turned off · "the metal frame houses white LED illumination" (teardown). So the lit rings + X +
+  wordmark are ACCURATE · KEEP them.
+  FLIP-FLOP GUARD (do NOT re-open): the forensic panel (w5oyz13ew) asserted "the FE has NO
+  illumination · delete the emission." That is FACTUALLY WRONG · overruled by the 5 sources above.
+  The agents worked from imperfect training memory · the live reviews + teardown win. The LEDs stay.
+  The panel's VALID point (keep): the emitters must cast real GI (cool spill onto blades/shroud) ·
+  addressed by raising the indirect clamp + thinning the emitters · NOT by deletion.
 
 ## Trademark gate · logos/wordmarks = BLANK plates only (shape + placement, no glyphs)
 - top-edge "GeForce RTX" wordmark: a blank recessed backlit strip (emissive cool white), centered.

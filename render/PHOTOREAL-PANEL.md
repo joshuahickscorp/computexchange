@@ -69,8 +69,43 @@ Verdict: still 4/4 RENDER, but the graders MEASURED my panel-1 fixes as off-targ
   Mac-Pro grater), not random glitter · a real hole-array + gold anodised alu. Queued for the Spark
   worktree (touch the gated Spark with care · DGX-SPARK-360-SPEC.md has the research).
 
-## Next when the loop resumes here
-Two hard tells remain: the **airfoil blade-mesh rebuild (#3)** and **material texture/grime (#4)**.
-These are real waves, not tweaks - reaching 4/4-photo is a large effort. Re-run the panel after each
-to measure the drop. Blunt: the render is meaningfully more photoreal than panel-1 (real emitters +
-grounding) but is NOT yet passing as a photograph · the fan geometry + material uniformity are the wall.
+## PANEL 3 (workflow w5oyz13ew · 5 lenses + synthesis · on the airfoil+black-fan+LED9 delivery heroes)
+Verdict: "GOOD RENDER, bordering on nearly-photo in crops · ~90% still reads CG at a glance." The
+airfoil blades + grounding + bead-blast Studio are acknowledged as real gains. Ranked master punch-list:
+
+1. **LEDs · [FACT DISPUTE RESOLVED · KEEP].** Panel claimed the FE has NO illumination + urged deleting
+   the rings/X. That is FACTUALLY WRONG · 5 sources (NVIDIA GeForce forums, TechPowerUp review + TEARDOWN
+   photos, OC3D, NoobFeed) confirm the real FE has static WHITE LEDs on the X, the inlet area, the top
+   GeForce logo + the side logo (non-RGB, non-off). The LEDs STAY (accurate signature). BUT the panel's
+   real observation holds across all 5 lenses: they read as UNSHADED GLOWING GEOMETRY · no cool GI spill
+   onto the black blades/hub, no bounce onto the shroud, no along-length ripple, no diffuser tint. FIX =
+   make the accurate LEDs BEHAVE like emitters: raise diffuse bounces >=4, add along-length brightness
+   noise + a slight cool tint, ensure the shroud/hub pick up a visible cool gradient. (Not delete.)
+2. **DGX Spark front · [HIGH].** Confirmed the glitter tell + NEW: the speckle WRAPS around the rounded
+   corner (impossible for a real panel) + two fabricated oval cutouts flank it + the gold is too
+   jewelry-yellow. FIX = real countersunk-hole lattice geometry (array of beveled holes ~2-3mm pitch),
+   confined to the flat face, edge-to-edge, delete the ovals, satin anodised gold (desat ~30%). GATED ·
+   now supported by panel + web research (2 refs) · still verify foam-vs-grater against a real photo first.
+3. **Fans · [HIGH · REFINE not rebuild].** The new airfoils read as too-long, too-curled 'scythe' blades
+   on an oversized hub · panel wants 9 SHORT, shallow-swept blades, hub ~30% of fan dia, +root fillet +
+   a slightly domed hub cap. FIX = reduce sweep (0.52->~0.28), shrink hub, add blade-root fillet.
+4. **CG clay (materials, all lenses) · [HIGH].** One flat frontal key + one uniform roughness everywhere.
+   FIX = 3-light studio (key45 + quarter fill + cool top rim, softbox >= object) + per-material rough
+   variation (blade flow lines + gloss leading edge · shroud cast grain · frame orange-peel bump) + a
+   light dust/AO pass on up-faces + a faint smudge mask on grip faces. Diffuse bounces >=4 so wells darken.
+5. **Card bottom + shroud tone · [MED].** Bottom edge is a dummy block · add the PCIe I/O bracket (3x DP +
+   HDMI cutouts) + gold-finger edge + recessed 16-pin. And darken the shroud albedo (reads silver under
+   the cool key · should be clearly darker gunmetal ~0.10-0.14 than the frame).
+6. **Clone lockstep · [MED].** 6 pixel-identical cards · randomise each yaw/pitch +/-0.3deg, seat +/-0.5mm.
+7. **Mac Studio · [MED].** Reads nearly CUBIC · real is a squat ~2:1 slab (197w x 95h). Verify the render
+   proportions · add the recessed base foot ring + correct front I/O (2 USB-C + SDXC slot + power LED).
+8. **Floor/bg · [LOW].** Floor is featureless black glass · give it a dark dielectric (rough ~0.3) with
+   faint smudges + a slight vertical near-black->less-black background gradient. (Contact shadows already OK.)
+
+## Execution order (this wave · rack-weighted, but advance a desktop too)
+A. LED GI realism (keep · #1 valid core) + gate: thin the X lit bar (it is 55% of the clip) → under 1%.
+B. Fan refine (#3): less sweep + smaller hub + root fillet.
+C. Shroud darken + card bottom I/O bracket (#5).  D. Clone lockstep jitter (#6).
+E. Material micro-texture + 3-light + dust (#4 · the big materials wave).  F. Floor/bg (#8).
+G. DESKTOP: verify+fix Mac Studio proportions (#7) · then the Spark hole-lattice (#2, gated, re-verify).
+Re-run the panel after B/E and after the desktop wave to measure the drop.
