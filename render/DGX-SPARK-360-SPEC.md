@@ -52,3 +52,12 @@ mesh design." So:
   logo badge (blank per trademark gate), air intakes top+bottom. The ONLY open polish: the foam
   MATERIAL could read a hair less "sparkly" and more matte-porous · but it is gated/pinned (SP10/SP11)
   and accurate · touch only with a measured before/after, never a wholesale rebuild.
+
+## FOAM VERIFIED AT MACRO (2026-07-06)
+Rendered a front macro (_audit_desktop.py --which spark --yaw 0): the foam3d reads as a genuine 3D
+POROUS structure with visible pore depth + self-shadowing · NOT flat glitter. Panel-4's "flat 2D
+texture" was a TRIO-SCALE artifact (the Spark is tiny in the trio, so the ~0.7mm foam relief does not
+resolve · it reads as speckle). Up close it is accurate metal foam. Only nuance: a hair coarse/high-
+contrast vs the finest real champagne foam · but SP10/SP11-tuned + gated · leave it (flip-flop guard).
+Conclusion: Spark front is ACCURATE + reads 3D · no change. The trio "glitter" read is unavoidable at
+that scale short of a finer foam, which risks the gated tone pin.
