@@ -1260,6 +1260,14 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
                     for (pw_, ph_, pxc) in port_specs]
     port_boxes = apply_boolean(body, port_cutters)
     assign_interior(body, port_boxes, 4, ymin=rear_y - mm(6.5))
+    # QSFP cage lips · the twin metal cages proud of the rear face (the Spark's most recognizable
+    # rear feature · ConnectX-7 200GbE) · a thin metal frame around each of the two QSFP openings.
+    cage_mat = principled("spark-qsfp-cage", (0.30, 0.30, 0.32), 0.42, metallic=0.8)
+    for qx in (47.0, 62.0):
+        for bw_, bh_, ox, oz in ((18.0, 2.0, 0.0, 5.5), (18.0, 2.0, 0.0, -5.5),
+                                 (2.0, 11.0, -8.5, 0.0), (2.0, 11.0, 8.5, 0.0)):
+            lip = cutter_box(mm(bw_), mm(2.0), mm(bh_), mm(0.4), (mm(qx + ox), rear_y + mm(0.8), port_z + mm(oz)))
+            lip.name = "spark-cage-lip"; lip.data.materials.append(cage_mat); tubs.append(lip)
 
     group = [body] + foam_layers + tubs
     for ob in group:
