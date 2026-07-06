@@ -616,6 +616,16 @@ def champagne_gold(rough=0.28, pore_darken=False):
     # FINAL WAVE (commit C): the device had DE-GOLDED to bone (wave-4 re-pin + 5c overshot). Pinned
     # to sth_front-1 (b29): visibly gold, calmer than the storagereview brass (b42.8). Foam struts
     # override this in the pore_darken branch.
+    if not pore_darken:
+        # low-freq roughness zoning on the SMOOTH gold sides/bezels · panel-6 #5: they read as one
+        # uniform satin · real anodized alu varies satin/matte across a face. Roughness-only (the
+        # spark_champ tone pin is albedo-based · untouched · holds).
+        nt = m.node_tree; b = nt.nodes["Principled BSDF"]
+        tcv = nt.nodes.new("ShaderNodeTexCoord")
+        rn = nt.nodes.new("ShaderNodeTexNoise"); rn.inputs["Scale"].default_value = 4.0; rn.inputs["Detail"].default_value = 2.0
+        nt.links.new(tcv.outputs["Object"], rn.inputs["Vector"])
+        rmr = nt.nodes.new("ShaderNodeMapRange"); rmr.inputs["To Min"].default_value = rough - 0.06; rmr.inputs["To Max"].default_value = rough + 0.08
+        nt.links.new(rn.outputs["Fac"], rmr.inputs["Value"]); nt.links.new(rmr.outputs["Result"], b.inputs["Roughness"])
     if pore_darken:
         nt = m.node_tree
         b = nt.nodes["Principled BSDF"]
