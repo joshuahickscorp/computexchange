@@ -42,8 +42,13 @@ Worked remaining facets by ascending grade. Committed:
 - **G3** flat hub cap · **G11** angled exhaust louvers (top/bottom edges) · **S12** Spark bottom
   (non-slip cover + intake slot) · **M8** Studio bottom (concentric intake annulus + foot ring +
   Kensington) · **S4** Spark crisp machined-brick edges (6.09->2.5mm fillet) · **S7** Spark NVIDIA
-  green logo badge (blank green plates) · **S5/S10** foam inset ~3.5mm shell bands (foam no longer
-  peeks side-on · overrides the spec's older edge-to-edge per the sourced dossier).
+  green logo badge (blank green plates).
+- **S5/S10 ATTEMPTED then REVERTED (autopsy):** narrowing the foam field 148->143mm to inset it +
+  hide the side-peek forced a fresh voxel remesh of the BIG front foam field (148x46mm) that ran 25+
+  min with no cache written · disproportionate cost for a minor side-peek (S10 was already 7/10) and
+  it fights the spec's measured edge-to-edge conclusion. Reverted to the cached 148mm (gate-pinned).
+  Deferred: if pursued later, inset via a THIN champagne shell-band OVERLAY at the side edges (cheap ·
+  no foam rebuild) rather than narrowing the gated foam field.
 - **M5 verified already-correct** (flip-flop guard): the front USB-C dims 2.62x8.47 ARE the true
   measured USB-C size ("settled, two photographers") · the report's "too thin, widen to 3x9" was a
   mis-impression · do NOT widen.
