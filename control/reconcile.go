@@ -76,6 +76,7 @@ func (wk *Workers) reconcileLedger(ctx context.Context) error {
 			// it rather than silently skipping.
 			log.Printf("workers: reconcile DRIFT: supplier %s shows $%.2f released but has no connected Stripe account", r.SupplierID, r.AmountUSD)
 			drifted++
+			metrics.reconcileDrift.Add(1)
 			continue
 		}
 		transferred, terr := stripeTransferredUSD(ctx, acct)
@@ -92,6 +93,7 @@ func (wk *Workers) reconcileLedger(ctx context.Context) error {
 			log.Printf("workers: reconcile DRIFT: supplier %s (%s): ledger released $%.2f vs stripe transferred $%.2f (delta $%.2f)",
 				r.SupplierID, acct, r.AmountUSD, transferred, delta)
 			drifted++
+			metrics.reconcileDrift.Add(1)
 		}
 	}
 	log.Printf("workers: reconcile complete — %d supplier(s) checked, %d with drift", checked, drifted)

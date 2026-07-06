@@ -89,6 +89,13 @@ const (
 	staleBackoff     = 1 * time.Minute  // delay before a requeued task is visible
 	maxTaskRetries   = 3                // requeue this many times before failing
 	sweepBatch       = 100              // max rows handled per tick
+	// budgetStopInterval (Control Plane Hot Path 7->8, docs/internal/
+	// CREED_AND_PATH_TO_TEN.md "Move markBudgetStoppedJobs off the claim path onto
+	// its own ticker (a 5-10s cadence is plenty)"): the Budget Governor's
+	// paused_for_budget state-transition + one-time event sweep, formerly run
+	// inside ClaimTask's transaction on every single claim. 7s sits in the
+	// rung's stated 5-10s window.
+	budgetStopInterval = 7 * time.Second
 	// Straggler hedging: a running primary older than hedgeAfter (≈2× the
 	// targetTaskSecs a chunk is sized for) gets one duplicate copy on a second
 	// worker. Hedge sparingly — at most hedgeMaxInFlight per job and hedgeBatch
@@ -96,6 +103,29 @@ const (
 	hedgeAfter       = 90 * time.Second // 2 × ~45s target per-task time
 	hedgeMaxInFlight = 4                // concurrent hedges per job
 	hedgeBatch       = 20               // max new hedges per tick
+	// Endgame racing (Speed Lane wave 1B, planner.go / raceEndgameTails): once a
+	// job has ZERO unclaimed tasks left, its wall-clock IS the slowest running
+	// chunk — so idle same-class spare capacity should duplicate that chunk
+	// IMMEDIATELY, not after the general 90s hedge window. The sweep runs on its
+	// own short cadence (the endgame is exactly when seconds matter, and the
+	// candidate query is cheap — it prefilters to jobs with an empty queue);
+	// endgameRaceMinRun is a small floor so a chunk that just started — and will
+	// finish in a few seconds anyway — is not duplicated for nothing. Caps are
+	// SHARED with hedging (hedgeMaxInFlight per job, hedgeBatch per tick, the
+	// same one-hedge-per-chunk guard in SQL), so racing can never double-spend
+	// the fleet beyond what hedging was already allowed.
+	endgameRaceInterval = 5 * time.Second
+	endgameRaceMinRun   = 10 * time.Second
+	// Throttled-worker hedging (docs/internal/CREED_AND_PATH_TO_TEN.md, "Thermal
+	// sustained-vs-peak throughput on fanless Apple Silicon" 7→8): a task whose
+	// claiming worker's OWN most recent heartbeat reports throttled=true (memory
+	// pressure OR a live sustained-throughput drop the agent detected mid-task —
+	// see runners.rs's LiveThroughputMonitor) is hedged after this MUCH shorter
+	// floor instead of waiting out the full hedgeAfter — a worker demonstrably
+	// throttling right now is a stronger, earlier signal than plain elapsed time.
+	// Never zero: a task that started a heartbeat-tick ago must get at least one
+	// real chance to make progress before being duplicated.
+	hedgeThrottledAfter = 15 * time.Second
 	// Stuck-run watchdog: a running job past its deadline (buyer deadline_secs when
 	// set, else stuckEtaFactor × the predicted eta_secs floored at eta+120s, else the
 	// 24h wall-clock cap — see StuckRunningJobs) with NO task progress — no commit,
@@ -115,7 +145,39 @@ const (
 	// strike), instead of waiting out the 30-min stale reaper. Heartbeats arrive
 	// ~every 30s, so 180s is six missed beats: sleep, crash, or network loss, not jitter.
 	deadWorkerAfter = 180 * time.Second
+	// telemetryRetentionInterval + workerMemorySampleRetention (docs/
+	// CREED_AND_PATH_TO_TEN.md, "Postgres data lifecycle" 3→4): the highest-write-
+	// rate table in the schema (one row per worker per memory-reporting heartbeat)
+	// had no retention at all before this — every real reader only ever looks at
+	// the most recent memSampleWindow=20 rows per worker, so a 14-day window is
+	// generous headroom above anything a real query needs. Once an hour is plenty
+	// for a prune, not a hot-path operation.
+	telemetryRetentionInterval  = 1 * time.Hour
+	workerMemorySampleRetention = 14 * 24 * time.Hour
+	// taskDurationRetention (docs/CREED_AND_PATH_TO_TEN.md, "Postgres data
+	// lifecycle" 4→5): task_durations is pure internal telemetry (the drift/ETA
+	// rollup), so it gets the same short window as worker_memory_samples.
+	taskDurationRetention = 30 * 24 * time.Hour
+	// jobEventRetention is deliberately much longer: job_events is buyer-VISIBLE
+	// history (GET /v1/jobs/{id}/events), not telemetry — a buyer auditing an old
+	// job may reasonably look months later.
+	jobEventRetention = 180 * 24 * time.Hour
+	// partitionRotationInterval (docs/internal/CREED_AND_PATH_TO_TEN.md, "Postgres data
+	// lifecycle" 6->7): the cadence of the partition lifecycle job
+	// (Store.RotateTelemetryPartitions) that CREATEs upcoming month partitions and
+	// DROPs expired ones for the three now-partitioned telemetry tables. The unit of
+	// work is a whole calendar month, so nothing needs doing more than a few times a
+	// day; six-hourly is generous headroom that keeps a create-ahead month ready long
+	// before any real insert could need it and drops an expired month within hours of
+	// it becoming droppable, while being a rare, cheap metadata operation — never a
+	// hot-path cost. (The hourly DELETE sweep still trims the sub-month tail; this job
+	// removes whole expired months in O(1).)
+	partitionRotationInterval = 6 * time.Hour
 )
+
+// telemetryTables is every table sweepTelemetryRetention prunes, in a fixed
+// display order — backs cx_telemetry_table_rows (Postgres Data Lifecycle 8->9).
+var telemetryTables = []string{"worker_memory_samples", "task_durations", "job_events"}
 
 // --- ticker liveness guard ---
 //
@@ -147,6 +209,14 @@ type tickerLiveness struct {
 type tickerStat struct {
 	interval    time.Duration
 	lastSuccess time.Time // zero until the first successful run
+	// failures counts every returned error from this ticker's fn, lifetime (not
+	// reset on a later success). Postgres Data Lifecycle 8->9
+	// (docs/internal/CREED_AND_PATH_TO_TEN.md): the staleness gauge above answers
+	// "has this loop stopped entirely", but a ticker that fails on every run and
+	// gets rescheduled just inside its stale budget would never trip that alert —
+	// this answers the different, narrower question "is this specific sweep
+	// actually succeeding", which is what a retention-job failure alert needs.
+	failures int64
 }
 
 // liveness is the package-global ticker registry. One value because the tickers
@@ -171,6 +241,27 @@ func (l *tickerLiveness) markSuccess(name string, t time.Time) {
 	if e, ok := l.entries[name]; ok {
 		e.lastSuccess = t
 	}
+}
+
+// markFailure records that name's fn just returned a non-nil error.
+func (l *tickerLiveness) markFailure(name string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if e, ok := l.entries[name]; ok {
+		e.failures++
+	}
+}
+
+// failureSnapshot returns, per ticker, the lifetime count of failed runs. Backs
+// cx_ticker_failures_total.
+func (l *tickerLiveness) failureSnapshot() map[string]int64 {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	out := make(map[string]int64, len(l.entries))
+	for name, e := range l.entries {
+		out[name] = e.failures
+	}
+	return out
 }
 
 // stale reports the names of every ticker that has not succeeded within
@@ -245,11 +336,22 @@ func (wk *Workers) Run(ctx context.Context) {
 		{staleInterval, "stale-requeue", wk.requeueStaleTasks},
 		{webhookInterval, "webhook-sweep", wk.sweepAndDeliver},
 		{hedgeInterval, "straggler-hedge", wk.hedgeStragglers},
+		// Speed Lane wave 1B: the endgame race — duplicate the slowest running
+		// chunks onto idle warm same-class capacity the moment a job's queue
+		// empties, instead of waiting out the 90s hedge (raceEndgameTails).
+		{endgameRaceInterval, "endgame-race", wk.raceEndgameTails},
 		{stuckInterval, "stuck-reaper", wk.reapStuckJobs},
 		{stuckInterval, "dead-claim-rescue", wk.rescueDeadClaims},
 		{reconcileInterval, "ledger-reconcile", wk.reconcileLedger},
 		{disputeInterval, "dispute-resolve", wk.resolveDisputes},
 		{chargeCollectInterval, "charge-collect", wk.collectCharges},
+		{telemetryRetentionInterval, "telemetry-retention", wk.sweepTelemetryRetention},
+		{partitionRotationInterval, "partition-rotation", wk.rotateTelemetryPartitions},
+		{budgetStopInterval, "budget-stop-sweep", wk.sweepBudgetStops},
+		// End-to-End Latency 8.5->9 (latency_watchdog.go): the class-aware no-peer
+		// watchdog — escapes a task wedged on a heartbeating worker with no eligible
+		// same-class peer off the 30-minute stale-reaper path.
+		{noPeerWatchdogInterval, "no-peer-watchdog", wk.reapNoPeerWedged},
 	}
 	for _, t := range tickers {
 		liveness.register(t.name, t.interval)
@@ -272,6 +374,7 @@ func (wk *Workers) tick(ctx context.Context, d time.Duration, name string, fn fu
 		case <-t.C:
 			if err := fn(ctx); err != nil {
 				log.Printf("workers: %s: %v", name, err)
+				liveness.markFailure(name)
 				continue
 			}
 			liveness.markSuccess(name, time.Now())
@@ -432,11 +535,33 @@ func (wk *Workers) resolveDisputes(ctx context.Context) error {
 // "First commit wins": when either copy commits, the commit path cancels the
 // sibling (CancelStragglerSiblings) and the merge dedupes per chunk.
 func (wk *Workers) hedgeStragglers(ctx context.Context) error {
-	stragglers, err := wk.store.StragglerTasks(ctx, hedgeAfter, hedgeMaxInFlight, hedgeBatch)
+	stragglers, err := wk.store.StragglerTasks(ctx, hedgeAfter, hedgeThrottledAfter, hedgeMaxInFlight, hedgeBatch)
 	if err != nil {
 		return err
 	}
 	for _, s := range stragglers {
+		// End-to-End Latency 8->8.5 (latency_watchdog.go, "Prevent the cold-model hedge
+		// storm"): a fresh worker's FIRST task on an uncached model is slow because it
+		// is downloading a multi-gigabyte GGUF inside the claimed task — hedging it to a
+		// second, likely also-cold worker just doubles that download for nothing. When
+		// the straggler's slowness is an expected cold load (worker does not yet report
+		// the model warm, task still inside coldModelLoadAllowance), suppress this first
+		// hedge. NEVER suppress a THROTTLED-worker hedge: that is a LIVE distress signal
+		// (memory pressure / measured throughput drop), not a cold load, so it must still
+		// hedge on its short floor. The suppression is bounded — once past the allowance,
+		// the same straggler hedges normally, and the no-peer watchdog still guards it —
+		// so a genuinely wedged cold-model worker is delayed, never shielded forever.
+		if !s.ThrottledHedge {
+			cold, cerr := wk.store.isColdModelStraggler(ctx, s.TaskID)
+			if cerr != nil {
+				return cerr
+			}
+			if cold {
+				log.Printf("workers: cold-model straggler task %s (chunk %d of job %s, model %s) — suppressing spurious hedge (worker %s still loading an uncached model, not wedged)", s.TaskID, s.ChunkIndex, s.JobID, s.ModelRef, s.WorkerID)
+				metrics.coldModelHedgesSuppressed.Add(1)
+				continue
+			}
+		}
 		peer, perr := wk.store.SelectRedundancyPeerExcluding(ctx, s.JobType, s.ModelRef, s.MinMemGB, s.WorkerID, nil, nil)
 		if errors.Is(perr, ErrNoSupply) {
 			continue // no distinct same-class worker free — leave it; the stale reaper still guards it
@@ -448,7 +573,69 @@ func (wk *Workers) hedgeStragglers(ctx context.Context) error {
 			return ierr
 		}
 		metrics.hedges.Add(1)
-		log.Printf("workers: hedged straggler task %s (chunk %d of job %s) to peer %s", s.TaskID, s.ChunkIndex, s.JobID, peer)
+		if s.ThrottledHedge {
+			// Distinct counter (docs/internal/CREED_AND_PATH_TO_TEN.md, "Thermal
+			// sustained-vs-peak throughput on fanless Apple Silicon" 7→8): lets an
+			// operator see how often a LIVE throttle signal — not just elapsed
+			// time — is the thing that actually triggered a hedge.
+			metrics.throttledHedges.Add(1)
+			log.Printf("workers: hedged THROTTLED-worker straggler task %s (chunk %d of job %s) to peer %s (worker %s reporting throttled=true)", s.TaskID, s.ChunkIndex, s.JobID, peer, s.WorkerID)
+		} else {
+			log.Printf("workers: hedged straggler task %s (chunk %d of job %s) to peer %s", s.TaskID, s.ChunkIndex, s.JobID, peer)
+		}
+	}
+	return nil
+}
+
+// raceEndgameTails is the ENDGAME RACE sweep (Speed Lane wave 1B — the tail
+// half of the fan-out planner, planner.go). When a job has zero unclaimed
+// tasks, at least one running task, and idle eligible same-class capacity
+// exists, the slowest running chunks are duplicated onto the FASTEST idle warm
+// peers immediately — the buyer's wall-clock at that point is exactly the
+// straggling chunk, and the pre-wave machinery would sit on its hands for the
+// full 90s hedgeAfter window (reactive-only tail: hedge 90s → no-peer watchdog
+// 5min → stale reaper 30min). Everything downstream is the PROVEN hedge
+// machinery reused verbatim: InsertHedgeTask pins the duplicate (pre-claimed,
+// pinned poll branch), first-commit-wins cancels the loser
+// (CancelStragglerSiblings — now in both directions, see its PATCH note), and
+// the merge dedupes per chunk (JobMergeInputs DISTINCT ON) — no second dedupe
+// invented. Cold-model suppression is respected on the straggler side
+// (isColdModelStraggler — a chunk slow because its worker is still cold-loading
+// must not be raced; the duplicate would just wait out the same load
+// elsewhere), and SelectEndgameRacePeer refuses cold peers on the dispatch
+// side, so a cold load is never raced from either end. Gated on
+// fanoutPlannerEnabled (CX_DISABLE_FANOUT_PLANNER reverts to the exact
+// pre-wave tail behavior — also the L2 proof's A/B switch).
+func (wk *Workers) raceEndgameTails(ctx context.Context) error {
+	if !fanoutPlannerEnabled.Load() {
+		return nil
+	}
+	tails, err := wk.store.EndgameTailTasks(ctx, endgameRaceMinRun, hedgeMaxInFlight, hedgeBatch)
+	if err != nil {
+		return err
+	}
+	for _, s := range tails {
+		cold, cerr := wk.store.isColdModelStraggler(ctx, s.TaskID)
+		if cerr != nil {
+			return cerr
+		}
+		if cold {
+			log.Printf("workers: endgame race: task %s (chunk %d of job %s, model %s) is a cold-model straggler — not raced (duplicate would pay the same cold load)", s.TaskID, s.ChunkIndex, s.JobID, s.ModelRef)
+			continue
+		}
+		peer, perr := wk.store.SelectEndgameRacePeer(ctx, s.JobType, s.ModelRef, s.MinMemGB, s.WorkerID)
+		if errors.Is(perr, ErrNoSupply) {
+			continue // no idle warm same-class peer — the ordinary hedge path still guards this chunk
+		}
+		if perr != nil {
+			return perr
+		}
+		if _, ierr := wk.store.InsertHedgeTask(ctx, s.JobID, s.TaskID, peer, s.InputRef, s.ChunkIndex); ierr != nil {
+			return ierr
+		}
+		metrics.hedges.Add(1) // an endgame race IS a hedge dispatch (same machinery, same cap)
+		log.Printf("workers: endgame race: duplicated slowest running task %s (chunk %d of job %s, type %s) onto idle fastest same-class peer %s — zero unclaimed tasks left, worker %s is the job's wall-clock (fan-out planner wave 1B)",
+			s.TaskID, s.ChunkIndex, s.JobID, s.JobType, peer, s.WorkerID)
 	}
 	return nil
 }
@@ -883,4 +1070,91 @@ func isInternalIP(ip net.IP) bool {
 	return ip.IsLoopback() || ip.IsPrivate() ||
 		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
 		ip.IsUnspecified()
+}
+
+// sweepTelemetryRetention prunes worker_memory_samples rows older than
+// workerMemorySampleRetention (docs/CREED_AND_PATH_TO_TEN.md, "Postgres data
+// lifecycle" 3→4 — the first production DELETE this codebase has ever had on its
+// highest-write-rate table). Logs the real row count pruned so an operator can see
+// this is actually running and actually shrinking the table, not just ticking.
+func (wk *Workers) sweepTelemetryRetention(ctx context.Context) error {
+	n, err := wk.store.DeleteOldWorkerMemorySamples(ctx, time.Now().Add(-workerMemorySampleRetention))
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		log.Printf("workers: telemetry-retention: pruned %d worker_memory_samples row(s) older than %s", n, workerMemorySampleRetention)
+	}
+	// task_durations (docs/CREED_AND_PATH_TO_TEN.md, "Postgres data lifecycle"
+	// 4→5): the other unbounded append-only table the audit named, alongside
+	// worker_memory_samples above.
+	td, err := wk.store.DeleteOldTaskDurations(ctx, time.Now().Add(-taskDurationRetention))
+	if err != nil {
+		return err
+	}
+	if td > 0 {
+		log.Printf("workers: telemetry-retention: pruned %d task_durations row(s) older than %s", td, taskDurationRetention)
+	}
+	// job_events: buyer-visible history, so a much longer window than the two
+	// pure-telemetry tables above.
+	je, err := wk.store.DeleteOldJobEvents(ctx, time.Now().Add(-jobEventRetention))
+	if err != nil {
+		return err
+	}
+	if je > 0 {
+		log.Printf("workers: telemetry-retention: pruned %d job_events row(s) older than %s", je, jobEventRetention)
+	}
+	return nil
+}
+
+// rotateTelemetryPartitions runs the partition lifecycle job (Postgres Data Lifecycle
+// 6->7, docs/internal/CREED_AND_PATH_TO_TEN.md): for each partitioned telemetry table
+// it CREATEs the upcoming month partitions (so a real insert always finds a home) and
+// DROPs any month partition whose entire range is older than that table's retention
+// window. A dropped partition is an O(1) metadata operation that reclaims a whole
+// month's heap + indexes at once — the replacement for the O(rows) DELETE burst the
+// retention sweep otherwise pays. Idempotent and cheap: creating an existing partition
+// is a no-op, and a quiet table with nothing to drop drops nothing. Logs only when it
+// actually created or dropped something, so a healthy steady state stays quiet.
+func (wk *Workers) rotateTelemetryPartitions(ctx context.Context) error {
+	created, dropped, err := wk.store.RotateTelemetryPartitions(ctx, time.Now())
+	if err != nil {
+		return err
+	}
+	if created > 0 || dropped > 0 {
+		log.Printf("workers: partition-rotation: created %d upcoming partition(s), dropped %d expired partition(s)", created, dropped)
+	}
+	return nil
+}
+
+// sweepBudgetStops runs the Budget Governor's paused_for_budget state-transition
+// sweep (Store.SweepBudgetStops / markBudgetStoppedJobs, control/scheduler.go) on
+// its own ticker.
+//
+// PATCH (Control plane hot path 7->8, docs/internal/CREED_AND_PATH_TO_TEN.md "Get
+// the correlated-subquery cost out of the transactional hot path"): this used to
+// run INSIDE ClaimTask's own transaction, on EVERY single claim attempt (claimed
+// or not) — a scan over every capped job in the system, each paying its own
+// correlated budget-projected-spend subquery, on the single hottest transactional
+// path in the system. It is now a short, independent transaction on its own
+// budgetStopInterval cadence, exactly like every other background sweep in this
+// file. The claim's own per-task budget enforcement (a capped job's task is never
+// dispatched past its cap) is a SEPARATE, unaffected predicate baked directly into
+// ClaimTaskSQL's hard filter — moving this sweep off the hot path changes only how
+// promptly the VISIBLE budget_state flips to 'paused_for_budget' and the one-time
+// budget_stopped event fires (bounded by budgetStopInterval), never whether an
+// over-cap task can be claimed.
+func (wk *Workers) sweepBudgetStops(ctx context.Context) error {
+	stopped, err := wk.store.SweepBudgetStops(ctx)
+	if err != nil {
+		return err
+	}
+	// Advance the counter only after the sweep's own transaction commits (Plane D
+	// D21): a rolled-back sweep must never inflate cx_budget_stops_total. The
+	// state transition inside markBudgetStoppedJobs's UPDATE is itself the guard
+	// against double-counting a job across repeated ticks.
+	if stopped > 0 {
+		metrics.budgetStops.Add(int64(stopped))
+	}
+	return nil
 }

@@ -7,28 +7,35 @@
      the Cycles stills); on WebGL failure it swaps to the Cycles still, which is the
      same scene, so the fallback is honest. Three is self-hosted under /assets/site/
      vendor · no CDN at runtime. Dash gate: no U+2014, no U+2013 · separator is the
-     middot. -->
+     middot.
+
+     DESIGN DIRECTION scaffold (DESIGN-DIRECTION.md) · "an instrument the size of a
+     room". Weighted monochrome procession · Owens' mass, Ando's void, the instrument
+     tradition's discipline. Primary voice is a neo-grotesque; mono is demoted to the
+     receipt/label voice (the machine speaking); the serif is gone. Layout hangs off a
+     61.8pct spine, flush-left, never centered except the one monument. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>computexchange</title>
 <meta name="description" content="a verified spot market for compute · priced before you spend, verified before you pay · closed alpha">
-<meta name="theme-color" content="#060606">
+<meta name="theme-color" content="#050505">
 <link rel="icon" href="/favicon.ico" sizes="any">
 <meta property="og:title" content="computexchange">
 <meta property="og:description" content="a verified spot market for compute · priced before you spend, verified before you pay">
 <meta property="og:image" content="https://computexchange.net/assets/site/og-image.png">
 <meta property="og:type" content="website">
 <link rel="preload" href="/assets/site/fonts/geist-mono.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/assets/site/oracles-pair@1x.png" as="image" fetchpriority="high">
 <style>
-  /* self-hosted, subsetted to the page's glyphs · no Google Fonts, no third-party
-     request, no render-blocking stylesheet. Geist Mono is one variable file (400 to
-     600); Cormorant is the single serif monument. */
+  /* Self-hosted, no CDN. Geist Mono (400 to 600) is the RECEIPT / LABEL voice only ·
+     "the machine speaking". The primary neo-grotesque voice (--sans / --breit) uses the
+     system grotesque for this scaffold (SF Pro / Helvetica Neue); the type-lock step
+     vendors Inter + Inter Display, or Klim Söhne + Söhne Breit, as self-hosted woff2 by
+     changing only these two vars. Cormorant Garamond is deleted (the serif is gone). */
   @font-face{font-family:'Geist Mono';font-style:normal;font-weight:400 600;font-display:swap;
     src:url(/assets/site/fonts/geist-mono.woff2) format('woff2')}
-  @font-face{font-family:'Cormorant Garamond';font-style:normal;font-weight:600;font-display:swap;
-    src:url(/assets/site/fonts/cormorant-600.woff2) format('woff2')}
 </style>
 <script type="importmap">
 { "imports": {
@@ -38,20 +45,25 @@
 </script>
 <style>
   :root{
-    --bg:#060606;
-    --panel:#101012;
-    --hair:rgba(255,255,255,.05);
-    --ash:#595960;
-    --mute:#83838b;
-    --bone:#bfbcb5;
-    --bone-hi:#e7e3dc;
-    --green:#4c9d6e; --green-core:#69c096;
-    --gold:#bf9a4e;  --gold-core:#e2c178;
-    --red:#c0554b;   --red-core:#dc8079;
+    /* pure monochrome (owner: "all black") · no warm cast anywhere. Near-black ground,
+       neutral greys, off-white highlight · colour exists ONLY as the green fact. */
+    --bg:#050505;
+    --bg-lift:#0E0E0E;
+    --hair:rgba(255,255,255,.11);       /* rules, borders · visible but quiet */
+    --hair-2:rgba(255,255,255,.06);
+    --ash:#575757;      /* faint labels */
+    --mute:#8C8C8C;     /* body-adjacent, receipt values */
+    --bone:#C7C7C7;     /* primary text */
+    --bone-hi:#F2F2F0;  /* the monument + the single brightest highlight */
+    --green-core:#69c096;               /* fact only */
+    /* voices · three jobs, no overlap */
+    --sans:"Inter","Söhne","Helvetica Neue",system-ui,-apple-system,Arial,sans-serif;
+    --breit:"Inter Display","Söhne Breit","Inter","Helvetica Neue",system-ui,sans-serif;
     --mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
-    --serif:"Cormorant Garamond",serif;
-    --r:14px; --r-sm:10px;
-    --dur:.18s; --ease:cubic-bezier(.2,0,0,1);
+    --m:clamp(40px,8vw,168px);          /* monumental outer frame margin */
+    --dur:.18s; --dur-veil:420ms;
+    --ease-glide:cubic-bezier(0.22,1,0.36,1);
+    --ease-veil:cubic-bezier(0.40,0,0.20,1);
   }
   *{box-sizing:border-box}
   html,body{margin:0}
@@ -59,115 +71,204 @@
     background:var(--bg);
     color:var(--bone);
     -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
-    font:400 14px/1.75 var(--mono);
-    font-variant-numeric:tabular-nums;
+    font:400 15.5px/1.65 var(--sans);
+    font-feature-settings:"kern" 1,"liga" 1;
   }
+  /* flat black ground (owner call) · the light lives in the scene, not the page */
   ::selection{background:var(--bone-hi);color:var(--bg)}
   img{display:block}
   button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;padding:0}
-  .wrap{max-width:1180px;margin:0 auto;padding:0 32px}
-  .measure{max-width:660px;margin-left:auto;margin-right:auto}
+
+  /* mono is the RECEIPT / LABEL voice · tabular, tracked small-caps for labels */
+  .label{font:500 10.5px/1.2 var(--mono);letter-spacing:.22em;text-transform:uppercase;color:var(--ash)}
+  .num{font-family:var(--mono);font-variant-numeric:tabular-nums}
 
   /* ── the desktop site ─────────────────────────────────────────────────── */
   .site{display:none}
-  @media (min-width:900px){.site{display:block}}
+  @media (min-width:900px){.site{display:block;position:relative;overflow-x:clip}}   /* the monument bleeds off, clipped here */
 
-  .hero{min-height:min(100vh,1000px);display:flex;flex-direction:column;padding-top:34px}
-  .masthead{display:flex;align-items:center;gap:14px}
-  .masthead img{width:28px;height:28px;opacity:.92}
-  .eyebrow{font-size:11px;letter-spacing:.38em;color:var(--ash);text-transform:uppercase}
+  /* the spine · one full-height hairline that says "there is a system here", plus a
+     faint tick-scale down the left frame rule (a chemin-de-fer, not a HUD). */
+  /* no spine rule, no graticule (owner: "remove the line · make it spacier") · the
+     asymmetric composition alone carries the system; the void does the work. */
 
-  /* the live stage · canvas fills the void, labels float over it */
-  .stage{position:relative;flex:1;min-height:520px;margin:8px 0 0}
-  #hero-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:grab;touch-action:none}
+  /* masthead · brand flush-left, a signage label flush-right. Fixed chrome. */
+  .masthead{position:fixed;top:0;left:0;right:0;z-index:6;pointer-events:none;
+    display:flex;align-items:center;justify-content:space-between;
+    padding:26px var(--m) 0}
+  .mark{display:flex;align-items:center;gap:12px;color:var(--bone-hi)}
+  .mark img{width:24px;height:24px;opacity:.92}
+  .mark b{font-weight:500;font-size:14px;letter-spacing:.01em}
+  .masthead .label{color:var(--ash)}
+
+  /* the stage · fallback is an in-flow hero on the LEFT field; live pins it full-bleed
+     left (see .live). Device sits low and toward the frame edge, never dead-center. */
+  .stage{position:relative;height:76vh;min-height:520px;margin:0;overflow:hidden}
+  #hero-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:grab;touch-action:none;z-index:0}
   #hero-canvas:active{cursor:grabbing}
-  .hero-still{position:absolute;inset:0;display:none;align-items:center;justify-content:center}
-  .hero-still img{width:100%;max-width:1140px;height:auto}
+  .hero-still{position:absolute;inset:0;display:flex;align-items:center;justify-content:flex-start;z-index:1;
+    padding-left:var(--m);transition:opacity var(--dur-veil) var(--ease-veil)}
+  /* seat the still INTO the void · the render has a baked studio ground, so a radial
+     pool-of-light mask melts its edges into the page black (the devices sit in the room,
+     not in a pasted photo) and the still-to-live crossfade stops jumping in luminance. */
+  .hero-still img{width:min(58vw,940px);height:auto;max-height:100%;object-fit:contain;object-position:left center;
+    filter:brightness(.88);
+    -webkit-mask-image:radial-gradient(60% 54% at 46% 50%,#000 50%,transparent 99%);
+            mask-image:radial-gradient(60% 54% at 46% 50%,#000 50%,transparent 99%)}
   .stage.fallback #hero-canvas{display:none}
-  .stage.fallback .hero-still{display:flex}
-  .hint{position:absolute;left:50%;bottom:6px;transform:translateX(-50%);
-    font-size:10px;letter-spacing:.28em;text-transform:uppercase;color:var(--ash);opacity:.55;
-    transition:opacity var(--dur) var(--ease)}
+  .stage.ready .hero-still{opacity:0;pointer-events:none}
+  .hint{position:absolute;left:var(--m);bottom:18px;opacity:.5;z-index:2;
+    font:500 10px/1.2 var(--mono);letter-spacing:.28em;text-transform:uppercase;color:var(--ash)}
   .stage.fallback .hint{display:none}
+  /* device specs folded into arrival as instrument lines (was a floating callout layer) */
+  .spec{color:var(--ash);margin:20px 0 0}
+  .spec+.spec{margin-top:6px}
 
-  /* hover spec annotations · Geist Mono small caps, one hairline leader */
-  .anno{position:absolute;pointer-events:none;opacity:0;transition:opacity var(--dur) var(--ease);
-    font-size:10.5px;letter-spacing:.24em;text-transform:uppercase;color:var(--mute)}
-  .anno.on{opacity:1}
-  .anno .lead{display:block;height:1px;background:var(--hair);margin-bottom:8px}
-  .anno.left{left:7%;bottom:20%;text-align:left}
-  .anno.left .lead{width:56px}
-  .anno.right{right:9%;bottom:30%;text-align:right}
-  .anno.right .lead{width:56px;margin-left:auto}
+  /* ── the field · everything hangs off the spine, flush-left, ragged-right ── */
+  .beats{margin:0}
+  .beat{position:relative;padding:12vh 0}   /* tight · the sections sit close (owner call) */
+  /* BASE (fallback · no WebGL): copy hangs off the LEFT frame, flush-left. LIVE composes
+     each beat's field against that beat's camera (see .live). One measure: the reveal. */
+  .field{padding:0 var(--m);max-width:none}
+  .field>.reveal{max-width:42ch}
 
-  .thesis{color:var(--bone-hi);font-size:20px;line-height:1.5;text-align:center;margin:14px 0 12px;letter-spacing:.01em}
-  .ash-line{color:var(--ash);font-size:12.5px;text-align:center;margin:0 0 8px}
+  /* the display tier · every section headline gets the monument ideology (owner:
+     "use that same ideology" as the price) · huge, flush-left, no ornament. */
+  .display{font:600 clamp(52px,8.5vw,140px)/0.95 var(--breit);color:var(--bone-hi);
+    letter-spacing:-.02em;margin:0 0 18px;text-wrap:balance}
+  .display-max{font-size:clamp(80px,15vw,240px);margin-bottom:24px}  /* earn · maximalist */
+  .beat-index{color:var(--ash);margin:0 0 22px;display:block}
+  .beat-index b{color:var(--mute);font-weight:500}
 
-  section.wrap{margin-top:160px}
-  .sec-label{font-size:11px;letter-spacing:.38em;color:var(--ash);text-transform:uppercase;margin:0 0 34px;text-align:center}
+  /* at arrival the STACKED PAIR is the monument · the thesis is its caption, set in the
+     bottom-right corner · authored to three lines, never a rag */
+  .thesis{color:var(--bone-hi);font:500 clamp(34px,3.4vw,52px)/1.08 var(--breit);letter-spacing:-.015em;
+    margin:0 0 22px;max-width:11ch;text-wrap:balance}
+  .ash-line{color:var(--mute);font-size:14px;line-height:1.6;margin:0 0 14px;max-width:38ch}
+  .lede{color:var(--bone);font-size:18px;line-height:1.55;margin:0}
 
-  /* the how rows carry the app's JOB-STATUS light · the turned-metal ring
-     (dot-ring@3x, flat + black rim) with a CSS colour lens inside, exactly as the
-     console renders run status. Traffic-light lenses: yellow, red, green. */
-  .how .row{display:flex;gap:22px;align-items:center;padding:20px 4px;box-shadow:0 1px 0 var(--hair);font-size:14.5px}
-  .how .row:first-of-type{box-shadow:0 1px 0 var(--hair),0 -1px 0 var(--hair)}
-  .status-dot{position:relative;width:22px;height:22px;flex:none;
-    background:url(/assets/site/dot-ring@3x.png) center/contain no-repeat}
-  .status-dot::before{content:"";position:absolute;inset:24%;border-radius:50%}
-  .status-dot.gold::before{background:radial-gradient(circle at 50% 40%,var(--gold-core),var(--gold) 74%);box-shadow:0 0 6px 0 rgba(226,193,120,.5)}
-  .status-dot.red::before{background:radial-gradient(circle at 50% 40%,var(--red-core),var(--red) 74%);box-shadow:0 0 6px 0 rgba(192,85,75,.5)}
-  .status-dot.green::before{background:radial-gradient(circle at 50% 40%,var(--green-core),var(--green) 74%);box-shadow:0 0 6px 0 rgba(76,157,110,.5)}
-  @media (prefers-reduced-motion: no-preference){
-    .status-dot.green::before{animation:breathe 2.4s ease-in-out infinite}
-    @keyframes breathe{50%{box-shadow:0 0 10px 0 rgba(105,192,150,.75)}}
-  }
-  .how .k{flex:none;width:72px;color:var(--mute);font-size:11px;letter-spacing:.2em;text-transform:uppercase}
-  .receipts-line{text-align:center;margin-top:38px}
-  .receipts-btn{color:var(--mute);font-size:12px;letter-spacing:.14em;text-transform:uppercase;
-    padding:10px 22px;border-radius:999px;background:var(--panel);transition:color var(--dur) var(--ease)}
+  /* the how rows · a genuine instrument · 4 columns, flat lit lens, tabular state.
+     No glow, no breathe · a state change means a transition happened, never idle. */
+  .console{border-top:1px solid var(--hair);margin-top:8px}
+  .receipts-block{margin-top:22px}   /* the receipts · a second console group under the flow */
+  .row{display:grid;grid-template-columns:16px 88px 1fr auto;gap:24px;align-items:baseline;
+    padding:24px 0;border-bottom:1px solid var(--hair)}
+  .lens{width:8px;height:8px;align-self:center;background:var(--ash);border-radius:0}
+  .lens.green{background:var(--green-core)}
+  .row .k{color:var(--ash);font:500 10.5px/1 var(--mono);letter-spacing:.22em;text-transform:uppercase}
+  .row .stmt{color:var(--bone);font-size:15.5px;line-height:1.45}
+  .row .state{color:var(--mute);font:500 12px/1 var(--mono);letter-spacing:.04em;font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+  .receipts-line{margin-top:30px}
+  .receipts-btn{color:var(--mute);font:500 11px/1 var(--mono);letter-spacing:.2em;text-transform:uppercase;
+    padding:12px 0;transition:color var(--dur) var(--ease-glide)}
+  .receipts-btn::after{content:" →";color:var(--ash)}
   .receipts-btn:hover{color:var(--bone-hi)}
 
-  .monument{text-align:center}
-  .monument .fig{font:600 96px/1 var(--serif);color:var(--bone-hi);letter-spacing:.01em}
-  .monument .lab{color:var(--ash);font-size:11px;letter-spacing:.34em;text-transform:uppercase;margin-top:14px}
+  /* the monument · the one sanctioned break from the spine · flush-LEFT against the far
+     frame, bleeding off the right edge, on a plinth. Söhne Breit at extreme size. */
+  /* the monument · flush-left off the frame, bleeding off the RIGHT edge (clipped by the
+     page, not by the beat), on a plinth that spans exactly the figure. >=80vh of ma. */
+  .beat-price{padding:40vh 0 40vh var(--m);overflow:visible}
+  .monument{position:relative;width:max-content}
+  .monument .cap-top{margin:0 0 10px}
+  .monument .fig{font:600 clamp(120px,22vw,360px)/0.9 var(--breit);color:var(--bone-hi);
+    letter-spacing:-.02em;white-space:nowrap;margin:0}
+  .monument .fig .dollar{color:var(--mute);font-size:.32em;vertical-align:.66em;font-family:var(--mono);margin-right:.05em}
+  .monument .fig .price{color:var(--bone-hi)}   /* monochrome · the figure needs no colour */
+  .monument .plinth{height:1px;background:var(--hair);margin:16px 0 0;width:100%}
+  .monument .cap-bot{margin:14px 0 0}
+  .monument .cap-bot .proof{color:var(--green-core)}
 
-  .earn{display:flex;align-items:center;justify-content:center;gap:38px}
-  .earn img{width:132px;height:132px;flex:none}
-  .earn p{margin:0;max-width:440px}
+  /* earn · knob-instrument left of the field copy */
+  .earn{display:flex;align-items:flex-start;gap:34px}
+  .earn img{width:140px;height:140px;flex:none}
+  .earn p{margin:0}
 
-  .download{text-align:center;padding-bottom:20px}
-  .download .state{display:inline-block;background:var(--panel);border-radius:999px;
-    padding:8px 20px;color:var(--gold-core);font-size:11px;letter-spacing:.28em;
-    text-transform:uppercase;margin-bottom:22px}
-  .download p{color:var(--bone);max-width:640px;margin:0 auto}
-  .download .road{color:var(--ash);font-size:12px;margin-top:16px}
+  /* download / release · the flag is a status, not a fact · mute, never the gold accent */
+  .flag{display:inline-block;color:var(--mute);margin:0 0 18px}
+  .download p{color:var(--bone);margin:0 0 12px;max-width:44ch}
+  .download .road{color:var(--ash);font-size:13px;line-height:1.55;max-width:46ch}
 
-  footer{padding:160px 0 44px;display:flex;align-items:center;justify-content:center;gap:12px;color:var(--ash);font-size:11.5px}
-  footer img{width:18px;height:18px;opacity:.8}
+  footer{display:flex;align-items:center;gap:12px;color:var(--ash);
+    padding:16vh 0 10vh;margin-left:var(--m)}
+  footer img{width:16px;height:16px;opacity:.7}
+  footer .label{color:var(--ash)}
 
-  dialog{background:var(--panel);color:var(--bone);border:0;border-radius:var(--r);
-    max-width:760px;width:92vw;max-height:82vh;padding:34px 36px;font:inherit}
-  dialog::backdrop{background:rgba(6,6,6,.82)}
-  .dlg-head{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:8px}
-  .dlg-title{font-size:11px;letter-spacing:.34em;color:var(--ash);text-transform:uppercase}
-  .dlg-close{color:var(--mute);font-size:12px;letter-spacing:.12em;text-transform:uppercase}
-  .dlg-close:hover{color:var(--bone-hi)}
-  .claim{padding:16px 2px;box-shadow:0 1px 0 var(--hair);font-size:12.5px}
-  .claim .k{display:block;color:var(--ash);font-size:10px;letter-spacing:.26em;text-transform:uppercase;margin-bottom:5px}
-  .dlg-foot{color:var(--ash);font-size:11.5px;margin:20px 2px 0}
-  .dlg-foot .path{color:var(--mute)}
+  /* the receipts ledger · the hero object · a printed audit artifact, not a modal.
+     The one framed object on the page; everything else is frameless. */
+  dialog{background:var(--bg-lift);color:var(--bone);border:1px solid var(--hair);border-radius:0;
+    max-width:820px;width:92vw;max-height:84vh;padding:0;font:inherit}
+  dialog::backdrop{background:rgba(6,6,6,.86)}
+  .ledger{padding:30px 34px 34px}
+  .ledger-head{display:flex;align-items:baseline;justify-content:space-between;
+    padding-bottom:14px;border-bottom:1px solid var(--hair)}
+  .ledger-head .title{color:var(--bone-hi);font:500 11px/1 var(--mono);letter-spacing:.24em;text-transform:uppercase}
+  .ledger-head .close{color:var(--mute);font:500 10.5px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase}
+  .ledger-head .close:hover{color:var(--bone-hi)}
+  .ledger-stat{display:flex;gap:26px;padding:14px 0;border-bottom:1px solid var(--hair);
+    font:400 12px/1 var(--mono);letter-spacing:.06em;color:var(--mute);font-variant-numeric:tabular-nums}
+  .ledger-stat b{color:var(--green-core);font-weight:500}
+  .ledger-stat .gen{margin-left:auto;color:var(--ash)}
+  .claim{display:grid;grid-template-columns:132px 1fr;gap:24px;align-items:baseline;
+    padding:14px 0;border-bottom:.5px solid var(--hair-2);font-size:12.5px;line-height:1.5}
+  .claim .k{color:var(--ash);font:500 10px/1.4 var(--mono);letter-spacing:.2em;text-transform:uppercase}
+  .claim .v{color:var(--mute)}
+  .claim .v b{color:var(--bone);font-weight:400}
+  .ledger-foot{color:var(--ash);font-size:11.5px;line-height:1.5;margin:18px 0 0}
+  .ledger-foot .path{color:var(--mute);font-family:var(--mono)}
 
-  /* ── the phone hand-off ───────────────────────────────────────────────── */
+  /* ── live choreography · pinned canvas full-bleed-left, type in the right field ──
+     Added by JS only when the WebGL hero mounts (html.live). No WebGL → the linear
+     asymmetric page above (already the direction, minus the pinned scene). */
+  /* the stage pins FULL-BLEED (the scene is the set; the camera composes the devices
+     into the LEFT field per hero.js BEATS · verified so the cluster never crosses the
+     spine into the type). The 56vw strip of S1 broke that proof · reverted. */
+  .live .stage{position:fixed;inset:0;height:100vh;width:100%;margin:0;z-index:0}
+  .live #hero-canvas{will-change:opacity}
+  /* S6 · the text layer inertia-scrolls over the fixed stage · promote it so the per-frame
+     translate is a compositor-only transform. The document keeps its true height, so the
+     native scrollbar stays the single source of truth · this warp is purely visual. */
+  .live .beats,.live footer{will-change:transform;backface-visibility:hidden}
+  .live .hero-still{justify-content:flex-start;padding-left:var(--m)}
+  .live .hero-still img{max-height:72vh}
+  .live .beats{position:relative;z-index:2;pointer-events:none}
+  .live .beats a,.live .beats button{pointer-events:auto}
+  .live .beat{min-height:105vh;display:flex;flex-direction:column;justify-content:center}
+  /* per-beat composition · each field sits exactly in that beat's harness-verified void
+     (the rest poses are clean; during travel the devices may pass behind the type). The
+     eye walks a zig: right corner, right, LEFT, right, monument, right, right-top. */
+  /* the BISECTION (owner) · models move in the left band, the text is a vertical
+     column on the right, always. Placements mirror the harness-verified rects. */
+  .live .field{margin-left:57.5%;padding-left:0;padding-right:var(--m)}
+  .live .beat-arrival{justify-content:flex-end;padding-bottom:12vh}
+  .live .beat-arrival .field{margin-left:70%}
+  .live .beat-spark .field{margin-left:65%}
+  .live .beat-how{justify-content:flex-start;padding-top:12vh}
+  .live .beat-how .field{margin-left:53%}             /* the console runs wide */
+  .live .beat-earn{justify-content:flex-end;padding-bottom:12vh}
+  /* release · the download sits against the footer, the scene already faded out */
+  .live .beat-release{min-height:78vh;justify-content:flex-end;padding-bottom:2vh}
+  .live .beat-release .field{margin-left:55%}
+  .live .runway{display:none}                         /* no dead runway · sections sit close */
+  .live footer{position:relative;z-index:2;padding-top:3vh}
+
+  /* reveal · engine drives opacity AND the 12px lift per frame off the glided scalar
+     (one owner, no CSS transition). Reduced-motion shows everything. */
+  .live .reveal{opacity:0;transform:translateY(12px);will-change:opacity,transform}
+  .live.reduced .reveal{opacity:1 !important;transform:none !important}
+  .runway{display:none}
+
+  /* ── the phone hand-off (unchanged) ───────────────────────────────────── */
   .handoff{display:none;min-height:100svh;flex-direction:column;align-items:center;
     justify-content:center;text-align:center;padding:40px 28px;gap:0}
   @media (max-width:899px){.handoff{display:flex}}
   .handoff img{width:44px;height:44px;opacity:.92;margin-bottom:22px}
-  .handoff .eyebrow{margin-bottom:34px}
-  .handoff h1{font:400 17px/1.6 var(--mono);color:var(--bone-hi);margin:0 0 8px;max-width:300px}
+  .handoff .eyebrow{margin-bottom:34px;font:500 11px/1 var(--mono);letter-spacing:.38em;color:var(--ash);text-transform:uppercase}
+  .handoff h1{font:400 17px/1.6 var(--sans);color:var(--bone-hi);margin:0 0 8px;max-width:300px}
   .handoff .sub{color:var(--ash);font-size:12px;margin:0 0 44px;max-width:300px}
   .handoff .keys{display:flex;flex-direction:column;gap:14px;width:100%;max-width:280px}
-  .hand-key{display:block;width:100%;background:var(--panel);border-radius:999px;
-    padding:14px 20px;color:var(--bone);font-size:12px;letter-spacing:.16em;
+  .hand-key{display:block;width:100%;border:1px solid var(--hair);
+    padding:14px 20px;color:var(--bone);font:500 12px/1 var(--mono);letter-spacing:.16em;
     text-transform:uppercase;text-align:center;text-decoration:none}
   .hand-key:active{color:var(--bone-hi)}
 </style>
@@ -187,119 +288,253 @@
 </div>
 
 <div class="site">
-<header class="hero wrap">
-  <div class="masthead">
-    <img src="/assets/site/cx-mark-white.png" alt="Cx" width="28" height="28">
-    <span class="eyebrow">computexchange</span>
-  </div>
-
-  <div class="stage" id="stage">
-    <canvas id="hero-canvas"></canvas>
-    <div class="hero-still">
-      <picture>
-        <source srcset="/assets/site/oracles-pair@1x.png 1200w, /assets/site/oracles-pair@2x.png 2400w, /assets/site/oracles-pair@3x.png 3600w"
-                sizes="(max-width: 1240px) 92vw, 1140px">
-        <img src="/assets/site/oracles-pair@1x.png" width="1200" height="750"
-             alt="A Mac Studio and an NVIDIA DGX Spark on a desk in studio light">
-      </picture>
-    </div>
-    <div class="anno left" id="anno-studio"><span class="lead"></span>apple silicon · metal · supplier</div>
-    <div class="anno right" id="anno-spark"><span class="lead"></span>grace blackwell · cuda · supplier</div>
-    <div class="hint" id="hint">drag to look</div>
-  </div>
-
-  <p class="thesis">a verified spot market for compute</p>
-  <p class="ash-line">inference · embeddings · transcription · priced before you spend, verified before you pay</p>
-  <p class="ash-line">no sign-in screen · the device provisions itself · a payment method is the only credential you connect</p>
+<header class="masthead">
+  <span class="mark"><img src="/assets/site/cx-mark-white.png" alt="Cx" width="24" height="24"><b>computexchange</b></span>
 </header>
 
-<main>
-  <section class="wrap">
-    <h2 class="sec-label">how it works</h2>
-    <div class="how measure">
-      <div class="row"><span class="status-dot gold" aria-hidden="true"></span><span class="k">drop</span>
-        <span>drop a workload · the pipeline is detected</span></div>
-      <div class="row"><span class="status-dot red" aria-hidden="true"></span><span class="k">cap</span>
-        <span>priced before you spend · the cap you set binds at dispatch</span></div>
-      <div class="row"><span class="status-dot green" aria-hidden="true"></span><span class="k">proof</span>
-        <span>results come back verified · every run ends in a receipt</span></div>
-    </div>
-    <div class="receipts-line">
-      <button class="receipts-btn" id="open-receipts">the receipts</button>
+<div class="stage" id="stage">
+  <canvas id="hero-canvas"></canvas>
+  <div class="hero-still">
+    <img src="/assets/site/oracles-pair@1x.png" width="1066" height="666" fetchpriority="high"
+         alt="A Mac Studio and an NVIDIA DGX Spark on a desk in studio light">
+  </div>
+  <div class="hint" id="hint">drag to look</div>
+</div>
+
+<main class="beats">
+  <!-- 01 · arrival · the stacked pair is the monument, the thesis its corner caption -->
+  <section class="beat beat-arrival" data-beat="0">
+    <div class="field"><div class="reveal">
+      <span class="beat-index label">01 <b>· arrival</b></span>
+      <p class="thesis">a verified spot market for compute</p>
+      <p class="ash-line">inference · embeddings · transcription · priced before you spend, verified before you pay</p>
+      <p class="ash-line">no sign-in screen · the device provisions itself · a payment method is the only credential you connect</p>
+    </div></div>
+  </section>
+
+  <!-- 02 · the studio · its sections (the page opens on the Studio) -->
+  <section class="beat beat-studio" data-beat="1">
+    <div class="field"><div class="reveal">
+      <span class="beat-index label">02 <b>· the studio</b></span>
+      <h2 class="display">Studio</h2>
+      <p class="ash-line">apple silicon on metal · the verified market work runs on the gpu by default, from a machine you already own</p>
+    </div></div>
+  </section>
+
+  <!-- 03 · the spark · the swap · its sections -->
+  <section class="beat beat-spark" data-beat="2">
+    <div class="field"><div class="reveal">
+      <span class="beat-index label">03 <b>· the spark</b></span>
+      <h2 class="display">Spark</h2>
+      <p class="ash-line">nvidia on cuda · the same verified work with more headroom, plus a locked-down container lane only a cuda host can run</p>
+    </div></div>
+  </section>
+
+  <!-- 04 · how it works · the instrument, wide · side by side on the left -->
+  <section class="beat beat-how" data-beat="3">
+    <div class="field">
+      <span class="beat-index label reveal">04 <b>· how it works</b></span>
+      <div class="console">
+        <div class="row reveal"><span class="lens" aria-hidden="true"></span><span class="k">drop</span>
+          <span class="stmt">drop a workload · the pipeline is detected</span><span class="state">detected</span></div>
+        <div class="row reveal"><span class="lens" aria-hidden="true"></span><span class="k">cap</span>
+          <span class="stmt">priced before you spend · the cap you set binds at dispatch</span><span class="state">at dispatch</span></div>
+        <div class="row reveal"><span class="lens" aria-hidden="true"></span><span class="k">quote</span>
+          <span class="stmt">a quote before any spend at POST /v1/quote</span><span class="state">max_usd</span></div>
+        <div class="row reveal"><span class="lens" aria-hidden="true"></span><span class="k">audit</span>
+          <span class="stmt">honeypot known-answer tasks · N-way majority votes</span><span class="state">0.25 floor</span></div>
+        <div class="row reveal"><span class="lens" aria-hidden="true"></span><span class="k">payout</span>
+          <span class="stmt">payouts are real Stripe Connect transfers</span><span class="state">3% take</span></div>
+        <div class="row reveal"><span class="lens green" aria-hidden="true"></span><span class="k">proof</span>
+          <span class="stmt">results come back verified · every run ends in a receipt</span><span class="state">184 / 184 pass</span></div>
+      </div>
+      <div class="console receipts-block">
+        <div class="row reveal"><span class="lens" aria-hidden="true"></span><span class="k">backends</span>
+          <span class="stmt">one candle in pure rust · metal by default on apple silicon, cuda as a build flag on nvidia</span><span class="state">both</span></div>
+        <div class="row reveal"><span class="lens" aria-hidden="true"></span><span class="k">executors</span>
+          <span class="stmt">embeddings, inference, transcription, classification, extraction, rerank · classification and extraction are real llama passes</span><span class="state">six verified</span></div>
+        <div class="row reveal"><span class="lens" aria-hidden="true"></span><span class="k">headroom</span>
+          <span class="stmt">the 7b batch model is gated by a 40gb memory floor, not the backend · batched decode about 1.5x on an m3 pro, up to 9.6x on an a100</span><span class="state">by memory</span></div>
+        <div class="row reveal"><span class="lens" aria-hidden="true"></span><span class="k">sandbox</span>
+          <span class="stmt">your own container in a locked-down gpu sandbox · cuda-only, no network, read-only root, a hard timeout · reputation-trusted</span><span class="state">road ahead</span></div>
+      </div>
+      <div class="receipts-line reveal">
+        <button class="receipts-btn" id="open-receipts">the full ledger</button>
+      </div>
     </div>
   </section>
 
-  <section class="wrap">
-    <div class="monument">
-      <div class="fig">$0.001</div>
-      <div class="lab">embeddings · per thousand</div>
+  <!-- 05 · the price monument · flush-left, bleeding off the right edge, on a plinth -->
+  <section class="beat beat-price" data-beat="4">
+    <div class="monument reveal">
+      <span class="cap-top label">embeddings</span>
+      <p class="fig"><span class="dollar">$</span><span class="price">0.001</span></p>
+      <div class="plinth"></div>
+      <span class="cap-bot label">usd · per 1,000 units · <span class="proof">verified</span></span>
     </div>
   </section>
 
-  <section class="wrap">
-    <h2 class="sec-label">earn</h2>
-    <div class="earn">
-      <img src="/assets/site/knob-off@3x.png" alt="" loading="lazy" width="132" height="132">
-      <p>flip your Mac online and it earns while it idles · quiet hours and battery rules are enforced on the device itself</p>
-    </div>
+  <!-- 06 · earn -->
+  <section class="beat beat-earn" data-beat="5">
+    <div class="field"><div class="reveal">
+      <span class="beat-index label">06 <b>· earn</b></span>
+      <h2 class="display display-max">earn</h2>
+      <div class="earn">
+        <img src="/assets/site/knob-off@3x.png" alt="" loading="lazy" width="104" height="104">
+        <p class="lede">flip your device online and it earns while it idles · quiet hours are enforced on the device itself</p>
+      </div>
+      <p class="road"><a href="/demo">try the buyer console at /demo</a> · no install, same-origin, runs the same job pipeline as the API</p>
+    </div></div>
   </section>
 
-  <section class="wrap download">
-    <h2 class="sec-label">download</h2>
-    <span class="state">closed alpha</span>
-    <p>There is no public download yet. The supplier agent installs with one command from the alpha build · the macOS menu bar app builds today, and the notarized public release is the next step. Ask for alpha access to run it now.</p>
-    <p class="road">the verified catalogue ships today · a metered general-compute lane for opaque GPU-second work like simulation and rendering runs your own container in a sandbox, and is the road ahead</p>
+  <!-- 07 · release / download -->
+  <section class="beat beat-release download" data-beat="6">
+    <div class="field"><div class="reveal">
+      <span class="beat-index label">07 <b>· release</b></span>
+      <h2 class="display">download</h2>
+      <span class="flag label">closed alpha</span>
+      <p>There is no public download yet. The supplier agent installs with one command from the alpha build · the macOS menu bar app builds today, and the notarized public release is the next step.</p>
+      <form id="alpha-form" class="alpha-form" style="display:flex;gap:.5em;flex-wrap:wrap;align-items:center;margin-top:1em">
+        <label for="alpha-email" class="label" style="flex:0 0 auto">ask for alpha access</label>
+        <input id="alpha-email" name="email" type="email" required placeholder="you@example.com"
+               style="flex:1 1 220px;min-width:0;background:transparent;border:1px solid currentColor;color:inherit;padding:.5em .75em;font:inherit">
+        <select id="alpha-role" name="role" style="background:transparent;border:1px solid currentColor;color:inherit;padding:.5em .75em;font:inherit">
+          <option value="buyer">as a buyer</option>
+          <option value="supplier">as a supplier</option>
+        </select>
+        <button type="submit" class="hand-key">request access</button>
+      </form>
+      <p id="alpha-status" class="road" aria-live="polite"></p>
+      <p class="road">the verified catalogue ships today · a metered general-compute lane for opaque GPU-second work like simulation and rendering runs your own container in a sandbox, and is the road ahead</p>
+    </div></div>
   </section>
 </main>
 
 <footer>
-  <img src="/assets/site/cx-mark-white.png" alt="" width="18" height="18">
-  <span>computexchange · 2026</span>
+  <img src="/assets/site/cx-mark-white.png" alt="" width="16" height="16">
+  <span class="label">computexchange · Joshua-Hicks Global Corp. · 2026</span>
 </footer>
 
-<dialog id="receipts" aria-label="the receipts">
-  <div class="dlg-head">
-    <span class="dlg-title">the receipts</span>
-    <button class="dlg-close" id="close-receipts">close</button>
+<dialog id="receipts" aria-label="the claims ledger">
+  <div class="ledger">
+    <div class="ledger-head">
+      <span class="title">computexchange · claims ledger</span>
+      <button class="close" id="close-receipts">close</button>
+    </div>
+    <div class="ledger-stat"><span><b>184</b> pass</span><span>0 skip</span><span>0 fail</span><span class="gen">make prove-local · proven 2026-07-05T20:36:46Z · f8dc90d6c22d</span></div>
+    <div class="claim"><span class="k">proof</span><span class="v">make prove-local · <b>184 pass · 0 skip · 0 fail</b> · a matrix-only run, tallied by grep over its own ledger · proven 2026-07-05T20:36:46Z · f8dc90d6c22d</span></div>
+    <div class="claim"><span class="k">queue</span><span class="v">the job queue is a plain Postgres table claimed with FOR UPDATE SKIP LOCKED · no Kafka, RabbitMQ, NATS, or Redis in the dependency tree</span></div>
+    <div class="claim"><span class="k">binaries</span><span class="v">two binaries at the core · a Rust supplier agent and a Go control plane · the buyer CLI and macOS menu bar app are optional layers on top</span></div>
+    <div class="claim"><span class="k">executors</span><span class="v">six verified executors ship today · embeddings, batch inference, transcription, classification, extraction, rerank · real Candle in pure Rust, Metal by default on Apple Silicon, CUDA as a build flag</span></div>
+    <div class="claim"><span class="k">general compute</span><span class="v">the sandbox that runs your own container is built and hardened · no network, read-only root, all capabilities dropped, non-root, a hard timeout · reputation-trusted, not output-verified, and CUDA-only · Linux with Docker and the NVIDIA Container Toolkit · metering it per GPU-second and opening the lane is the road ahead</span></div>
+    <div class="claim"><span class="k">scheduler</span><span class="v">tasks are sized for a 45 second runtime target · five hard filters gate every claim · quiet hours are enforced by the agent on the device itself</span></div>
+    <div class="claim"><span class="k">verification</span><span class="v">honeypot known-answer tasks, within-class redundancy, N-way majority votes · a 0.25 audit floor, so even the most trusted supplier is spot-checked about one task in four · a failed honeypot docks reputation, claws back the credit, and quarantines the supplier</span></div>
+    <div class="claim"><span class="k">quote</span><span class="v">a quote before any spend at POST /v1/quote · the max_usd cap set at submission is enforced at dispatch, pausing the job before the cap is breached · $0.002 per 1,000 units of Llama 3.2 1B, from $0.004 per audio minute of Whisper</span></div>
+    <div class="claim"><span class="k">payouts</span><span class="v">credits are held, then released against a real transfer reference or marked ready when owed · a read-only pass reconciles against Stripe every 15 minutes and never moves money · the platform take defaults to 3%</span></div>
+    <div class="claim"><span class="k">api</span><span class="v">an OpenAI-compatible Batch API at /v1/files and /v1/batches · the Python SDK is one file and imports only the standard library</span></div>
+    <div class="claim"><span class="k">rails</span><span class="v">payouts are real Stripe Connect transfers when the key is configured · an unconfigured deployment keeps credits marked owed and never fakes a paid transfer</span></div>
+    <div class="claim"><span class="k">identity</span><span class="v">there is no sign-in screen · on first use the console silently provisions a device-local account, and the only credential a person ever connects by hand is a payment method</span></div>
+    <p class="ledger-foot">every sentence above traces to a path and line in the source tree · the ledger is <span class="path">docs/SITE-CLAIMS.md</span> · what could not be evidenced was not softened, it was killed</p>
   </div>
-  <div class="claim"><span class="k">proof</span>make prove-local · 168 pass · 0 skip · 0 fail · a matrix-only run, tallied by grep over its own ledger</div>
-  <div class="claim"><span class="k">queue</span>the job queue is a plain Postgres table claimed with FOR UPDATE SKIP LOCKED · no Kafka, RabbitMQ, NATS, or Redis in the dependency tree</div>
-  <div class="claim"><span class="k">binaries</span>two binaries at the core · a Rust supplier agent and a Go control plane · the buyer CLI and macOS menu bar app are optional layers on top</div>
-  <div class="claim"><span class="k">executors</span>six verified executors ship today · embeddings, batch inference, transcription, classification, extraction, rerank · real Candle in pure Rust, Metal by default on Apple Silicon, CUDA as a build flag</div>
-  <div class="claim"><span class="k">general compute</span>a general-compute lane runs your own container in a locked-down GPU sandbox · metered per GPU-second and reputation-trusted, not output-verified · Linux with Docker and the NVIDIA Container Toolkit</div>
-  <div class="claim"><span class="k">scheduler</span>tasks are sized for a 45 second runtime target · five hard filters gate every claim · quiet hours are enforced by the agent on the device itself</div>
-  <div class="claim"><span class="k">verification</span>honeypot known-answer tasks, within-class redundancy, N-way majority votes · a 0.25 audit floor, so even the most trusted supplier is spot-checked about one task in four · a failed honeypot docks reputation, claws back the credit, and quarantines the supplier</div>
-  <div class="claim"><span class="k">quote</span>a quote before any spend at POST /v1/quote · the max_usd cap set at submission is enforced at dispatch, pausing the job before the cap is breached · $0.002 per 1,000 units of Llama 3.2 1B, from $0.004 per audio minute of Whisper</div>
-  <div class="claim"><span class="k">payouts</span>credits are held, then released against a real transfer reference or marked ready when owed · a read-only pass reconciles against Stripe every 15 minutes and never moves money · the platform take defaults to 3%</div>
-  <div class="claim"><span class="k">api</span>an OpenAI-compatible Batch API at /v1/files and /v1/batches · the Python SDK is one file and imports only the standard library</div>
-  <div class="claim"><span class="k">rails</span>payouts are real Stripe Connect transfers when the key is configured · an unconfigured deployment keeps credits marked owed and never fakes a paid transfer</div>
-  <div class="claim"><span class="k">identity</span>there is no sign-in screen · on first use the console silently provisions a device-local account, and the only credential a person ever connects by hand is a payment method</div>
-  <p class="dlg-foot">every sentence above traces to a path and line in the source tree · the ledger is <span class="path">docs/SITE-CLAIMS.md</span> · what could not be evidenced was not softened, it was killed</p>
 </dialog>
 </div>
 
 <script type="module">
   // Dynamic import so any vendor/WebGL gap degrades to the Cycles still (the same
-  // scene) rather than a blank hero · the fallback is honest.
+  // scene) rather than a blank hero · the fallback is honest. On a successful mount
+  // the document goes .live and the asymmetric linear page becomes the pinned beat
+  // choreography; without it the page stays the linear asymmetric still-page above.
+  const root = document.documentElement;
   const stage = document.getElementById('stage');
   const canvas = document.getElementById('hero-canvas');
+  const hintEl = document.getElementById('hint');
   const fallback = () => stage.classList.add('fallback');
   const coarse = window.matchMedia('(pointer: coarse)').matches;
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+  const sections = Array.prototype.slice.call(document.querySelectorAll('.beat'));
+  // S6 · the content layer that inertia-scrolls (the beats + footer) warps over the fixed
+  // stage. window.scrollY stays the true scroll; the warp only eases the content toward the
+  // smoothed viewFrac the engine hands back, so the copy moves with the camera's momentum.
+  const warp = [document.querySelector('.beats'), document.querySelector('footer')].filter(Boolean);
+  let isLive = false, lastView = 0;
+  // index + 6 flow rows + 4 receipt rows + the ledger button = 12 staggered reveals · ~60pct overlap
+  const HOW_GATE = [0.10, 0.16, 0.23, 0.29, 0.36, 0.42, 0.48, 0.55, 0.61, 0.67, 0.74, 0.80];
+  const GATE_W = 0.16;
+  function setRev(el, o) { el.style.opacity = o; el.style.transform = o > 0.999 ? 'none' : 'translateY(' + ((1 - o) * 12).toFixed(2) + 'px)'; }
+
+  let metrics = [], mMax = 1, mVh = 0, lastP = 0;
+  function measure() {
+    // read UNTRANSFORMED geometry · the warp is a visual transform, so clear it before
+    // measuring section centres, then the reveal() call that always follows reapplies it
+    // in the same frame (no visible flash).
+    for (const el of warp) el.style.transform = 'none';
+    const sy = window.scrollY, vh = window.innerHeight;
+    mVh = vh;
+    mMax = Math.max(1, document.documentElement.scrollHeight - vh);
+    metrics = sections.map(function (sec) {
+      const r = sec.getBoundingClientRect();
+      return {
+        revs: Array.prototype.slice.call(sec.querySelectorAll('.reveal')),
+        idx: +sec.dataset.beat, center: r.top + sy + r.height / 2, h: r.height,
+      };
+    });
+  }
+
+  function reveal(camP, view) {
+    if (reduce) return;
+    // S6 · the reveal AND the content warp both key off the smoothed page-scroll fraction
+    // (viewFrac · pure inertia), so the copy's opacity and its position share one motion.
+    // The camera keeps its own dwell scalar (it holds the shot); the text never holds.
+    const v = (view === undefined ? camP : view);
+    lastP = camP; lastView = v;
+    const vh = mVh || window.innerHeight, mid = vh / 2, vy = v * mMax;
+    // warp the text layer to the smoothed position over the fixed stage · visual only, so
+    // centerInVp below equals the copy's true on-screen centre (warp cancels in the maths).
+    if (isLive && metrics.length) {
+      const tf = 'translate3d(0,' + (window.scrollY - vy).toFixed(2) + 'px,0)';
+      for (const el of warp) el.style.transform = tf;
+    }
+    for (const m of metrics) {
+      const centerInVp = m.center - vy;
+      const align = clamp(1 - (Math.abs(centerInVp - mid) / vh - 0.14) / 0.5, 0, 1);
+      if (m.idx === 3) {   // how · the console rows stagger (beat 4 of 7)
+        const top = centerInVp - m.h / 2;
+        const ep = clamp((vh * 0.86 - top) / (vh * 0.92), 0, 1);
+        for (let i = 0; i < m.revs.length; i++) {
+          setRev(m.revs[i], align * clamp((ep - (HOW_GATE[i] || 0)) / GATE_W, 0, 1));
+        }
+      } else {
+        for (const el of m.revs) setRev(el, align);
+      }
+      if (m.idx === 0 && hintEl) hintEl.style.opacity = (align * 0.5).toFixed(3);
+    }
+  }
+
+  // HYBRID SEAM (S1): the live scene is the procession today. Once ~150 photoreal frames
+  // are baked, swap this import for sequence.js (mountSequence) to scrub the baked
+  // procession, and keep hero.js for drag-to-inspect at the price + release beats.
   import('/assets/site/hero.js').then(({ mountHero }) => {
     const h = mountHero(canvas, {
       onFail: fallback,
-      labels: {
-        'mac-studio': document.getElementById('anno-studio'),
-        'dgx-spark': document.getElementById('anno-spark'),
-      },
+      beats: true,
+      dev: /[?&]perf\b/.test(location.search),
+      onProgress: reveal,
+      onReady: function () { stage.classList.add('ready'); },
     });
     if (!h) { fallback(); return; }
     window.__hero = h;
-    if (coarse) {
-      document.getElementById('anno-studio').classList.add('on');
-      document.getElementById('anno-spark').classList.add('on');
-      document.getElementById('hint').textContent = 'a mac studio and an nvidia dgx spark';
-    }
+    root.classList.add('live');
+    isLive = true;
+    if (reduce) root.classList.add('reduced');
+    measure();
+    window.addEventListener('resize', function () { measure(); reveal(lastView, lastView); }, { passive: true });
+    // reveal at the TRUE starting position so a reload mid-page paints in place (no flash);
+    // the engine's first tick then takes over with its own smoothed viewFrac.
+    var v0 = mMax > 0 ? clamp(window.scrollY / mMax, 0, 1) : 0;
+    reveal(v0, v0);
+    if (coarse) hintEl.textContent = 'a mac studio and an nvidia dgx spark';
   }).catch(fallback);
 </script>
 
@@ -322,6 +557,96 @@
     var done = function () { copyBtn.textContent = 'copied'; setTimeout(function () { copyBtn.textContent = 'copy the link'; }, 1600); };
     if (navigator.clipboard) { navigator.clipboard.writeText(URL_SELF).then(done).catch(done); } else { done(); }
   });
+
+  var alphaForm = document.getElementById('alpha-form');
+  var alphaStatus = document.getElementById('alpha-status');
+  alphaForm.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var email = document.getElementById('alpha-email').value;
+    var role = document.getElementById('alpha-role').value;
+    alphaStatus.textContent = 'sending…';
+    fetch('/v1/alpha-request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email, role: role })
+    }).then(function (res) {
+      if (!res.ok) throw new Error('request failed');
+      alphaStatus.textContent = "you're on the list · we'll follow up at " + email;
+      alphaForm.reset();
+      beacon('cta_click', { detail: 'alpha-request:' + role });
+    }).catch(function () {
+      alphaStatus.textContent = "that didn't go through — try again in a moment";
+    });
+  });
+</script>
+
+<script>
+  // Funnel beacon (docs/internal/CREED_AND_PATH_TO_TEN.md, "Public site &
+  // conversion" 6→7, "Make the funnel observable"). Self-hosted, same-origin,
+  // no CDN script, no cookie, no localStorage. pageId is generated fresh in
+  // memory on every load and never persisted anywhere — it exists only to
+  // group the handful of events one pageview emits (see control/beacon.go's
+  // header comment for the full reasoning); it is not a visitor identifier and
+  // nothing here would ever need a cookie-consent banner. Best-effort: a
+  // failed beacon send never affects the page (catch swallows silently).
+  var pageId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : (
+    // extremely old-browser fallback; still not persisted anywhere
+    'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+      var r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+      return v.toString(16);
+    })
+  );
+
+  function beacon(event, opts) {
+    opts = opts || {};
+    var body = {
+      page_id: pageId,
+      event: event,
+      path: location.pathname,
+      referrer: document.referrer || ''
+    };
+    if (typeof opts.beat === 'number') body.beat = opts.beat;
+    if (opts.detail) body.detail = String(opts.detail).slice(0, 128);
+    try {
+      var payload = JSON.stringify(body);
+      if (navigator.sendBeacon) {
+        navigator.sendBeacon('/v1/beacon', new Blob([payload], { type: 'application/json' }));
+      } else {
+        fetch('/v1/beacon', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload, keepalive: true }).catch(function () {});
+      }
+    } catch (e) { /* never let telemetry break the page */ }
+  }
+
+  beacon('pageview');
+
+  document.getElementById('open-receipts').addEventListener('click', function () {
+    beacon('receipts_open');
+  });
+
+  var demoLink = document.querySelector('a[href="/demo"]');
+  if (demoLink) {
+    demoLink.addEventListener('click', function () { beacon('cta_click', { detail: 'demo' }); });
+  }
+
+  // Scroll-depth per narrative beat: each of the seven .beat sections fires at
+  // most once per pageview, the first time it becomes >=50% visible. Plain
+  // IntersectionObserver (not the WebGL hero's own scroll math), so this works
+  // identically whether the live scene mounts or the reduced-motion/fallback
+  // page is shown.
+  var seenBeats = {};
+  var beatEls = Array.prototype.slice.call(document.querySelectorAll('.beat[data-beat]'));
+  if (beatEls.length && 'IntersectionObserver' in window) {
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (!entry.isIntersecting) return;
+        var beat = +entry.target.dataset.beat;
+        if (seenBeats[beat]) return;
+        seenBeats[beat] = true;
+        beacon('scroll_depth', { beat: beat });
+      });
+    }, { threshold: 0.5 });
+    beatEls.forEach(function (el) { io.observe(el); });
+  }
 </script>
 </body>
 </html>

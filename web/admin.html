@@ -241,6 +241,57 @@
         <p class="muted" style="margin:0;line-height:1.7">The exchange manages itself · stale claims requeue, slow tails are hedged to a second machine, and the <b style="color:var(--bone)">stuck-run watchdog</b> cancels any run past 1.5× its machine-predicted ETA with no progress: completed chunks are checkpointed into the artifact and settled; un-run work is never charged. Buyers see it on the job timeline. Manual runbooks (requeue, payout export, backup/restore, disaster recovery) live in <span class="ash">docs/RUNBOOKS.md</span>. Workflows remain expressed through jobs (CLI, SDK, Batch API) · buyers submit through the app, this operator included.</p>
       </div>
     </div>
+
+    <!-- ══ FLEET · identify a bad worker and suspend it, on screen, without SQL ══ -->
+    <div class="card" style="margin-top:16px">
+      <div class="row" style="justify-content:space-between;margin-bottom:12px">
+        <h2 class="label" style="margin:0">Fleet · workers</h2>
+        <button class="qs" id="btn-refresh-workers">refresh</button>
+      </div>
+      <div class="snip" style="overflow-x:auto">
+        <table id="t-workers" style="width:100%;border-collapse:collapse;font:400 12px var(--mono)">
+          <thead>
+            <tr style="text-align:left;color:var(--mute)">
+              <th style="padding:4px 10px 8px 0">worker</th>
+              <th style="padding:4px 10px 8px">supplier</th>
+              <th style="padding:4px 10px 8px">status</th>
+              <th style="padding:4px 10px 8px">reputation</th>
+              <th style="padding:4px 10px 8px">hw_class</th>
+              <th style="padding:4px 10px 8px">throttled</th>
+              <th style="padding:4px 10px 8px">last_seen</th>
+              <th style="padding:4px 0 8px 10px"></th>
+            </tr>
+          </thead>
+          <tbody id="workers-body"><tr><td colspan="8" class="muted">loading…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="err" id="a-workers-err"></div>
+      <div class="err" id="a-suspend-err"></div>
+      <p class="muted" id="a-suspend-ok" style="margin:8px 0 0"></p>
+    </div>
+
+    <!-- ══ SCHEDULER EXPLAIN · "why won't this worker's task claim?" ══ -->
+    <div class="card" style="margin-top:16px">
+      <h2 class="label">Scheduler explain</h2>
+      <p class="muted" style="margin:0 0 12px">Runs the exact hard-filter predicates the claim query uses against every currently-claimable task, for one worker, and reports why each was rejected (or eligible). Read-only — never claims, never mutates.</p>
+      <div class="row">
+        <input id="explain-worker-id" placeholder="worker id (uuid)" style="max-width:360px">
+        <button class="pill solid" id="btn-explain">explain</button>
+      </div>
+      <div class="snip" id="explain-out-wrap" hidden><pre id="explain-out">…</pre></div>
+      <div class="err" id="a-explain-err"></div>
+    </div>
+
+    <!-- ══ AUDIT LOG · every admin write action, who/what/why (Operator Tooling 7→8) ══ -->
+    <div class="card" style="margin-top:16px">
+      <div class="row" style="justify-content:space-between;margin-bottom:12px">
+        <h2 class="label" style="margin:0">Audit log · admin actions</h2>
+        <button class="qs" id="btn-refresh-actions">refresh</button>
+      </div>
+      <p class="muted" style="margin:0 0 12px">Every reinstate, force-requeue, reputation adjustment, and payout-hold release performed from this console (or the API directly) — the operator actions that used to be raw SQL, now traced here instead.</p>
+      <div class="snip"><pre id="a-actions">…</pre></div>
+      <div class="err" id="a-actions-err"></div>
+    </div>
   </main>
 </div>
 
@@ -436,6 +487,92 @@ async function loadFraud(){
   }catch(e){ $('a-fraud').textContent=''; $('a-fraud-err').textContent=e.message; }
 }
 
+// ── fleet · workers + suspend (Operator Tooling 5→6: identify + suspend a bad
+// worker using only what is on screen, no SQL) ──
+function fmtAgo(iso){
+  if(!iso) return '<span class="muted">never</span>';
+  const ms = Date.now() - new Date(iso).getTime();
+  if(ms < 0) return 'just now';
+  const s = Math.floor(ms/1000);
+  if(s < 60) return s+'s ago';
+  const m = Math.floor(s/60);
+  if(m < 60) return m+'m ago';
+  return Math.floor(m/60)+'h ago';
+}
+async function suspendWorker(id, btn){
+  if(!confirm('Suspend worker '+id+'? Its supplier is immediately excluded from all future claims.')) return;
+  btn.disabled = true;
+  $('a-suspend-err').textContent=''; $('a-suspend-ok').textContent='';
+  try{
+    await api('/admin/workers/'+encodeURIComponent(id)+'/suspend', {method:'POST'});
+    $('a-suspend-ok').textContent = 'worker '+id+' suspended · '+new Date().toLocaleTimeString();
+    await loadWorkers(); await loadFraud();
+  }catch(e){ $('a-suspend-err').textContent=e.message; btn.disabled = false; }
+}
+async function reinstateWorker(id, btn){
+  if(!confirm('Reinstate worker '+id+'? Its supplier immediately becomes eligible for new work again.')) return;
+  btn.disabled = true;
+  $('a-suspend-err').textContent=''; $('a-suspend-ok').textContent='';
+  try{
+    await api('/admin/workers/'+encodeURIComponent(id)+'/reinstate', {method:'POST'});
+    $('a-suspend-ok').textContent = 'worker '+id+' reinstated · '+new Date().toLocaleTimeString();
+    await loadWorkers(); await loadFraud();
+  }catch(e){ $('a-suspend-err').textContent=e.message; btn.disabled = false; }
+}
+async function loadWorkers(){
+  try{
+    const ws = await api('/admin/workers'); $('a-workers-err').textContent='';
+    const body = $('workers-body');
+    if(!ws.length){ body.innerHTML='<tr><td colspan="8" class="muted">no workers registered</td></tr>'; return; }
+    body.innerHTML = ws.map(w=>{
+      const active = w.status === 'active';
+      const dot = active ? 'green' : (w.status==='suspended'||w.status==='banned' ? 'red' : 'gold');
+      const btnCell = active
+        ? '<button class="qs suspend-btn" data-id="'+esc(w.id)+'" style="color:var(--red-core)">suspend</button>'
+        : (w.status==='suspended'
+            ? '<button class="qs reinstate-btn" data-id="'+esc(w.id)+'" style="color:var(--green-core)">reinstate</button>'
+            : '<span class="ash">banned</span>');
+      return '<tr style="border-top:1px solid var(--hair)">'+
+        '<td style="padding:7px 10px 7px 0;font-size:11px">'+esc(w.id)+'</td>'+
+        '<td style="padding:7px 10px;font-size:11px">'+esc(w.supplier_id)+'</td>'+
+        '<td style="padding:7px 10px"><span class="dot '+dot+'"></span> '+esc(w.status)+'</td>'+
+        '<td style="padding:7px 10px">'+Number(w.reputation).toFixed(2)+'</td>'+
+        '<td style="padding:7px 10px">'+esc(w.hw_class)+'</td>'+
+        '<td style="padding:7px 10px">'+(w.throttled ? '<span class="dot gold"></span> yes' : 'no')+'</td>'+
+        '<td style="padding:7px 10px">'+fmtAgo(w.last_seen_at)+'</td>'+
+        '<td style="padding:7px 0 7px 10px">'+btnCell+'</td>'+
+      '</tr>';
+    }).join('');
+    body.querySelectorAll('.suspend-btn').forEach(b=>{
+      b.onclick = () => suspendWorker(b.getAttribute('data-id'), b);
+    });
+    body.querySelectorAll('.reinstate-btn').forEach(b=>{
+      b.onclick = () => reinstateWorker(b.getAttribute('data-id'), b);
+    });
+  }catch(e){ $('a-workers-err').textContent=e.message; }
+}
+
+// ── scheduler explain · "why won't this worker's task claim?" (Operator
+// Tooling 6→7): read-only, walks the real hard-filter predicates. ──
+async function runExplain(){
+  const id = $('explain-worker-id').value.trim();
+  $('a-explain-err').textContent='';
+  if(!id){ $('a-explain-err').textContent='Enter a worker id.'; return; }
+  try{
+    const exp = await api('/admin/scheduler/explain?worker_id='+encodeURIComponent(id));
+    show('explain-out-wrap', true);
+    $('explain-out').textContent = JSON.stringify(exp, null, 2);
+  }catch(e){ show('explain-out-wrap', false); $('a-explain-err').textContent=e.message; }
+}
+
+// ── audit log · every admin write action (Operator Tooling 7→8) ──
+async function loadActions(){
+  try{
+    const a = await api('/admin/actions'); $('a-actions-err').textContent='';
+    $('a-actions').textContent = a.length ? JSON.stringify(a, null, 2) : '(no admin actions recorded yet)';
+  }catch(e){ $('a-actions').textContent=''; $('a-actions-err').textContent=e.message; }
+}
+
 // ── boot ──
 let timers=[];
 function stopTimers(){ timers.forEach(clearInterval); timers=[]; }
@@ -445,9 +582,9 @@ async function boot(){
   catch(e){ show('console',false); show('gate',true); $('gate-err').textContent=e.message; return; }
   if(st.authenticated){
     show('gate',false); show('console',true);
-    ping(); loadMetrics(); loadSummary(); loadFraud();
+    ping(); loadMetrics(); loadSummary(); loadFraud(); loadWorkers(); loadActions();
     timers.push(setInterval(()=>{ ping(); loadMetrics(); },4000));
-    timers.push(setInterval(()=>{ loadSummary(); loadFraud(); },15000));
+    timers.push(setInterval(()=>{ loadSummary(); loadFraud(); loadWorkers(); loadActions(); },15000));
     return;
   }
   show('console',false); show('gate',true);
@@ -460,5 +597,9 @@ async function boot(){
 
 $('btn-login').onclick=loginPasskey; $('btn-register').onclick=registerPasskey; $('signout').onclick=signOut;
 $('admin-key').addEventListener('keydown',e=>{ if(e.key==='Enter') registerPasskey(); });
+$('btn-refresh-workers').onclick=loadWorkers;
+$('btn-explain').onclick=runExplain;
+$('explain-worker-id').addEventListener('keydown',e=>{ if(e.key==='Enter') runExplain(); });
+$('btn-refresh-actions').onclick=loadActions;
 boot();
 </script>

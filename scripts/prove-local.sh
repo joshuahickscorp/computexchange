@@ -147,6 +147,15 @@ wait_for() {
 say "$(b 'Computexchange — local release-candidate proof')"
 rm -rf "$ART"; mkdir -p "$ART"; : >"$LEDGER_FILE"
 
+# META line: the commit this proof run actually ran against + when it started.
+# scripts/site-build.mjs reads this to stamp the live page — the ledger is the
+# single source of truth for "what commit was this pass count proven on", not a
+# hand-typed figure re-derived some other way at build time.
+GIT_SHA="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+RUN_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf 'META\tcommit\t%s\n' "$GIT_SHA" >>"$LEDGER_FILE"
+printf 'META\tstarted_at\t%s\n' "$RUN_STARTED_AT" >>"$LEDGER_FILE"
+
 need=(go cargo psql curl python3)
 [ "$USE_DOCKER" = "1" ] && need+=(docker) || need+=(postgres initdb pg_ctl createdb minio)
 for t in "${need[@]}"; do
@@ -763,6 +772,19 @@ assert r["samples"]>=1 and r["p90_duration_ms"]>0, "no observed duration recorde
   [ "$CLI_OK" = "1" ] \
     && record PASS cli-surfaces "cx invoice --json + cx explain-scheduler drive the live plane (buyer + admin)" \
     || record FAIL cli-surfaces "cx CLI surfaces failed (invoice=$CINV explain=$CEXP)"
+
+  # Buyer DX doc-as-test (Buyer Developer Experience 5->6): docs/QUICKSTART.md as
+  # EXECUTABLE TRUTH. scripts/doc-as-test.sh extracts every documented buyer command
+  # (curl, Python SDK, cx CLI) OUT of the doc, localizes only host+key, and runs each
+  # against THIS live plane — with the REAL Metal agent (not a stand-in) draining the
+  # jobs, since we attach to the already-running stack. Its built-in self-test also
+  # confirms a deliberately-broken doc command IS caught, so a stale doc fails here.
+  if CX_DOCTEST_CONTROL_URL="$CONTROL_URL" CX_DOCTEST_API_KEY="$API_KEY" \
+       bash "$ROOT/scripts/doc-as-test.sh" >"$ART/doc-as-test.log" 2>&1; then
+    record PASS doc-as-test "every documented QUICKSTART command runs against the live plane (curl+SDK+CLI); broken-doc self-test caught"
+  else
+    record FAIL doc-as-test "a documented QUICKSTART command failed against the live plane — see $ART/doc-as-test.log"
+  fi
 
   # Plane C quote (Compute Autopilot): POST /v1/quote scans a JSONL input and returns
   # a conservative cost/ETA/supply/risk band WITHOUT spending — and persists the

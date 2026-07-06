@@ -35,6 +35,42 @@ enum AgentPaths {
         }
         return nil
     }
+
+    /// The bundled macOS seatbelt profile (cx-agent.sb) that sandboxes the cx-agent
+    /// CHILD process (Security Posture 8->9, docs/internal/CREED_AND_PATH_TO_TEN.md).
+    /// Shipped as an app-bundle resource; proven by
+    /// macapp/ComputeExchangeAgent/sandbox-profile-test.sh. Absent in a bare dev
+    /// checkout with no assembled bundle — the launch path then records that the
+    /// child ran UNSANDBOXED rather than pretending otherwise.
+    static var sandboxProfile: URL? {
+        Bundle.main.url(forResource: "cx-agent", withExtension: "sb")
+    }
+
+    /// The model cache root the sandbox profile scopes writes to. Mirrors the agent's
+    /// own resolution (agent/src/models.rs / status.rs): $CX_MODEL_CACHE, else
+    /// $HF_HOME, else ~/.cache/huggingface. The launcher passes this as the profile's
+    /// MODELCACHE param so hf-hub downloads stay allowed.
+    static var modelCacheDir: URL {
+        let env = ProcessInfo.processInfo.environment
+        if let c = env["CX_MODEL_CACHE"], !c.isEmpty {
+            return URL(fileURLWithPath: c, isDirectory: true)
+        }
+        if let hf = env["HF_HOME"], !hf.isEmpty {
+            return URL(fileURLWithPath: hf, isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cache/huggingface", isDirectory: true)
+    }
+
+    /// Absolute path to `sandbox-exec` (a fixed OS location).
+    static let sandboxExec = "/usr/bin/sandbox-exec"
+
+    /// Env marker set on the child when THIS launcher has already applied the seatbelt
+    /// profile, so the agent's own startup self-re-exec
+    /// (agent/src/main.rs `reexec_under_sandbox_if_needed`, which keys off the same
+    /// name) becomes a no-op and does not wrap the process a second time. Must match the
+    /// Rust `CX_SANDBOXED_ENV` constant exactly.
+    static let sandboxedEnvKey = "CX_SANDBOXED"
 }
 
 @MainActor
@@ -48,6 +84,12 @@ final class AgentController: ObservableObject {
     /// Non-nil while we are managing a child agent process we launched ourselves.
     @Published private(set) var launchedPID: Int32?
     @Published private(set) var lastLaunchError: String?
+    /// Whether the CURRENTLY-launched (or last-launched) cx-agent child is running
+    /// under the macOS seatbelt sandbox (cx-agent.sb). Honest: false when the profile
+    /// couldn't be resolved (a bare dev build with no assembled bundle) so the UI /
+    /// consent copy never claims a protection that isn't active. The menu-bar app can
+    /// surface this to the operator.
+    @Published private(set) var sandboxActive = false
 
     private var timer: Timer?
     private var process: Process?
@@ -73,6 +115,12 @@ final class AgentController: ObservableObject {
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
+        // NOTE on thermal signal (Supplier onboarding & safety 6→7): this app does
+        // NOT observe ProcessInfo.thermalState itself. The Rust agent
+        // (agent/src/hardware.rs `read_thermal_pressure`) reads it directly,
+        // in-process, via its own NSProcessInfo FFI call every poll cycle — no
+        // menu-bar-app round trip needed. This app only DISPLAYS the thermal_state
+        // the agent reports back in status.json.
     }
 
     // MARK: status
@@ -125,19 +173,47 @@ final class AgentController: ObservableObject {
         }
         do {
             try FileManager.default.createDirectory(at: AgentPaths.dataDir, withIntermediateDirectories: true)
+            // The sandbox profile scopes writes to the model cache; create it up front
+            // so hf-hub's first download has an existing, allowed target directory.
+            try FileManager.default.createDirectory(at: AgentPaths.modelCacheDir, withIntermediateDirectories: true)
         } catch {
             lastLaunchError = "Could not create data dir: \(error.localizedDescription)"
             return
         }
         let p = Process()
-        p.executableURL = bin
-        p.arguments = ["run", "--config", AgentPaths.configFile.path]
+        let agentArgs = ["run", "--config", AgentPaths.configFile.path]
+        // Sandbox the cx-agent CHILD under the shipped macOS seatbelt profile
+        // (cx-agent.sb) when it's available — the Security Posture 8->9 boundary that
+        // contains a malicious buyer payload's filesystem blast radius (proven by
+        // macapp/ComputeExchangeAgent/sandbox-profile-test.sh). When the profile can't
+        // be resolved (a bare dev build with no assembled bundle), we launch the agent
+        // DIRECTLY and record sandboxActive=false, never pretending it's protected.
+        if let argv = sandboxWrappedLaunch(binary: bin, agentArgs: agentArgs) {
+            p.executableURL = URL(fileURLWithPath: AgentPaths.sandboxExec)
+            p.arguments = argv
+            sandboxActive = true
+        } else {
+            p.executableURL = bin
+            p.arguments = agentArgs
+            sandboxActive = false
+        }
         // Point the agent at the operator-prefs overlay (Atlas F7 / item 25). The agent
         // merges this sidecar over agent.toml, so the menu toggles ACTUALLY control it —
         // they are no longer decorative. (The agent also auto-discovers this conventional
         // path next to the config; setting the env var makes the contract explicit.)
         var env = ProcessInfo.processInfo.environment
         env["CX_AGENT_PREFS"] = AgentPaths.prefsFile.path
+        // When WE applied the seatbelt profile (via sandbox-exec above), tell the agent
+        // it is already sandboxed so its own startup self-re-exec
+        // (agent/src/main.rs, reexec_under_sandbox_if_needed) is a no-op instead of
+        // wrapping the child a SECOND time. The Rust side keys off exactly this marker to
+        // break the re-exec loop; the two launch paths cooperate through it. When we could
+        // NOT apply the profile (sandboxActive=false), we deliberately leave the marker
+        // UNSET so the binary's own self-re-exec still gets a chance to contain a direct
+        // launch — belt and suspenders, never a double no-op.
+        if sandboxActive {
+            env[AgentPaths.sandboxedEnvKey] = "1"
+        }
         p.environment = env
         p.terminationHandler = { [weak self] proc in
             Task { @MainActor in
@@ -158,12 +234,44 @@ final class AgentController: ObservableObject {
         }
     }
 
+    /// Build the `sandbox-exec` argv that runs cx-agent under the shipped seatbelt
+    /// profile (cx-agent.sb), or return nil when the sandbox cannot be applied — in
+    /// which case the caller launches the agent directly and records sandboxActive=false.
+    ///
+    /// The profile (Security Posture 8->9) contains the child's filesystem blast radius:
+    /// writes are confined to the model cache + data dir + temp, and reads of the
+    /// operator's SSH keys / keychain / documents are denied — proven by
+    /// macapp/ComputeExchangeAgent/sandbox-profile-test.sh. The `-D KEY=VALUE` params
+    /// below are exactly the ones the profile references.
+    ///
+    /// Returns nil (→ unsandboxed launch, honestly flagged) when either the profile
+    /// resource or `sandbox-exec` is absent, so a bare dev build without an assembled
+    /// bundle still runs rather than failing to launch — the app never claims a
+    /// protection it isn't applying.
+    private func sandboxWrappedLaunch(binary: URL, agentArgs: [String]) -> [String]? {
+        guard let profile = AgentPaths.sandboxProfile else { return nil }
+        guard FileManager.default.isExecutableFile(atPath: AgentPaths.sandboxExec) else { return nil }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let tmp = ProcessInfo.processInfo.environment["TMPDIR"] ?? "/private/var/folders"
+        var argv = [
+            "-f", profile.path,
+            "-D", "HOME=\(home)",
+            "-D", "MODELCACHE=\(AgentPaths.modelCacheDir.path)",
+            "-D", "DATADIR=\(AgentPaths.dataDir.path)",
+            "-D", "TMPDIR=\(tmp)",
+            binary.path,
+        ]
+        argv.append(contentsOf: agentArgs)
+        return argv
+    }
+
     /// Stop an agent we launched. (An agent started elsewhere · e.g. a LaunchAgent
     /// · is not ours to kill; we only manage our own child.)
     func stopAgent() {
         process?.terminate()
         process = nil
         launchedPID = nil
+        sandboxActive = false
         refresh()
     }
 

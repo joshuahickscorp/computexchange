@@ -10,7 +10,10 @@ use std::time::Duration;
 use reqwest::{Client, Response, StatusCode};
 use uuid::Uuid;
 
-use crate::types::{Earnings, FailReport, Heartbeat, TaskCommit, TaskDispatch, WorkerCapability};
+use crate::types::{
+    ConnectStatus, Earnings, FailReport, Heartbeat, SupplierVerification, TaskCommit,
+    TaskDispatch, WorkerCapability,
+};
 
 /// Long-poll budget. Slightly above the server's ~30s poll window so we don't
 /// time out a poll the server is legitimately holding open.
@@ -251,6 +254,51 @@ impl ControlPlaneClient {
             .map_err(|e| Self::transport(endpoint, e))?;
         let resp = Self::expect_status(endpoint, resp, &[StatusCode::OK]).await?;
         resp.json::<Earnings>()
+            .await
+            .map_err(|e| ProtocolError::Decode {
+                endpoint: endpoint.to_string(),
+                source: e,
+            })
+    }
+
+    /// `GET /v1/worker/connect/status` — real payout readiness (Stripe key
+    /// configured / account connected / payouts enabled). Polled each heartbeat
+    /// (Supplier onboarding & safety 7->8) to populate the menu-bar trust panel's
+    /// `payouts_configured/connected/enabled` fields instead of leaving them
+    /// permanently absent.
+    pub async fn connect_status(&self) -> Result<ConnectStatus, ProtocolError> {
+        let endpoint = "/v1/worker/connect/status";
+        let resp = self
+            .http
+            .get(self.url(endpoint))
+            .header("X-Worker-Token", &self.token)
+            .send()
+            .await
+            .map_err(|e| Self::transport(endpoint, e))?;
+        let resp = Self::expect_status(endpoint, resp, &[StatusCode::OK]).await?;
+        resp.json::<ConnectStatus>()
+            .await
+            .map_err(|e| ProtocolError::Decode {
+                endpoint: endpoint.to_string(),
+                source: e,
+            })
+    }
+
+    /// `GET /v1/worker/verification` — this supplier's real lifetime honeypot
+    /// pass/fail counts + derived label. Polled each heartbeat (Supplier
+    /// onboarding & safety 7->8) to populate the menu-bar trust panel's
+    /// `honeypots_passed/failed/verification_label` fields.
+    pub async fn verification(&self) -> Result<SupplierVerification, ProtocolError> {
+        let endpoint = "/v1/worker/verification";
+        let resp = self
+            .http
+            .get(self.url(endpoint))
+            .header("X-Worker-Token", &self.token)
+            .send()
+            .await
+            .map_err(|e| Self::transport(endpoint, e))?;
+        let resp = Self::expect_status(endpoint, resp, &[StatusCode::OK]).await?;
+        resp.json::<SupplierVerification>()
             .await
             .map_err(|e| ProtocolError::Decode {
                 endpoint: endpoint.to_string(),

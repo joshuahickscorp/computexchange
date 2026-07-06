@@ -88,6 +88,11 @@ type jobSubmit struct {
 	// Both omitempty so the unbound/uncapped wire shape is unchanged.
 	MaxUSD  float64 `json:"max_usd,omitempty"`
 	QuoteID string  `json:"quote_id,omitempty"`
+	// PrivatePool routes this job ONLY to suppliers bound via `cx private-pool add`
+	// (Buyer advantage & pricing edge 6->7: "Productize the privacy premium instead
+	// of leaving it a sentence"). false (default) is the ordinary shared-pool path,
+	// unchanged.
+	PrivatePool bool `json:"private_pool,omitempty"`
 }
 
 // ---- HTTP client ----
@@ -163,6 +168,8 @@ func main() {
 		cmdExplainScheduler(args)
 	case "cancel":
 		cmdCancel(args)
+	case "private-pool":
+		cmdPrivatePool(args)
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -194,6 +201,7 @@ func cmdSubmit(args []string) {
 	webhook := fs.String("webhook", "", "https completion webhook URL")
 	quoteID := fs.String("quote-id", "", "bind to an advisory quote id (q_<uuid> from `cx quote`)")
 	maxUSD := fs.Float64("max-usd", 0, "hard spend cap in USD (Budget Governor); 0 = no cap")
+	privatePool := fs.Bool("private-pool", false, "route ONLY to suppliers you've added via `cx private-pool add` (real premium priced in `cx quote`)")
 	s3Key := fs.String("s3-key", "", "use an already-uploaded object instead of --input")
 	wait := fs.Bool("wait", false, "poll to completion and print results")
 	poll := fs.Duration("poll", 3*time.Second, "poll interval with --wait")
@@ -265,11 +273,12 @@ func cmdSubmit(args []string) {
 			HoneypotFrac:   float32(*honeypot),
 			PayoutHoldSecs: uint32(*payoutHold),
 		},
-		Tier:       *tier,
-		Input:      inputField,
-		WebhookURL: *webhook,
-		MaxUSD:     *maxUSD,
-		QuoteID:    *quoteID,
+		Tier:        *tier,
+		Input:       inputField,
+		WebhookURL:  *webhook,
+		MaxUSD:      *maxUSD,
+		QuoteID:     *quoteID,
+		PrivatePool: *privatePool,
 	}
 
 	c := newClient()
@@ -356,6 +365,36 @@ type statusResp struct {
 func cmdCancel(args []string) {
 	id := oneArg("cancel", args)
 	printJSON(newClient().do("DELETE", "/v1/jobs/"+id, nil))
+}
+
+// cmdPrivatePool is the real buyer-facing private-pool flow (Buyer advantage &
+// pricing edge 6->7, docs/internal/CREED_AND_PATH_TO_TEN.md: "Productize the
+// privacy premium instead of leaving it a sentence") — add/list/remove over the
+// already-wired server-side AddPrivatePoolMember, so a buyer can designate a
+// private supplier pool end to end via the CLI, not just a database row.
+func cmdPrivatePool(args []string) {
+	if len(args) == 0 {
+		fatalf("usage: cx private-pool add|list|remove <supplier_id>")
+	}
+	sub, rest := args[0], args[1:]
+	c := newClient()
+	switch sub {
+	case "add":
+		sid := oneArg("private-pool add", rest)
+		c.do("POST", "/v1/private-pool", mustJSON(map[string]string{"supplier_id": sid}))
+		fmt.Printf("added supplier %s to your private pool\n", sid)
+	case "list":
+		if len(rest) != 0 {
+			fatalf("usage: cx private-pool list")
+		}
+		printJSON(c.do("GET", "/v1/private-pool", nil))
+	case "remove":
+		sid := oneArg("private-pool remove", rest)
+		c.do("DELETE", "/v1/private-pool/"+sid, nil)
+		fmt.Printf("removed supplier %s from your private pool\n", sid)
+	default:
+		fatalf("unknown private-pool subcommand %q (try add, list, or remove)", sub)
+	}
 }
 
 func cmdResults(args []string) {
@@ -528,16 +567,19 @@ type quoteResp struct {
 		FirstBadLine     int   `json:"first_bad_line"`
 	} `json:"input"`
 	Execution struct {
-		RecommendedSplitSize int    `json:"recommended_split_size"`
-		EstimatedTasks       int    `json:"estimated_tasks"`
-		EligibleWorkersNow   int    `json:"eligible_workers_now"`
-		OOMRisk              string `json:"oom_risk"`
-		ColdStartRisk        string `json:"cold_start_risk"`
+		RecommendedSplitSize   int    `json:"recommended_split_size"`
+		EstimatedTasks         int    `json:"estimated_tasks"`
+		EligibleWorkersNow     int    `json:"eligible_workers_now"`
+		OOMRisk                string `json:"oom_risk"`
+		ColdStartRisk          string `json:"cold_start_risk"`
+		PrivatePool            bool   `json:"private_pool"`
+		PrivatePoolMemberCount int    `json:"private_pool_member_count"`
 	} `json:"execution"`
 	Cost struct {
-		MinUSD      float64 `json:"min_usd"`
-		ExpectedUSD float64 `json:"expected_usd"`
-		MaxUSD      float64 `json:"max_usd"`
+		MinUSD                float64 `json:"min_usd"`
+		ExpectedUSD           float64 `json:"expected_usd"`
+		MaxUSD                float64 `json:"max_usd"`
+		PrivatePoolPremiumUSD float64 `json:"private_pool_premium_usd"`
 	} `json:"cost"`
 	Time struct {
 		P50Secs int `json:"p50_secs"`
@@ -546,7 +588,8 @@ type quoteResp struct {
 	Budget struct {
 		SuggestedMaxUSD float64 `json:"suggested_max_usd"`
 	} `json:"budget"`
-	Warnings []string `json:"warnings"`
+	Warnings               []string `json:"warnings"`
+	PrivatePoolAttestation string   `json:"private_pool_attestation"`
 }
 
 // cmdQuote scans an input locally-via-server and prints a compact quote (PLANE_C
@@ -561,6 +604,7 @@ func cmdQuote(args []string) {
 	split := fs.Int("split", 0, "lines per task (0 = server adaptive default)")
 	minMemory := fs.Float64("min-memory", 0, "min worker memory GB")
 	redundancy := fs.Float64("redundancy", 0, "redundancy fraction 0.0-1.0")
+	privatePool := fs.Bool("private-pool", false, "price a private-pool submission (routes only to suppliers you've added via `cx private-pool add`)")
 	asJSON := fs.Bool("json", false, "print the full quote JSON")
 	fs.Parse(args)
 	if *model == "" || *typ == "" {
@@ -582,6 +626,7 @@ func cmdQuote(args []string) {
 		Verification: verificationPolicy{RedundancyFrac: float32(*redundancy)},
 		Tier:         *tier,
 		Input:        mustJSON(string(data)),
+		PrivatePool:  *privatePool,
 	}
 	out := newClient().do("POST", "/v1/quote", mustJSON(sub))
 	if *asJSON {
@@ -610,11 +655,20 @@ func printQuote(q quoteResp, model, typ, tier, inputPath string) {
 	p("  Cost     : $%.4f-$%.4f expected $%.4f", q.Cost.MinUSD, q.Cost.MaxUSD, q.Cost.ExpectedUSD)
 	p("  ETA      : p50 %s, p90 %s", humanSecs(q.Time.P50Secs), humanSecs(q.Time.P90Secs))
 	p("  Risk     : %s OOM, %s cold-start", q.Execution.OOMRisk, q.Execution.ColdStartRisk)
+	if q.Execution.PrivatePool {
+		p("  Private  : pool of %d bound supplier(s) · premium $%.4f (already included above)",
+			q.Execution.PrivatePoolMemberCount, q.Cost.PrivatePoolPremiumUSD)
+		p("  Guarantee: %s", q.PrivatePoolAttestation)
+	}
 	for _, w := range q.Warnings {
 		p("  ⚠ %s", w)
 	}
 	p("  Cap      : --max-usd %.4f (suggested)", q.Budget.SuggestedMaxUSD)
-	p("  Submit   : cx submit --model %s --type %s --tier %s --input %s", model, typ, tier, inputPath)
+	submitFlags := ""
+	if q.Execution.PrivatePool {
+		submitFlags = " --private-pool"
+	}
+	p("  Submit   : cx submit --model %s --type %s --tier %s --input %s%s", model, typ, tier, inputPath, submitFlags)
 }
 
 // human formats a count with k/M suffixes; humanBytes/humanSecs for sizes/durations.
@@ -741,6 +795,7 @@ Usage:
   cx models
   cx estimate --model <id> --units N [--tier t]
   cx explain-scheduler --worker <id>   (admin key)
+  cx private-pool add|list|remove <supplier_id>
 
 Env:
   CX_API_URL   control plane base URL (default http://localhost:8080)

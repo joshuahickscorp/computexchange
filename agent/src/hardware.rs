@@ -9,13 +9,127 @@
 //! runs each available runner on a tiny fixed workload and measures eps/tps,
 //! p99 latency, and a sustained-load thermal proxy (see `runners::run_benchmarks`).
 
+use std::path::PathBuf;
 use std::process::Command;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use sysinfo::System;
 use uuid::Uuid;
 
-use crate::types::{HardwareClass, WorkerCapability};
+use crate::types::{BenchResult, HardwareClass, WorkerCapability};
+
+/// How long a cached startup benchmark stays valid before it's re-measured anyway,
+/// even if the (agent_version, build_hash, hardware) key still matches.
+const BENCH_CACHE_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// On-disk shape of a cached startup benchmark (memory bandwidth + per-model
+/// tok/s-or-eps sweep). Every real launch of the agent otherwise burns ~45-60s of
+/// near-full-load GPU/CPU compute running these unconditionally (the fan-spin-up
+/// moment most likely to make a supplier uninstall) — this cache lets a WARM
+/// relaunch on the same build + same hardware skip straight to reusing the last
+/// real measurement instead of re-running it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BenchCache {
+    /// Identifies exactly what this measurement is valid for: the agent version,
+    /// the verification-class build hash (so a kernel/codegen change invalidates
+    /// the cache automatically, never silently reuses a stale number), and a
+    /// hardware fingerprint (CPU brand string + rounded host memory) so moving
+    /// the same binary to different hardware also invalidates it.
+    key: String,
+    measured_unix: u64,
+    memory_bw_gbps: f32,
+    benchmarks: Vec<BenchResult>,
+}
+
+/// Resolve the bench-cache file path: `$CX_BENCH_CACHE_PATH` (when set and
+/// non-empty), else `~/.compute-exchange/bench_cache.json`, else
+/// `./bench_cache.json` if `$HOME` is unset — mirrors `status::status_path()`'s
+/// resolution order exactly.
+fn bench_cache_path() -> PathBuf {
+    if let Ok(p) = std::env::var("CX_BENCH_CACHE_PATH") {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() => PathBuf::from(home)
+            .join(".compute-exchange")
+            .join("bench_cache.json"),
+        _ => PathBuf::from("bench_cache.json"),
+    }
+}
+
+fn bench_cache_key(agent_version: &str, build_hash: &str, brand: &str, host_mem_gb: f32) -> String {
+    // Round memory to the nearest GB: sysinfo/sysctl readings are exact-byte but a
+    // supplier's "same Mac" reading can jitter by a few MB across boots.
+    format!(
+        "{agent_version}|{build_hash}|{brand}|{}",
+        host_mem_gb.round() as i64
+    )
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Load a cached benchmark if the key matches and it isn't stale. Any read/parse
+/// failure (missing file, corrupt JSON, older schema) is treated as a cache miss —
+/// never a hard error — so a broken cache file can never block startup; it just
+/// falls back to re-measuring, exactly like a fresh install.
+fn load_bench_cache(key: &str) -> Option<(f32, Vec<BenchResult>)> {
+    let path = bench_cache_path();
+    let bytes = std::fs::read(&path).ok()?;
+    let cache: BenchCache = serde_json::from_slice(&bytes).ok()?;
+    if cache.key != key {
+        tracing::info!("bench cache: hardware/build changed since last run; re-measuring");
+        return None;
+    }
+    let age = now_unix().saturating_sub(cache.measured_unix);
+    if age > BENCH_CACHE_MAX_AGE_SECS {
+        tracing::info!(age_secs = age, "bench cache: stale (>7d); re-measuring");
+        return None;
+    }
+    tracing::info!(
+        age_secs = age,
+        path = %path.display(),
+        "bench cache: reusing measured startup benchmark (skipping ~45-60s cold re-measure)"
+    );
+    Some((cache.memory_bw_gbps, cache.benchmarks))
+}
+
+/// Persist a freshly-measured benchmark. A write failure is logged and swallowed
+/// (matches `status.rs`'s "never fail the caller over a side-channel write") — the
+/// agent already has the real numbers in hand for THIS run; only the next launch's
+/// cache hit is at stake.
+fn save_bench_cache(key: &str, memory_bw_gbps: f32, benchmarks: &[BenchResult]) {
+    let path = bench_cache_path();
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::warn!(error = %e, path = %parent.display(), "bench cache: failed to create directory; skipping write");
+            return;
+        }
+    }
+    let cache = BenchCache {
+        key: key.to_string(),
+        measured_unix: now_unix(),
+        memory_bw_gbps,
+        benchmarks: benchmarks.to_vec(),
+    };
+    match serde_json::to_vec_pretty(&cache) {
+        Ok(bytes) => {
+            if let Err(e) = std::fs::write(&path, bytes) {
+                tracing::warn!(error = %e, path = %path.display(), "bench cache: failed to write; next launch will re-measure");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "bench cache: failed to serialize; next launch will re-measure")
+        }
+    }
+}
 
 /// Bytes touched per streaming pass of the bandwidth benchmark (~256 MiB).
 const BENCH_BYTES: usize = 256 * 1024 * 1024;
@@ -78,6 +192,75 @@ fn nvidia_gpu() -> Option<(String, f32)> {
     let (name, mib) = first.split_once(',')?;
     let mib: f64 = mib.trim().parse().ok()?;
     Some((name.trim().to_string(), (mib / 1024.0) as f32)) // MiB → GiB (~GB)
+}
+
+/// The REAL VRAM memory bandwidth (decimal GB/s) of a detected NVIDIA card, by its
+/// `nvidia-smi` product name (CUDA Lane Performance & Parity 6→6.5).
+///
+/// Why this exists: `measure_memory_bandwidth_gbps()` runs a HOST-CPU streaming
+/// microbenchmark (~40-60 GB/s on any box, Mac or cloud VM). On the Apple lane that
+/// approximates the unified-memory bandwidth that actually gates inference, so it is
+/// the right number there. On the CUDA lane it is meaningless and ~30x too low — an
+/// A100's inference throughput is gated by its ~1.5-2 TB/s HBM, not the host VM's DDR.
+/// Advertising the host number on an NVIDIA worker misrepresents the single most
+/// decisive spec of the card by roughly 30x. Each entry below is the manufacturer's
+/// published HBM/GDDR bandwidth for that EXACT SKU (the one `nvidia-smi` names) — a
+/// real, verifiable spec for the detected card, not a fabricated or host-derived
+/// figure. `None` for an unrecognized card, so the caller falls back to the honest
+/// microbenchmark rather than inventing a number. Matched most-specific-substring
+/// first (an "A100-SXM4-80GB" must not fall through to a generic "A100" 40GB entry).
+fn nvidia_vram_bandwidth_gbps(gpu_name: &str) -> Option<f32> {
+    let n = gpu_name.to_ascii_uppercase();
+    // Order matters: more specific SKU markers precede their family fallback.
+    const TABLE: &[(&str, f32)] = &[
+        // Hopper / Blackwell (HBM3/HBM3e)
+        ("H200", 4800.0),
+        ("H100 SXM", 3350.0),
+        ("H100 80GB HBM3", 3350.0),
+        ("H100 PCIE", 2000.0),
+        ("H100", 3350.0),
+        ("GH200", 4900.0),
+        ("B200", 8000.0),
+        // Ampere datacenter (HBM2/HBM2e)
+        ("A100-SXM4-80GB", 2039.0),
+        ("A100 80GB PCIE", 1935.0),
+        ("A100-PCIE-40GB", 1555.0),
+        ("A100-SXM4-40GB", 1555.0),
+        ("A100", 1555.0), // conservative family fallback (40GB HBM2)
+        // Ampere / Ada workstation + inference (GDDR6/GDDR6X)
+        ("A40", 696.0),
+        ("A10G", 600.0),
+        ("A10", 600.0),
+        ("L40S", 864.0),
+        ("L40", 864.0),
+        ("L4", 300.0),
+        ("RTX 6000 ADA", 960.0),
+        ("RTX 4090", 1008.0),
+        ("RTX 3090", 936.0),
+        // Turing / Volta datacenter
+        ("V100", 900.0),
+        ("T4", 320.0),
+    ];
+    TABLE
+        .iter()
+        .find(|(marker, _)| n.contains(marker))
+        .map(|(_, gbps)| *gbps)
+}
+
+/// The worker's advertised `memory_bw_gbps`: the detected NVIDIA card's REAL VRAM
+/// bandwidth when this is an NVIDIA host (the number that actually gates GPU
+/// inference), else the host streaming microbenchmark (correct for the Apple unified
+/// / CPU lanes). Never fabricates: an unrecognized NVIDIA card falls back to the
+/// honest microbenchmark with a warning rather than a guessed VRAM figure.
+fn advertised_memory_bw_gbps() -> f32 {
+    if let Some((name, _vram)) = nvidia_gpu() {
+        if let Some(vram_bw) = nvidia_vram_bandwidth_gbps(&name) {
+            tracing::info!(gpu = %name, vram_bw_gbps = vram_bw, "advertising REAL NVIDIA VRAM bandwidth (spec for the detected SKU), not the host microbenchmark");
+            return vram_bw;
+        }
+        tracing::warn!(gpu = %name, "unrecognized NVIDIA card: no VRAM-bandwidth spec on file, falling back to the host streaming microbenchmark (which UNDERSTATES real GPU bandwidth) — add this SKU to nvidia_vram_bandwidth_gbps");
+    }
+    measure_memory_bandwidth_gbps()
 }
 
 /// Map NVIDIA VRAM (GB) to a VRAM-tiered `HardwareClass`. VRAM is the gating
@@ -324,11 +507,17 @@ pub fn read_vram_snapshot() -> Option<MemorySnapshot> {
 /// `supported_models`/`supported_jobs` are the CANONICAL catalogue (contract #4),
 /// not whatever happened to benchmark — the control plane's hard model filter
 /// dispatches against these exact ids.
-pub fn detect_and_benchmark(
+/// `pool` is the SAME `ModelPool` the agent reuses for real task dispatch
+/// afterward (Warm Model Pool 6->6.5, docs/internal/CREED_AND_PATH_TO_TEN.md):
+/// the benchmark load below is routed through it so it becomes the agent's one
+/// real cold load per model, not a rehearsal that gets dropped and re-paid on
+/// the first real task.
+pub async fn detect_and_benchmark(
     supplier_id: Uuid,
     agent_version: &str,
     min_payout_usd_hr: f32,
     engine: &str,
+    pool: &crate::pool::ModelPool,
 ) -> WorkerCapability {
     let mut sys = System::new();
     sys.refresh_memory();
@@ -366,24 +555,39 @@ pub fn detect_and_benchmark(
         (class, host_mem_gb)
     };
 
-    tracing::info!("running memory-bandwidth microbenchmark (~256MiB streaming)...");
-    let memory_bw_gbps = measure_memory_bandwidth_gbps();
-    tracing::info!(memory_bw_gbps, "measured streaming memory bandwidth");
+    // Cache key: same agent build (build_hash folds in the verification-class
+    // content id, so a kernel/codegen change invalidates it automatically) on the
+    // same physical hardware. A hit skips ~45-60s of near-full-load GPU/CPU
+    // benchmarking on every relaunch — the exact fan-spin-up moment that makes a
+    // supplier notice and consider uninstalling.
+    let build_hash = engine_build_hash(engine, agent_version);
+    let cache_key = bench_cache_key(agent_version, &build_hash, &brand, host_mem_gb);
 
-    // REAL per-model benchmarks: load each backend and measure it on a tiny
-    // workload. Models that fail to load (e.g. HF unreachable) are skipped with
-    // a warning inside `run_benchmarks` — never replaced by fabricated numbers.
-    tracing::info!(
-        device = crate::models::device_label(),
-        "running real model benchmarks (embed eps + llama tps, ~20s each)…"
-    );
-    let benchmarks = crate::runners::run_benchmarks();
-    for b in &benchmarks {
-        tracing::info!(
-            model = %b.model_id, eps = b.eps, tps = b.tps, p99_ms = b.p99_ms,
-            thermal_ok = b.thermal_ok, "benchmark"
-        );
-    }
+    let (memory_bw_gbps, benchmarks) = match load_bench_cache(&cache_key) {
+        Some(cached) => cached,
+        None => {
+            tracing::info!("resolving advertised memory bandwidth (real NVIDIA VRAM spec on a CUDA host; host streaming microbenchmark on Apple/CPU)...");
+            let memory_bw_gbps = advertised_memory_bw_gbps();
+            tracing::info!(memory_bw_gbps, "resolved advertised memory bandwidth");
+
+            // REAL per-model benchmarks: load each backend and measure it on a tiny
+            // workload. Models that fail to load (e.g. HF unreachable) are skipped with
+            // a warning inside `run_benchmarks` — never replaced by fabricated numbers.
+            tracing::info!(
+                device = crate::models::device_label(),
+                "running real model benchmarks (embed, llama 1B, llama 7B, whisper, rerank; ~20s each)…"
+            );
+            let benchmarks = crate::runners::run_benchmarks(pool, memory_gb).await;
+            for b in &benchmarks {
+                tracing::info!(
+                    model = %b.model_id, eps = b.eps, tps = b.tps, p99_ms = b.p99_ms,
+                    thermal_ok = b.thermal_ok, "benchmark"
+                );
+            }
+            save_bench_cache(&cache_key, memory_bw_gbps, &benchmarks);
+            (memory_bw_gbps, benchmarks)
+        }
+    };
     // Advertise the CANONICAL catalogue ids (contract #4), regardless of which
     // benchmarks happened to load. These must match prove-local's submitted refs
     // and the control-plane models table, or the hard model filter never
@@ -426,7 +630,7 @@ pub fn detect_and_benchmark(
         // redundancy peers + honeypots to the same (hw_class, engine, build_hash), so a
         // kernel/codegen change shipped in a NEW agent build lands in a new class and is
         // never byte-docked against an old-build peer (docs/DETERMINISM_CLASS.md).
-        build_hash: engine_build_hash(engine, agent_version),
+        build_hash,
         memory_gb,
         memory_bw_gbps,
         // Job types this agent will accept dispatch for. `can_run` in runners.rs
@@ -481,6 +685,97 @@ pub fn read_gpu_telemetry() -> Option<(f32, Option<f32>)> {
     Some((util_pct, temp_c))
 }
 
+/// PATCH (P-real-platform-signals, docs/internal/CREED_AND_PATH_TO_TEN.md, "Agent
+/// idle footprint & startup overhead" 7→8): "Replace subprocess polling with real
+/// platform signals". Battery state used to be read by spawning `pmset -g batt`
+/// (main.rs's old `on_battery`) — a subprocess fork+exec+parse on every poll cycle,
+/// documented in this same audit as "~6,500 times a day". `IOPSGetProvidingPowerSourceType`
+/// is the real macOS/IOKit API for the exact same fact (AC vs battery vs UPS),
+/// read in-process via the `IOKit.framework` C ABI — no fork, no shell, no text
+/// parsing. Returns `false` (not on battery / can't tell) when the info blob or
+/// the power-source-type string can't be read, matching the old subprocess path's
+/// own fail-open behavior (a failed pmset call also returned "not on battery").
+#[cfg(target_os = "macos")]
+pub fn on_battery() -> bool {
+    use objc2_core_foundation::{CFRetained, CFString, CFType};
+    use std::ffi::c_void;
+    use std::ptr::NonNull;
+
+    #[link(name = "IOKit", kind = "framework")]
+    extern "C" {
+        fn IOPSCopyPowerSourcesInfo() -> *const c_void;
+        fn IOPSGetProvidingPowerSourceType(snapshot: *const c_void) -> *const c_void;
+    }
+
+    // SAFETY: both functions are read-only C queries into IOKit's power-source
+    // registry. `IOPSCopyPowerSourcesInfo` follows CF "Copy" semantics (caller
+    // owns one reference, released via `CFRetained::from_raw` + drop below).
+    // `IOPSGetProvidingPowerSourceType` follows CF "Get" semantics — the
+    // returned `CFStringRef` is owned by (and lives at least as long as) the
+    // `blob`, so we read it BEFORE releasing `blob_ref`, never after.
+    unsafe {
+        let blob = IOPSCopyPowerSourcesInfo();
+        let Some(blob_ptr) = NonNull::new(blob as *mut CFType) else {
+            return false; // no power-source info available; fail open (not on battery)
+        };
+        let blob_ref: CFRetained<CFType> = CFRetained::from_raw(blob_ptr);
+        let type_ref = IOPSGetProvidingPowerSourceType(blob);
+        let on_battery = if type_ref.is_null() {
+            false
+        } else {
+            (*(type_ref as *const CFString))
+                .to_string()
+                .contains("Battery")
+        };
+        drop(blob_ref);
+        on_battery
+    }
+}
+
+/// Non-macOS builds (the CUDA/Linux lane) have no IOKit power-source registry —
+/// a rented GPU box is never running on battery, so report the honest constant
+/// rather than fabricating a subprocess call that doesn't exist on that platform.
+#[cfg(not(target_os = "macos"))]
+pub fn on_battery() -> bool {
+    false
+}
+
+/// PATCH (P-real-platform-signals, docs/internal/CREED_AND_PATH_TO_TEN.md, "Agent
+/// idle footprint & startup overhead" 7→8): real thermal-pressure + low-power-mode
+/// reading via `NSProcessInfo` (Cocoa/Foundation), in-process — no subprocess, no
+/// `powermetrics`/`pmset` text scraping. This is the SAME signal
+/// `config::ThermalPressure`/`evaluate_thermal_throttle` already model and unit-test
+/// (that machinery was built ahead of a real reader; this IS the real reader) — Apple's
+/// own definition of "this device is measurably hot", the identical enum the OS uses
+/// internally to throttle itself. Maps `NSProcessInfoThermalState` (0..=3) onto our
+/// `config::ThermalPressure` 1:1; any future OS thermal state we don't recognize
+/// degrades to `Critical` (fail SAFE — pause work — never silently treated as nominal).
+#[cfg(target_os = "macos")]
+pub fn read_thermal_pressure() -> Option<crate::config::ThermalPressure> {
+    use crate::config::ThermalPressure;
+    use objc2_foundation::{NSProcessInfo, NSProcessInfoThermalState};
+
+    // Both are safe-in-this-binding read-only calls: `processInfo()` returns the
+    // shared process-info singleton and `thermalState()` is a plain property getter.
+    let info = NSProcessInfo::processInfo();
+    let state = info.thermalState();
+    Some(match state {
+        NSProcessInfoThermalState::Nominal => ThermalPressure::Nominal,
+        NSProcessInfoThermalState::Fair => ThermalPressure::Fair,
+        NSProcessInfoThermalState::Serious => ThermalPressure::Serious,
+        _ => ThermalPressure::Critical, // Critical, or any future/unknown state — fail safe
+    })
+}
+
+/// Off macOS there is no `NSProcessInfo.thermalState` (Foundation isn't linked at
+/// all on the CUDA/Linux lane) — `None` is the honest "no reading available"
+/// value `evaluate_thermal_throttle` already treats as "unknown, never assumed
+/// nominal", matching this function's macOS counterpart's own failure semantics.
+#[cfg(not(target_os = "macos"))]
+pub fn read_thermal_pressure() -> Option<crate::config::ThermalPressure> {
+    None
+}
+
 /// True when this host can run the BYO-container `custom` lane: a reachable Docker
 /// daemon. Checked once at capability build so the worker never advertises a lane it
 /// cannot execute (the NVIDIA Container Toolkit is assumed on a GPU supplier box and
@@ -522,6 +817,83 @@ mod tests {
     fn bandwidth_is_positive() {
         // A real run on any machine must report > 0 GB/s.
         assert!(measure_memory_bandwidth_gbps() > 0.0);
+    }
+
+    #[test]
+    fn nvidia_vram_bandwidth_uses_real_per_sku_spec_not_host_number() {
+        // The exact product strings `nvidia-smi --query-gpu=name` emits.
+        // Each must resolve to its real HBM/GDDR spec — an order of magnitude
+        // above any host-CPU streaming microbenchmark (~40-60 GB/s), which is the
+        // whole point of the CUDA 6->6.5 fix.
+        assert_eq!(nvidia_vram_bandwidth_gbps("NVIDIA A100-SXM4-80GB"), Some(2039.0));
+        assert_eq!(nvidia_vram_bandwidth_gbps("NVIDIA A100-PCIE-40GB"), Some(1555.0));
+        assert_eq!(nvidia_vram_bandwidth_gbps("NVIDIA H100 80GB HBM3"), Some(3350.0));
+        assert_eq!(nvidia_vram_bandwidth_gbps("NVIDIA L4"), Some(300.0));
+        // Most-specific-substring wins: the 80GB SXM SKU must NOT fall through to
+        // the generic "A100" 40GB family entry.
+        assert!(nvidia_vram_bandwidth_gbps("NVIDIA A100-SXM4-80GB").unwrap() > 2000.0);
+        // Every known datacenter card is >> any plausible host streaming number.
+        for name in ["NVIDIA A100-SXM4-80GB", "NVIDIA H100 PCIe", "Tesla V100-SXM2-16GB"] {
+            assert!(
+                nvidia_vram_bandwidth_gbps(name).unwrap() > 500.0,
+                "{name} must resolve to a real GPU bandwidth, not a host figure"
+            );
+        }
+        // An unknown card returns None so the caller falls back honestly, never a guess.
+        assert_eq!(nvidia_vram_bandwidth_gbps("NVIDIA MADE-UP-9000"), None);
+        assert_eq!(nvidia_vram_bandwidth_gbps("Apple M3 Pro"), None);
+    }
+
+    /// A cold cache (no file yet), a matching-key hit, a build/hardware-mismatch
+    /// miss, and a stale (>7d) miss — the four cache states `detect_and_benchmark`
+    /// actually relies on. Uses a dedicated temp path via `CX_BENCH_CACHE_PATH` so
+    /// it never touches a real `~/.compute-exchange/bench_cache.json`.
+    #[test]
+    fn bench_cache_hit_miss_and_staleness() {
+        let dir = std::env::temp_dir().join(format!("cx-bench-cache-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("bench_cache.json");
+        std::env::set_var("CX_BENCH_CACHE_PATH", &path);
+
+        // 1. Nothing written yet: a miss, not a panic or a fabricated value.
+        assert!(load_bench_cache("k1").is_none());
+
+        // 2. Save, then load with the SAME key: a hit, with the exact values back.
+        let sample = vec![BenchResult {
+            model_id: "all-minilm-l6-v2".to_string(),
+            job_type: "embed".to_string(),
+            tps: 0.0,
+            eps: 812.5,
+            p99_ms: 12,
+            thermal_ok: true,
+            load_ms: 340,
+        }];
+        save_bench_cache("k1", 123.75, &sample);
+        let (bw, benches) = load_bench_cache("k1").expect("fresh matching-key save must hit");
+        assert_eq!(bw, 123.75);
+        assert_eq!(benches.len(), 1);
+        assert_eq!(benches[0].model_id, "all-minilm-l6-v2");
+
+        // 3. Same file, DIFFERENT key (e.g. a new agent build_hash or different
+        // hardware): must miss even though the file is fresh and well-formed.
+        assert!(load_bench_cache("k2-different-build").is_none());
+
+        // 4. Same key, but measured far enough in the past to exceed the 7-day
+        // cap: must miss even though the key matches exactly.
+        let stale = BenchCache {
+            key: "k1".to_string(),
+            measured_unix: now_unix().saturating_sub(BENCH_CACHE_MAX_AGE_SECS + 3600),
+            memory_bw_gbps: 999.0,
+            benchmarks: vec![],
+        };
+        std::fs::write(&path, serde_json::to_vec(&stale).unwrap()).unwrap();
+        assert!(
+            load_bench_cache("k1").is_none(),
+            "a >7d-old cache must be treated as a miss"
+        );
+
+        std::env::remove_var("CX_BENCH_CACHE_PATH");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -596,6 +968,77 @@ mod tests {
             "available ({}) must be within [0, total ({})]",
             s.available_gb,
             s.total_gb
+        );
+    }
+
+    /// PATCH (P-real-platform-signals, docs/internal/CREED_AND_PATH_TO_TEN.md,
+    /// "Agent idle footprint & startup overhead" 7→8): a real, in-process
+    /// platform-signal call — no subprocess, so this must never panic, hang, or
+    /// require any process spawn permission. Not asserting a specific value (this
+    /// box's real battery/thermal state at test time is whatever it is) — the
+    /// proof is that the call completes and returns a value of the right shape,
+    /// exactly mirroring `read_memory_snapshot_is_real`'s own "real, not
+    /// fabricated" discipline.
+    #[test]
+    fn on_battery_reads_real_platform_state_without_a_subprocess() {
+        // Must simply return without panicking; both true/false are valid depending
+        // on whether this test runs on AC or battery power.
+        let _ = on_battery();
+    }
+
+    #[test]
+    fn read_thermal_pressure_reads_real_nsprocessinfo_without_a_subprocess() {
+        // On macOS this must be Some(..) — a live machine always has SOME thermal
+        // reading. Off macOS (not exercised in this CI, but documented) it is None.
+        #[cfg(target_os = "macos")]
+        assert!(
+            read_thermal_pressure().is_some(),
+            "a real macOS process always has a thermalState reading"
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(read_thermal_pressure(), None);
+    }
+
+    /// Real proof of the Warm Model Pool 6->6.5 fix
+    /// (docs/internal/CREED_AND_PATH_TO_TEN.md): `detect_and_benchmark`'s model
+    /// loads must land in the SAME pool a real task reuses afterward, so the
+    /// benchmark's cold load is the agent's ONLY cold load for that model — not a
+    /// rehearsal that gets thrown away and re-paid on the first real dispatch.
+    /// Downloads real weights (MiniLM + the 1B GGUF), so gated behind `#[ignore]`.
+    /// Run with:
+    ///   cargo test --release benchmark_load_stays_warm_for_real_dispatch -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "downloads real MiniLM + Llama-3.2-1B weights and runs the full benchmark"]
+    async fn benchmark_load_stays_warm_for_real_dispatch() {
+        let pool = crate::pool::ModelPool::new();
+        let before = crate::pool::loads();
+        let cap = detect_and_benchmark(uuid::Uuid::nil(), "test", 0.0, "candle", &pool).await;
+        assert!(
+            !cap.benchmarks.is_empty(),
+            "benchmark must have produced at least one real result"
+        );
+        let after_bench = crate::pool::loads();
+        let real_loads_during_bench = after_bench - before;
+        assert!(
+            real_loads_during_bench >= 1,
+            "benchmarking must have caused at least one real model load, got {real_loads_during_bench}"
+        );
+
+        // A "real task" touching the SAME models afterward, through the SAME pool,
+        // must NOT cause any further load — this is the whole point of the fix.
+        let _ = pool
+            .embedder("")
+            .await
+            .expect("embedder must already be warm");
+        let _ = pool
+            .llama("")
+            .await
+            .expect("llama backend must already be warm");
+        let after_reuse = crate::pool::loads();
+        assert_eq!(
+            after_reuse, after_bench,
+            "reusing the benchmarked models via the same pool must cause ZERO additional loads (got {} more)",
+            after_reuse - after_bench
         );
     }
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"strconv"
@@ -60,6 +61,26 @@ const (
 	chargeRetryStep = 30 * time.Minute
 	chargeRetryMax  = 6 * time.Hour
 )
+
+// firmChargeAmountSQL is the shared SQL expression for "the amount this job
+// should actually be charged" (Project Detection & Quotation 7->8,
+// docs/internal/CREED_AND_PATH_TO_TEN.md, "Ship a firm-quote tier: a real
+// commitment, not just an estimate"): actual_usd normally, but capped at
+// firm_quote_max_usd for a firm-quote job whose real cost exceeded what it
+// committed to — and, since Speed Lane wave 2A, NET of any recorded speed-SLA
+// refund (the sla_refund ledger credit keyed 'sla-<job_id>'; see
+// settleSLAOutcome below), floored at zero. Used by BOTH charge paths — the
+// immediate single-job path (Store.JobChargeInfo, the Go-side twin of this
+// same logic) and the batch path (FormChargeBatch) — so neither the firm cap
+// nor the SLA remedy can be bypassed by which path happens to collect the job.
+const firmChargeAmountSQL = `GREATEST(0, CASE
+	WHEN firm_quote AND COALESCE(firm_quote_max_usd,0) > 0
+	     AND COALESCE(actual_usd,0) > firm_quote_max_usd
+	THEN firm_quote_max_usd
+	ELSE COALESCE(actual_usd,0)
+END - COALESCE((SELECT SUM(le.amount_usd) FROM ledger_entries le
+                WHERE le.kind = 'sla_refund'
+                  AND le.payout_ref = 'sla-' || jobs.id::text), 0))`
 
 // chargeMinUSD reads the CX_CHARGE_MIN_USD batching threshold (USD). Unset or
 // unparseable → the 5.00 default; a negative value is clamped to 0 (= batch
@@ -250,8 +271,14 @@ func (s *Store) FormChargeBatch(ctx context.Context, buyerID uuid.UUID) (batch C
 	// Membership is capped per batch: an unbounded sum can overflow the NUMERIC
 	// column (months of parked debt re-armed at once) and a giant member set makes
 	// the freeze transaction long. Leftovers simply form the next batch next tick.
+	//
+	// firmChargeAmountSQL (Project Detection & Quotation 7->8): a batched job can
+	// be firm-quoted too, and batching must never let it bypass the cap
+	// JobChargeInfo already enforces on the immediate-charge path — a firm-quote
+	// job that happens to settle under the batching threshold would otherwise be
+	// charged its full uncapped actual_usd once it lands in a batch with siblings.
 	rows, err := tx.Query(ctx,
-		`SELECT id, COALESCE(actual_usd, 0)::float8 FROM jobs
+		`SELECT id, `+firmChargeAmountSQL+`::float8 FROM jobs
 		 WHERE buyer_id = $1 AND charge_status = 'deferred' AND charge_batch_id IS NULL
 		   AND COALESCE(actual_usd, 0) > 0
 		 ORDER BY created_at ASC
@@ -290,8 +317,11 @@ func (s *Store) FormChargeBatch(ctx context.Context, buyerID uuid.UUID) (batch C
 		buyerID, sum).Scan(&batch.ID); err != nil {
 		return batch, false, err
 	}
+	// billed_usd is stamped HERE (not just charge_attempt_usd, which this batch
+	// path never sets) so a firm-quote job's invoice can show the real capped
+	// amount it was actually batched at, not its uncapped actual_usd.
 	if _, err := tx.Exec(ctx,
-		`UPDATE jobs SET charge_batch_id = $1
+		`UPDATE jobs SET charge_batch_id = $1, billed_usd = `+firmChargeAmountSQL+`
 		 WHERE id = ANY($2::uuid[]) AND charge_status = 'deferred' AND charge_batch_id IS NULL`,
 		batch.ID, ids); err != nil {
 		return batch, false, err
@@ -395,10 +425,13 @@ func (s *Store) MarkJobDeferred(ctx context.Context, jobID uuid.UUID) (bool, err
 // FreezeChargeAmount records the amount a single-job charge attempt is made for,
 // once (first writer wins): every retry must replay the SAME (idempotency key,
 // amount) pair, so the figure is pinned before the first attempt and never drifts
-// with a later re-settle.
+// with a later re-settle. Also stamps billed_usd — the real amount the buyer is
+// actually being charged (already capped by JobChargeInfo for a firm-quote job
+// whose actual cost exceeded its committed maximum) — so the invoice can show the
+// cap took effect, not just the ledger's own uncapped actual_usd.
 func (s *Store) FreezeChargeAmount(ctx context.Context, jobID uuid.UUID, usd float64) error {
 	_, err := s.pool.Exec(ctx,
-		`UPDATE jobs SET charge_attempt_usd = $2
+		`UPDATE jobs SET charge_attempt_usd = $2, billed_usd = COALESCE(billed_usd, $2)
 		 WHERE id = $1 AND charge_attempt_usd IS NULL`, jobID, usd)
 	return err
 }
@@ -491,6 +524,221 @@ func (s *Store) ChargesMissingFeeRows(ctx context.Context, limit int) ([]UnfeedC
 	return out, rows.Err()
 }
 
+// --- speed-SLA enforcement (Speed Lane wave 2A,
+// --- docs/speed-lane-reports/SLA_QUOTE_WAVE2A.md) -------------------------------
+//
+// A job that bound a speed-SLA (jobs.sla_guarantee_secs, stamped at submit from
+// the quote's offer) is judged ONCE, at completion, on the buyer-visible span:
+// created_at (submit) → results_merged_at (the merged artifact exists). Met →
+// sla_met=true and nothing else. Missed → sla_met=false + exactly one
+// sla_refund ledger credit for the premium (capped at what the job is actually
+// chargeable for — the remedy nets a bill down, it never mints free money) + a
+// buyer-visible sla_missed timeline event. The refund is then netted off the
+// collection by firmChargeAmountSQL / JobChargeInfo — the EXISTING collect
+// rails, no new payment path.
+//
+// Idempotent by construction, because THREE sites can observe the same miss
+// (the commit-path finalize, this file's sweep pass, and a re-run of either):
+// the jobs row is locked FOR UPDATE while deciding, sla_met is stamped once
+// (later calls see it non-NULL and no-op), and the refund insert is
+// INSERT-if-absent by payout_ref ('sla-<job_id>') backed by the
+// ledger_sla_refund_ref_uniq partial unique index — the same replay-proof
+// pattern as the stripe_fee recorder.
+//
+// Deliberately NOT wired into deadline_secs/the stuck-run watchdog: the
+// deadline drives a rescue→KILL ladder, and a missed SLA must COMPLETE and
+// REFUND — killing a late job would destroy the buyer's results to punish
+// lateness. A job that never completes (failed/cancelled) is likewise not
+// judged here: its remedy is the existing partial-settle path (pay only for
+// completed tasks), and its sla_met honestly stays NULL — named boundary in
+// the wave report.
+
+// KindSLARefund is the ledger kind of the speed-SLA miss remedy: a POSITIVE
+// buyer amount (credit — the schema's sign convention), payout_ref =
+// slaRefundRef(job) as the idempotency key.
+const KindSLARefund = "sla_refund"
+
+// slaRefundRef is the sla_refund ledger row's payout_ref for a job — the
+// idempotency key the partial unique index enforces (one refund per job, ever).
+func slaRefundRef(jobID uuid.UUID) string { return "sla-" + jobID.String() }
+
+// slaRefundAmount is the pure remedy figure: the full premium, capped at what
+// the job is actually chargeable for (a refund larger than the bill would be
+// minted money, not a remedy). Unit-tested directly.
+func slaRefundAmount(premiumUSD, chargeableUSD float64) float64 {
+	if premiumUSD <= 0 || chargeableUSD <= 0 {
+		return 0
+	}
+	if premiumUSD > chargeableUSD {
+		return chargeableUSD
+	}
+	return premiumUSD
+}
+
+// slaSpanMissed is the pure miss test: the buyer-visible span (submit →
+// results merged) strictly exceeded the guarantee. Landing exactly ON the
+// guarantee is a MET (the promise is "within"). Unit-tested directly.
+func slaSpanMissed(createdAt, mergedAt time.Time, guaranteeSecs int) bool {
+	return mergedAt.Sub(createdAt) > time.Duration(guaranteeSecs)*time.Second
+}
+
+// SLASettleResult reports what SettleJobSLA actually did, so the caller emits
+// the buyer-visible event exactly once (only the call that DECIDED emits).
+type SLASettleResult struct {
+	Decided    bool    // this call stamped sla_met (false: no SLA / already decided / not finalized yet)
+	Met        bool    // the outcome stamped by this call
+	RefundUSD  float64 // the sla_refund credit recorded by this call (0 on met / nothing chargeable)
+	OverBySecs int     // how far past the guarantee the span landed (miss only; for the event text)
+}
+
+// SettleJobSLA decides one job's speed-SLA outcome, exactly once, inside a
+// single transaction. The jobs row is locked FOR UPDATE so the competing
+// settle sites serialize; the refund insert is INSERT-if-absent by payout_ref
+// (plus the partial unique index) so even a settle racing an already-committed
+// sibling can never double-credit.
+func (s *Store) SettleJobSLA(ctx context.Context, jobID uuid.UUID) (SLASettleResult, error) {
+	var res SLASettleResult
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return res, err
+	}
+	defer tx.Rollback(ctx)
+
+	var (
+		buyerID    uuid.UUID
+		guarantee  int
+		premium    float64
+		met        *bool
+		status     string
+		createdAt  time.Time
+		mergedAt   *time.Time
+		chargeable float64 // firm-capped actual BEFORE refund netting (no refund exists yet)
+	)
+	err = tx.QueryRow(ctx,
+		`SELECT buyer_id, COALESCE(sla_guarantee_secs,0), COALESCE(sla_premium_usd,0)::float8,
+		        sla_met, status, created_at, results_merged_at,
+		        (CASE WHEN firm_quote AND COALESCE(firm_quote_max_usd,0) > 0
+		                   AND COALESCE(actual_usd,0) > firm_quote_max_usd
+		              THEN firm_quote_max_usd
+		              ELSE COALESCE(actual_usd,0) END)::float8
+		   FROM jobs WHERE id = $1
+		    FOR UPDATE`,
+		jobID,
+	).Scan(&buyerID, &guarantee, &premium, &met, &status, &createdAt, &mergedAt, &chargeable)
+	if err != nil {
+		return res, err
+	}
+	// Only a completed, merged, SLA-carrying, not-yet-decided job is judged —
+	// anything else is a clean no-op (the sweep retries next tick when the job
+	// simply has not finished merging yet).
+	if guarantee <= 0 || met != nil || status != "complete" || mergedAt == nil {
+		return res, nil
+	}
+
+	if !slaSpanMissed(createdAt, *mergedAt, guarantee) {
+		if _, err := tx.Exec(ctx,
+			`UPDATE jobs SET sla_met = true WHERE id = $1 AND sla_met IS NULL`, jobID); err != nil {
+			return res, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return res, err
+		}
+		return SLASettleResult{Decided: true, Met: true}, nil
+	}
+
+	// MISS: record the once-only refund credit (the premium, capped at the
+	// chargeable amount) and stamp the outcome, atomically.
+	refund := slaRefundAmount(premium, chargeable)
+	if refund > 0 {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO ledger_entries (kind, buyer_id, amount_usd, payout_status, payout_ref)
+			 SELECT $1, $2, $3, 'released', $4
+			 WHERE NOT EXISTS (SELECT 1 FROM ledger_entries WHERE kind = $1 AND payout_ref = $4)`,
+			KindSLARefund, buyerID, refund, slaRefundRef(jobID)); err != nil {
+			return res, err
+		}
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE jobs SET sla_met = false WHERE id = $1 AND sla_met IS NULL`, jobID); err != nil {
+		return res, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return res, err
+	}
+	over := int(mergedAt.Sub(createdAt)/time.Second) - guarantee
+	return SLASettleResult{Decided: true, Met: false, RefundUSD: refund, OverBySecs: over}, nil
+}
+
+// SLAUndecidedCompleteJobs lists completed, merged jobs whose bound speed-SLA
+// outcome has not been decided yet — the sweep's work items. This is the
+// backstop for jobs finalized by the background completion sweep
+// (workers.go sweepAndDeliver), which does not run the commit-path finalize.
+func (s *Store) SLAUndecidedCompleteJobs(ctx context.Context, limit int) ([]uuid.UUID, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id FROM jobs
+		 WHERE COALESCE(sla_guarantee_secs,0) > 0
+		   AND sla_met IS NULL
+		   AND status = 'complete'
+		   AND results_merged_at IS NOT NULL
+		 ORDER BY created_at ASC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// settleSLAOutcome is the shared settle entry point: decide the outcome (once)
+// and, if THIS call decided a miss, surface it on the buyer's timeline. Called
+// from the commit-path finalize (api.go finalizeJobIfDone, BEFORE the charge
+// decision so the refund nets the very first collection) and from the collect
+// sweep below (the backstop for sweep-finalized jobs).
+func settleSLAOutcome(ctx context.Context, store *Store, jobID uuid.UUID) {
+	res, err := store.SettleJobSLA(ctx, jobID)
+	if err != nil {
+		log.Printf("sla: settling outcome for job %s: %v (retried by the collect sweep)", jobID, err)
+		return
+	}
+	if !res.Decided {
+		return
+	}
+	if res.Met {
+		log.Printf("sla: job %s met its speed-SLA (guarantee held)", jobID)
+		return
+	}
+	// Miss: the event is emitted only by the call that decided (Decided=true),
+	// so a re-run/sweep replay never duplicates it.
+	_ = store.InsertJobEvent(ctx, jobID, nil, "sla_missed",
+		fmt.Sprintf("Speed SLA missed by %ds · the $%.6f premium was refunded automatically (netted off your charge)", res.OverBySecs, res.RefundUSD), nil)
+	// A dedicated metrics counter would live in metrics.go (outside this
+	// bundle's file set) — the structured log line + the ledger row + the job
+	// event are the observability for now; the counter is a named follow-up.
+	log.Printf("sla: job %s MISSED its speed-SLA by %ds — refunded $%.6f (once, ledger sla_refund)", jobID, res.OverBySecs, res.RefundUSD)
+}
+
+// settleSLAOutcomes is the sweep pass: judge every completed-but-undecided
+// SLA job. Runs inside the charge-collect tick BEFORE any charging duty, and
+// deliberately BEFORE the Stripe gate — the SLA outcome and its ledger truth
+// are independent of whether billing is configured.
+func (wk *Workers) settleSLAOutcomes(ctx context.Context) error {
+	ids, err := wk.store.SLAUndecidedCompleteJobs(ctx, sweepBatch)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		settleSLAOutcome(ctx, wk.store, id)
+	}
+	return nil
+}
+
 // --- the sweep ---
 
 // collectCharges is the charge-collect tick. Gated on stripeKey(): unconfigured
@@ -499,6 +747,15 @@ func (s *Store) ChargesMissingFeeRows(ctx context.Context, limit int) ([]UnfeedC
 // for the rest — but a query failure surfaces as the tick's error so the
 // liveness guard sees a genuinely wedged sweep.
 func (wk *Workers) collectCharges(ctx context.Context) error {
+	// Speed-SLA outcomes FIRST, and before the Stripe gate (wave 2A): the
+	// outcome + refund are ledger truth independent of billing configuration,
+	// and running them ahead of every charging duty below guarantees a
+	// sweep-finalized job's refund exists BEFORE its terminal-coverage charge is
+	// decided in the same tick — the refund nets the very first collection.
+	if err := wk.settleSLAOutcomes(ctx); err != nil {
+		return err
+	}
+
 	if stripeKey() == "" {
 		log.Print("workers: charge-collect: skipped — billing not configured (STRIPE_SECRET_KEY unset), nothing charged or faked")
 		return nil

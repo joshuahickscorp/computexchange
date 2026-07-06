@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -14,12 +15,15 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"strconv"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/sync/errgroup"
 )
 
 // api.go — all HTTP handlers, auth middleware, and job→task splitting.
@@ -86,7 +90,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
-	mux.HandleFunc("GET /{$}", s.handleRoot)                    // the public site (web/index.html) · the operator surface stays at /admin
+	mux.HandleFunc("GET /{$}", s.handleRoot)                        // the public site (web/index.html) · the operator surface stays at /admin
 	mux.HandleFunc("GET /assets/site/{path...}", s.handleSiteAsset) // whitelisted site static tree (renders, foam maps, glb, self-hosted Three.js)
 	mux.HandleFunc("GET /favicon.ico", s.handleFavicon)
 	mux.HandleFunc("GET /demo", s.handleDemo) // Launch/Earn product demo (monochrome, same-origin)
@@ -94,6 +98,8 @@ func (s *Server) Routes() http.Handler {
 	// Self-serve accounts (accounts.go) · unauthed: these MINT the credential.
 	mux.HandleFunc("POST /v1/signup", s.handleSignup)
 	mux.HandleFunc("POST /v1/login", s.handleLogin)
+	mux.HandleFunc("POST /v1/alpha-request", s.handleAlphaRequest)               // public site's alpha-access capture (alpha_request.go), unauthed lead intake
+	mux.HandleFunc("POST /v1/beacon", s.handleBeacon)                            // public site's cookie-free funnel beacon (beacon.go), unauthed pageview/scroll/CTA capture
 	mux.Handle("POST /v1/logout", s.authBuyer(http.HandlerFunc(s.handleLogout))) // revoke the presenting session
 	mux.Handle("GET /v1/me", s.authBuyer(http.HandlerFunc(s.handleMe)))          // authenticated buyer identity + remaining sandbox credit
 
@@ -104,6 +110,7 @@ func (s *Server) Routes() http.Handler {
 	// arbitrary tax rows or enumerate a supplier's payout state by email.
 	mux.Handle("POST /v1/supplier/onboard", s.authBuyer(http.HandlerFunc(s.handleSupplierOnboard)))
 	mux.Handle("GET /v1/supplier/status", s.authBuyer(http.HandlerFunc(s.handleSupplierStatus)))
+	mux.Handle("POST /v1/supplier/worker-tokens", s.authBuyer(http.HandlerFunc(s.handleCreateWorkerToken))) // self-serve token mint, one call per new Mac (suppliers.go)
 
 	// Buyer API (Bearer api_key OR session token).
 	mux.Handle("POST /v1/jobs", s.authBuyer(http.HandlerFunc(s.handleCreateJob)))
@@ -120,7 +127,9 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /v1/quote", s.authBuyer(http.HandlerFunc(s.handleQuote)))                  // Plane C: scan + price, no spend
 	mux.Handle("POST /v1/quote/pipeline", s.authBuyer(http.HandlerFunc(s.handlePipelineQuote))) // composite multi-stage quote (item 4)
 	mux.Handle("POST /v1/webhooks", s.authBuyer(http.HandlerFunc(s.handleRegisterWebhook)))
-	mux.Handle("POST /v1/private-pool", s.authBuyer(http.HandlerFunc(s.handleAddPrivatePoolMember))) // Private Deployment (research §3)
+	mux.Handle("POST /v1/private-pool", s.authBuyer(http.HandlerFunc(s.handleAddPrivatePoolMember)))           // Private Deployment (research §3)
+	mux.Handle("GET /v1/private-pool", s.authBuyer(http.HandlerFunc(s.handleListPrivatePoolMembers)))          // Buyer advantage & pricing edge 6->7
+	mux.Handle("DELETE /v1/private-pool/{id}", s.authBuyer(http.HandlerFunc(s.handleRemovePrivatePoolMember))) // Buyer advantage & pricing edge 6->7
 
 	// Concierge intake + buyer billing (intake.go, billing.go). The callback is
 	// unauthed — GitHub redirects to it with no bearer; the buyer is recovered from
@@ -161,6 +170,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /v1/worker/task/{id}/commit", s.authWorker(http.HandlerFunc(s.handleWorkerCommit)))
 	mux.Handle("POST /v1/worker/task/{id}/fail", s.authWorker(http.HandlerFunc(s.handleWorkerFail))) // Plane C/D: immediate typed failure
 	mux.Handle("GET /v1/worker/earnings", s.authWorker(http.HandlerFunc(s.handleWorkerEarnings)))
+	mux.Handle("GET /v1/worker/verification", s.authWorker(http.HandlerFunc(s.handleWorkerVerification))) // trust panel (Supplier onboarding & safety 7->8)
 	mux.Handle("POST /v1/worker/connect", s.authWorker(http.HandlerFunc(s.handleWorkerConnect)))
 	mux.Handle("GET /v1/worker/connect/status", s.authWorker(http.HandlerFunc(s.handleWorkerConnectStatus)))
 
@@ -188,10 +198,29 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /admin/fraud-flags", s.authAdmin(http.HandlerFunc(s.handleAdminFraudFlags)))
 	mux.Handle("GET /admin/fraud", s.authAdmin(http.HandlerFunc(s.handleAdminFraud)))
 	mux.Handle("GET /admin/drift", s.authAdmin(http.HandlerFunc(s.handleAdminDrift)))
+	// GET /admin/quotes: the COST-drift twin of /admin/drift (which is ETA-only).
+	// Project Detection & Quotation 6.5->7 (docs/internal/CREED_AND_PATH_TO_TEN.md,
+	// "Close the cost-drift loop and start auto-tuning prices").
+	mux.Handle("GET /admin/quotes", s.authAdmin(http.HandlerFunc(s.handleAdminQuoteDrift)))
+	mux.Handle("POST /admin/quotes/auto-tune", s.authAdmin(http.HandlerFunc(s.handleAdminAutoTunePrices)))
 	mux.Handle("GET /admin/scheduler/explain", s.authAdmin(http.HandlerFunc(s.handleAdminSchedulerExplain)))
+	mux.Handle("GET /admin/moat", s.authAdmin(http.HandlerFunc(s.handleAdminMoat)))                        // data-moat tracking counters (moat.go)
+	mux.Handle("GET /admin/moat/reliability", s.authAdmin(http.HandlerFunc(s.handleAdminMoatReliability))) // per-(supplier,job_type) reliability view (moat.go, Data Moat 6->7)
+	mux.Handle("GET /admin/funnel", s.authAdmin(http.HandlerFunc(s.handleAdminFunnel)))                    // site funnel beacon report (beacon.go)
 	mux.Handle("POST /admin/workers/{id}/suspend", s.authAdmin(http.HandlerFunc(s.handleAdminSuspend)))
+	// Operator Tooling 7->8 (docs/internal/CREED_AND_PATH_TO_TEN.md, "Add write
+	// actions the operator currently has to reach into the database for"): closes
+	// the three highest-frequency raw-SQL procedures RUNBOOKS.md documented —
+	// reinstate a quarantined supplier, force-requeue a wedged task, adjust a
+	// supplier's reputation, and release a payout hold — each now a real, audited
+	// admin endpoint instead of a psql one-liner.
+	mux.Handle("POST /admin/workers/{id}/reinstate", s.authAdmin(http.HandlerFunc(s.handleAdminReinstate)))
+	mux.Handle("POST /admin/tasks/{id}/requeue", s.authAdmin(http.HandlerFunc(s.handleAdminRequeueTask)))
+	mux.Handle("POST /admin/suppliers/{id}/reputation", s.authAdmin(http.HandlerFunc(s.handleAdminAdjustReputation)))
+	mux.Handle("POST /admin/payouts/{id}/release", s.authAdmin(http.HandlerFunc(s.handleAdminReleasePayout)))
+	mux.Handle("GET /admin/actions", s.authAdmin(http.HandlerFunc(s.handleAdminActions))) // audit log for the above
 
-	return observe(s.ipLimiter.limitByIP(mux))
+	return observe(s.ipLimiter.limitByIP(capBody(requestBodyLimit, mux)))
 }
 
 // --- middleware ---
@@ -210,6 +239,59 @@ func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter 
 // generated), echoes it on the response, and emits one structured access-log line
 // (method · path · status · latency · id) so a buyer/supplier request can be traced
 // end to end. High-frequency /healthz + /metrics are skipped to keep logs signal-dense.
+// maxRequestBodyBytes bounds every incoming request body (except POST /v1/jobs,
+// see maxJobSubmitBodyBytes below) before any handler's json.NewDecoder or
+// io.ReadAll ever touches it — finite, so an authenticated caller can no longer
+// force unbounded server-side buffering by POSTing an oversized body to any route.
+const maxRequestBodyBytes = 256 << 20 // 256 MiB
+
+// maxJobSubmitBodyBytes is the REAL, GENEROUS (Data Transfer & Artifact I/O 8->9 /
+// Scalability Headroom 7->8, "Remove the artifact-size ceiling") cap specifically
+// on POST /v1/jobs, overriding the blanket maxRequestBodyBytes for this one route.
+// An inline JSONL submit is a single JSON string field decoded whole by
+// json.NewDecoder — no amount of downstream streaming (see resolveInput /
+// streamSplitAndUpload) changes that this specific bytes-on-the-wire body must
+// still fit in one read, so this is the honest ceiling for THAT path. A submit
+// referencing an existing {"s3_key":...} object is NOT bound by this at all — it
+// streams via storage.GetObjectReader (never through this request body), so
+// chained multi-GB inputs already have no ceiling here regardless of this
+// constant. 2 GiB comfortably covers "the largest job the platform claims to
+// support" for an inline submit while remaining a REAL, finite number: past it,
+// http.MaxBytesReader below closes the request and the handler never sees a
+// partial body, so a submit over the cap 413s cleanly — it can never OOM or
+// crash the process the way an unbounded read could.
+const maxJobSubmitBodyBytes = 2 << 30 // 2 GiB
+
+// capBody wraps every request's Body in http.MaxBytesReader so a body past the
+// route's limit fails cleanly (the json decoder / io.ReadAll returns an error,
+// and MaxBytesReader itself closes the connection rather than reading further)
+// instead of buffering an unbounded amount of memory — an oversized body 413s,
+// it never OOMs or crashes the process. This is deliberately the
+// OUTERMOST-of-the-innermost wrap — applied ONCE, around the whole mux, so no
+// individual handler can forget it AND no per-route wrap could accidentally
+// layer a LARGER http.MaxBytesReader on top of a smaller one (Go's
+// MaxBytesReader nests to the SMALLEST limit seen, not the most recent one — a
+// second, bigger call never widens an outer, smaller one). limitFor picks the
+// limit per-request so one route (POST /v1/jobs) can have a real, deliberately
+// larger ceiling than every other route without a second, ineffective wrap.
+func capBody(limitFor func(*http.Request) int64, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, limitFor(r))
+		next.ServeHTTP(w, r)
+	})
+}
+
+// requestBodyLimit is capBody's limitFor: maxJobSubmitBodyBytes (Data Transfer &
+// Artifact I/O 8->9 / Scalability Headroom 7->8, "Remove the artifact-size
+// ceiling") for POST /v1/jobs — the one route that legitimately carries a large
+// buyer payload — and the ordinary maxRequestBodyBytes for everything else.
+func requestBodyLimit(r *http.Request) int64 {
+	if r.Method == http.MethodPost && r.URL.Path == "/v1/jobs" {
+		return maxJobSubmitBodyBytes
+	}
+	return maxRequestBodyBytes
+}
+
 func observe(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rid := r.Header.Get("X-Request-ID")
@@ -224,7 +306,23 @@ func observe(next http.Handler) http.Handler {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
-		log.Printf("req id=%s %s %s %d %dms", rid, r.Method, r.URL.Path, rec.status, time.Since(start).Milliseconds())
+		dur := time.Since(start)
+		// Per-endpoint HTTP request-duration histogram (Performance Observability &
+		// Regression Tracking, docs/internal/CREED_AND_PATH_TO_TEN.md: the exposition
+		// had task- and claim-duration histograms but "no HTTP request duration ...
+		// per-endpoint p99"). The LABEL is the ServeMux-matched route PATTERN (r.Pattern,
+		// populated by the mux during next.ServeHTTP — this middleware wraps the whole
+		// mux, so it is set by the time we read it here), e.g. "GET /v1/jobs/{id}", NOT
+		// the raw path — so a route with a path variable stays ONE bounded series instead
+		// of exploding into one per job id. An unmatched request (404, no pattern) is
+		// bucketed under a single "unmatched" label so a flood of bogus paths can never
+		// blow up label cardinality.
+		endpoint := r.Pattern
+		if endpoint == "" {
+			endpoint = "unmatched"
+		}
+		observeHTTPRequest(endpoint, dur)
+		log.Printf("req id=%s %s %s %d %dms", rid, r.Method, r.URL.Path, rec.status, dur.Milliseconds())
 	})
 }
 
@@ -264,10 +362,11 @@ func (s *Server) authBuyer(next http.Handler) http.Handler {
 }
 
 // authAdmin gates admin routes on EITHER of two credentials:
-//   1. a valid cx_admin_ passkey session cookie (the operator signed in with a passkey
-//      at /admin — see webauthn.go), or
-//   2. the admin bearer key (authBuyer + is_admin) — kept as BREAK-GLASS so a lost or
-//      not-yet-registered passkey can never lock the operator out.
+//  1. a valid cx_admin_ passkey session cookie (the operator signed in with a passkey
+//     at /admin — see webauthn.go), or
+//  2. the admin bearer key (authBuyer + is_admin) — kept as BREAK-GLASS so a lost or
+//     not-yet-registered passkey can never lock the operator out.
+//
 // The passkey path is checked first and, on success, synthesizes an admin AuthResult
 // (admin reads are cross-buyer and never dereference BuyerID, verified in api.go).
 func (s *Server) authAdmin(next http.Handler) http.Handler {
@@ -374,6 +473,16 @@ type jobSubmit struct {
 	// (and best-effort input bytes) before persisting the binding; a mismatch is 409.
 	// Empty (the default) keeps the unbound submission path unchanged.
 	QuoteID string `json:"quote_id,omitempty"`
+	// FirmQuote opts into the firm-quote tier (Project Detection & Quotation 7->8,
+	// docs/internal/CREED_AND_PATH_TO_TEN.md, "Ship a firm-quote tier: a real
+	// commitment, not just an estimate"): the bound quote's cost_max_usd becomes a
+	// REAL CEILING on the buyer's charge — if the job's actual cost exceeds it, the
+	// buyer is still only ever charged the quoted maximum, and the platform absorbs
+	// the difference. Requires QuoteID (a firm price commitment needs something to
+	// be firm ABOUT); false (the default) leaves the existing advisory-only
+	// behavior — quoted-vs-actual is shown on the invoice, but the buyer pays
+	// actuals — completely unchanged.
+	FirmQuote bool `json:"firm_quote,omitempty"`
 	// MinReputation routes this job only to suppliers whose reputation is >= this (0..1).
 	// The Elite-supplier moat (DEEP_RESEARCH_V2 §6.4 anti-defection): high-margin /
 	// enterprise work is reachable only by suppliers who earned a high reputation ON the
@@ -401,6 +510,17 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	auth := r.Context().Value(ctxBuyer).(*AuthResult)
 	var sub jobSubmit
 	if err := json.NewDecoder(r.Body).Decode(&sub); err != nil {
+		// Data Transfer & Artifact I/O 8->9 / Scalability Headroom 7->8, "Remove the
+		// artifact-size ceiling": a body past maxJobSubmitBodyBytes must 413 CLEANLY,
+		// not surface as an ordinary 400 "invalid json" (what a bare decode error
+		// looks like otherwise). http.MaxBytesReader's *http.MaxBytesError is exactly
+		// this case, distinguishable from a genuinely malformed body.
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeErr(w, http.StatusRequestEntityTooLarge,
+				fmt.Sprintf("request body exceeds the %d byte submission limit", mbe.Limit))
+			return
+		}
 		writeErr(w, http.StatusBadRequest, "invalid job submission json: "+err.Error())
 		return
 	}
@@ -460,6 +580,39 @@ func (s *Server) createJob(ctx context.Context, buyerID uuid.UUID, sub jobSubmit
 		return JobSubmitResponse{}, &httpError{http.StatusBadRequest,
 			"deadline_secs must be -1 (run to completion), 0 (default watchdog), or 60..604800 seconds"}
 	}
+	// Private pool guard (Buyer advantage & pricing edge 6->7,
+	// docs/internal/CREED_AND_PATH_TO_TEN.md: "Productize the privacy premium
+	// instead of leaving it a sentence"): private_pool was previously accepted with
+	// ZERO validation that the buyer had bound ANY supplier — the dispatch filter
+	// (control/scheduler.go's private_pool_members EXISTS clause) would then
+	// silently refuse to hand the job to anyone, ever, with no error at submit
+	// time and no way for the buyer to learn why their job was stuck at 0%. Refuse
+	// loudly here instead, before any storage write, so the failure is visible at
+	// submit rather than discovered later as an inexplicably stalled job.
+	if sub.PrivatePool {
+		n, err := s.store.PrivatePoolMemberCount(ctx, buyerID)
+		if err != nil {
+			return JobSubmitResponse{}, &httpError{http.StatusInternalServerError, "checking private pool membership: " + err.Error()}
+		}
+		if n == 0 {
+			return JobSubmitResponse{}, &httpError{http.StatusBadRequest,
+				"private_pool is set but you have zero bound suppliers: POST /v1/private-pool {\"supplier_id\":\"<uuid>\"} first, or this job could never be claimed"}
+		}
+	}
+	// Verification floor (Verification & Result Trust 6->7,
+	// docs/internal/CREED_AND_PATH_TO_TEN.md): redundancy_frac=0 AND
+	// honeypot_frac=0 used to be silently accepted — a job with ZERO real
+	// anti-fraud coverage. `wantVerificationFloor` records that this job needs
+	// at least one honeypot task injected below (after nPrimary/nHoneypot are
+	// computed from the real chunk count) UNLESS the buyer explicitly opted
+	// out. A buyer who set EITHER fraction above zero already asked for real
+	// coverage and is left untouched. Deliberately NOT done by bumping
+	// HoneypotFrac to a small constant and trusting fracCount's rounding: for a
+	// job with few chunks (the common case), a percentage-based floor can
+	// itself round back down to zero — the same bug this rung fixes, just
+	// moved one step over. The floor is enforced as a real minimum COUNT below.
+	wantVerificationFloor := !sub.Verification.SkipVerificationFloor &&
+		sub.Verification.RedundancyFrac <= 0 && sub.Verification.HoneypotFrac <= 0
 
 	// Require a saved payment method before accepting billable work WHEN billing is
 	// configured · UNLESS the buyer still has sandbox free credit. Without this gate a
@@ -499,32 +652,29 @@ func (s *Server) createJob(ctx context.Context, buyerID uuid.UUID, sub jobSubmit
 		}
 	}
 
-	// Resolve the input JSONL bytes. fromKey is true when the input already lives
-	// in object storage (we then skip re-uploading the canonical copy).
-	inputBytes, srcKey, err := s.resolveInput(ctx, sub.Input)
-	if err != nil {
-		return JobSubmitResponse{}, &httpError{http.StatusBadRequest, "resolving input: " + err.Error()}
+	// Quote-to-submit binding (Plane D D7), CHEAP checks only: if the buyer passed a
+	// quote_id, load it and check everything that needs no input bytes (existence,
+	// expiry, job_type/model/tier match) BEFORE any storage writes, so a stale/
+	// mismatched quote_id rejects cleanly with no orphaned objects — same as
+	// before this rung. The one check that DOES need the input (the sha256
+	// fingerprint match) cannot run yet: on the new streamed path, the hash is
+	// only known after the single pass over the input completes below, so it is
+	// checked AFTER streaming, see the qBind.InputSHA256 comparison further
+	// down. That is a genuine (small, honest) trade of this rung: a buyer who
+	// passes a valid, non-expired, type-matching quote_id but a DIFFERENT input
+	// than the one quoted now has its chunks uploaded before the mismatch is
+	// caught and the submission rejected — those chunk objects are orphaned
+	// (unreferenced garbage, cheap, and no job/task DB row is ever created to
+	// point at them) rather than the previous "reject before writing anything"
+	// guarantee. Whole-buffer verify-then-write was the only way to avoid this
+	// entirely, and whole-buffer is exactly what streaming exists to remove.
+	var qBind *boundQuote
+	var firmQuoteMaxUSD float64
+	var slaGuaranteeSecs int  // wave 2A: bound time guarantee (0 = none)
+	var slaPremiumUSD float64 // wave 2A: the bound guarantee's premium (the miss remedy)
+	if sub.FirmQuote && sub.QuoteID == "" {
+		return JobSubmitResponse{}, &httpError{http.StatusBadRequest, "firm_quote requires a quote_id: a firm price commitment needs a quote to be firm about"}
 	}
-	// Adaptive chunk sizing: an explicit params.split_size always wins; otherwise
-	// pick a per-job-type default that targets ~30–60s/task (embeddings pack far
-	// more items/chunk than generation), scaled DOWN for long prompts so a
-	// prefill-bound generation job splits into right-sized tasks. See adaptiveSplitSize.
-	avgLineBytes := 0.0
-	if rec := scanJSONL(inputBytes).Records; rec > 0 {
-		avgLineBytes = float64(len(inputBytes)) / float64(rec)
-	}
-	splitSize := adaptiveSplitSize(sub.JobType.Type, sub.Params, avgLineBytes)
-	lines := splitJSONL(inputBytes, splitSize)
-	if len(lines) == 0 {
-		return JobSubmitResponse{}, &httpError{http.StatusBadRequest, "input is empty: at least one JSONL line is required"}
-	}
-
-	// Quote-to-submit binding (Plane D D7): if the buyer passed a quote_id, bind this
-	// submission to that advisory quote so the invoice can say what they were told.
-	// Validated BEFORE any storage writes so a stale/mismatched quote rejects cleanly
-	// with no orphaned objects. boundQuoteID stays zero when no quote was supplied
-	// (the unbound path is unchanged).
-	var boundQuoteID uuid.UUID
 	if sub.QuoteID != "" {
 		qid, err := quoteIDToUUID(sub.QuoteID)
 		if err != nil {
@@ -545,88 +695,262 @@ func (s *Server) createJob(ctx context.Context, buyerID uuid.UUID, sub jobSubmit
 		if q.JobType != sub.JobType.Type || q.ModelRef != sub.Model.Ref || q.Tier != sub.Tier {
 			return JobSubmitResponse{}, &httpError{http.StatusConflict, "quote does not match this submission"}
 		}
-		// Best-effort: confirm the bytes match what was scanned at quote time. We only
-		// reject when BOTH sides have a fingerprint and they differ (a pre-D7 quote with
-		// no stored sha still binds, leaning permissive rather than blocking older quotes).
-		if q.InputSHA256 != "" {
-			sum := sha256.Sum256(inputBytes)
-			if q.InputSHA256 != hex.EncodeToString(sum[:]) {
-				return JobSubmitResponse{}, &httpError{http.StatusConflict, "quote does not match this submission: input changed since the quote"}
+		// Firm-quote tier (Project Detection & Quotation 7->8): the quote's OWN
+		// cost_max_usd — the conservative top of the band the buyer was already
+		// shown at quote time (buildQuote's Budget.SuggestedMaxUSD) — becomes a real
+		// ceiling, not just a suggestion. A quote with no positive max (a pre-D7 row,
+		// or a degenerate zero-cost quote) cannot back a real commitment; refuse
+		// rather than silently firm-committing to a meaningless $0 cap.
+		if sub.FirmQuote {
+			if q.CostMaxUSD <= 0 {
+				return JobSubmitResponse{}, &httpError{http.StatusConflict, "quote has no positive cost_max_usd to firm-commit to"}
+			}
+			firmQuoteMaxUSD = q.CostMaxUSD
+			// Speed-SLA binding (Speed Lane wave 2A): a firm submission against an
+			// SLA-bearing quote binds the TIME guarantee alongside the price cap —
+			// one commitment package, exactly as offered (the quote's sla block
+			// showed both the guarantee and the premium). The committed price
+			// ceiling grows by exactly the quoted premium: the cap the buyer was
+			// shown covered the work; the SLA surcharge is priced on top of it,
+			// never squeezed out of it. A quote without an SLA offer binds
+			// price-only, byte-identical to before this wave.
+			//
+			// Deliberately NOT mapped onto deadline_secs: the deadline drives the
+			// stuck-run watchdog's rescue→KILL ladder (workers.go reapStuckJobs),
+			// and a missed SLA must COMPLETE and REFUND — killing a late job would
+			// destroy the buyer's results to punish lateness. The guarantee is a
+			// money remedy (collect.go settleSLAOutcome), enforced at finalize; the
+			// watchdog keeps its own independent ETA-derived geometry.
+			if q.SLAGuaranteedSecs > 0 && q.SLAPremiumUSD > 0 {
+				slaGuaranteeSecs = q.SLAGuaranteedSecs
+				slaPremiumUSD = q.SLAPremiumUSD
+				firmQuoteMaxUSD = q.CostMaxUSD + q.SLAPremiumUSD
 			}
 		}
-		boundQuoteID = q.ID
+		qBind = q
+	}
+
+	// Resolve the input as a STREAM (Data Transfer & Artifact I/O 7->8): fromKey is
+	// non-empty when the input already lives in object storage (we then skip
+	// re-uploading the canonical copy). The caller (this function) owns closing it.
+	inputReader, srcKey, err := s.resolveInput(ctx, buyerID, sub.Input)
+	if err != nil {
+		return JobSubmitResponse{}, &httpError{http.StatusBadRequest, "resolving input: " + err.Error()}
+	}
+	defer inputReader.Close()
+
+	// splitSize: an explicit params.split_size always wins. Otherwise adaptiveSplitSize
+	// wants an avgLineBytes estimate, which for a STREAMED input we can only get from a
+	// bounded look-ahead sample (peekInputSample), not the whole object — the whole
+	// point of streaming is to never require the full size up front. This is a sizing
+	// HEURISTIC only (adaptiveSplitSize just targets ~45s/task), never a correctness
+	// requirement, so a sample-based estimate is an honest trade, not a silent
+	// regression: see peekInputSample.
+	splitSize := splitSizeOf(sub.Params)
+	if splitSize == defaultSplitSize && !hasExplicitSplitSize(sub.Params) {
+		sample, rest, serr := peekInputSample(inputReader, inputSampleBytes)
+		if serr != nil {
+			return JobSubmitResponse{}, &httpError{http.StatusBadRequest, "reading input: " + serr.Error()}
+		}
+		inputReader = rest
+		avgLineBytes := 0.0
+		totalRecords := 0
+		if scan := scanJSONL(sample); scan.Records > 0 {
+			avgLineBytes = float64(scan.Bytes) / float64(scan.Records)
+			if len(sample) < inputSampleBytes {
+				// The sample consumed the WHOLE stream, so the record count is
+				// EXACT — only then may the planner's width floor below be
+				// applied (a partial sample cannot honestly bound chunk count).
+				totalRecords = scan.Records
+			}
+		}
+		splitSize = adaptiveSplitSize(sub.JobType.Type, sub.Params, avgLineBytes)
+		// Speed Lane wave 1B (planner.go): refine the static-map size with the
+		// LIVE fleet's measured rates, and floor the chunk count at the
+		// planner's recommended fan-out width so the width is actually
+		// achievable. Falls back to the static size untouched whenever the
+		// rate cache is thin, the type is non-generative, or the planner is
+		// disabled — never a silent guess.
+		splitSize = s.adaptiveSplitSizeLive(ctx, sub.JobType.Type, sub.Model.Ref,
+			sub.Constraints.MinMemoryGB, sub.JobType.MaxTokens, avgLineBytes, splitSize, totalRecords)
 	}
 
 	jobID := uuid.New()
 	inputKey := srcKey
+	var canonicalWriter io.Writer
+	var canonicalPut *streamingPut
 	if inputKey == "" {
-		// Upload the canonical job input only when it came inline.
+		// Upload the canonical job input only when it came inline. Streamed via an
+		// io.Pipe alongside the chunk split below (streamSplitAndUpload tees into
+		// this writer) so the canonical copy is never separately buffered either.
 		inputKey = fmt.Sprintf("jobs/%s/input.jsonl", jobID)
-		if err := s.storage.PutObject(ctx, inputKey, inputBytes, "application/x-ndjson"); err != nil {
-			return JobSubmitResponse{}, &httpError{http.StatusInternalServerError, "uploading input: " + err.Error()}
+		canonicalPut = newStreamingPut(ctx, s.storage, inputKey, "application/x-ndjson")
+		canonicalWriter = canonicalPut.writer
+	}
+
+	// Stream-split the input into per-task chunk objects, uploading them
+	// CONCURRENTLY through a bounded errgroup (~16 in flight) instead of one
+	// whole-buffer read + serial PutObject per chunk (Data Transfer & Artifact I/O
+	// 7->8 / Scalability Headroom 7->8, "Stream the control-plane storage layer end
+	// to end" / "Remove the artifact-size ceiling"). See streamSplitAndUpload.
+	tasks, totalBytes, totalRecords, sum256, serr := s.streamSplitAndUpload(ctx, jobID, inputReader, splitSize, canonicalWriter)
+	if canonicalPut != nil {
+		canonicalPut.writer.Close() // signal EOF to the tee goroutine regardless of serr
+		if perr := canonicalPut.wait(); perr != nil && serr == nil {
+			serr = perr
 		}
 	}
-	outputKey := fmt.Sprintf("jobs/%s/output.jsonl", jobID)
-
-	// Split the input into chunks; each chunk is its own object and one primary
-	// task. The task's input_ref is the chunk key, result_key is its result
-	// target.
-	tasks := make([]taskRow, 0, len(lines))
-	for i, chunk := range lines {
-		chunkKey := fmt.Sprintf("jobs/%s/tasks/%d/input.jsonl", jobID, i)
-		if err := s.storage.PutObject(ctx, chunkKey, chunk, "application/x-ndjson"); err != nil {
-			return JobSubmitResponse{}, &httpError{http.StatusInternalServerError, "uploading chunk: " + err.Error()}
-		}
-		tasks = append(tasks, taskRow{
-			ID:         uuid.New(),
-			JobID:      jobID,
-			InputRef:   chunkKey,
-			ResultKey:  fmt.Sprintf("jobs/%s/tasks/%d/result.json", jobID, i),
-			ChunkIndex: i, // 0-based input position, for the ordered result merge
-		})
+	if serr != nil {
+		return JobSubmitResponse{}, &httpError{http.StatusInternalServerError, "splitting/uploading input: " + serr.Error()}
+	}
+	if len(tasks) == 0 {
+		return JobSubmitResponse{}, &httpError{http.StatusBadRequest, "input is empty: at least one JSONL line is required"}
 	}
 	nPrimary := len(tasks) // primaries precede any redundancy/honeypot clones
+	inputSHA256 := hex.EncodeToString(sum256[:])
+
+	var boundQuoteID uuid.UUID
+	if qBind != nil {
+		// Best-effort: confirm the bytes match what was scanned at quote time. We only
+		// reject when BOTH sides have a fingerprint and they differ (a pre-D7 quote with
+		// no stored sha still binds, leaning permissive rather than blocking older quotes).
+		// See the long comment above qBind's cheap pre-checks for why this ONE check
+		// unavoidably runs after the chunks are already written on the streamed path.
+		if qBind.InputSHA256 != "" && qBind.InputSHA256 != inputSHA256 {
+			return JobSubmitResponse{}, &httpError{http.StatusConflict, "quote does not match this submission: input changed since the quote"}
+		}
+		boundQuoteID = qBind.ID
+	}
+
+	outputKey := fmt.Sprintf("jobs/%s/output.jsonl", jobID)
+
+	// tasks/nPrimary/inputKey/inputSHA256 were already produced above by
+	// streamSplitAndUpload — one object per chunk, task.InputRef the chunk key,
+	// ResultKey its result target — uploaded CONCURRENTLY through a bounded
+	// errgroup instead of the old whole-buffer-then-serial-PutObject loop.
+	//
+	// SECURITY: every task's result_key is keyed by that task's own opaque UUID
+	// (jobs/{job}/tasks/{taskID}/result.json), with NO "honeypots/" or
+	// "redundancy/" path segment and no revealing sequential index. A worker only
+	// ever sees its own presigned GET/PUT URLs (PresignGet(c.InputRef) /
+	// PresignPut(c.ResultKey) below in pollDispatch), so if the key shape or
+	// substrings differed by task kind, a worker could fingerprint honeypot/
+	// redundancy tasks from the URL alone and pass every probe while cheating
+	// elsewhere — the exact hole a prior audit found here. Primary, redundancy,
+	// and honeypot tasks must stay byte-for-byte indistinguishable in their
+	// storage addressing; only the DB's is_honeypot/is_redundancy columns (never
+	// sent to the worker, see the pollDispatch NOTE below) may know the type.
 
 	// Redundancy tasks: a same-class peer for redundancy_frac of the primaries.
 	// Each clones a primary's input chunk so PeerResultKey can pair them by
-	// shared input_ref, and reuses that primary's chunk_index.
+	// shared input_ref, and reuses that primary's chunk_index. The result_key is
+	// a fresh opaque task UUID — same shape as a primary's, never "redundancy/".
+	//
+	// WHICH primaries get a peer is chosen by a keyed hash of (jobID, that
+	// primary's own task UUID) — NOT "the first nRedundancy primaries in chunk
+	// order". The old ordinal selection was deterministic in a way nothing about
+	// task addressing hides: chunk 0..k of every job always got a peer and the
+	// rest never did, so a pattern-watching supplier could infer redundancy
+	// assignment from submission order alone even though the URL/key shape
+	// itself is opaque (the prior audit's fix). Both jobID and every task's UUID
+	// are freshly random per submission, so this hash is unpredictable ahead of
+	// time to anyone who does not already know the task IDs — which workers
+	// never do until they are dispatched one. Deterministic given those inputs
+	// (so tests/replays are reproducible), not ordinal.
 	nRedundancy := fracCount(nPrimary, sub.Verification.RedundancyFrac)
+	redundancyPeers := append([]taskRow(nil), tasks[:nPrimary]...)
+	sort.Slice(redundancyPeers, func(i, j int) bool {
+		return redundancySelectionHash(jobID, redundancyPeers[i].ID) < redundancySelectionHash(jobID, redundancyPeers[j].ID)
+	})
 	for i := 0; i < nRedundancy; i++ {
-		p := tasks[i]
+		p := redundancyPeers[i]
+		taskID := uuid.New()
 		tasks = append(tasks, taskRow{
-			ID:           uuid.New(),
+			ID:           taskID,
 			JobID:        jobID,
 			IsRedundancy: true,
 			InputRef:     p.InputRef,
-			ResultKey:    fmt.Sprintf("jobs/%s/redundancy/%d/result.json", jobID, i),
+			ResultKey:    fmt.Sprintf("jobs/%s/tasks/%s/result.json", jobID, taskID),
 			ChunkIndex:   p.ChunkIndex,
 		})
 	}
 
-	// Honeypot tasks: pull available known-answer honeypots for this job type and
-	// inject them as tasks pointing at the honeypot's input_ref. They are probes,
-	// not buyer output, so they reuse the matching primary's chunk_index (and are
-	// excluded from the merge by is_honeypot).
-	nHoneypot := fracCount(len(lines), sub.Verification.HoneypotFrac)
+	// Honeypot tasks: pull available known-answer SEED honeypots for this job type
+	// and inject them as probes (not buyer output — they reuse the matching
+	// primary's chunk_index and are excluded from the merge by is_honeypot).
+	//
+	// SECURITY — the honeypot input-GET leak (Verification & Result Trust 5->5.5,
+	// docs/internal/CREED_AND_PATH_TO_TEN.md). The result-PUT path was already
+	// opaque (result_key is a per-task UUID; see the SECURITY note above). But the
+	// GET/input side still leaked: a seed honeypot's object key is "honeypots/..."
+	// (seed.go, Store.InsertHoneypot), and pollDispatch presigns the task's
+	// input_ref verbatim into input_url — so a worker inspecting its OWN presigned
+	// input URL would find the literal substring "honeypots/" and could ace every
+	// probe while cheating on real chunks, defeating the entire trust engine.
+	//
+	// Fix: copy each seed honeypot's input BYTES to a per-task, job-namespaced
+	// OPAQUE key — "jobs/{job}/tasks/{taskID}/input.jsonl", byte-for-byte the same
+	// shape streamSplitAndUpload gives a primary chunk (and a redundancy clone
+	// reuses) — and point the task's input_ref at THAT. The worker's presigned GET
+	// is now indistinguishable from a normal chunk's on the wire. To keep the
+	// verifier's GetHoneypotAnswer(job_type, input_ref) lookup working — it keys on
+	// the task's input_ref, now the opaque key — we register the opaque key as a
+	// honeypots-table ALIAS carrying the same known answer + class
+	// (RegisterHoneypotAlias). AvailableSeedHoneypots deliberately reads only
+	// "honeypots/..."-keyed seeds, never these "jobs/..."-keyed aliases, so an
+	// alias is never re-dispatched as a honeypot for a future job.
+	nHoneypot := fracCount(nPrimary, sub.Verification.HoneypotFrac)
+	if wantVerificationFloor && nHoneypot == 0 {
+		// A real minimum COUNT, not a fraction — guarantees at least one
+		// honeypot task even for a single-chunk job, where any small
+		// percentage floor would itself round back down to zero.
+		nHoneypot = 1
+	}
 	if nHoneypot > 0 {
-		hps, herr := s.store.AvailableHoneypots(ctx, sub.JobType.Type, nHoneypot)
+		hps, herr := s.store.AvailableSeedHoneypots(ctx, sub.JobType.Type, nHoneypot)
 		if herr != nil {
 			return JobSubmitResponse{}, &httpError{http.StatusInternalServerError, "loading honeypots: " + herr.Error()}
 		}
 		for i, hp := range hps {
+			taskID := uuid.New()
+			// Opaque per-task input key, identical in shape to a primary chunk's.
+			opaqueKey := fmt.Sprintf("jobs/%s/tasks/%s/input.jsonl", jobID, taskID)
+			// Copy the seed honeypot's real input bytes to the opaque key so the
+			// worker's presigned GET serves the same probe content under a
+			// non-revealing address.
+			inputBytes, gerr := s.storage.GetObject(ctx, hp.InputRef)
+			if gerr != nil {
+				// A honeypot whose input object is missing cannot be dispatched
+				// safely (the worker's GET would 404 and it would retry forever —
+				// the exact real bug seed.go's storage upload closed). Skip this one
+				// rather than inject a broken probe; coverage is best-effort.
+				log.Printf("createJob: honeypot input %q unreadable, skipping this probe: %v", hp.InputRef, gerr)
+				continue
+			}
+			if perr := s.storage.PutObject(ctx, opaqueKey, inputBytes, "application/x-ndjson"); perr != nil {
+				return JobSubmitResponse{}, &httpError{http.StatusInternalServerError, "copying honeypot input to opaque key: " + perr.Error()}
+			}
+			// Register the opaque key as an alias so verification's answer lookup by
+			// input_ref still resolves — same answer + class as the seed honeypot.
+			if aerr := s.store.RegisterHoneypotAlias(ctx, sub.JobType.Type, opaqueKey, hp.KnownAnswer, hp.AnswerClass); aerr != nil {
+				return JobSubmitResponse{}, &httpError{http.StatusInternalServerError, "registering honeypot alias: " + aerr.Error()}
+			}
 			tasks = append(tasks, taskRow{
-				ID:         uuid.New(),
+				ID:         taskID,
 				JobID:      jobID,
 				IsHoneypot: true,
-				InputRef:   hp,
-				ResultKey:  fmt.Sprintf("jobs/%s/honeypots/%d/result.json", jobID, i),
+				InputRef:   opaqueKey,
+				ResultKey:  fmt.Sprintf("jobs/%s/tasks/%s/result.json", jobID, taskID),
 				ChunkIndex: i % nPrimary,
 			})
 		}
 	}
 
-	// Estimate cost from DB-backed model pricing × unit count.
-	estimate := s.estimateJobUSD(ctx, sub.Model.Ref, inputBytes, len(lines), sub.Tier)
+	// Estimate cost from DB-backed model pricing × unit count. totalRecords (not
+	// the chunk count nPrimary) is the real per-record unit count the generative
+	// output-token term prices against; sub.JobType.MaxTokens drives that term for
+	// batch_infer/json_extraction (Project Detection & Quotation 6->6.5).
+	estimate := s.estimateJobUSD(ctx, sub.JobType.Type, sub.Model.Ref, totalBytes, totalRecords, sub.JobType.MaxTokens, sub.Tier)
 	// Price verification THROUGH to the buyer: the stored estimate — and thus the
 	// total charge (scheduleTaskPayout splits EstimatedUSD across all TaskCount
 	// tasks) — covers every task that will run: deliverable + redundancy + honeypot.
@@ -636,6 +960,16 @@ func (s *Server) createJob(ctx context.Context, buyerID uuid.UUID, sub jobSubmit
 	// guard just never divides by zero.)
 	if nPrimary > 0 && len(tasks) > nPrimary {
 		estimate = roundUSD(estimate * float64(len(tasks)) / float64(nPrimary))
+	}
+	// Speed-SLA premium (wave 2A): the bound guarantee's documented surcharge is
+	// folded into the job's estimate — the SAME single money path every other
+	// cost component takes (estimated_usd → per-task buyer_charge rows →
+	// actual_usd), no second rail. On a miss the FULL quoted premium comes back
+	// as an sla_refund ledger credit netted off the collection
+	// (JobChargeInfo/firmChargeAmountSQL), with the platform absorbing the
+	// refund — the same absorption discipline as the firm-quote overage.
+	if slaGuaranteeSecs > 0 && slaPremiumUSD > 0 {
+		estimate = roundUSD(estimate + slaPremiumUSD)
 	}
 	vp, _ := json.Marshal(sub.Verification)
 	// Persist the FULL submitted JobType (tag + labels/schema/max_tokens/...) so the
@@ -673,6 +1007,10 @@ func (s *Server) createJob(ctx context.Context, buyerID uuid.UUID, sub jobSubmit
 		MaxUSD:             sub.MaxUSD,   // Budget Governor cap (0 = none → persisted NULL)
 		QuoteID:            boundQuoteID, // D7 quote binding (zero = none → persisted NULL)
 		DeadlineSecs:       sub.DeadlineSecs,
+		FirmQuote:          sub.FirmQuote,
+		FirmQuoteMaxUSD:    firmQuoteMaxUSD,  // the real charge ceiling (0 = not firm → persisted NULL)
+		SLAGuaranteeSecs:   slaGuaranteeSecs, // wave 2A time guarantee (0 = none → persisted NULL)
+		SLAPremiumUSD:      slaPremiumUSD,    // wave 2A premium = the miss remedy (0 = none → NULL)
 	}
 	if err := s.store.CreateJobWithTasks(ctx, jr, tasks); err != nil {
 		return JobSubmitResponse{}, &httpError{http.StatusInternalServerError, "failed to create job: " + err.Error()}
@@ -707,6 +1045,14 @@ func (s *Server) createJob(ctx context.Context, buyerID uuid.UUID, sub jobSubmit
 			fmt.Sprintf("bound to quote q_%s", boundQuoteID), nil)
 	}
 
+	// Record the speed-SLA binding on the timeline (wave 2A): the buyer sees the
+	// guarantee clock and the remedy in their own event stream, not just in a
+	// column. Best-effort like the events above.
+	if slaGuaranteeSecs > 0 {
+		_ = s.store.InsertJobEvent(ctx, jobID, nil, "sla_bound",
+			fmt.Sprintf("Speed SLA bound: results guaranteed within %ds of submission · premium $%.6f is refunded automatically on a miss", slaGuaranteeSecs, slaPremiumUSD), nil)
+	}
+
 	// Estimated completion from the queue-depth/throughput ETA (priority work is
 	// estimated to clear faster — see estimateETASecs), with a tier floor so the
 	// human-facing RFC3339 timestamp stays sane.
@@ -723,10 +1069,32 @@ func (s *Server) createJob(ctx context.Context, buyerID uuid.UUID, sub jobSubmit
 	}, nil
 }
 
-// resolveInput turns the polymorphic `input` field into bytes. A JSON string IS
-// the inline JSONL; an object {"s3_key":"..."} is fetched from storage and its
-// key is returned (so the caller skips re-uploading). Anything else is an error.
-func (s *Server) resolveInput(ctx context.Context, raw json.RawMessage) (data []byte, fromKey string, err error) {
+// jobsKeyPattern matches every object key this codebase ever generates under a
+// job (jobs/{jobID}/input.jsonl, jobs/{jobID}/output.jsonl,
+// jobs/{jobID}/tasks/{taskID}/...). Any s3_key a buyer legitimately owns has this
+// shape — it is how resolveInput recovers which job (and therefore which buyer)
+// produced the referenced object.
+var jobsKeyPattern = regexp.MustCompile(`^jobs/([0-9a-fA-F-]{36})/`)
+
+// resolveInput turns the polymorphic `input` field into a STREAM (Data Transfer &
+// Artifact I/O 7->8, "Stream the control-plane storage layer end to end"). A JSON
+// string IS the inline JSONL, wrapped in a reader with no extra copy beyond the
+// []byte json.Unmarshal already produced; an object {"s3_key":"..."} opens a
+// streaming GetObjectReader on the object and returns its key (so the caller
+// skips re-uploading) WITHOUT ever buffering the whole object — the only thing
+// that can be multi-GB on this path. Anything else is an error. The caller MUST
+// Close the returned reader.
+//
+// SECURITY (Security Posture 6.5->7): an {"s3_key":...} reference is fetched only
+// after confirming the key belongs to a job THIS buyerID submitted. Without this,
+// any authenticated buyer could pass any other buyer's job_id (leaked via a
+// webhook payload, a support ticket, a shared log line — job IDs are unguessable
+// UUIDs, but "unguessable" is not the same as "never learned") in an s3_key and
+// read that buyer's private input/output bytes — a real IDOR, not a theoretical
+// one, since resolveInput previously fetched whatever key it was given with no
+// ownership check at all. The legitimate use this preserves: a buyer chaining
+// their OWN completed job's output into a new job's input.
+func (s *Server) resolveInput(ctx context.Context, buyerID uuid.UUID, raw json.RawMessage) (r io.ReadCloser, fromKey string, err error) {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil, "", errors.New("input is required (inline JSONL string or {\"s3_key\":\"...\"})")
@@ -736,7 +1104,7 @@ func (s *Server) resolveInput(ctx context.Context, raw json.RawMessage) (data []
 		if err := json.Unmarshal(raw, &inline); err != nil {
 			return nil, "", fmt.Errorf("invalid inline input string: %w", err)
 		}
-		return []byte(inline), "", nil
+		return io.NopCloser(strings.NewReader(inline)), "", nil
 	}
 	var ref struct {
 		S3Key string `json:"s3_key"`
@@ -744,11 +1112,25 @@ func (s *Server) resolveInput(ctx context.Context, raw json.RawMessage) (data []
 	if err := json.Unmarshal(raw, &ref); err != nil || ref.S3Key == "" {
 		return nil, "", errors.New("input must be a JSONL string or an object with a non-empty s3_key")
 	}
-	b, err := s.storage.GetObject(ctx, ref.S3Key)
+	m := jobsKeyPattern.FindStringSubmatch(ref.S3Key)
+	if m == nil {
+		return nil, "", errors.New("s3_key must reference an object under a job you submitted (jobs/<job_id>/...)")
+	}
+	refJobID, perr := uuid.Parse(m[1])
+	if perr != nil {
+		return nil, "", errors.New("s3_key contains an invalid job id")
+	}
+	ownerID, oerr := s.store.JobBuyerID(ctx, refJobID)
+	if oerr != nil || ownerID != buyerID {
+		// Same message whether the job doesn't exist or belongs to someone else —
+		// never confirm/deny another buyer's job_id to an unauthorized caller.
+		return nil, "", errors.New("s3_key does not reference a job you submitted")
+	}
+	rc, err := s.storage.GetObjectReader(ctx, ref.S3Key)
 	if err != nil {
 		return nil, "", fmt.Errorf("fetching input %q: %w", ref.S3Key, err)
 	}
-	return b, ref.S3Key, nil
+	return rc, ref.S3Key, nil
 }
 
 func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
@@ -767,20 +1149,23 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, JobStatus{
-		JobID:        j.ID,
-		Status:       j.Status,
-		JobType:      j.JobType,
-		Tier:         j.Tier,
-		TaskCount:    j.TaskCount,
-		TasksDone:    j.TasksDone,
-		EstimatedUSD: j.EstimatedUSD,
-		ActualUSD:    j.ActualUSD,
-		ETASecs:      j.ETASecs,
-		CreatedAt:    j.CreatedAt.UTC().Format(time.RFC3339),
-		MaxUSD:       j.MaxUSD,
-		BudgetState:  j.BudgetState,
-		ChargeStatus: j.ChargeStatus,
-		Verification: j.Verification,
+		JobID:            j.ID,
+		Status:           j.Status,
+		JobType:          j.JobType,
+		Tier:             j.Tier,
+		TaskCount:        j.TaskCount,
+		TasksDone:        j.TasksDone,
+		EstimatedUSD:     j.EstimatedUSD,
+		ActualUSD:        j.ActualUSD,
+		ETASecs:          j.ETASecs,
+		CreatedAt:        j.CreatedAt.UTC().Format(time.RFC3339),
+		MaxUSD:           j.MaxUSD,
+		BudgetState:      j.BudgetState,
+		ChargeStatus:     j.ChargeStatus,
+		Verification:     j.Verification,
+		SLAGuaranteeSecs: j.SLAGuaranteeSecs, // wave 2A: the bound guarantee (0 = none, omitted)
+		SLAPremiumUSD:    j.SLAPremiumUSD,    // wave 2A: its premium (the miss remedy)
+		SLAMet:           j.SLAMet,           // wave 2A: outcome (absent until decided)
 	})
 }
 
@@ -802,6 +1187,39 @@ func (s *Server) handleAddPrivatePoolMember(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if err := s.store.AddPrivatePoolMember(r.Context(), auth.BuyerID, sid); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleListPrivatePoolMembers (GET /v1/private-pool) returns the buyer's own
+// private-pool members (Buyer advantage & pricing edge 6->7: "Productize the
+// privacy premium instead of leaving it a sentence") — the buyer-facing read side
+// of the pool a quote's private_pool_member_count and a submission's dispatch
+// filter both depend on, so a buyer can see WHO they are actually paying the
+// premium to run on, not just an opaque database row.
+func (s *Server) handleListPrivatePoolMembers(w http.ResponseWriter, r *http.Request) {
+	auth := r.Context().Value(ctxBuyer).(*AuthResult)
+	members, err := s.store.ListPrivatePoolMembers(r.Context(), auth.BuyerID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, members)
+}
+
+// handleRemovePrivatePoolMember (DELETE /v1/private-pool/{id}) unbinds a supplier
+// from the buyer's Private Deployment pool (Buyer advantage & pricing edge 6->7)
+// — the real add/remove/list flow the rung asks for, not a one-way bind. 204,
+// idempotent (removing a non-member is a no-op, matching Add's own idempotency).
+func (s *Server) handleRemovePrivatePoolMember(w http.ResponseWriter, r *http.Request) {
+	auth := r.Context().Value(ctxBuyer).(*AuthResult)
+	sid, ok := pathUUID(w, r)
+	if !ok {
+		return
+	}
+	if err := s.store.RemovePrivatePoolMember(r.Context(), auth.BuyerID, sid); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -851,15 +1269,25 @@ func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
 	}
 
 	res := JobResults{JobID: j.ID, Status: j.Status, ResultURLs: urls}
-	// Merge into the single buyer-ready artifact and presign it. The merge is
-	// idempotent (it overwrites output_ref) and cheap, so we always run it on read:
-	// the sweep is best-effort timing, this is the correctness guarantee.
+	// Merge into the single buyer-ready artifact and presign it. Once
+	// results_merged_at is set, a real successful merge has already run since
+	// completion (either finalizeJobIfDone synchronously before marking the job
+	// complete, or a prior read here) and output_ref already holds the current
+	// buyer-ready artifact, so skip re-merging (Data Transfer & Artifact I/O
+	// 4.5->5, "Stop paying for every poll twice" — a buyer polling repeatedly
+	// after completion no longer re-fetches and re-writes every primary result on
+	// every single poll). When it is NOT set (a legacy job from before this
+	// migration, or the rare gap where completion raced ahead of the merge),
+	// fall back to merging on read exactly as before: the sweep/finalize path is
+	// best-effort timing, this stays the correctness guarantee.
 	if j.OutputRef != "" {
-		if _, merr := s.MergeJobResults(ctx, j.ID); merr != nil {
-			// Surface a merge failure (e.g. a malformed result object) rather than
-			// hand back a fallback that hides the problem.
-			writeErr(w, http.StatusInternalServerError, "merging results: "+merr.Error())
-			return
+		if j.ResultsMergedAt == nil {
+			if _, merr := s.MergeJobResults(ctx, j.ID); merr != nil {
+				// Surface a merge failure (e.g. a malformed result object) rather than
+				// hand back a fallback that hides the problem.
+				writeErr(w, http.StatusInternalServerError, "merging results: "+merr.Error())
+				return
+			}
 		}
 		if u, perr := s.storage.PresignGet(ctx, j.OutputRef, time.Hour); perr == nil {
 			res.ResultsURL = u
@@ -951,6 +1379,14 @@ func mergeJobResults(ctx context.Context, store *Store, storage *Storage, jobID 
 			return 0, fmt.Errorf("merge: writing binary output %q: %w", info.OutputRef, err)
 		}
 		metrics.resultMerges.Add(1)
+		// Stamp the watermark now that the bytes are durably written: a later
+		// GET /v1/jobs/{id}/results poll can trust results_merged_at and skip
+		// re-merging (Data Transfer & Artifact I/O 4.5->5). The merge itself
+		// already succeeded, so a watermark write failure is still surfaced (never
+		// silently swallowed) but never hides that the artifact is already good.
+		if err := store.MarkResultsMerged(ctx, jobID); err != nil {
+			return len(out), fmt.Errorf("merge: writing binary output %q succeeded but marking results_merged_at failed: %w", info.OutputRef, err)
+		}
 		return len(out), nil
 	}
 
@@ -969,6 +1405,14 @@ func mergeJobResults(ctx context.Context, store *Store, storage *Storage, jobID 
 		return 0, fmt.Errorf("merge: writing output %q: %w", info.OutputRef, err)
 	}
 	metrics.resultMerges.Add(1)
+	// Stamp the watermark now that the bytes are durably written: a later
+	// GET /v1/jobs/{id}/results poll can trust results_merged_at and skip
+	// re-merging (Data Transfer & Artifact I/O 4.5->5). The merge itself
+	// already succeeded, so a watermark write failure is still surfaced (never
+	// silently swallowed) but never hides that the artifact is already good.
+	if err := store.MarkResultsMerged(ctx, jobID); err != nil {
+		return len(out), fmt.Errorf("merge: writing output %q succeeded but marking results_merged_at failed: %w", info.OutputRef, err)
+	}
 	return len(out), nil
 }
 
@@ -1342,10 +1786,13 @@ func (s *Server) handleWorkerHeartbeat(w http.ResponseWriter, r *http.Request) {
 // response to land before the client times out (Plane D §7 D1).
 const longPollCap = 25 * time.Second
 
-// longPollInterval is the re-attempt cadence while waiting: each tick is its own
-// ClaimTask (no DB transaction is held across the wait). 250ms keeps idle pickup
-// well under a second without hammering the claim query.
-const longPollInterval = 250 * time.Millisecond
+// longPollInterval is the FALLBACK re-attempt cadence while waiting — a safety net
+// for a missed pg_notify (a brief LISTEN connection drop; see notify.go), not the
+// primary wake mechanism. It used to be the only mechanism (every idle long-poll
+// re-attempted ClaimTask every 250ms regardless of whether work existed); now the
+// real wake is taskWake's broadcast on the tasks table's notify trigger, so this
+// interval is deliberately generous — a real notify almost always fires first.
+const longPollInterval = 5 * time.Second
 
 // parseWaitMs reads the optional ?wait_ms long-poll budget, clamped to
 // [0, longPollCap]. A missing, empty, malformed, or non-positive value yields 0 —
@@ -1369,13 +1816,16 @@ func parseWaitMs(r *http.Request) time.Duration {
 
 // claimWithWait is ClaimTask with an optional long-poll wait (Plane D §7 D1). With
 // wait<=0 it is a single ClaimTask — identical to the pre-long-poll behavior. With
-// wait>0 and nothing immediately claimable, it re-attempts ClaimTask every
-// longPollInterval until a task is found or the wait elapses, then returns (nil,
-// nil) for the caller's 204. Each attempt is its own short-lived transaction (the
-// wait never holds a DB transaction open). ctx (the request context) is honored on
-// every tick, so a client disconnect aborts the wait immediately. A timed-out empty
-// return bumps metrics.longPollTimeouts; errNotFound (unregistered worker) and any
-// real claim error surface at once without waiting.
+// wait>0 and nothing immediately claimable, it re-attempts ClaimTask on every real
+// wake (taskWake's broadcast — see notify.go — fired by a Postgres trigger the
+// instant a task is inserted, requeued, hedged, or rescued) or, as a fallback safety
+// net for a missed notification, every longPollInterval, until a task is found or
+// the wait elapses, then returns (nil, nil) for the caller's 204. Each attempt is
+// its own short-lived transaction (the wait never holds a DB transaction open). ctx
+// (the request context) is honored throughout, so a client disconnect aborts the
+// wait immediately. A timed-out empty return bumps metrics.longPollTimeouts;
+// errNotFound (unregistered worker) and any real claim error surface at once
+// without waiting.
 func (s *Server) claimWithWait(ctx context.Context, auth WorkerAuth, wait time.Duration) (*ClaimedTask, error) {
 	c, err := s.store.ClaimTask(ctx, auth)
 	if err != nil || c != nil || wait <= 0 {
@@ -1396,6 +1846,11 @@ func (s *Server) claimWithWait(ctx context.Context, auth WorkerAuth, wait time.D
 		case <-deadline.C:
 			metrics.longPollTimeouts.Add(1)
 			return nil, nil
+		case <-taskWake.Wait():
+			c, err := s.store.ClaimTask(ctx, auth)
+			if err != nil || c != nil {
+				return c, err
+			}
 		case <-tick.C:
 			c, err := s.store.ClaimTask(ctx, auth)
 			if err != nil || c != nil {
@@ -1580,12 +2035,42 @@ func (s *Server) handleWorkerCommit(w http.ResponseWriter, r *http.Request) {
 	// If a committed redundancy sibling exists for the same input chunk on a
 	// different worker, fetch its result too for a within-class comparison. None
 	// yet → nil, which the verifier treats as "nothing to compare" (honest).
+	//
+	// PATCH (Control plane hot path 8->9, docs/internal/CREED_AND_PATH_TO_TEN.md
+	// "Get result-commit off the S3 critical path"): this used to ALWAYS re-fetch
+	// the peer's full result object from S3 synchronously inside the commit
+	// request, even though the only thing the byte-exact comparison path
+	// (resultsAgree's default branch, verification.go) does with it is
+	// bytes.Equal(commitBytes, redundancyBytes). When BOTH sides reported a
+	// validated SHA-256 (nullSHA256Hex — malformed/absent never trusted), the job
+	// type is byte-exact (the tolerant types need real parsed content — cosine/
+	// JSON/label/rerank — so they are NEVER hash-trusted), and the two workers are
+	// in the SAME verification class (a cross-class byte difference is legitimate,
+	// not comparable — the exact gate resultsAgree's caller already applies), a
+	// hash match is PROVABLY the same bytes.Equal verdict a real GetObject would
+	// have produced (SHA-256 collision is not a real-world concern here), so the
+	// peer GET is skipped and commitBytes itself stands in for redundancyBytes —
+	// every downstream comparison, vote, and dock/credit path is byte-IDENTICAL to
+	// the slow path, just without the second synchronous S3 round-trip. A hash
+	// MISMATCH is NOT treated as a verified mismatch here (a hash collision-proof
+	// disagreement still deserves the real bytes for the tiebreak/dock path to
+	// reason about), and a missing/unvalidated hash on either side always falls
+	// back to the real GetObject — this is a pure speed optimization that can
+	// never change a verification verdict, only how it is reached.
 	var redundancyBytes []byte
-	if peerKey, peerSup, peerEng, peerBuild, perr := s.store.PeerResultKey(ctx, info.TaskID); perr == nil && peerKey != "" {
+	if peerKey, peerSup, peerEng, peerBuild, peerSHA256, perr := s.store.PeerResultKey(ctx, info.TaskID); perr == nil && peerKey != "" {
 		info.peerSupplierID = peerSup // for the verifier's no-object-store fallback (dock the right supplier)
 		info.peerEngine = peerEng     // peer's verification class — same-class vs cross-class byte mismatch
 		info.peerBuildHash = peerBuild
-		if b, gerr := s.storage.GetObject(ctx, peerKey); gerr == nil {
+		hashTrusted := commitBytes != nil &&
+			byteExactJobType(info.jobType) &&
+			sameVerificationClass(info.engine, info.buildHash, peerEng, peerBuild) &&
+			nullSHA256Hex(c.ResultSHA256) != nil && nullSHA256Hex(peerSHA256) != nil &&
+			strings.EqualFold(c.ResultSHA256, peerSHA256)
+		if hashTrusted {
+			redundancyBytes = commitBytes
+			metrics.hashTrustedRedundancy.Add(1)
+		} else if b, gerr := s.storage.GetObject(ctx, peerKey); gerr == nil {
 			redundancyBytes = b
 		}
 	}
@@ -1598,6 +2083,14 @@ func (s *Server) handleWorkerCommit(w http.ResponseWriter, r *http.Request) {
 	switch outcome {
 	case OutcomeFail:
 		metrics.verificationMismatch.Add(1)
+	case OutcomeLossNoPayout:
+		// A confirmed tiebreak/honeypot loss on THIS task: real disagreement was
+		// detected and this task's own payout was already clawed back/withheld
+		// inside the verifier (Verification & Result Trust 5.5->6). The chunk
+		// itself still resolved (a winning result exists), so it counts toward
+		// completion same as pass_with_penalty — only the payout is suppressed.
+		metrics.verificationMismatch.Add(1)
+		metrics.tasksCompleted.Add(1)
 	case OutcomePassWithPenalty:
 		metrics.verificationMismatch.Add(1)
 		metrics.tasksCompleted.Add(1)
@@ -1605,18 +2098,25 @@ func (s *Server) handleWorkerCommit(w http.ResponseWriter, r *http.Request) {
 		metrics.tasksCompleted.Add(1)
 	}
 
-	// On pass (or pass-with-penalty), schedule payout: real ledger rows with
-	// the hold window from the job's verification policy.
+	// First commit wins: cancel any still-running straggler hedge sibling for
+	// this chunk so it stops blocking completion and frees its worker, and
+	// finalize the job if this was its last task — for any outcome that isn't a
+	// hard requeue-and-retry (OutcomeFail). OutcomeLossNoPayout is included: the
+	// chunk has a real winning result, it is just this task's own payout that
+	// must never be scheduled (make cheating economically real).
 	if outcome != OutcomeFail {
-		// First commit wins: cancel any still-running straggler hedge sibling for
-		// this chunk so it stops blocking completion and frees its worker. Logged,
-		// not fatal — a stale sibling is also caught by the stale-task reaper.
 		if cerr := s.store.CancelStragglerSiblings(ctx, info.JobID, info.ChunkIndex, info.TaskID); cerr != nil {
 			log.Printf("commit: cancelling hedge siblings for job %s chunk %d: %v", info.JobID, info.ChunkIndex, cerr)
 		}
-		if err := s.scheduleTaskPayout(ctx, info); err != nil {
-			writeErr(w, http.StatusInternalServerError, "ledger error: "+err.Error())
-			return
+		// On pass (or pass-with-penalty), schedule payout: real ledger rows with
+		// the hold window from the job's verification policy. A confirmed
+		// tiebreak/honeypot loser (OutcomeLossNoPayout) is explicitly excluded —
+		// it does not get paid for the task it lost.
+		if outcome != OutcomeLossNoPayout {
+			if err := s.scheduleTaskPayout(ctx, info); err != nil {
+				writeErr(w, http.StatusInternalServerError, "ledger error: "+err.Error())
+				return
+			}
 		}
 		// If this commit completed the job, finalize it now: merge the buyer-ready
 		// artifact BEFORE marking complete + settling. A merge failure is surfaced
@@ -1653,6 +2153,13 @@ func (s *Server) finalizeJobIfDone(ctx context.Context, jobID uuid.UUID) error {
 	if err := s.store.SetJobActualUSD(ctx, jobID); err != nil {
 		return err
 	}
+	// Speed-SLA outcome (wave 2A): decided HERE — after the merge stamped
+	// results_merged_at (the guarantee clock's stop) and actual_usd settled (the
+	// refund cap), and BEFORE the charge decision below so a miss's refund nets
+	// the very first collection. Idempotent (SettleJobSLA stamps sla_met once);
+	// a no-op for jobs without a bound SLA. Best-effort: a settle error is
+	// logged and retried by the collect sweep, never fails the finalize.
+	settleSLAOutcome(ctx, s.store, jobID)
 	// Feed the ETA calibration loop (predicted vs realized; best-effort).
 	recordEtaCalibration(ctx, s.store, jobID)
 	// Best-effort external charge: gated on Stripe + a saved card, idempotent by
@@ -1689,6 +2196,22 @@ func (s *Server) handleWorkerEarnings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, e)
+}
+
+// handleWorkerVerification (GET /v1/worker/verification) reports THIS supplier's
+// own real honeypot pass/fail counts + derived label — the trust-panel data
+// source (Supplier onboarding & safety 7->8: "Populate the trust panel with real
+// data"). Polled each heartbeat by the agent alongside earnings + connect/status
+// so agent/src/status.rs can populate honeypots_passed/failed/verification_label
+// instead of leaving them permanently absent.
+func (s *Server) handleWorkerVerification(w http.ResponseWriter, r *http.Request) {
+	auth := r.Context().Value(ctxWorker).(*WorkerAuth)
+	v, err := s.store.SupplierVerification(r.Context(), auth.SupplierID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
 }
 
 // --- admin handlers ---
@@ -1735,6 +2258,39 @@ func (s *Server) handleAdminDrift(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, d)
+}
+
+// handleAdminQuoteDrift (GET /admin/quotes) is the COST-drift twin of
+// handleAdminDrift, which is ETA-only. Project Detection & Quotation 6.5->7
+// (docs/internal/CREED_AND_PATH_TO_TEN.md): "the quoted-vs-charged learning loop
+// is ETA-only: the drift data lands in Postgres but is never rolled up or fed back
+// into prices, and the specced GET /admin/quotes surface doesn't exist." This
+// rolls up real quotes.cost_expected_usd vs real jobs.actual_usd per (job_type,
+// model), so an operator can see exactly which slices of the catalogue are
+// under- or over-priced relative to what jobs actually cost to run.
+func (s *Server) handleAdminQuoteDrift(w http.ResponseWriter, r *http.Request) {
+	d, err := s.store.CostDriftRollup(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, d)
+}
+
+// handleAdminAutoTunePrices (POST /admin/quotes/auto-tune) is the "use it to
+// auto-adjust catalogue prices" half of the same rung: it reads the real cost
+// drift and nudges each sufficiently-sampled (job_type, model)'s catalogue price
+// toward the drift-corrected value (clamped, see autoTuneMaxAdjustmentFrac). An
+// explicit admin-triggered action, not a silent background loop — a price change
+// this consequential gets an operator's deliberate act and a real response body
+// naming exactly what changed, not an invisible cron.
+func (s *Server) handleAdminAutoTunePrices(w http.ResponseWriter, r *http.Request) {
+	applied, err := s.store.AutoTunePrices(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tuned": applied, "count": len(applied)})
 }
 
 // handleAdminSchedulerExplain answers "why is this worker getting no work?" (Plane D
@@ -1804,6 +2360,172 @@ func (s *Server) handleAdminSuspend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "suspended"})
+}
+
+// adminActionBody is the shared request shape for the audited admin write
+// endpoints below: an optional free-text reason, and (adjust-reputation only) a
+// numeric delta. reason is optional (an operator working a real incident should
+// never be BLOCKED from acting because they didn't type a sentence first) but is
+// always recorded — empty if omitted — so the audit trail is honest about what
+// was and wasn't explained.
+type adminActionBody struct {
+	Reason string  `json:"reason,omitempty"`
+	Delta  float32 `json:"delta,omitempty"`
+}
+
+// decodeAdminActionBody reads an optional JSON body; a missing/empty body is NOT
+// an error (reason is optional), but malformed JSON in a present body is a real
+// 400 rather than being silently ignored.
+func decodeAdminActionBody(r *http.Request) (adminActionBody, error) {
+	var b adminActionBody
+	if r.ContentLength == 0 {
+		return b, nil
+	}
+	if err := json.NewDecoder(r.Body).Decode(&b); err != nil && !errors.Is(err, io.EOF) {
+		return b, err
+	}
+	return b, nil
+}
+
+// handleAdminReinstate (POST /admin/workers/{id}/reinstate) closes the "reinstate
+// after review" half of RUNBOOKS.md's Bad/fraudulent worker procedure (Operator
+// Tooling 7->8): previously a raw
+// `psql -c "UPDATE suppliers SET status='active', quarantined_at=NULL ..."`.
+// 409 (not 500) when the worker's supplier isn't currently suspended — reinstating
+// an already-active supplier is a no-op an operator should be told about, not a
+// silent success that hides a typo'd worker id.
+func (s *Server) handleAdminReinstate(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathUUID(w, r)
+	if !ok {
+		return
+	}
+	if _, err := decodeAdminActionBody(r); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid request json: "+err.Error())
+		return
+	}
+	err := s.store.ReinstateWorker(r.Context(), id)
+	if errors.Is(err, errNotFound) {
+		writeErr(w, http.StatusNotFound, "worker not found")
+		return
+	}
+	if errors.Is(err, errNotSuspended) {
+		writeErr(w, http.StatusConflict, "worker's supplier is not currently suspended")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "active"})
+}
+
+// handleAdminRequeueTask (POST /admin/tasks/{id}/requeue) closes the "Stuck job"
+// runbook's manual fix (Operator Tooling 7->8): previously a raw
+// `psql -c "UPDATE tasks SET status='queued', claimed_by=NULL, visible_at=now() ..."`.
+// 409 when the task isn't in a requeueable state (running/retrying) — matching the
+// runbook's own scope, so this can never resurrect a complete/failed/cancelled task.
+func (s *Server) handleAdminRequeueTask(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathUUID(w, r)
+	if !ok {
+		return
+	}
+	body, err := decodeAdminActionBody(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid request json: "+err.Error())
+		return
+	}
+	err = s.store.AdminForceRequeueTask(r.Context(), id, body.Reason)
+	if errors.Is(err, errNotFound) {
+		writeErr(w, http.StatusNotFound, "task not found")
+		return
+	}
+	if errors.Is(err, errNotRequeueable) {
+		writeErr(w, http.StatusConflict, "task is not running/retrying — nothing to requeue")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "queued"})
+}
+
+// handleAdminAdjustReputation (POST /admin/suppliers/{id}/reputation) closes the
+// "manually adjust a supplier's reputation with an audit trail" gap named
+// directly in the backlog rung (Operator Tooling 7->8). Body: {"delta": ±float,
+// "reason": "..."}. delta=0 is rejected (a no-op reputation "adjustment" is
+// almost certainly a caller mistake, and would otherwise write a confusing
+// before==after audit row); reason is optional but recommended.
+func (s *Server) handleAdminAdjustReputation(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathUUID(w, r)
+	if !ok {
+		return
+	}
+	body, err := decodeAdminActionBody(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid request json: "+err.Error())
+		return
+	}
+	if body.Delta == 0 {
+		writeErr(w, http.StatusBadRequest, "delta must be non-zero")
+		return
+	}
+	before, after, err := s.store.AdminAdjustReputation(r.Context(), id, body.Delta, body.Reason)
+	if errors.Is(err, errNotFound) {
+		writeErr(w, http.StatusNotFound, "supplier not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"before": before, "after": after})
+}
+
+// handleAdminReleasePayout (POST /admin/payouts/{id}/release) closes the
+// "manually trigger a payout-hold release" gap named directly in the backlog
+// rung (Operator Tooling 7->8): previously the operator would reach for a raw
+// UPDATE against ledger_entries. Accepts an entry that is currently 'held' OR
+// 'ready' (409 for any other status — pending/released/clawed_back) and always
+// leaves it 'held' with release_at advanced to now() — it never marks the entry
+// 'released' itself (that requires a real payout_ref, per MarkPayout's own
+// invariant); the existing release-worker sweep (DuePayouts) picks it up on its
+// very next cycle.
+func (s *Server) handleAdminReleasePayout(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathUUID(w, r)
+	if !ok {
+		return
+	}
+	body, err := decodeAdminActionBody(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid request json: "+err.Error())
+		return
+	}
+	err = s.store.AdminReleasePayoutHold(r.Context(), id, body.Reason)
+	if errors.Is(err, errNotFound) {
+		writeErr(w, http.StatusNotFound, "ledger entry not found")
+		return
+	}
+	if errors.Is(err, errNotHeld) {
+		writeErr(w, http.StatusConflict, "ledger entry is not currently held or ready")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "release_scheduled"})
+}
+
+// handleAdminActions (GET /admin/actions) is the audit-log review surface for
+// every admin write action above: who did what, when, and (if given) why.
+func (s *Server) handleAdminActions(w http.ResponseWriter, r *http.Request) {
+	actions, err := s.store.ListAdminActions(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, actions)
 }
 
 // handleJobInvoice returns the buyer-facing invoice for one job (scoped to the
@@ -2098,19 +2820,65 @@ func tierMultiplier(tier string) float64 {
 	}
 }
 
+// generativeJobType reports whether a job type produces model-generated COMPLETION
+// tokens whose length (max_tokens) is a real, separately-priced cost — as opposed
+// to embed/classification/rerank, which emit a bounded, input-shaped result (a
+// vector, a label, a ranking) whose size max_tokens does not drive. Only these two
+// types get an expected-output-token cost term in estimateJobUSD (Project Detection
+// & Quotation 6->6.5, docs/internal/CREED_AND_PATH_TO_TEN.md). audio_transcribe and
+// image_gen are generative too but priced on a different basis (audio seconds /
+// image steps), not JSONL max_tokens, so they are deliberately excluded here.
+func generativeJobType(jobType string) bool {
+	return jobType == "batch_infer" || jobType == "json_extraction"
+}
+
+// defaultQuoteMaxTokens is the completion length the quote ASSUMES for a
+// generative job when the buyer sets no explicit max_tokens (the wire zero-value
+// after omitempty). It mirrors the Rust agent's own fallback for a batch_infer
+// job with no max_tokens (agent/src/runners.rs: `_ => 256`), so the quote's
+// assumed output length matches what the worker would actually generate rather
+// than pricing zero output for a job that will really emit ~256 tokens/record.
+const defaultQuoteMaxTokens = 256
+
 // estimateJobUSD estimates a job's pre-execution cost from the DB-backed model
-// price and the unit count. Units = JSONL lines (one record per line) for the
-// per-1K pricing, with a byte-derived floor (~4 bytes/token) so a few very large
-// records are not under-counted. actual_usd is set from the real ledger on
+// price and the unit count. Base units = JSONL lines (one record per line) for
+// the per-1K pricing, with a byte-derived floor (~4 bytes/token) so a few very
+// large records are not under-counted. actual_usd is set from the real ledger on
 // completion; this is the honest up-front estimate.
-func (s *Server) estimateJobUSD(ctx context.Context, modelRef string, inputBytes []byte, nLines int, tier string) float64 {
+//
+// EXPECTED-OUTPUT-TOKEN COST (Project Detection & Quotation 6->6.5): for a
+// GENERATIVE job type (batch_infer/json_extraction) the completion the model
+// writes is real work the buyer pays for, and its length is driven by max_tokens.
+// The old estimate ignored completion length entirely — max_tokens did not move
+// the price at all, so a 16-token extraction and a 2048-token generation quoted
+// identically. We now add an expected-output-token term: each of the nLines
+// records is assumed to generate up to max_tokens completion tokens (falling back
+// to defaultQuoteMaxTokens when the buyer omits it), and those output tokens are
+// priced on the SAME per-1K catalogue basis as the input units — because for a
+// generative model the catalogue's price_per_1k IS a per-1K-token price
+// (control/pricing.go's repricing derives it from tok/s throughput). A tolerant
+// (non-generative) job type is unchanged: maxTokens does not apply and adds
+// nothing, so embed/classification/rerank quotes are byte-for-byte identical to
+// before this rung.
+func (s *Server) estimateJobUSD(ctx context.Context, jobType, modelRef string, inputBytesLen int, nLines int, maxTokens uint32, tier string) float64 {
 	price := 0.002 // default per-1K when the model is unknown to the catalogue
 	if m, err := s.store.GetModel(ctx, modelRef); err == nil {
 		price = modelPrice(*m)
 	}
 	units := float64(nLines)
-	if byteUnits := float64(len(inputBytes)) / 4.0; byteUnits > units {
+	if byteUnits := float64(inputBytesLen) / 4.0; byteUnits > units {
 		units = byteUnits
+	}
+	// Expected output tokens for generative jobs: nLines records × the per-record
+	// completion length (max_tokens, or the agent's own default when unset). These
+	// are ADDED to the priced units so a longer max_tokens measurably raises the
+	// quote — the real cost of a longer completion the old estimate dropped.
+	if generativeJobType(jobType) && nLines > 0 {
+		outTokensPerRecord := maxTokens
+		if outTokensPerRecord == 0 {
+			outTokensPerRecord = defaultQuoteMaxTokens
+		}
+		units += float64(nLines) * float64(outTokensPerRecord)
 	}
 	est := units / 1000.0 * price * tierMultiplier(tier)
 	return roundUSD(est)
@@ -2129,6 +2897,21 @@ func splitSizeOf(params json.RawMessage) int {
 		return defaultSplitSize
 	}
 	return p.SplitSize
+}
+
+// hasExplicitSplitSize reports whether params carries a positive split_size (the
+// buyer override adaptiveSplitSize always defers to). Used by the streaming
+// submit path to decide whether the avgLineBytes heuristic — which for a
+// streamed input can only come from a bounded look-ahead sample, see
+// peekInputSample — is even needed: an explicit split_size makes it moot.
+func hasExplicitSplitSize(params json.RawMessage) bool {
+	if len(params) == 0 {
+		return false
+	}
+	var p struct {
+		SplitSize int `json:"split_size"`
+	}
+	return json.Unmarshal(params, &p) == nil && p.SplitSize > 0
 }
 
 // jobTypeThroughput is the representative items processed per SECOND for one
@@ -2209,6 +2992,135 @@ func adaptiveSplitSize(jobType string, params json.RawMessage, avgLineBytes floa
 	return n
 }
 
+// adaptiveSplitSizeLive is the LIVE-FLEET-aware refinement of adaptiveSplitSize
+// (Speed Lane wave 1B, planner.go): instead of the static jobTypeThroughput
+// map's "typical worker", it sizes a chunk at ~targetTaskSecs of work for the
+// MEDIAN live eligible worker's measured rate (worker_tps_cache), and then
+// floors the resulting CHUNK COUNT at the fan-out planner's recommended width
+// so the plan's parallelism is actually achievable (a job split into fewer
+// chunks than the fleet can usefully run in parallel wastes idle capacity —
+// the pre-wave failure mode for small generative jobs).
+//
+// staticSize (the adaptiveSplitSize result) is returned UNCHANGED — the honest
+// fallback — whenever: the planner is disabled; the job type is not generative
+// (worker_tps_cache tps is tokens/sec, which converts to items/sec via
+// tokensPerItemEstimate only for token-generating types; embed/rerank rates
+// live on a different unit axis and keep the static path — a documented
+// boundary, not a silent mismatch); fewer than plannerMinFleetSamples live
+// workers have a real measured rate; or the snapshot query fails (a sizing
+// heuristic must never fail a submission). totalRecords is 0 when the input
+// was streamed past the look-ahead sample (record count unknown) — the median
+// sizing still applies but the width floor is skipped, honestly.
+func (s *Server) adaptiveSplitSizeLive(ctx context.Context, jobType, modelRef string, minMemGB float32, maxTokens uint32, avgLineBytes float64, staticSize, totalRecords int) int {
+	if !fanoutPlannerEnabled.Load() || !generativeJobType(jobType) {
+		return staticSize
+	}
+	rows, err := s.store.FleetRateSnapshot(ctx, jobType, modelRef, minMemGB)
+	if err != nil {
+		return staticSize // degraded sizing, never a failed submit
+	}
+	var rates []float64
+	for _, r := range rows {
+		if r.TPS > 0 && !r.Throttled {
+			rates = append(rates, float64(r.TPS))
+		}
+	}
+	if len(rates) < plannerMinFleetSamples {
+		return staticSize // rate cache too thin — static map remains in force
+	}
+	tokensPerItem := tokensPerItemEstimate(maxTokens, avgLineBytes)
+	medianItemsPerSec := medianRate(rates) / tokensPerItem
+	size := int(medianItemsPerSec * targetTaskSecs)
+	if size < 1 {
+		size = 1
+	}
+	if size > 4096 {
+		size = 4096
+	}
+	width := 0
+	if totalRecords > 0 {
+		fleet := plannerFleetFromRows(rows, modelRef, func(tps float32) float64 {
+			return float64(tps) / tokensPerItem
+		})
+		plan := PlanFanout(PlannerJob{Items: totalRecords, JobType: jobType, ModelRef: modelRef}, fleet)
+		width = plan.Width
+		if width > 0 {
+			if chunks := (totalRecords + size - 1) / size; chunks < width {
+				size = (totalRecords + width - 1) / width // ceil: chunk count >= planner width
+				if size < 1 {
+					size = 1
+				}
+			}
+		}
+		log.Printf("planner: split jobType=%s model=%s live_fleet=%d median_tps=%.1f tok/item=%.0f records=%d width=%d split=%d (static %d) modeled_wallclock_p50=%.1fs conservative=%.1fs single_node=%.1fs speedup_vs_single=%.2fx [MODELED]",
+			jobType, modelRef, len(rates), medianRate(rates), tokensPerItem, totalRecords,
+			plan.Width, size, staticSize, plan.WallClockP50Secs, plan.WallClockConservativeSecs,
+			plan.SingleNodeSecs, plan.ModeledSpeedupVsSingle)
+	} else {
+		log.Printf("planner: split jobType=%s model=%s live_fleet=%d median_tps=%.1f tok/item=%.0f records=unknown(streamed) split=%d (static %d) width_floor=skipped [MODELED]",
+			jobType, modelRef, len(rates), medianRate(rates), tokensPerItem, size, staticSize)
+	}
+	return size
+}
+
+// plannerETASecs is the planner-backed ETA (Speed Lane wave 1B): the modeled
+// makespan of (queuedAhead + nTasks) task-units across the live fleet's
+// MEASURED heterogeneous rates, with a per-worker COLD-LOAD term
+// (benchmark_results.load_ms where measured, the documented default
+// otherwise) — the two things the blunt ceil(queue/workers)×perTaskSecs
+// formula structurally cannot see (a mixed fleet's tail and a cold fleet's
+// first minutes were systematically underestimated). Rates are RELATIVE:
+// perTaskSecs (the drift-fed p90 or the static target) anchors the absolute
+// scale — the median-rate worker completes one task-unit per perTaskSecs; a
+// worker at 2× the median tps completes it in half that.
+//
+// Returns ok=false — and the caller keeps the pre-wave formula — when the
+// planner is disabled, the snapshot fails, or fewer than
+// plannerMinFleetSamples live workers have a measured rate for this job type.
+//
+// Speed Lane wave 2A: alongside the p50 it now also returns the plan's
+// CONSERVATIVE band (the same assignment re-costed with every rate degraded to
+// plannerConservativeRateFactor of measured — planner.go) so the speed-SLA
+// quote can build its guarantee on the band, never on the p50. The band is
+// floored at the p50 (defensive; by construction it is ≥).
+func (s *Server) plannerETASecs(ctx context.Context, jobType, modelRef string, nTasks, queuedAhead, perTaskSecs int) (eta, conservative int, ok bool) {
+	if !fanoutPlannerEnabled.Load() {
+		return 0, 0, false
+	}
+	rows, err := s.store.FleetRateSnapshot(ctx, jobType, modelRef, 0)
+	if err != nil {
+		return 0, 0, false
+	}
+	var rates []float64
+	for _, r := range rows {
+		if r.TPS > 0 && !r.Throttled {
+			rates = append(rates, float64(r.TPS))
+		}
+	}
+	median := medianRate(rates)
+	if len(rates) < plannerMinFleetSamples || median <= 0 || perTaskSecs <= 0 {
+		return 0, 0, false
+	}
+	fleet := plannerFleetFromRows(rows, modelRef, func(tps float32) float64 {
+		return (float64(tps) / median) / float64(perTaskSecs) // task-units per second
+	})
+	plan := PlanFanout(PlannerJob{Items: queuedAhead + nTasks, JobType: jobType, ModelRef: modelRef}, fleet)
+	if plan.Width == 0 {
+		return 0, 0, false
+	}
+	eta = int(math.Ceil(plan.WallClockP50Secs))
+	if eta < perTaskSecs {
+		eta = perTaskSecs // a job always takes at least one task's worth of time
+	}
+	conservative = int(math.Ceil(plan.WallClockConservativeSecs))
+	if conservative < eta {
+		conservative = eta
+	}
+	log.Printf("planner: eta jobType=%s model=%s tasks=%d queued_ahead=%d live_fleet=%d width=%d per_task=%ds eta=%ds (conservative %ds) [MODELED]",
+		jobType, modelRef, nTasks, queuedAhead, len(rates), plan.Width, perTaskSecs, eta, conservative)
+	return eta, conservative, true
+}
+
 // offeredRateUsdHr derives the $/hr a worker earns running this job from the
 // DB-backed model price and the job type's representative throughput:
 //
@@ -2245,14 +3157,32 @@ func perTaskSecsFromP90(p90ms int64) int {
 
 // estimateETASecs is a simple queue-depth/throughput estimate: the time for this
 // job's tasks plus everything already queued ahead of them to drain across the
-// live fleet. perTaskSecs is the per-task duration: we use the OBSERVED p90 of past
-// committed tasks for this (job_type, model_ref) once enough have been recorded
-// (Plane D D6 drift feedback — the Exchange Brain learns reality), and fall back to
-// the static throughput target when history is too thin (or a DB error). The queue
-// depth and active-worker count come from the store (a DB error degrades gracefully
-// to a single-worker, no-backlog estimate rather than failing the submission).
-// Never returns < perTaskSecs (a job always takes at least one task's worth of time).
+// live fleet. Kept as the one-value wrapper (same signature as ever) over
+// etaBandSecs below — createJob and every other caller that only needs the p50
+// stays byte-identical.
 func (s *Server) estimateETASecs(ctx context.Context, jobType, modelRef string, nTasks int) int {
+	eta, _, _ := s.etaBandSecs(ctx, jobType, modelRef, nTasks)
+	return eta
+}
+
+// etaBandSecs is estimateETASecs plus the planner's CONSERVATIVE band (Speed
+// Lane wave 2A — the guarantee basis of the speed-SLA quote). perTaskSecs is
+// the per-task duration: we use the OBSERVED p90 of past committed tasks for
+// this (job_type, model_ref) once enough have been recorded (Plane D D6 drift
+// feedback — the Exchange Brain learns reality), and fall back to the static
+// throughput target when history is too thin (or a DB error). The queue depth
+// and active-worker count come from the store (a DB error degrades gracefully
+// to a single-worker, no-backlog estimate rather than failing the submission).
+// Never returns eta < perTaskSecs (a job always takes at least one task's
+// worth of time).
+//
+// plannerBacked=true iff the ETA is the planner's modeled makespan over REAL
+// measured heterogeneous rates (wave 1B); only then is `conservative` a real
+// band (rates degraded to 75% of measured, planner.go) a guarantee may be
+// built on. plannerBacked=false → conservative is 0 and NO caller may promise
+// anything: the pre-wave blunt formula is an aggregate, not a model of this
+// fleet, and the speed-SLA never offers a guarantee on it (honest degradation).
+func (s *Server) etaBandSecs(ctx context.Context, jobType, modelRef string, nTasks int) (eta, conservative int, plannerBacked bool) {
 	// Drift feedback: prefer the observed p90 per-task duration once history is thick
 	// enough (HistoricalP90DurationMs returns 0 below the sample floor, so a thin or
 	// empty history — or a DB error — cleanly falls back to the static target).
@@ -2262,6 +3192,15 @@ func (s *Server) estimateETASecs(ctx context.Context, jobType, modelRef string, 
 	}
 	perTaskSecs := perTaskSecsFromP90(p90ms)
 	queued, _ := s.store.QueuedTaskCount(ctx)
+	// Speed Lane wave 1B (planner.go): when the live fleet has enough measured
+	// rates, the ETA is the planner's modeled makespan over HETEROGENEOUS
+	// per-worker rates plus a real COLD-LOAD term — the two effects the wave
+	// formula below cannot represent. Same perTaskSecs anchor, same queue term;
+	// ok=false (thin cache / disabled / DB error) falls through to the
+	// unchanged pre-wave formula.
+	if eta, cons, ok := s.plannerETASecs(ctx, jobType, modelRef, nTasks, queued, perTaskSecs); ok {
+		return eta, cons, true
+	}
 	workers, _ := s.store.ActiveWorkerCount(ctx)
 	if workers < 1 {
 		workers = 1
@@ -2271,11 +3210,11 @@ func (s *Server) estimateETASecs(ctx context.Context, jobType, modelRef string, 
 	ahead := queued // tasks already waiting
 	totalTasks := ahead + nTasks
 	waves := (totalTasks + workers - 1) / workers
-	eta := waves * perTaskSecs
+	eta = waves * perTaskSecs
 	if eta < perTaskSecs {
 		eta = perTaskSecs
 	}
-	return eta
+	return eta, 0, false
 }
 
 // tierMinCompletion is the human-facing completion floor per tier, so the RFC3339
@@ -2322,6 +3261,152 @@ func splitJSONL(data []byte, n int) [][]byte {
 	return chunks
 }
 
+// inputSampleBytes bounds the look-ahead peekInputSample reads to estimate
+// avgLineBytes for adaptiveSplitSize on a STREAMED input, when the buyer gave no
+// explicit split_size. Large enough to see a representative mix of record sizes,
+// small enough that it is never the memory cost driver even for a multi-GB input.
+const inputSampleBytes = 1 << 20 // 1 MiB
+
+// peekInputSample reads up to max bytes from r for a look-ahead sample, then
+// returns that sample PLUS a reader that reproduces the full original stream
+// (sample followed by whatever remains of r, via io.MultiReader) — so the
+// caller can inspect the sample without losing a single byte of the real input.
+// r is not closed; the returned rest wraps it in a NopCloser paired with the
+// prepended sample, matching resolveInput's io.ReadCloser contract.
+func peekInputSample(r io.ReadCloser, max int) (sample []byte, rest io.ReadCloser, err error) {
+	buf := make([]byte, max)
+	n, rerr := io.ReadFull(r, buf)
+	if rerr != nil && rerr != io.ErrUnexpectedEOF && rerr != io.EOF {
+		return nil, nil, rerr
+	}
+	sample = buf[:n]
+	return sample, io.NopCloser(io.MultiReader(bytes.NewReader(sample), r)), nil
+}
+
+// streamingPut uploads an unknown-size stream to storage.PutObject via an
+// io.Pipe, run on its own goroutine so createJob can tee the canonical input
+// upload alongside the chunk split below without ever buffering it separately.
+// size=-1 tells minio-go to use its own streaming multipart upload internally
+// (see minio-go's PutObject), so this never buffers the whole canonical input
+// in control-plane memory either.
+type streamingPut struct {
+	writer *io.PipeWriter
+	done   chan error
+}
+
+func newStreamingPut(ctx context.Context, storage *Storage, key, contentType string) *streamingPut {
+	pr, pw := io.Pipe()
+	sp := &streamingPut{writer: pw, done: make(chan error, 1)}
+	go func() {
+		err := storage.PutObjectStream(ctx, key, pr, contentType)
+		pr.CloseWithError(err) // unblock the writer side if PutObject gave up early
+		sp.done <- err
+	}()
+	return sp
+}
+
+// wait blocks for the upload goroutine to finish and returns its error.
+func (sp *streamingPut) wait() error { return <-sp.done }
+
+// streamSplitAndUpload reads input once, splitting it into <=splitSize-line
+// JSONL chunks and uploading each as its own object CONCURRENTLY through a
+// bounded errgroup (Data Transfer & Artifact I/O 7->8 / Scalability Headroom
+// 7->8: "write submission chunks concurrently through a bounded errgroup (~16 in
+// flight) instead of serially"). If canonicalTee is non-nil, every byte read is
+// also written there verbatim (before line-splitting/trimming) so the canonical
+// jobs/{jobID}/input.jsonl upload — when the input came inline rather than from
+// an existing s3_key — reproduces the buyer's exact original bytes, the same
+// contract PutObject(inputBytes) gave before this streamed. Returns the primary
+// task rows (chunk_index 0-based, matching the input's line order), the total
+// input byte count, and the sha256 of the exact bytes read (for D7 quote-hash
+// binding) — all three the streaming equivalents of what a whole-buffer read
+// used to hand back for free.
+func (s *Server) streamSplitAndUpload(ctx context.Context, jobID uuid.UUID, input io.Reader, splitSize int, canonicalTee io.Writer) (tasks []taskRow, totalBytes int, totalRecords int, sum256 [32]byte, err error) {
+	if splitSize <= 0 {
+		splitSize = defaultSplitSize
+	}
+	if canonicalTee != nil {
+		input = io.TeeReader(input, canonicalTee)
+	}
+	hasher := sha256.New()
+	input = io.TeeReader(input, hasher)
+
+	const uploadConcurrency = 16
+	grp, gctx := errgroup.WithContext(ctx)
+	grp.SetLimit(uploadConcurrency)
+
+	// chunkIndex assigns each task its 0-based input position HERE, in the single
+	// reader goroutine below — NOT by goroutine launch/completion order (errgroup's
+	// bounded workers can finish out-of-order). tasks itself is only ever appended
+	// to from this same reader goroutine (the grp.Go closures only PutObject; they
+	// never touch tasks), so no lock is needed for it — the concurrency this
+	// function bounds is entirely on the object-store WRITE side, not on this
+	// bookkeeping.
+	nextIndex := 0
+
+	br := bufio.NewReaderSize(input, 64<<10)
+	var lineBuf bytes.Buffer
+	linesInChunk := 0
+	flush := func() {
+		if linesInChunk == 0 {
+			return
+		}
+		idx := nextIndex
+		nextIndex++
+		chunk := append([]byte(nil), lineBuf.Bytes()...) // copy: lineBuf is reused next iteration
+		lineBuf.Reset()
+		linesInChunk = 0
+		taskID := uuid.New()
+		chunkKey := fmt.Sprintf("jobs/%s/tasks/%s/input.jsonl", jobID, taskID)
+		tasks = append(tasks, taskRow{
+			ID:         taskID,
+			JobID:      jobID,
+			InputRef:   chunkKey,
+			ResultKey:  fmt.Sprintf("jobs/%s/tasks/%s/result.json", jobID, taskID),
+			ChunkIndex: idx,
+		})
+		grp.Go(func() error {
+			return s.storage.PutObject(gctx, chunkKey, chunk, "application/x-ndjson")
+		})
+	}
+
+	for {
+		line, rerr := br.ReadBytes('\n')
+		if len(line) > 0 {
+			trimmed := bytes.TrimRight(line, "\r\n")
+			totalBytes += len(trimmed)
+			if len(bytes.TrimSpace(trimmed)) != 0 {
+				lineBuf.Write(trimmed)
+				lineBuf.WriteByte('\n')
+				linesInChunk++
+				totalRecords++ // one non-blank JSONL line = one record (per-record output-token pricing)
+				if linesInChunk >= splitSize {
+					flush()
+				}
+			}
+		}
+		if rerr != nil {
+			if rerr != io.EOF {
+				_ = grp.Wait()
+				return nil, 0, 0, sum256, rerr
+			}
+			break
+		}
+	}
+	flush() // the final, possibly-short chunk
+	if werr := grp.Wait(); werr != nil {
+		return nil, 0, 0, sum256, werr
+	}
+	// Order tasks by ChunkIndex: errgroup workers can finish (and append) out of
+	// launch order even though chunkIndex assignment above was already correct —
+	// the DB rows/keys are right regardless, but a stable, predictable ORDER in
+	// the slice (matching the pre-streaming code's guarantee) costs one sort of an
+	// already-small (task-count, not byte-size) slice.
+	sort.Slice(tasks, func(i, j int) bool { return tasks[i].ChunkIndex < tasks[j].ChunkIndex })
+	copy(sum256[:], hasher.Sum(nil))
+	return tasks, totalBytes, totalRecords, sum256, nil
+}
+
 // fracCount returns round(n * frac), clamped to [0, n]. Used to size honeypot
 // and redundancy task counts from the policy fractions.
 func fracCount(n int, frac float32) int {
@@ -2336,6 +3421,20 @@ func fracCount(n int, frac float32) int {
 }
 
 func roundUSD(v float64) float64 { return math.Round(v*1e6) / 1e6 }
+
+// redundancySelectionHash gives each primary task a stable, unpredictable-ahead-
+// of-time rank for "does this primary get a redundancy peer" — sha256(jobID +
+// taskID) truncated to a uint64. Deterministic given those two freshly-random
+// UUIDs (so a fixed job replays identically), but NOT ordinal — it does not
+// correlate with chunk position, so a supplier watching submission order alone
+// cannot infer which chunks are more likely to get redundancy-checked.
+func redundancySelectionHash(jobID, taskID uuid.UUID) uint64 {
+	h := sha256.New()
+	h.Write(jobID[:])
+	h.Write(taskID[:])
+	sum := h.Sum(nil)
+	return binary.BigEndian.Uint64(sum[:8])
+}
 
 // pathUUID parses the {id} path value as a UUID, writing a 400 on failure.
 func pathUUID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {

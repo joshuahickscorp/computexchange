@@ -32,6 +32,54 @@ fn default_checkpoint_secs() -> u64 {
     30
 }
 
+/// Hard bounds on the Hawking continuous-batch lane's concurrent-slot ceiling
+/// (`hawking_pool_size`). The upper bound is 8 because B=8 is the PROVEN
+/// operating point (5.0x aggregate vs single-stream, measured on the reference
+/// M3 Pro — docs/HAWKING_PORT_PLAN.md "What is PROVEN vs UNVALIDATED") and the
+/// upstream Hawking GEMMs are independently capped at `1..=8`; **B=16 and larger
+/// are explicitly UNVALIDATED**, so a config asking for more is clamped, never
+/// honored. The lower bound is 1 (a 0-slot pool could admit nothing and would
+/// stall every job).
+pub const HAWKING_POOL_SIZE_MIN: usize = 1;
+pub const HAWKING_POOL_SIZE_MAX: usize = 8;
+
+/// Default `hawking_pool_size` when `agent.toml` omits it: the proven B=8
+/// operating point (see `HAWKING_POOL_SIZE_MAX`'s doc comment).
+fn default_hawking_pool_size() -> usize {
+    HAWKING_POOL_SIZE_MAX
+}
+
+/// Real thermal-pressure reading, mirroring Apple's own `NSProcessInfoThermalState`
+/// levels (`nominal`/`fair`/`serious`/`critical`) — the identical enum macOS uses
+/// internally to throttle itself. On the Mac agent this comes from
+/// `hardware::read_thermal_pressure()`, an in-process `NSProcessInfo.thermalState`
+/// FFI read (no subprocess, no menu-bar-app round trip — the ONLY thermal signal
+/// macOS exposes to an ordinary process; there is no per-die temperature API off
+/// CUDA). Absent (`None`) means "no reading available this cycle" — NEVER treated
+/// as nominal-and-safe; see `evaluate_thermal_throttle`. Also settable via the
+/// `agent.prefs.toml` overlay (`OperatorPrefs.thermal_pressure`) for anyone
+/// layering an alternate reader in front of the agent; the real Mac path does not
+/// need it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThermalPressure {
+    Nominal,
+    Fair,
+    Serious,
+    Critical,
+}
+
+impl ThermalPressure {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ThermalPressure::Nominal => "nominal",
+            ThermalPressure::Fair => "fair",
+            ThermalPressure::Serious => "serious",
+            ThermalPressure::Critical => "critical",
+        }
+    }
+}
+
 /// User-facing operator policy for this machine. Deserialized straight from TOML.
 ///
 /// Some fields (`max_cpu_pct`, `min_payout_usd_per_hr`, `data_dir`) are part of
@@ -46,6 +94,7 @@ fn default_checkpoint_secs() -> u64 {
 ///   (PERF_AND_CAPABILITY_AUDIT Wave 2; docs/VLLM_LANE.md). The CUDA serving lane.
 /// - `hawking` — Apple-Silicon continuous-batch lane ported from the founder's
 ///   Hawking engine, `continuous_batch` module (docs/HAWKING_PORT_PLAN.md). Apple-only.
+///
 /// Set in agent.toml: `inference_backend = "vllm"` (etc).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -128,6 +177,30 @@ pub struct AgentConfig {
     /// via `default_checkpoint_secs` (30) when omitted from the TOML.
     #[serde(default = "default_checkpoint_secs")]
     pub checkpoint_secs: u64,
+    /// Concurrent-slot ceiling (`pool_size`) for the Hawking continuous-batch
+    /// lane — only read when `inference_backend = "hawking"`. This is the
+    /// scheduler's `max_batch_size`: how many sequences may decode through one
+    /// shared forward pass at peak. Defaults to 8, the PROVEN operating point
+    /// (docs/HAWKING_PORT_PLAN.md); consumed via `hawking_pool_size_clamped()`,
+    /// which HARD-CLAMPS to `1..=8` because B=16+ is explicitly UNVALIDATED —
+    /// an operator cannot opt into an unproven batch width from the TOML.
+    #[serde(default = "default_hawking_pool_size")]
+    pub hawking_pool_size: usize,
+    /// Live thermal-pressure reading (see `ThermalPressure`). `None` at process
+    /// start and whenever no reading is available — treated as "unknown", NEVER as
+    /// "safe to run", by `evaluate_thermal_throttle`'s own doc comment. Set fresh
+    /// every poll cycle by `refresh_thermal_pressure`, which prefers the real
+    /// in-process `hardware::read_thermal_pressure()` OS read and falls back to the
+    /// `agent.prefs.toml` overlay only if that yields nothing. Absent from
+    /// `agent.toml` itself, so it is not part of the base-config Deserialize impl.
+    #[serde(skip, default)]
+    pub thermal_pressure: Option<ThermalPressure>,
+    /// Resolved path of the operator-prefs overlay (see `resolve_prefs_path`),
+    /// cached at `load()` time so `refresh_thermal_pressure` can re-read it on
+    /// every poll cycle without re-deriving `CX_AGENT_PREFS`/sidecar precedence
+    /// each time. `None` when no overlay exists (dev/test configs).
+    #[serde(skip, default)]
+    pub prefs_path: Option<PathBuf>,
 }
 
 /// Operator-preferences overlay (Atlas F7 / backlog item 25). A PARTIAL TOML the
@@ -147,6 +220,12 @@ pub struct OperatorPrefs {
     pub max_cpu_pct: Option<f32>,
     pub quiet_hours: Option<(u8, u8)>,
     pub max_concurrent_tasks: Option<usize>,
+    /// Live thermal-pressure reading (see `ThermalPressure`). Unlike the other
+    /// prefs fields this isn't operator-set policy — it's a live sensor value the
+    /// app rewrites on every `NSProcessInfoThermalStateDidChange` notification —
+    /// but it rides the same overlay file because that's the one channel that
+    /// already updates a running agent without a restart.
+    pub thermal_pressure: Option<ThermalPressure>,
 }
 
 impl OperatorPrefs {
@@ -174,7 +253,54 @@ pub struct ThrottleDecision {
     pub used_pct: f32,
 }
 
+/// The outcome of a thermal-pressure evaluation, mirroring `ThrottleDecision`'s
+/// shape so both feed the same status-surface/heartbeat pattern. `reading` is
+/// `None` when no thermal signal has been observed yet (process just started, or
+/// the app hasn't written the overlay since launch) — the status surface must
+/// render that as "unknown", never as "nominal".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThermalDecision {
+    pub throttled: bool,
+    pub reason: Option<String>,
+    pub reading: Option<ThermalPressure>,
+}
+
 impl AgentConfig {
+    /// Decide whether thermal pressure should pause NEW work. PURE — fully
+    /// determined by `self.thermal_pressure`, so it is unit-tested without ever
+    /// touching the OS. Mirrors `evaluate_memory_throttle`'s shape and is checked
+    /// alongside it in `poll_and_spawn`, before every claim.
+    ///
+    /// Honesty note (docs/internal/CREED_AND_PATH_TO_TEN.md, Supplier onboarding
+    /// & safety 6→7): this is real thermal gating, not the permanently-`None`
+    /// `gpu_temp_c` stub. On the Mac agent the only signal available is
+    /// `ProcessInfo.thermalState` (`.serious`/`.critical` are Apple's own
+    /// definition of "this device is measurably hot and macOS is already
+    /// throttling it"), piped in via the menu-bar app writing the
+    /// `agent.prefs.toml` overlay on every `NSProcessInfoThermalStateDidChange`.
+    /// We pause on `serious` (not just `critical`) — matching the consent copy's
+    /// "backs off before it would slow you down" — because by the time macOS
+    /// itself reports `critical`, the box is already visibly struggling.
+    pub fn evaluate_thermal_throttle(&self) -> ThermalDecision {
+        match self.thermal_pressure {
+            Some(ThermalPressure::Serious) => ThermalDecision {
+                throttled: true,
+                reason: Some("thermal pressure: serious (macOS is throttling this Mac)".into()),
+                reading: Some(ThermalPressure::Serious),
+            },
+            Some(ThermalPressure::Critical) => ThermalDecision {
+                throttled: true,
+                reason: Some("thermal pressure: critical".into()),
+                reading: Some(ThermalPressure::Critical),
+            },
+            other => ThermalDecision {
+                throttled: false,
+                reason: None,
+                reading: other,
+            },
+        }
+    }
+
     /// Decide whether memory pressure should pause NEW work. PURE — fully
     /// determined by the snapshot + policy (+ an optional next-task estimate) with
     /// no I/O, so it is unit-tested without ever touching the OS or risking a real
@@ -262,29 +388,65 @@ impl AgentConfig {
             }
         }
 
-        // Operator-prefs overlay (Atlas F7 / item 25). Source, in precedence order:
-        //   1. CX_AGENT_PREFS — an explicit path (the app sets it on launch), else
-        //   2. the conventional `agent.prefs.toml` sidecar next to the config file —
-        //      the exact path the menu-bar app writes — so its toggles apply with no
-        //      extra wiring. A present pref value overrides the base; absent leaves it.
-        // An explicit path that won't read, or an existing sidecar that won't parse, is
-        // a HARD error (surfaced) — silently-ignored prefs ARE the decorative-toggle bug.
-        let prefs_path: Option<PathBuf> = match std::env::var("CX_AGENT_PREFS") {
-            Ok(p) if !p.is_empty() => Some(PathBuf::from(p)),
-            _ => {
-                let sidecar = path.with_file_name("agent.prefs.toml");
-                if sidecar.exists() {
-                    Some(sidecar)
-                } else {
-                    None
-                }
-            }
-        };
-        if let Some(pp) = prefs_path {
+        // Operator-prefs overlay (Atlas F7 / item 25). A present pref value
+        // overrides the base; absent leaves it. An explicit path that won't read, or
+        // an existing sidecar that won't parse, is a HARD error (surfaced) —
+        // silently-ignored prefs ARE the decorative-toggle bug.
+        if let Some(pp) = Self::resolve_prefs_path(path) {
             cfg.apply_prefs(&OperatorPrefs::load(&pp)?);
         }
+        cfg.prefs_path = Self::resolve_prefs_path(path);
 
         Ok(cfg)
+    }
+
+    /// Resolve the operator-prefs overlay path, in precedence order:
+    ///   1. `CX_AGENT_PREFS` — an explicit path (the app sets it on launch), else
+    ///   2. the conventional `agent.prefs.toml` sidecar next to the config file —
+    ///      the exact path the menu-bar app writes — so its toggles apply with no
+    ///      extra wiring.
+    ///
+    /// Shared by `load` (initial merge) and `refresh_thermal_pressure` (the live
+    /// re-read every poll cycle needs, since `thermal_pressure` — unlike every
+    /// other overlay knob — must reflect the CURRENT reading, not the one at
+    /// process start).
+    fn resolve_prefs_path(config_path: &Path) -> Option<PathBuf> {
+        match std::env::var("CX_AGENT_PREFS") {
+            Ok(p) if !p.is_empty() => Some(PathBuf::from(p)),
+            _ => {
+                let sidecar = config_path.with_file_name("agent.prefs.toml");
+                sidecar.exists().then_some(sidecar)
+            }
+        }
+    }
+
+    /// Re-read the live thermal reading, fresh, right now. Unlike
+    /// `power_only`/`memory_headroom_gb`/etc (applied once at launch; the app's own
+    /// doc comment: "the toggles apply on the next launch"), thermal pressure must
+    /// be live — a hot Mac needs to pause claiming within the same run, not after a
+    /// restart. Mirrors `throttle_snapshot()`'s pattern of doing real, fresh I/O
+    /// every cycle rather than caching a stale value.
+    ///
+    /// PATCH (P-real-platform-signals, docs/internal/CREED_AND_PATH_TO_TEN.md,
+    /// "Agent idle footprint & startup overhead" 7→8): this used to read ONLY the
+    /// `agent.prefs.toml` overlay, which nothing currently writes a `thermal_pressure`
+    /// key into — the menu-bar app displays thermal state but has no
+    /// `NSProcessInfoThermalStateDidChange` observer wired up yet, so the overlay
+    /// path alone always yielded `None` in practice (dead plumbing waiting for a
+    /// reader). `hardware::read_thermal_pressure()` is that reader: a direct,
+    /// in-process `NSProcessInfo.thermalState` read from the agent binary itself,
+    /// needing no separate app process at all. Preferred first; the overlay is kept
+    /// as a fallback (and forward-compatible if the app ever does start writing a
+    /// live value there — e.g. a future GUI-only deployment where the agent binary
+    /// itself can't link Foundation for some reason) — an overlay reading is used
+    /// only when the direct OS read yields no signal.
+    pub fn refresh_thermal_pressure(&mut self) {
+        self.thermal_pressure = crate::hardware::read_thermal_pressure().or_else(|| {
+            self.prefs_path
+                .as_ref()
+                .and_then(|p| OperatorPrefs::load(p).ok())
+                .and_then(|p| p.thermal_pressure)
+        });
     }
 
     /// Merge an operator-prefs overlay over this config (Atlas F7 / item 25). Each
@@ -315,6 +477,9 @@ impl AgentConfig {
             // The app writes 0 to mean "derive from cores+RAM" (its sidecar comment), so
             // map 0 to None (the derive sentinel) rather than pinning concurrency to 1.
             self.max_concurrent_tasks = if v == 0 { None } else { Some(v) };
+        }
+        if let Some(v) = prefs.thermal_pressure {
+            self.thermal_pressure = Some(v);
         }
     }
 
@@ -353,6 +518,17 @@ impl AgentConfig {
             None => ((memory_gb / 8.0) as usize).clamp(2, 4),
         }
     }
+
+    /// The Hawking lane's effective concurrent-slot ceiling: the configured
+    /// `hawking_pool_size` HARD-CLAMPED to `HAWKING_POOL_SIZE_MIN..=
+    /// HAWKING_POOL_SIZE_MAX` (1..=8). Every consumer goes through this — the
+    /// raw field is never handed to the runner — because B=16+ is explicitly
+    /// UNVALIDATED (docs/HAWKING_PORT_PLAN.md) and a 0-slot pool would stall:
+    /// the clamp is a correctness/safety bound, not a tuning suggestion.
+    pub fn hawking_pool_size_clamped(&self) -> usize {
+        self.hawking_pool_size
+            .clamp(HAWKING_POOL_SIZE_MIN, HAWKING_POOL_SIZE_MAX)
+    }
 }
 
 #[cfg(test)]
@@ -374,6 +550,9 @@ mod tests {
             max_concurrent_tasks: None,
             inference_backend: InferenceBackend::default(),
             checkpoint_secs: default_checkpoint_secs(),
+            hawking_pool_size: default_hawking_pool_size(),
+            thermal_pressure: None,
+            prefs_path: None,
         }
     }
 
@@ -491,6 +670,61 @@ mod tests {
         assert!(cfg(None, false).is_eligible_to_run(12, true));
     }
 
+    // --- Thermal throttle (Supplier onboarding & safety 6→7) --------------------
+    // Closes the first honesty gap: the consent copy promises the agent "pauses
+    // new work under memory pressure or high thermals"; before this, `thermal_
+    // pressure` didn't exist and nothing ever paused claiming for heat.
+
+    #[test]
+    fn no_thermal_reading_never_throttles() {
+        // Freshly started agent (or one whose app hasn't written the overlay yet):
+        // `None` must NOT be treated as "nominal" — but it also must not itself
+        // pause claiming (that would make every fresh launch instantly stuck).
+        let d = cfg(None, false).evaluate_thermal_throttle();
+        assert!(!d.throttled);
+        assert_eq!(d.reading, None);
+    }
+
+    #[test]
+    fn nominal_and_fair_do_not_throttle() {
+        let mut c = cfg(None, false);
+        c.thermal_pressure = Some(ThermalPressure::Nominal);
+        assert!(!c.evaluate_thermal_throttle().throttled);
+        c.thermal_pressure = Some(ThermalPressure::Fair);
+        assert!(!c.evaluate_thermal_throttle().throttled);
+    }
+
+    #[test]
+    fn serious_and_critical_thermal_pressure_throttle() {
+        let mut c = cfg(None, false);
+        c.thermal_pressure = Some(ThermalPressure::Serious);
+        let d = c.evaluate_thermal_throttle();
+        assert!(d.throttled);
+        assert!(d.reason.unwrap().contains("serious"));
+        assert_eq!(d.reading, Some(ThermalPressure::Serious));
+
+        c.thermal_pressure = Some(ThermalPressure::Critical);
+        let d = c.evaluate_thermal_throttle();
+        assert!(d.throttled);
+        assert!(d.reason.unwrap().contains("critical"));
+    }
+
+    #[test]
+    fn thermal_pressure_overlay_merges_via_apply_prefs() {
+        // Proves the real plumbing path end to end: a prefs overlay (exactly what
+        // the menu-bar app writes into agent.prefs.toml on a thermal-state change)
+        // flips a fresh config from not-throttled to throttled.
+        let mut c = cfg(None, false);
+        assert!(!c.evaluate_thermal_throttle().throttled);
+
+        let prefs = OperatorPrefs {
+            thermal_pressure: Some(ThermalPressure::Serious),
+            ..Default::default()
+        };
+        c.apply_prefs(&prefs);
+        assert!(c.evaluate_thermal_throttle().throttled);
+    }
+
     #[test]
     fn quiet_hours_same_day_window() {
         let c = cfg(Some((9, 17)), false);
@@ -533,7 +767,41 @@ mod tests {
         let c: AgentConfig = toml::from_str(&format!("{base}\ncheckpoint_secs = 7")).unwrap();
         assert_eq!(c.checkpoint_secs, 7);
         let c: AgentConfig = toml::from_str(&format!("{base}\ncheckpoint_secs = 0")).unwrap();
-        assert_eq!(c.checkpoint_secs, 0, "explicit 0 disables, not defaulted over");
+        assert_eq!(
+            c.checkpoint_secs, 0,
+            "explicit 0 disables, not defaulted over"
+        );
+    }
+
+    /// `hawking_pool_size` defaults to 8 (the proven B=8 operating point) when
+    /// the TOML omits it, and `hawking_pool_size_clamped()` HARD-CLAMPS every
+    /// configured value into 1..=8 — B=16 is explicitly unvalidated
+    /// (docs/HAWKING_PORT_PLAN.md) and must never reach the runner, and a 0-slot
+    /// pool would stall every job.
+    #[test]
+    fn hawking_pool_size_defaults_and_clamps() {
+        let base = r#"
+            control_url = "http://localhost:8080"
+            worker_token = "t"
+            supplier_id = "00000000-0000-0000-0000-000000000000"
+            max_cpu_pct = 90.0
+            power_only = false
+            min_payout_usd_per_hr = 0.0
+            data_dir = "/tmp/cx-agent"
+        "#;
+        let c: AgentConfig = toml::from_str(base).unwrap();
+        assert_eq!(c.hawking_pool_size, 8, "omitted → the proven B=8 default");
+        assert_eq!(c.hawking_pool_size_clamped(), 8);
+        // In-range values are honored as-is.
+        let c: AgentConfig = toml::from_str(&format!("{base}\nhawking_pool_size = 2")).unwrap();
+        assert_eq!(c.hawking_pool_size_clamped(), 2);
+        // Over the proven ceiling → clamped to 8, never honored (B=16 unvalidated).
+        let c: AgentConfig = toml::from_str(&format!("{base}\nhawking_pool_size = 16")).unwrap();
+        assert_eq!(c.hawking_pool_size, 16, "raw field keeps what was written");
+        assert_eq!(c.hawking_pool_size_clamped(), 8, "…but the consumer sees 8");
+        // Zero → clamped up to 1 (a 0-slot pool could admit nothing).
+        let c: AgentConfig = toml::from_str(&format!("{base}\nhawking_pool_size = 0")).unwrap();
+        assert_eq!(c.hawking_pool_size_clamped(), 1);
     }
 
     #[test]

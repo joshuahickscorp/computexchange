@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,6 +33,59 @@ import (
 // maxUploadBytes caps an uploaded batch file (multipart or raw) to keep a single
 // request from buffering an unbounded body in memory.
 const maxUploadBytes = 64 << 20 // 64 MiB
+
+// modelNotFoundError marks parseBatchInput's error as an unsupported-model
+// rejection (as opposed to a generic malformed-input error), so
+// handleCreateBatch can return the OpenAI-shaped 404 model_not_found instead of
+// a generic 400 invalid_request_error.
+type modelNotFoundError struct{ model string }
+
+func (e *modelNotFoundError) Error() string {
+	return fmt.Sprintf("model %q is not supported by this endpoint", e.model)
+}
+
+// writeOpenAIErr writes an error in the real OpenAI wire shape
+// (https://platform.openai.com/docs/guides/error-codes): {"error": {"message",
+// "type", "code", "param"}}. This is a HARDENING fix (Buyer Developer Experience
+// 7→8): the control plane's generic writeErr sends {"error": "<string>"}, which
+// the real `openai` Python SDK decodes fine at the transport level (it maps HTTP
+// status → exception class regardless of body shape) but then hands the buyer a
+// bare STRING as the exception's `.body` instead of an object — so the exact
+// pattern OpenAI's own docs recommend (`except BadRequestError as e:
+// e.body["message"]`) throws `TypeError: string indices must be integers` in a
+// real, reproduced crash. Every OpenAI-compatible route (files/batches) uses this
+// instead of writeErr so `.body["message"]`, `.code`, and `.type` all work for an
+// unmodified real SDK client. Native (non-OpenAI) routes are untouched.
+func writeOpenAIErr(w http.ResponseWriter, status int, errType, code, msg string) {
+	writeJSON(w, status, map[string]any{
+		"error": map[string]any{
+			"message": msg,
+			"type":    errType,
+			"param":   nil,
+			"code":    code,
+		},
+	})
+}
+
+// openaiErr picks the real OpenAI (type, code) pair for a given HTTP status —
+// https://platform.openai.com/docs/guides/error-codes — and writes it. Covers
+// every status this file actually emits (400/403/404/500+); anything else falls
+// back to a generic invalid_request_error/server_error split so a future call
+// site can never emit our old bare-string shape by omission.
+func openaiErr(w http.ResponseWriter, status int, msg string) {
+	switch {
+	case status == http.StatusNotFound:
+		writeOpenAIErr(w, status, "invalid_request_error", "not_found", msg)
+	case status == http.StatusForbidden:
+		writeOpenAIErr(w, status, "invalid_request_error", "permission_denied", msg)
+	case status == http.StatusBadRequest:
+		writeOpenAIErr(w, status, "invalid_request_error", "invalid_request", msg)
+	case status >= 500:
+		writeOpenAIErr(w, status, "server_error", "internal_error", msg)
+	default:
+		writeOpenAIErr(w, status, "invalid_request_error", "invalid_request", msg)
+	}
+}
 
 // fileMeta is the sidecar persisted next to an uploaded/produced JSONL object. It
 // carries the owner for buyer-scoped auth and the OpenAI file fields.
@@ -79,18 +133,18 @@ func (s *Server) handleCreateFile(w http.ResponseWriter, r *http.Request) {
 	filename := "input.jsonl"
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
 		if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
-			writeErr(w, http.StatusBadRequest, "parsing multipart upload: "+err.Error())
+			openaiErr(w, http.StatusBadRequest, "parsing multipart upload: "+err.Error())
 			return
 		}
 		f, hdr, err := r.FormFile("file")
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, "missing `file` part: "+err.Error())
+			openaiErr(w, http.StatusBadRequest, "missing `file` part: "+err.Error())
 			return
 		}
 		defer f.Close()
 		content, err = io.ReadAll(io.LimitReader(f, maxUploadBytes))
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, "reading uploaded file: "+err.Error())
+			openaiErr(w, http.StatusBadRequest, "reading uploaded file: "+err.Error())
 			return
 		}
 		if p := r.FormValue("purpose"); p != "" {
@@ -102,7 +156,7 @@ func (s *Server) handleCreateFile(w http.ResponseWriter, r *http.Request) {
 	} else {
 		b, err := io.ReadAll(io.LimitReader(r.Body, maxUploadBytes))
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, "reading body: "+err.Error())
+			openaiErr(w, http.StatusBadRequest, "reading body: "+err.Error())
 			return
 		}
 		content = b
@@ -111,13 +165,13 @@ func (s *Server) handleCreateFile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(bytes.TrimSpace(content)) == 0 {
-		writeErr(w, http.StatusBadRequest, "uploaded file is empty")
+		openaiErr(w, http.StatusBadRequest, "uploaded file is empty")
 		return
 	}
 
 	id := "file-" + uuid.NewString()
 	if err := s.storage.PutObject(ctx, fileContentKey(id), content, "application/x-ndjson"); err != nil {
-		writeErr(w, http.StatusInternalServerError, "storing file: "+err.Error())
+		openaiErr(w, http.StatusInternalServerError, "storing file: "+err.Error())
 		return
 	}
 	meta := fileMeta{
@@ -125,7 +179,7 @@ func (s *Server) handleCreateFile(w http.ResponseWriter, r *http.Request) {
 		Filename: filename, Bytes: int64(len(content)), CreatedAt: time.Now().Unix(),
 	}
 	if err := s.putMeta(ctx, fileMetaKey(id), meta); err != nil {
-		writeErr(w, http.StatusInternalServerError, "storing file meta: "+err.Error())
+		openaiErr(w, http.StatusInternalServerError, "storing file meta: "+err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, fileObject(meta))
@@ -147,12 +201,12 @@ func (s *Server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 		Input            json.RawMessage `json:"input"` // inline alternative to input_file_id
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid batch request json: "+err.Error())
+		openaiErr(w, http.StatusBadRequest, "invalid batch request json: "+err.Error())
 		return
 	}
 	jobType, ok := endpointJobType(req.Endpoint)
 	if !ok {
-		writeErr(w, http.StatusBadRequest, "unsupported endpoint "+req.Endpoint+" (use /v1/embeddings or /v1/chat/completions)")
+		openaiErr(w, http.StatusBadRequest, "unsupported endpoint "+req.Endpoint+" (use /v1/embeddings or /v1/chat/completions)")
 		return
 	}
 
@@ -166,19 +220,19 @@ func (s *Server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 	case req.InputFileID != "":
 		fm, herr := s.getFileMeta(ctx, req.InputFileID, auth.BuyerID)
 		if herr != nil {
-			writeErr(w, herr.status, herr.msg)
+			openaiErr(w, herr.status, herr.msg)
 			return
 		}
 		inputFileID = fm.ID
 	case len(req.Input) > 0:
 		jsonl, ierr := inlineBatchJSONL(req.Input)
 		if ierr != nil {
-			writeErr(w, http.StatusBadRequest, "invalid inline batch input: "+ierr.Error())
+			openaiErr(w, http.StatusBadRequest, "invalid inline batch input: "+ierr.Error())
 			return
 		}
 		id := "file-" + uuid.NewString()
 		if err := s.storage.PutObject(ctx, fileContentKey(id), jsonl, "application/x-ndjson"); err != nil {
-			writeErr(w, http.StatusInternalServerError, "storing inline input: "+err.Error())
+			openaiErr(w, http.StatusInternalServerError, "storing inline input: "+err.Error())
 			return
 		}
 		fm := fileMeta{
@@ -186,23 +240,31 @@ func (s *Server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 			Filename: "inline.jsonl", Bytes: int64(len(jsonl)), CreatedAt: time.Now().Unix(),
 		}
 		if err := s.putMeta(ctx, fileMetaKey(id), fm); err != nil {
-			writeErr(w, http.StatusInternalServerError, "storing inline input meta: "+err.Error())
+			openaiErr(w, http.StatusInternalServerError, "storing inline input meta: "+err.Error())
 			return
 		}
 		inputFileID = id
 	default:
-		writeErr(w, http.StatusBadRequest, "batch requires input_file_id or inline input")
+		openaiErr(w, http.StatusBadRequest, "batch requires input_file_id or inline input")
 		return
 	}
 
 	raw, err := s.storage.GetObject(ctx, fileContentKey(inputFileID))
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "reading input file: "+err.Error())
+		openaiErr(w, http.StatusInternalServerError, "reading input file: "+err.Error())
 		return
 	}
 	customIDs, nativeJSONL, model, perr := parseBatchInput(raw, jobType)
 	if perr != nil {
-		writeErr(w, http.StatusBadRequest, "invalid batch input: "+perr.Error())
+		var mnf *modelNotFoundError
+		if errors.As(perr, &mnf) {
+			// A real, typed error — never a silent model substitution. Status
+			// 404 + code "model_not_found" mirrors OpenAI's own shape for this
+			// exact case (https://platform.openai.com/docs/guides/error-codes).
+			writeOpenAIErr(w, http.StatusNotFound, "invalid_request_error", "model_not_found", mnf.Error())
+			return
+		}
+		openaiErr(w, http.StatusBadRequest, "invalid batch input: "+perr.Error())
 		return
 	}
 
@@ -222,7 +284,7 @@ func (s *Server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 		Input:   inputField,
 	})
 	if herr != nil {
-		writeErr(w, herr.status, "submitting batch job: "+herr.msg)
+		openaiErr(w, herr.status, "submitting batch job: "+herr.msg)
 		return
 	}
 
@@ -233,7 +295,7 @@ func (s *Server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 		Total: len(customIDs), CreatedAt: time.Now().Unix(),
 	}
 	if err := s.putMeta(ctx, batchMetaKey(id), meta); err != nil {
-		writeErr(w, http.StatusInternalServerError, "storing batch meta: "+err.Error())
+		openaiErr(w, http.StatusInternalServerError, "storing batch meta: "+err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, batchObject(meta, "in_progress", 0))
@@ -251,22 +313,22 @@ func (s *Server) handleGetBatch(w http.ResponseWriter, r *http.Request) {
 
 	var meta batchMeta
 	if err := s.getMeta(ctx, batchMetaKey(id), &meta); err != nil {
-		writeErr(w, http.StatusNotFound, "batch not found")
+		openaiErr(w, http.StatusNotFound, "batch not found")
 		return
 	}
 	if meta.BuyerID != auth.BuyerID.String() {
-		writeErr(w, http.StatusForbidden, "batch belongs to another buyer")
+		openaiErr(w, http.StatusForbidden, "batch belongs to another buyer")
 		return
 	}
 
 	jobID, err := uuid.Parse(meta.JobID)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "corrupt batch job id")
+		openaiErr(w, http.StatusInternalServerError, "corrupt batch job id")
 		return
 	}
 	j, err := s.store.GetJob(ctx, jobID, auth.BuyerID)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "loading batch job: "+err.Error())
+		openaiErr(w, http.StatusInternalServerError, "loading batch job: "+err.Error())
 		return
 	}
 
@@ -274,12 +336,12 @@ func (s *Server) handleGetBatch(w http.ResponseWriter, r *http.Request) {
 	if j.Status == "complete" && meta.OutputFileID == "" {
 		outID, gerr := s.generateBatchOutput(ctx, &meta, j.OutputRef)
 		if gerr != nil {
-			writeErr(w, http.StatusInternalServerError, "generating batch output: "+gerr.Error())
+			openaiErr(w, http.StatusInternalServerError, "generating batch output: "+gerr.Error())
 			return
 		}
 		meta.OutputFileID = outID
 		if err := s.putMeta(ctx, batchMetaKey(id), meta); err != nil {
-			writeErr(w, http.StatusInternalServerError, "recording batch output: "+err.Error())
+			openaiErr(w, http.StatusInternalServerError, "recording batch output: "+err.Error())
 			return
 		}
 	}
@@ -296,12 +358,12 @@ func (s *Server) handleGetFileContent(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
 	if _, herr := s.getFileMeta(ctx, id, auth.BuyerID); herr != nil {
-		writeErr(w, herr.status, herr.msg)
+		openaiErr(w, herr.status, herr.msg)
 		return
 	}
 	body, err := s.storage.GetObject(ctx, fileContentKey(id))
 	if err != nil {
-		writeErr(w, http.StatusNotFound, "file content not found")
+		openaiErr(w, http.StatusNotFound, "file content not found")
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-ndjson")
@@ -323,20 +385,48 @@ func endpointJobType(endpoint string) (string, bool) {
 	}
 }
 
+// embedModelAliases / chatModelAliases are the ONLY OpenAI model names this drop-in
+// honestly claims to serve, each mapped to the real native catalogue model that
+// actually runs the request. This is a hardening fix (Buyer Developer Experience
+// 7→8): the previous version silently remapped ANY model name — including typos
+// and models we have never claimed to support — onto a fallback with no signal to
+// the caller. A real `openai` SDK integration that requests a model we do not
+// serve now gets a real, typed 404 (see mapModel) instead of a silent substitution
+// that could return unexpectedly-shaped or unexpectedly-cheap/expensive results.
+// Blank (model omitted) is treated as "any embedding/chat model is fine" and
+// resolves to the canonical model — that is an honest default, not a substitution,
+// since the caller expressed no preference.
+var embedModelAliases = map[string]string{
+	"":                       "all-minilm-l6-v2",
+	"all-minilm-l6-v2":       "all-minilm-l6-v2",
+	"text-embedding-3-small": "all-minilm-l6-v2",
+	"text-embedding-3-large": "all-minilm-l6-v2",
+	"text-embedding-ada-002": "all-minilm-l6-v2",
+}
+
+var chatModelAliases = map[string]string{
+	"":                         "llama-3.2-1b-instruct-q4",
+	"llama-3.2-1b-instruct-q4": "llama-3.2-1b-instruct-q4",
+	"gpt-4o-mini":              "llama-3.2-1b-instruct-q4",
+	"gpt-4o":                   "llama-3.2-1b-instruct-q4",
+	"gpt-4":                    "llama-3.2-1b-instruct-q4",
+	"gpt-4-turbo":              "llama-3.2-1b-instruct-q4",
+	"gpt-3.5-turbo":            "llama-3.2-1b-instruct-q4",
+}
+
 // mapModel resolves the OpenAI model name (or a native id) to our catalogue id for
-// the given job type. Unknown/blank names fall back to the canonical model.
-func mapModel(jobType, openaiModel string) string {
+// the given job type. Returns an honest error for any model we do not actually
+// claim to serve — never a silent substitution.
+func mapModel(jobType, openaiModel string) (string, error) {
 	m := strings.ToLower(strings.TrimSpace(openaiModel))
+	aliases := chatModelAliases
 	if jobType == "embed" {
-		if m == "all-minilm-l6-v2" {
-			return m
-		}
-		return "all-minilm-l6-v2" // text-embedding-3-*, ada-002, … → our embed model
+		aliases = embedModelAliases
 	}
-	if m == "llama-3.2-1b-instruct-q4" {
-		return m
+	if native, ok := aliases[m]; ok {
+		return native, nil
 	}
-	return "llama-3.2-1b-instruct-q4" // gpt-*, o*, … → our batch_infer model
+	return "", &modelNotFoundError{model: openaiModel}
 }
 
 // batchInputLine is one OpenAI batch request line.
@@ -413,7 +503,11 @@ func parseBatchInput(raw []byte, jobType string) (customIDs []string, nativeJSON
 	if len(customIDs) == 0 {
 		return nil, nil, "", fmt.Errorf("no request lines found")
 	}
-	return customIDs, buf.Bytes(), mapModel(jobType, openaiModel), nil
+	nativeModel, merr := mapModel(jobType, openaiModel)
+	if merr != nil {
+		return nil, nil, "", merr
+	}
+	return customIDs, buf.Bytes(), nativeModel, nil
 }
 
 // extractText pulls the inference text from one request line: the embeddings

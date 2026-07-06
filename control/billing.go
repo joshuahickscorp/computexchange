@@ -165,9 +165,25 @@ func (s *Server) handleBillingStatus(w http.ResponseWriter, r *http.Request) {
 
 // --- Stripe webhooks + auto-charge ---
 
+// stripeSigTolerance bounds how far a webhook's own claimed timestamp may drift
+// from wall-clock "now" before it is rejected — Stripe's own client libraries
+// default to 5 minutes for exactly this reason (Security Posture 6.5->7,
+// docs/internal/CREED_AND_PATH_TO_TEN.md): without it, a signature is valid
+// forever once computed, so a captured request body (e.g. from a proxy log, a
+// misconfigured debug tool, or a compromised intermediary) stays replayable
+// indefinitely — the HMAC alone never expires on its own.
+const stripeSigTolerance = 5 * time.Minute
+
 // verifyStripeSig checks a Stripe-Signature header (t=…,v1=…) against the webhook
-// secret: real HMAC-SHA256 over "t.payload", constant-time compared.
+// secret: real HMAC-SHA256 over "t.payload", constant-time compared, AND that the
+// header's own claimed timestamp is within stripeSigTolerance of now.
 func verifyStripeSig(payload []byte, sigHeader, secret string) bool {
+	return verifyStripeSigAt(payload, sigHeader, secret, time.Now())
+}
+
+// verifyStripeSigAt is verifyStripeSig with an injectable clock, so replay-window
+// behavior is unit-testable without a real wall-clock race.
+func verifyStripeSigAt(payload []byte, sigHeader, secret string, now time.Time) bool {
 	var t, v1 string
 	for _, part := range strings.Split(sigHeader, ",") {
 		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
@@ -185,7 +201,18 @@ func verifyStripeSig(payload []byte, sigHeader, secret string) bool {
 	}
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(t + "." + string(payload)))
-	return hmac.Equal([]byte(hex.EncodeToString(mac.Sum(nil))), []byte(v1))
+	if !hmac.Equal([]byte(hex.EncodeToString(mac.Sum(nil))), []byte(v1)) {
+		return false
+	}
+	tsSecs, err := strconv.ParseInt(t, 10, 64)
+	if err != nil {
+		return false
+	}
+	age := now.Sub(time.Unix(tsSecs, 0))
+	if age < 0 {
+		age = -age
+	}
+	return age <= stripeSigTolerance
 }
 
 // handleStripeWebhook receives Stripe events (unauthed — verified by signature) and

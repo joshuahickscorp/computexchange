@@ -831,6 +831,49 @@ func TestMatchPrefersWarmWorker(t *testing.T) {
 	}
 }
 
+// Thermal ranking (docs/internal/CREED_AND_PATH_TO_TEN.md, "Thermal sustained-vs-peak
+// throughput on fanless Apple Silicon" 4→5 — "make thermal_ok mean something to the
+// scheduler"): a worker whose stored thermal_ok is false (poor sustained-load history —
+// its advertised TPS is a 20-second peak that its own benchmark showed it cannot hold)
+// must rank BELOW an otherwise-equal worker with a similar peak but a clean sustained-
+// throughput history, and it must NOT be excluded outright (still real, usable supply).
+func TestMatchPenalizesPoorThermalHistory(t *testing.T) {
+	now := time.Now()
+	// Two same-class workers with an IDENTICAL advertised (peak) tok/s and
+	// reputation; only `throttling` failed the sustained-load thermal proxy.
+	steady := mw(uuid.New(), "apple_silicon_max", 64, 0.9, 100, 2, now)
+	throttling := mw(uuid.New(), "apple_silicon_max", 64, 0.9, 100, 2, now)
+	throttling.ThermalDegraded = true
+
+	got, err := Match(MatchTask{JobType: "embed", MinMemoryGB: 8, Tier: "batch"},
+		[]MatchWorker{throttling, steady})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("thermal penalty must not drop the throttling worker (still real supply); got %d", len(got))
+	}
+	if got[0].ID != steady.ID {
+		t.Fatal("a worker with clean sustained-throughput history should rank ahead of an equal-peak worker known to throttle")
+	}
+
+	// The penalty must not make a throttling worker unpickable outright: a
+	// throttling worker with a MEANINGFULLY higher peak still wins over a
+	// steady-but-much-slower one (this is a re-rank haircut, not a trump card —
+	// same shape as the warm-bonus test above).
+	fastThrottling := mw(uuid.New(), "apple_silicon_max", 64, 0.9, 100, 2, now)
+	fastThrottling.ThermalDegraded = true
+	slowSteady := mw(uuid.New(), "apple_silicon_max", 64, 0.9, 50, 2, now)
+	got2, err := Match(MatchTask{JobType: "embed", MinMemoryGB: 8, Tier: "batch"},
+		[]MatchWorker{slowSteady, fastThrottling})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got2[0].ID != fastThrottling.ID {
+		t.Fatal("a 30% thermal haircut must not override a 2x-faster throttling worker")
+	}
+}
+
 func TestMatchTrustedTierGate(t *testing.T) {
 	now := time.Now()
 	lowTier := mw(uuid.New(), "apple_silicon_max", 64, 0.9, 100, 1, now)
@@ -1183,5 +1226,89 @@ func TestSiteAssetType(t *testing.T) {
 		if _, valid := siteAssetType(n); valid {
 			t.Errorf("siteAssetType(%q) = valid, want invalid", n)
 		}
+	}
+}
+
+// TestClaimTaskSQLIsTheSharedConstant locks in Control Plane Hot Path 4.5->5
+// (docs/internal/CREED_AND_PATH_TO_TEN.md, "Make the benchmark measure the
+// real query"): ClaimTaskSQL must be the ONE place the claim CTE's SQL text
+// is written, referenced identically by ClaimTask (scheduler.go) and by
+// `control print-claim-sql` (main.go) for scripts/bench-local.sh to EXPLAIN
+// ANALYZE. This is a no-DB unit test — it asserts the render function's
+// output shape directly, so a future edit that reintroduces a second,
+// hand-copied copy of this query (the exact drift that produced the
+// stand-in this rung replaces) fails a fast test, not just a slow load run.
+func TestClaimTaskSQLIsTheSharedConstant(t *testing.T) {
+	general := ClaimTaskSQL("t.claimed_by IS NULL")
+	pinned := ClaimTaskSQL("t.claimed_by = $1 AND t.started_at IS NULL")
+
+	// Every real JOIN, correlated subquery, and the full computed ORDER BY
+	// must be present verbatim — this is what distinguishes the real query
+	// from the old bench stand-in (a bare WHERE + 2-column ORDER BY).
+	//
+	// PATCH (Control plane hot path 8->9, docs/internal/CREED_AND_PATH_TO_TEN.md
+	// "Get the correlated-subquery cost out of the transactional hot path" — the
+	// O(queue x fleet) cost entry 61 root-caused): the claim CTE is now three CTEs
+	// — a `me` CTE resolving the claiming worker+supplier ONCE, an `eligible_jobs`
+	// AS MATERIALIZED CTE that enforces every per-JOB hard filter and computes
+	// cheaper_class_online once per candidate job (not once per task), and the
+	// `next` CTE that joins tasks to eligible_jobs and carries only the two
+	// genuinely per-task predicates. The fragments below track that structure.
+	mustContain := []string{
+		"WITH me AS (",
+		"JOIN suppliers s ON s.id = w.supplier_id",
+		"WHERE w.id = $1",
+		"eligible_jobs AS MATERIALIZED (",
+		"cheaper_class_online",
+		"FROM jobs j, me",
+		"JOIN eligible_jobs ej ON ej.job_id = t.job_id",
+		"worker_tps",
+		"warm_for_task",
+		"job_dispatched_count",
+		// worker_tps is read from the maintained worker_tps_cache (upserted by
+		// UpsertWorker), keyed by the bound worker id ($1) and the per-job job_type —
+		// computed once per candidate job in eligible_jobs (Control Plane Hot Path
+		// 8->9), not a correlated subquery re-scanning benchmark_results per row.
+		"FROM worker_tps_cache wtc",
+		"wtc.worker_id = $1 AND wtc.job_type = j.job_type",
+		"worker_model_state wms",
+		"private_pool_members m",
+		"ledger_entries le",
+		// The claimable-task guard on eligible_jobs (skips the fleet scan for every
+		// finished/no-work job) — covers BOTH claim branches so the pinned/hedge
+		// branch is never starved of its job.
+		"tt.claimed_by IS NULL",
+		// Verification-requeue worker exclusion (Scheduling & Matching Engine 8->9):
+		// the failed worker is skipped for the exclusion window on the claim path.
+		"t.excluded_worker <> $1",
+		"ORDER BY (t.claimed_by = $1) DESC, (ej.tier = 'priority') DESC,",
+		"cheaper_class_online ASC, worker_tps DESC, warm_for_task DESC,",
+		"job_dispatched_count ASC, t.created_at ASC",
+		"FOR UPDATE OF t SKIP LOCKED",
+		"RETURNING tasks.id, tasks.job_id",
+	}
+	for _, want := range mustContain {
+		if !strings.Contains(general, want) {
+			t.Errorf("ClaimTaskSQL(general) missing expected fragment: %q", want)
+		}
+		if !strings.Contains(pinned, want) {
+			t.Errorf("ClaimTaskSQL(pinned) missing expected fragment: %q", want)
+		}
+	}
+
+	// The ONLY difference between the two branches is the spliced predicate.
+	if !strings.Contains(general, "t.claimed_by IS NULL") {
+		t.Errorf("general branch predicate not present verbatim")
+	}
+	if !strings.Contains(pinned, "t.claimed_by = $1 AND t.started_at IS NULL") {
+		t.Errorf("pinned branch predicate not present verbatim")
+	}
+
+	// The rendered SQL must never itself force a planner GUC — realistic
+	// planner settings are the harness's job (bench-local.sh), not the
+	// query's; a stand-in that hard-codes enable_seqscan=off is exactly the
+	// dishonesty this rung removes.
+	if strings.Contains(general, "enable_seqscan") {
+		t.Errorf("ClaimTaskSQL must not embed a forced planner GUC")
 	}
 }

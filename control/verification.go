@@ -26,6 +26,19 @@ const (
 	OutcomePass            VerifyOutcome = "pass"
 	OutcomeFail            VerifyOutcome = "fail"
 	OutcomePassWithPenalty VerifyOutcome = "pass_with_penalty"
+	// OutcomeLossNoPayout is a CONFIRMED mismatch where the currently-committing
+	// task itself is the losing side (a redundancy tiebreak loss or a honeypot
+	// class-comparable byte mismatch resolved via the N-way vote). It is
+	// distinct from OutcomeFail (which also requeues the task to a different
+	// worker) because a tiebreak loser's chunk already has a winning result and
+	// must NOT be re-run — but, like OutcomeFail and unlike
+	// OutcomePassWithPenalty, it must never let the caller schedule a payout for
+	// THIS task (Verification & Result Trust 5.5->6, "make cheating economically
+	// real"): a worker that loses a redundancy tiebreak does not get paid for
+	// the losing task, it only gets docked reputation. Any credit the same task
+	// already had scheduled (e.g. it committed first and was later outvoted) is
+	// separately clawed back via ClawbackTaskCredit before this is returned.
+	OutcomeLossNoPayout VerifyOutcome = "loss_no_payout"
 )
 
 // Verifier coordinates honeypot + redundancy checks against the store. storage is
@@ -518,6 +531,7 @@ func (v *Verifier) resolveTiebreak(ctx context.Context, info *CommitTaskInfo, al
 		}
 	}
 	mismatch := false
+	committerLost := false
 	for _, c := range all {
 		switch {
 		case resultsAgree(info.jobType, c.bytes, winner):
@@ -536,11 +550,30 @@ func (v *Verifier) resolveTiebreak(ctx context.Context, info *CommitTaskInfo, al
 			_ = v.store.RecordVerificationEvent(ctx, info.JobID, c.taskID, c.supplierID, "tiebreak_cross_class")
 		default:
 			mismatch = true
+			if c.taskID == info.TaskID {
+				committerLost = true
+			}
 			if err := v.store.DockReputation(ctx, c.supplierID, EventMismatch); err != nil {
 				return OutcomeFail, err
 			}
 			_ = v.store.RecordVerificationEvent(ctx, info.JobID, c.taskID, c.supplierID, "tiebreak_loss")
+			// Make cheating economically real (Verification & Result Trust 5.5->6):
+			// a confirmed tiebreak loser does not just get docked reputation — its
+			// payout for THIS losing task is clawed back. ClawbackTaskCredit is a
+			// safe no-op when the losing task hasn't had a credit scheduled yet
+			// (e.g. it is the task committing right now, in which case the
+			// OutcomeLossNoPayout returned below stops the caller from ever
+			// scheduling one in the first place).
+			if err := v.store.ClawbackTaskCredit(ctx, c.supplierID, c.taskID); err != nil {
+				return OutcomeFail, err
+			}
 		}
+	}
+	if committerLost {
+		// The task committing right now is itself a confirmed tiebreak loser: it
+		// must never be paid for this task (economically-real cheating cost),
+		// even though the chunk overall still resolved via the winning result.
+		return OutcomeLossNoPayout, nil
 	}
 	if mismatch {
 		// A loser was docked — the chunk had a real disagreement the vote settled.

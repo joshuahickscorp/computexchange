@@ -23,7 +23,12 @@ CREATE TABLE IF NOT EXISTS suppliers (
     stripe_acct  TEXT,               -- Stripe Connect account ID
     reputation   REAL DEFAULT 0.5,   -- 0.0–1.0
     tier         SMALLINT DEFAULT 0, -- 0–3
-    status       TEXT DEFAULT 'pending'  -- pending|active|suspended|banned
+    status       TEXT DEFAULT 'pending',  -- pending|active|suspended|banned
+    -- Maintained running count of this supplier's lifetime completed tasks
+    -- (Control Plane Hot Path 7->8, docs/internal/CREED_AND_PATH_TO_TEN.md):
+    -- incremented once per real commit (CommitTask) instead of ClaimTask
+    -- re-scanning `tasks` with a `count(*)` on every single claim.
+    completed_tasks BIGINT NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS workers (
@@ -46,7 +51,8 @@ CREATE TABLE IF NOT EXISTS benchmark_results (
     tps            REAL,            -- tokens/sec
     eps            REAL,            -- embeddings/sec
     thermal_ok     BOOLEAN,
-    p99_latency_ms REAL
+    p99_latency_ms REAL,
+    load_ms        BIGINT DEFAULT 0 -- cold-load wall-clock ms the agent measured (0 = pre-load_ms agent build)
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -80,15 +86,29 @@ CREATE TABLE IF NOT EXISTS tasks (
     is_redundancy BOOLEAN DEFAULT false,
     retry_count   SMALLINT DEFAULT 0,
     -- Postgres-queue columns (SKIP LOCKED claim + retry visibility):
-    claimed_by    UUID,                       -- worker currently holding the task
-    claimed_at    TIMESTAMPTZ,                -- when the claim was taken
-    visible_at    TIMESTAMPTZ DEFAULT now()   -- task is claimable only once now() >= visible_at
+    claimed_by      UUID,                     -- worker currently holding the task
+    claimed_at      TIMESTAMPTZ,              -- when the claim was taken
+    visible_at      TIMESTAMPTZ DEFAULT now(),-- task is claimable only once now() >= visible_at
+    -- Verification-requeue worker exclusion (Scheduling & Matching Engine 8->9,
+    -- docs/internal/CREED_AND_PATH_TO_TEN.md "add backoff plus worker-exclusion to
+    -- verification-requeue so a chunk that just failed verification doesn't
+    -- immediately return to the same worker with no delay"). When a task is requeued
+    -- after a failed honeypot, RequeueTask records the worker that just failed it
+    -- here and until excluded_until; the claim query skips that worker for the
+    -- window (a DIFFERENT worker gets first crack), then the exclusion expires so a
+    -- thin/single-worker fleet is never permanently starved of the retry.
+    excluded_worker UUID,                     -- worker to skip on the next claim (the one that just failed it)
+    excluded_until  TIMESTAMPTZ               -- exclusion is only in force while now() < excluded_until (NULL = no exclusion)
 );
 -- input_ref added after the fact for already-created tables (idempotent ALTER).
 -- A task is a split of its job; when its own input_ref is null the dispatch uses
 -- the parent job's input_ref. This column lets a job fan out into per-chunk
 -- inputs without a second table.
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS input_ref TEXT;
+-- Verification-requeue worker exclusion (Scheduling & Matching Engine 8->9) —
+-- idempotent ALTERs for already-created tables. See the column comments above.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS excluded_worker UUID;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS excluded_until  TIMESTAMPTZ;
 
 -- E3 · autovacuum tuning for the hottest table. `tasks` churns constantly: every
 -- claim/start/commit/fail/requeue is an UPDATE, so dead tuples (and the visibility
@@ -299,7 +319,7 @@ INSERT INTO models (id, family, quant, kind, dim, job_type, price_per_1k, price_
     ('all-minilm-l6-v2', 'minilm', NULL,   'embed',   384,  'embed',            0.00100000, NULL,        2, 'sentence-transformers/all-MiniLM-L6-v2'),
     ('bge-small-en-v1.5', 'bge',   NULL,   'embed',   384,  'embed',            0.00100000, NULL,        2, 'BAAI/bge-small-en-v1.5'),
     ('llama-3.2-1b-instruct-q4', 'llama', 'q4_k_m', 'gguf', NULL, 'batch_infer', 0.00200000, NULL,        4, 'unsloth/Llama-3.2-1B-Instruct-GGUF'),
-    ('qwen2.5-7b-instruct-q4', 'qwen', 'q4_k_m', 'gguf', NULL, 'batch_infer',    0.00800000, NULL,       40, 'Qwen/Qwen2.5-7B-Instruct-GGUF'),
+    ('qwen2.5-7b-instruct-q4', 'qwen', 'q4_k_m', 'gguf', NULL, 'batch_infer',    0.00800000, NULL,       40, 'bartowski/Qwen2.5-7B-Instruct-GGUF'),
     ('whisper-tiny',     'whisper', NULL,  'whisper', NULL,  'audio_transcribe', NULL,       0.00400000,  1, 'openai/whisper-tiny'),
     ('whisper-base',     'whisper', NULL,  'whisper', NULL,  'audio_transcribe', NULL,       0.00500000,  2, 'openai/whisper-base')
 ON CONFLICT (id) DO NOTHING;
@@ -330,6 +350,7 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS split_size         INT;              -
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS offered_rate_usd_hr REAL;            -- price-derived $/hr a worker earns running this (min-payout gate)
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS eta_secs           INT;              -- predicted completion seconds at submit
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS charge_status      TEXT NOT NULL DEFAULT 'not_attempted'; -- not_attempted|charged|failed|no_payment_method|deferred (queryable charge state, not log-only).
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS results_merged_at  TIMESTAMPTZ;      -- watermark: set when the buyer-ready artifact was last successfully merged, so GET /v1/jobs/{id}/results only re-merges once since completion instead of on every poll
 -- 'deferred': the job settled BELOW the CX_CHARGE_MIN_USD batching threshold, so it is
 -- deliberately not charged alone (a ~30¢ Stripe fixed fee on a sub-$5 charge is fee
 -- bleed); the charge-collect sweep groups deferred jobs per buyer into charge_batches
@@ -352,6 +373,16 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS budget_state       TEXT DEFAULT 'track
 -- Task ordering (buyer-ready merge in input order) + straggler-hedge lineage.
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS chunk_index INT DEFAULT 0;          -- position within the job's input
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS hedged_from UUID;                   -- original task this is a hedge/tiebreak of
+
+-- Control Plane Hot Path 8->9 (docs/internal/CREED_AND_PATH_TO_TEN.md, "Get
+-- result-commit off the S3 critical path"): the worker-reported SHA-256 (hex) of
+-- its own committed result bytes, persisted at CommitTask. A later commit's
+-- redundancy/honeypot comparison trusts a hash-to-hash match for byte-exact job
+-- types instead of a second synchronous S3 GetObject inside the commit
+-- transaction. NULL for an older agent that omits it (or a pre-migration row) —
+-- the commit handler always falls back to a real GetObject when a hash is
+-- missing, so correctness never depends on this column being populated.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS result_sha256 TEXT;
 
 -- Worker capability, queryable (the agent already advertises these on register).
 ALTER TABLE workers ADD COLUMN IF NOT EXISTS supported_jobs     TEXT[];        -- job_type tags this worker can run
@@ -470,15 +501,11 @@ CREATE TABLE IF NOT EXISTS task_failures (
 -- the buyer should not infer state from status fields alone. event is the shared
 -- enum (job_created|task_failed|task_requeued|job_failed|...); buyer_text is a
 -- safe-to-show summary, detail holds operator context (ids/class).
-CREATE TABLE IF NOT EXISTS job_events (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    created_at  TIMESTAMPTZ DEFAULT now(),
-    job_id      UUID NOT NULL,
-    task_id     UUID,
-    event       TEXT NOT NULL,
-    buyer_text  TEXT,
-    detail      JSONB
-);
+--
+-- job_events is a declarative RANGE-partitioned table (Postgres Data Lifecycle 6->7) —
+-- its parent + partitions are created together with the other two telemetry tables by
+-- cx_partition_telemetry() further down (all three must be created after their column
+-- shapes are declared, so the definition lives there, not here).
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Indexes
@@ -500,7 +527,10 @@ CREATE INDEX IF NOT EXISTS models_job_type_idx       ON models (job_type);
 CREATE INDEX IF NOT EXISTS tasks_job_chunk_idx        ON tasks (job_id, chunk_index);  -- ordered merge
 CREATE INDEX IF NOT EXISTS workers_supplier_idx       ON workers (supplier_id);
 CREATE INDEX IF NOT EXISTS quotes_buyer_created_idx   ON quotes (buyer_id, created_at DESC);  -- buyer quote history + admin drift
-CREATE INDEX IF NOT EXISTS job_events_job_idx         ON job_events (job_id, created_at);       -- buyer event timeline (ordered)
+-- job_events_job_idx is created by cx_partition_telemetry() alongside the partitioned
+-- job_events parent (it cannot be created here — job_events does not exist yet at this
+-- point in the file on a fresh DB, and the partitioned parent propagates the index to
+-- every leaf).
 
 -- disputes: the buyer-dispute record — the anti-defection / optimistic-verification
 -- primitive ROADMAP_STATUS flags as missing ("a buyer-dispute mechanism — none exists
@@ -566,16 +596,15 @@ CREATE INDEX IF NOT EXISTS jobs_quote_idx ON jobs (quote_id) WHERE quote_id IS N
 -- quote's ETA leans on it instead of the target. jobs.eta_secs (above) already holds
 -- the quoted ETA — it is REUSED as the quoted side of the drift rollup, not duplicated.
 -- ─────────────────────────────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS task_durations (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    created_at  TIMESTAMPTZ DEFAULT now(),
-    job_id      UUID,
-    job_type    TEXT,
-    model_ref   TEXT,
-    split_size  INT,               -- the job's lines/task, so drift can be sliced by chunk size
-    duration_ms BIGINT             -- the committing worker's reported task wall-time (never faked)
-);
-CREATE INDEX IF NOT EXISTS task_durations_type_model_idx ON task_durations (job_type, model_ref);  -- p90 history + drift rollup lookups
+-- Postgres Data Lifecycle 6->7 (docs/internal/CREED_AND_PATH_TO_TEN.md): task_durations,
+-- worker_memory_samples and job_events are declarative RANGE-PARTITIONED tables (monthly
+-- partitions on created_at) so expired history is dropped by an O(1) DROP PARTITION
+-- instead of an O(rows) DELETE competing with autovacuum. All three are created together
+-- by cx_partition_telemetry() below (after all three column shapes are declared), because
+-- a partitioned parent needs its DEFAULT + month partitions created in the same breath to
+-- be insertable. See that function for the full rationale (composite PK, NOT NULL
+-- created_at, leaf-level autovacuum, fresh-vs-existing-DB convergence with the Go
+-- migration control/partition.go).
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Plane D D4 (docs/PLANE_D.md §10) — memory telemetry persistence + quote risk.
@@ -588,18 +617,153 @@ CREATE INDEX IF NOT EXISTS task_durations_type_model_idx ON task_durations (job_
 -- assessRisk → applyMemoryFloorRisk) compares a model's memory floor against the
 -- MEDIAN effective memory of eligible workers (from these samples) to bump oom_risk
 -- when the floor is tight. All real telemetry — every value is the agent's reported
--- number, never faked. Retention/capping is out of scope (the rows are cheap; a
--- later sweeper can trim by created_at, which the index already orders on).
-CREATE TABLE IF NOT EXISTS worker_memory_samples (
-    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    worker_id    UUID,
-    available_gb REAL,              -- live free + reclaimable memory the beat reported (GB)
-    effective_gb REAL,              -- allocatable-for-jobs pool after the supplier's headroom (GB)
-    throttled    BOOLEAN,           -- the worker was pausing new claims at sample time (memory pressure)
-    created_at   TIMESTAMPTZ DEFAULT now()
+-- number, never faked. Retention is enforced by monthly partitioning (6->7 below) plus
+-- the hourly DELETE sweep that trims the sub-month tail.
+--
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Postgres Data Lifecycle 6->7 (docs/internal/CREED_AND_PATH_TO_TEN.md) — the three
+-- telemetry tables, created as declarative RANGE-partitioned tables.
+-- ─────────────────────────────────────────────────────────────────────────────
+-- cx_partition_telemetry(table, columns, index_name, index_body, autovacuum) creates one
+-- partitioned parent with a composite (created_at, id) PK, its secondary index, a DEFAULT
+-- catch-all partition, and month partitions spanning [now()-1 month, now()+2 months] — all
+-- with leaf-level autovacuum params (a partitioned PARENT cannot carry storage params, so
+-- they go on every leaf). It is a COMPLETE NO-OP when a relation of that name already
+-- exists in ANY form (plain or partitioned): a fresh DB is born partitioned here; an
+-- existing plain-table DB is left untouched for the Go migration
+-- (control/partition.go MigrateTelemetryPartitions) to convert IN PLACE, preserving every
+-- row. Both paths converge to the identical shape, and the rotation job
+-- (control/workers.go rotateTelemetryPartitions) keeps months current thereafter.
+--
+-- The composite PK (created_at, id) is mandatory (a partition-key column must be in every
+-- unique constraint); no reader looks these rows up by id and no FK references them, so
+-- gen_random_uuid()'s collision-freeness preserves effective global id-uniqueness.
+-- created_at is NOT NULL because a RANGE partition key cannot be NULL — every existing row
+-- already has a non-NULL created_at (it has defaulted to now() since creation).
+CREATE OR REPLACE FUNCTION cx_partition_telemetry(
+    p_table text, p_columns text, p_index_name text, p_index_body text, p_autovacuum text
+) RETURNS void LANGUAGE plpgsql AS $cx$
+DECLARE
+    m date; lo date; hi date; part text; nextm date;
+BEGIN
+    -- No-op if the relation already exists in any form (idempotent + non-destructive).
+    IF EXISTS (SELECT 1 FROM pg_class WHERE relname = p_table AND relnamespace = 'public'::regnamespace) THEN
+        RETURN;
+    END IF;
+    EXECUTE format('CREATE TABLE %I (%s, PRIMARY KEY (created_at, id)) PARTITION BY RANGE (created_at)', p_table, p_columns);
+    EXECUTE format('CREATE INDEX %I ON %I %s', p_index_name, p_table, p_index_body);
+    EXECUTE format('CREATE TABLE %I PARTITION OF %I DEFAULT WITH (%s)', p_table || '_default', p_table, p_autovacuum);
+    lo := date_trunc('month', (now() - interval '1 month'))::date;   -- one back so a just-inserted row near a month edge has a home
+    hi := date_trunc('month', (now() + interval '2 months'))::date;  -- create-ahead headroom (matches partitionCreateAheadMonths)
+    m := lo;
+    WHILE m <= hi LOOP
+        nextm := (m + interval '1 month')::date;
+        part := p_table || '_p' || to_char(m, 'YYYY_MM');
+        EXECUTE format('CREATE TABLE IF NOT EXISTS %I PARTITION OF %I FOR VALUES FROM (%L) TO (%L) WITH (%s)',
+                       part, p_table, m::timestamptz, nextm::timestamptz, p_autovacuum);
+        m := nextm;
+    END LOOP;
+END;
+$cx$;
+
+SELECT cx_partition_telemetry(
+    'worker_memory_samples',
+    $c$id           UUID NOT NULL DEFAULT gen_random_uuid(),
+       worker_id    UUID,
+       available_gb REAL,
+       effective_gb REAL,
+       throttled    BOOLEAN,
+       created_at   TIMESTAMPTZ NOT NULL DEFAULT now()$c$,
+    'worker_memory_samples_worker_time_idx', '(worker_id, created_at DESC)',
+    'autovacuum_vacuum_scale_factor=0.02, autovacuum_vacuum_threshold=200, autovacuum_analyze_scale_factor=0.02, autovacuum_analyze_threshold=200, autovacuum_vacuum_cost_limit=1000'
 );
-CREATE INDEX IF NOT EXISTS worker_memory_samples_worker_time_idx
-    ON worker_memory_samples (worker_id, created_at DESC);  -- recent-N-per-worker + median-effective lookups
+SELECT cx_partition_telemetry(
+    'task_durations',
+    $c$id          UUID NOT NULL DEFAULT gen_random_uuid(),
+       created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+       job_id      UUID,
+       job_type    TEXT,
+       model_ref   TEXT,
+       split_size  INT,
+       duration_ms BIGINT,
+       worker_id   UUID,
+       engine      TEXT,
+       build_hash  TEXT$c$,
+    'task_durations_type_model_idx', '(job_type, model_ref)',
+    'autovacuum_vacuum_scale_factor=0.05, autovacuum_vacuum_threshold=100, autovacuum_analyze_scale_factor=0.05, autovacuum_analyze_threshold=100, autovacuum_vacuum_cost_limit=500'
+);
+SELECT cx_partition_telemetry(
+    'job_events',
+    $c$id          UUID NOT NULL DEFAULT gen_random_uuid(),
+       created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+       job_id      UUID NOT NULL,
+       task_id     UUID,
+       event       TEXT NOT NULL,
+       buyer_text  TEXT,
+       detail      JSONB$c$,
+    'job_events_job_idx', '(job_id, created_at)',
+    'autovacuum_vacuum_scale_factor=0.1, autovacuum_vacuum_threshold=100, autovacuum_analyze_scale_factor=0.1, autovacuum_analyze_threshold=100, autovacuum_vacuum_cost_limit=500'
+);
+
+-- Postgres Data Lifecycle 5→6 (docs/internal/CREED_AND_PATH_TO_TEN.md): autovacuum
+-- tuning for the telemetry tables sweepTelemetryRetention (control/workers.go
+-- telemetryTables) now DELETEs from on an hourly ticker. Bounding the tables (4→5)
+-- fixed unbounded growth but introduced a NEW churn shape the DB defaults were never
+-- tuned for: instead of a slow trickle of dead tuples from scattered UPDATEs (what
+-- the 0.2 default scale factor assumes), each table now takes one large DELETE burst
+-- per hour, all at once. On a big table 20%-of-table-since-last-vacuum can be a huge
+-- absolute number of dead tuples sitting unvacuumed between the hourly bursts,
+-- bloating both the table and worker_memory_samples_worker_time_idx /
+-- task_durations_type_model_idx / job_events_job_idx (which every real read of these
+-- tables goes through — ListWorkers' recent-N-per-worker LATERAL, the p90/drift
+-- rollup, and the buyer-facing GET /v1/jobs/{id}/events timeline). Same discipline as
+-- the `tasks` table's own E3 tuning above: small scale factors with flat thresholds
+-- so autovacuum fires on absolute churn instead of waiting for a fraction of the
+-- table, sized per table to its actual insert-vs-delete pattern:
+--
+--   worker_memory_samples — the hottest of the three. One row per worker per
+--   heartbeat-with-memory-reporting (control/store.go InsertWorkerMemorySample) is
+--   the highest insert rate of any telemetry table (~2,880 rows/worker/day, per the
+--   facet's own sizing note above), and the 14-day retention window is the
+--   shortest, so the hourly sweep's delete burst is proportionally the largest
+--   fraction of the table each cycle. Tuned as aggressively as `tasks` itself.
+--
+--   task_durations — one row per COMMITTED task (not per heartbeat), so a lower
+--   insert rate than worker_memory_samples, but the 30-day window means the hourly
+--   delete burst still removes a meaningful slice of the table each cycle at any
+--   real task volume. Tuned between `tasks` and job_events: still low, not as low
+--   as the heartbeat table.
+--
+--   job_events — a handful of rows per job/task (creation, failures, requeues), the
+--   lowest insert rate of the three, AND the 180-day retention window means any
+--   single hourly delete burst is a much smaller fraction of total table size than
+--   the other two. Still tuned below the 0.2 default (it is still hourly-delete
+--   churn, not cold storage), but the least aggressive of the three.
+--
+-- Idempotent and table-scoped · no global GUC change. Since 6->7 these tables are
+-- PARTITIONED, and a partitioned PARENT rejects storage parameters (Postgres requires
+-- them on the leaves), so the tuning is applied per-leaf by cx_partition_telemetry()
+-- and the rotation job at partition-creation time — NOT on the parent here. This block
+-- therefore applies the params ONLY when the table is still a PLAIN table (relkind 'r'):
+-- on a fresh partitioned DB it is a no-op (relkind 'p'); on an older DB whose telemetry
+-- tables are still plain (pre-6->7, awaiting the Go in-place conversion) it keeps them
+-- tuned exactly as before, and the Go migration then carries the same params onto every
+-- leaf when it converts. cx_apply_plain_autovacuum() encapsulates that relkind guard.
+CREATE OR REPLACE FUNCTION cx_apply_plain_autovacuum(p_table text, p_params text)
+RETURNS void LANGUAGE plpgsql AS $cx$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_class WHERE relname = p_table
+                 AND relnamespace = 'public'::regnamespace AND relkind = 'r') THEN
+        EXECUTE format('ALTER TABLE %I SET (%s)', p_table, p_params);
+    END IF;
+END;
+$cx$;
+SELECT cx_apply_plain_autovacuum('worker_memory_samples',
+    'autovacuum_vacuum_scale_factor=0.02, autovacuum_vacuum_threshold=200, autovacuum_analyze_scale_factor=0.02, autovacuum_analyze_threshold=200, autovacuum_vacuum_cost_limit=1000');
+SELECT cx_apply_plain_autovacuum('task_durations',
+    'autovacuum_vacuum_scale_factor=0.05, autovacuum_vacuum_threshold=100, autovacuum_analyze_scale_factor=0.05, autovacuum_analyze_threshold=100, autovacuum_vacuum_cost_limit=500');
+SELECT cx_apply_plain_autovacuum('job_events',
+    'autovacuum_vacuum_scale_factor=0.1, autovacuum_vacuum_threshold=100, autovacuum_analyze_scale_factor=0.1, autovacuum_analyze_threshold=100, autovacuum_vacuum_cost_limit=500');
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Plane D D3 (docs/PLANE_D.md §9) — warm-model state + routing preference.
@@ -622,6 +786,26 @@ CREATE TABLE IF NOT EXISTS worker_model_state (
 );
 CREATE INDEX IF NOT EXISTS worker_model_state_model_idx
     ON worker_model_state (model_id, last_seen_warm DESC);  -- "which live workers have THIS model warm" (scheduler + quote)
+
+-- worker_tps_cache maintains ClaimTask's throughput tiebreak (Control Plane Hot
+-- Path 7->8, docs/internal/CREED_AND_PATH_TO_TEN.md "Get the correlated-subquery
+-- cost out of the transactional hot path"): the claim CTE used to run a fresh
+-- correlated subquery (SELECT br.tps FROM benchmark_results ... ORDER BY
+-- measured_at DESC LIMIT 1) for EVERY eligible candidate row, on EVERY single
+-- claim — an O(candidate rows) cost paid on the hottest transactional path for a
+-- number that only actually changes once per real worker state change (a fresh
+-- benchmark report). This table is upserted once, in UpsertWorker's own
+-- transaction, exactly when a new benchmark_results row lands (mirrors
+-- worker_model_state's "maintained on write, read as O(1) on the claim path"
+-- shape). ClaimTaskSQL now LEFT JOINs this table per (worker, job_type) instead
+-- of running the correlated subquery — a plain indexed lookup, not a per-row scan.
+CREATE TABLE IF NOT EXISTS worker_tps_cache (
+    worker_id  UUID NOT NULL,
+    job_type   TEXT NOT NULL,
+    tps        REAL NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (worker_id, job_type)
+);
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Stuck-run watchdog V2 (control/workers.go reapStuckJobs) — escalation ladder,
@@ -717,3 +901,105 @@ CREATE INDEX IF NOT EXISTS jobs_charge_status_idx ON jobs (charge_status);
 -- INSERT-if-absent by payout_ref, and this partial unique index makes a racing
 -- double-insert impossible rather than merely unlikely.
 CREATE UNIQUE INDEX IF NOT EXISTS ledger_stripe_fee_ref_uniq ON ledger_entries (payout_ref) WHERE kind = 'stripe_fee';
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Public-site alpha-access capture (docs/CREED_AND_PATH_TO_TEN.md, "Public site
+-- & conversion" 4→5). The site's release beat previously said "ask for alpha
+-- access" with no mechanism to ask through — this is that mechanism: a real,
+-- unauthenticated, rate-limited capture endpoint (POST /v1/alpha-request) so a
+-- prospective buyer or supplier can actually leave contact info instead of the
+-- funnel dead-ending at the sentence.
+CREATE TABLE IF NOT EXISTS alpha_requests (
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at TIMESTAMPTZ DEFAULT now(),
+    email      TEXT NOT NULL,
+    role       TEXT,   -- 'buyer' | 'supplier' | '' (unspecified) — whichever CTA was clicked
+    note       TEXT,   -- optional free-text ("what would you run", etc.)
+    source_ip  TEXT    -- for the same per-IP abuse-rate reasoning as signupLimiter
+);
+CREATE INDEX IF NOT EXISTS alpha_requests_created_at_idx ON alpha_requests (created_at);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Buyer Advantage & Pricing Edge 4.5→5 (docs/internal/CREED_AND_PATH_TO_TEN.md,
+-- "Reprice from real supplier economics, not hand-seeded constants"). Price
+-- provenance: a price is either 'seed' (the original hand-typed launch constant)
+-- or 'measured_supplier_economics' (derived by control/pricing.go's
+-- repriceFromSupplierEconomics from a real docs/GPU_CAPABILITY.md throughput
+-- figure, the real control/payment.go supplier-share rate, and an electricity-cost
+-- floor — the same inverse arithmetic scripts/supplier_earnings_calculator.py does
+-- by hand for one supplier, now applied to reprice the catalogue itself).
+-- price_formula records the exact figures so any repriced number is traceable back
+-- to a real measurement, never a re-guessed constant.
+ALTER TABLE models ADD COLUMN IF NOT EXISTS price_source  TEXT DEFAULT 'seed';
+ALTER TABLE models ADD COLUMN IF NOT EXISTS price_formula TEXT;
+
+-- Project Detection & Quotation 7→8 ("Ship a firm-quote tier: a real commitment,
+-- not just an estimate"). An opt-in per-job flag: when set, the buyer's charge is
+-- capped at firm_quote_max_usd (the quote's stated maximum) regardless of actual
+-- cost — any overage is absorbed by the platform, never passed through. billed_usd
+-- is what the buyer was actually charged (== actual_usd unless capped), so the
+-- invoice/ledger can show the cap took effect.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS firm_quote          BOOLEAN DEFAULT false;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS firm_quote_max_usd  NUMERIC(12,6);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Speed Lane wave 2A (docs/speed-lane-reports/SLA_QUOTE_WAVE2A.md) — the
+-- wall-clock speed-SLA quote. A quote whose fleet is SLA-eligible AND whose ETA
+-- was planner-backed (real measured per-worker rates, control/planner.go) may
+-- carry a TIME GUARANTEE derived from the planner's CONSERVATIVE band plus an
+-- explicit safety margin and a merge/collect allowance (control/quote.go
+-- slaGuaranteedSecs — every term documented there). The guarantee is priced: a
+-- documented premium (sla_premium_usd) that is refunded automatically on a miss.
+--
+--   quotes.sla_guaranteed_secs / sla_premium_usd — the OFFER persisted with the
+--     quote's other assumptions (NULL = no guarantee was offerable: thin fleet,
+--     planner disabled, or no measured rates — honest degradation, never a guess).
+--   jobs.sla_guarantee_secs / sla_premium_usd — the BINDING, stamped at submit
+--     when firm_quote binds an SLA-bearing quote. The guarantee clock is the
+--     buyer-visible span: jobs.created_at → jobs.results_merged_at.
+--   jobs.sla_met — the OUTCOME: NULL until decided (or no SLA), true = met,
+--     false = missed (an sla_refund ledger row + job event were recorded).
+--     Deliberately NOT wired into deadline_secs: the deadline drives the stuck-run
+--     watchdog's rescue/KILL ladder, while a missed SLA must complete-and-REFUND —
+--     killing a late job would destroy the buyer's results to punish lateness.
+ALTER TABLE quotes ADD COLUMN IF NOT EXISTS sla_guaranteed_secs INT;
+ALTER TABLE quotes ADD COLUMN IF NOT EXISTS sla_premium_usd     NUMERIC(12,6);
+ALTER TABLE jobs   ADD COLUMN IF NOT EXISTS sla_guarantee_secs  INT;
+ALTER TABLE jobs   ADD COLUMN IF NOT EXISTS sla_premium_usd     NUMERIC(12,6);
+ALTER TABLE jobs   ADD COLUMN IF NOT EXISTS sla_met             BOOLEAN;
+-- Exactly ONE sla_refund ledger row per job, structurally: the refund insert is
+-- INSERT-if-absent by payout_ref ('sla-<job_id>'), and this partial unique index
+-- makes a racing double-insert (two finalize sites + the collect sweep can all
+-- observe the same miss) impossible rather than merely unlikely — the same
+-- pattern as ledger_stripe_fee_ref_uniq above.
+CREATE UNIQUE INDEX IF NOT EXISTS ledger_sla_refund_ref_uniq ON ledger_entries (payout_ref) WHERE kind = 'sla_refund';
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Public Site & Conversion 6→7 (docs/internal/CREED_AND_PATH_TO_TEN.md, "Make the
+-- funnel observable"). A minimal, self-hosted, cookie-free beacon: pageview,
+-- scroll-depth per narrative beat, receipts-panel opens, and CTA clicks. No
+-- tracking pixel, no third-party script, no cookie — see control/beacon.go for
+-- the endpoint and web/index.html's inline beacon script for the client side.
+--
+-- Cookie-free by construction: page_id is generated client-side in memory only
+-- (crypto.randomUUID(), never written to a cookie or localStorage) purely to
+-- group the handful of events one single pageview emits — it dies with the tab
+-- and is never sent back to the same visitor on a later visit, so it is not a
+-- persistent client identifier. source_ip is retained only as long as every
+-- other IP already stored in this database (alpha_requests, signup) for the
+-- same abuse-rate reasoning, not to build a cross-session profile.
+CREATE TABLE IF NOT EXISTS site_events (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at  TIMESTAMPTZ DEFAULT now(),
+    page_id     UUID    NOT NULL, -- in-memory-only per-pageview id (see above) — groups events from one page load, nothing more
+    event_type  TEXT    NOT NULL CHECK (event_type IN ('pageview', 'scroll_depth', 'receipts_open', 'cta_click')),
+    beat        SMALLINT,         -- narrative beat index (0-6, see web/index.html data-beat) — NULL when not beat-scoped
+    detail      TEXT,             -- e.g. which CTA ('alpha-request', 'demo') — free text, capped, never PII
+    path        TEXT,             -- request path the beacon fired from
+    referrer_host TEXT,           -- host-only referrer (no query string / path — never the full referring URL)
+    source_ip   TEXT              -- same per-IP abuse-rate reasoning as alpha_requests.source_ip
+);
+CREATE INDEX IF NOT EXISTS site_events_created_at_idx ON site_events (created_at);
+CREATE INDEX IF NOT EXISTS site_events_type_idx ON site_events (event_type, created_at);
+CREATE INDEX IF NOT EXISTS site_events_page_id_idx ON site_events (page_id);
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS billed_usd          NUMERIC(12,6);

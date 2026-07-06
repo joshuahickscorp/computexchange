@@ -227,6 +227,16 @@ pub struct BenchResult {
     pub eps: f32,
     pub p99_ms: u32,
     pub thermal_ok: bool,
+    /// Wall-clock milliseconds the COLD load of this model took (docs/
+    /// CREED_AND_PATH_TO_TEN.md, "Warm model pool" 6.5→7 — "cold-load latency is
+    /// completely unmeasured... the quote path can only say a cold load is
+    /// possible, never how many seconds it costs"). Measured once, at the
+    /// unavoidably-cold first load every fresh agent process does during its
+    /// startup benchmark — a real number instead of a category. `#[serde(default)]`
+    /// so an older agent's echoed/cached record (which never sent this field)
+    /// still deserializes as 0, not a parse failure.
+    #[serde(default)]
+    pub load_ms: u64,
 }
 
 /// Default engine tag for a `WorkerCapability` deserialized without one (an older
@@ -324,12 +334,25 @@ pub struct TaskDispatch {
 }
 
 /// Result submission after a task completes.
+///
+/// `result_sha256` (Control Plane Hot Path 8->9, docs/internal/
+/// CREED_AND_PATH_TO_TEN.md "Get result-commit off the S3 critical path") is the
+/// lowercase-hex SHA-256 of the exact bytes just PUT to `output_url`, computed
+/// AFTER a successful upload. It lets the control plane trust a hash-to-hash
+/// redundancy compare for byte-exact job types instead of re-downloading this
+/// same object synchronously inside the commit request. `#[serde(default)]` so
+/// an older control plane build's TaskCommit decode (were the field ever
+/// reordered/renamed) — and any caller that doesn't set it — still round-trips;
+/// the control plane treats an empty string exactly like an absent field and
+/// always falls back to a real GetObject, so this is purely additive.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskCommit {
     pub task_id: Uuid,
     pub result_key: String,
     pub duration_ms: u64,
     pub tokens_used: u64,
+    #[serde(default)]
+    pub result_sha256: String,
     pub hardware_temp_c: Option<f32>,
 }
 
@@ -400,10 +423,47 @@ pub struct FailReport {
 
 /// Earnings summary returned by `GET /v1/worker/earnings`. Consumed by the
 /// heartbeat to populate the menu-bar status file (see status.rs).
+/// `last_payout_*`/`next_payout_at` are Supplier onboarding & safety 7->8
+/// (docs/internal/CREED_AND_PATH_TO_TEN.md, "Populate the trust panel with real
+/// data"): real payout proof sourced from this supplier's own ledger rows on the
+/// control plane, never fabricated — absent (`None`) when there is no such row
+/// yet, matching the control plane's own `omitempty` pointer fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Earnings {
     pub balance_usd: f64,
     pub lifetime_usd: f64,
+    #[serde(default)]
+    pub last_payout_usd: Option<f64>,
+    #[serde(default)]
+    pub last_payout_at: Option<u64>,
+    #[serde(default)]
+    pub next_payout_at: Option<u64>,
+}
+
+/// Per-supplier honeypot verification aggregate returned by
+/// `GET /v1/worker/verification` (Supplier onboarding & safety 7->8) — the
+/// trust-panel data source, distinct from the buyer-facing per-job
+/// `Verification` receipt on the control plane. `label` reuses the control
+/// plane's own derived vocabulary ("verified" | "honeypot-checked" |
+/// "no-independent-peer" | "cross-class-skip" | "unverified").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SupplierVerification {
+    pub honeypots_passed: i64,
+    pub honeypots_failed: i64,
+    pub verification_label: String,
+}
+
+/// Payout readiness returned by `GET /v1/worker/connect/status` (Supplier
+/// onboarding & safety 7->8). Mirrors `handleWorkerConnectStatus`'s wire shape
+/// exactly: `configured` is true once the control plane has a Stripe key at
+/// all, `connected` once this supplier has linked an Express account, `enabled`
+/// once Stripe reports `payouts_enabled` on that account.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectStatus {
+    pub configured: bool,
+    pub connected: bool,
+    #[serde(rename = "payouts_enabled")]
+    pub enabled: bool,
 }
 
 #[cfg(test)]
@@ -489,9 +549,7 @@ mod tests {
             "output_url":"http://example/out",
             "result_key":"jobs/x/tasks/0/result.json",
             "deadline":0"#;
-        let with = format!(
-            "{base},\n\"partial_put_url\":\"http://example/out.partial?sig=abc\"}}"
-        );
+        let with = format!("{base},\n\"partial_put_url\":\"http://example/out.partial?sig=abc\"}}");
         let d: TaskDispatch = serde_json::from_str(&with).expect("dispatch with partial URL");
         assert_eq!(
             d.partial_put_url.as_deref(),

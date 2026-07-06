@@ -18,7 +18,13 @@ struct ConsentRecord: Codable, Equatable {
     var version: Int
     var acceptedAt: TimeInterval
 
-    static let currentVersion = 1
+    // Bumped 2→3 (Security Posture 8→9): the sandbox line changed MATERIALLY — the
+    // cx-agent child is now launched under a real macOS seatbelt sandbox that
+    // contains its filesystem blast radius (v2 accurately said it was UNsandboxed;
+    // that is no longer true). A supplier who accepted v2's "runs as an ordinary
+    // process" wording is asked to re-accept the corrected, now-more-protective
+    // terms rather than having stale consent silently carry over.
+    static let currentVersion = 3
 }
 
 /// The fixed terms presented at first run. Kept here (not hard-coded in the view)
@@ -31,10 +37,25 @@ enum ConsentTerms {
     /// What actually runs and the default protections, stated plainly. These match
     /// the agent's real defaults (OperatorPrefs / agent config): power-only,
     /// memory headroom, quiet hours, dynamic throttling.
+    ///
+    /// Honesty note (docs/internal/CREED_AND_PATH_TO_TEN.md, Security Posture 8→9):
+    /// the sandbox line is now ACCURATE about a real, enforced protection. The
+    /// menu-bar app launches the cx-agent child under a macOS seatbelt sandbox
+    /// (macapp/ComputeExchangeAgent/cx-agent.sb, applied via sandbox-exec in
+    /// AgentController.sandboxWrappedLaunch): the child's filesystem writes are
+    /// confined to the model cache + the agent's own data dir + temp, and it CANNOT
+    /// read the operator's SSH keys, cloud credentials, keychain, or Documents. That
+    /// containment is proven by sandbox-profile-test.sh and gated in CI. What the
+    /// copy deliberately does NOT claim: the seatbelt profile does not yet restrict
+    /// the child's network to only the control/storage hosts (macOS seatbelt can't
+    /// filter by hostname from a profile — that half is a named follow-up in
+    /// docs/SECURITY.md). The line below states exactly what IS enforced without
+    /// overclaiming the part that isn't; the memory/thermal/quiet-hours/power lines
+    /// that follow describe the other real, enforced protections.
     static let points: [String] = [
-        "Computexchange runs a sandboxed compute agent (cx-agent) on this Mac that performs paid inference jobs for buyers when your machine is idle and eligible.",
+        "Computexchange runs a compute agent (cx-agent) on this Mac that performs paid inference jobs for buyers when your machine is idle and eligible. Both this menu-bar app and the cx-agent process it launches run inside a macOS sandbox: the compute agent's file access is confined to its model cache and its own working folder, and it cannot read your SSH keys, passwords/keychain, or your Documents. (The sandbox does not yet restrict which servers the agent can reach — that protection is in progress and described in our security notes.)",
         "You keep \(supplierSharePct)% of what each job earns; Computexchange keeps \(platformSharePct)%.",
-        "Resource limits: the agent reserves memory headroom for you and pauses new work under memory pressure or high thermals (dynamic throttling) · it backs off before it would slow you down.",
+        "Resource limits: the agent reserves memory headroom for you and pauses new work under memory pressure or high thermals (dynamic throttling, backed by macOS's own thermal-pressure signal) · it backs off before it would slow you down.",
         "Power: by default the agent only works while on AC power and pauses on battery.",
         "Quiet hours: you can set hours when the agent never accepts work.",
         "You can stop the agent at any time from this menu; stopping is immediate.",

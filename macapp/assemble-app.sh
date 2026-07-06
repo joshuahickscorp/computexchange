@@ -62,6 +62,20 @@ else
   info "embedded cx-agent from $AGENT_BIN"
 fi
 
+# ── 3b. embed the seatbelt sandbox profile (Security Posture 8->9) ────────────
+# AgentController launches the cx-agent child under this macOS seatbelt profile via
+# sandbox-exec, containing a malicious buyer payload's filesystem blast radius
+# (proven by macapp/ComputeExchangeAgent/sandbox-profile-test.sh). It must ship in
+# Resources/ so Bundle.main.url(forResource:"cx-agent",withExtension:"sb") resolves;
+# without it the app launches the agent UNSANDBOXED and honestly reports so.
+SANDBOX_PROFILE="ComputeExchangeAgent/cx-agent.sb"
+if [ -f "$SANDBOX_PROFILE" ]; then
+  cp "$SANDBOX_PROFILE" "$APP_PATH/Contents/Resources/cx-agent.sb"
+  info "embedded seatbelt profile cx-agent.sb"
+else
+  info "WARNING: $SANDBOX_PROFILE missing — the app will run cx-agent UNSANDBOXED"
+fi
+
 # ── 4. app icon (.icns) from the PNG, if the tools + source exist ────────────
 ICON_SRC="$ROOT/logo/cx-app-icon.png"
 if [ -f "$ICON_SRC" ] && command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then

@@ -38,6 +38,12 @@ pub fn classify(err: &RunError, low_memory: bool) -> &'static str {
                 "internal_error"
             }
         }
+        // A real mid-job memory-pressure preemption (docs/internal/
+        // CREED_AND_PATH_TO_TEN.md, "Memory management & dynamic throttling
+        // internals" 7→8) — same wire class as any other OOM signal, already
+        // retryable/not-buyer-fault in control/failure.go, so the control plane
+        // requeues the remaining rows to a worker with room with no taxonomy change.
+        RunError::OomPreempt { .. } => "oom",
     }
 }
 

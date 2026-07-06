@@ -250,6 +250,66 @@ platform take defaults to 3%.
 **Notes:** prices are served from the models table, not a Go constant (`control/api.go:1145`).
 The one serif monument on the page is $0.001 per 1,000 embeddings (`db/schema.sql:299`).
 
+## 13 · per-device capability detail · added in the site shift (verified)
+
+The Studio (Apple Silicon) and Spark (NVIDIA CUDA) beats are each one line now (owner call ·
+the granular under-text was cleared); the architecture-specific capability receipts they briefly
+carried moved into the `how it works` beat as a second console group (backends, executors,
+headroom, sandbox), and the earn line was made fully device-agnostic. The receipts below still
+back those relocated rows one-for-one. Every claim was adversarially receipt-checked (a skeptic
+re-opened each cited line and tried to refute the exact wording) before it shipped; the refuted
+phrasings are recorded as kills below so they stay dead.
+
+**Studio · Apple Silicon lines:**
+- `apple silicon runs inference on the metal gpu by default · real candle in pure rust`:
+  `agent/Cargo.toml:47` `default = ["metal"]` · `agent/src/models.rs:36` `match Device::new_metal(0)`
+  Metal tried first, never faked · `agent/src/runners.rs:1` REAL Candle inference.
+- `all six verified executors run here · embeddings, inference, transcription, classification,
+  extraction, rerank`: `agent/src/hardware.rs:436` the six base job types. The six are the
+  output-verified catalogue (claim 6); the seventh `custom` container lane is excluded on purpose,
+  it is reputation-trusted only.
+- `classification and extraction are real llama passes, not prompt wrappers`:
+  `agent/src/runners.rs:1804` `backend.generate_batch_shared_prefix(&prompts, 12)` · a full batched
+  quantized forward pass, per-row output byte-for-byte.
+- `batched decode stays byte-identical to serial at about 1.5x on an m3 pro`:
+  `docs/GPU_CAPABILITY.md:45` byte-identical, 138.7 tok/s = 1.52x at batch 32 on an M3 Pro.
+- `the menu bar app is the operator's face · status, earnings, thermal, start and stop`:
+  `macapp/README.md:3` the operator's face for the Rust cx-agent (Mac-only, claim 3).
+- `battery and quiet hours enforced on the device itself · eligibility never leaves the mac`:
+  `agent/src/config.rs:328` `is_eligible_to_run(now_hour, on_battery)` · `agent/src/main.rs:151`
+  `on_battery` shells out to `pmset -g batt` (macOS-only) · `agent/src/types.rs:351` the heartbeat
+  carries no battery or quiet-hours field.
+
+**Spark · NVIDIA CUDA lines:**
+- `the nvidia box runs the same six executors on cuda · a device branch, not a rewrite`:
+  `agent/Cargo.toml:49` cuda "Mirrors metal exactly ... a device branch, not a rewrite" · `:53`
+  the cuda opt-in feature · `agent/src/models.rs:47` `Device::new_cuda(0)`.
+- `the 7b batch model is gated by a 40gb memory floor, not the backend`:
+  `agent/src/models.rs:153` `BIG_LLAMA_MIN_MEMORY_GB = 40.0`, gated to high-VRAM workers
+  (nvidia_48g/80g/180g AND the large Apple unified-memory classes) · a memory floor, not a backend
+  gate, so a large-memory Mac clears it too.
+- `the batched win is bigger on cuda · up to 9.6x, measured on an a100`:
+  `docs/GPU_CAPABILITY.md:64` up to 9.6x at batch 64, 2345 tok/s on a RunPod A100 80GB.
+- `a locked-down container sandbox only a cuda host can run · no network, read-only root, all caps
+  dropped, a hard timeout`: `agent/src/sandbox.rs:8` the hardened profile · `agent/src/sandbox.rs:12`
+  "Linux + Docker + the NVIDIA Container Toolkit only" · `agent/src/hardware.rs:406` the `custom`
+  job is advertised only on an NVIDIA worker with a reachable Docker daemon.
+- `reputation-trusted, not output-verified · metering it per gpu-second is the road ahead`:
+  `agent/src/runners.rs:2369` "metered per GPU-second and reputation-trusted, never
+  honeypot/redundancy output-checked" · `docs/internal/ACCRETION.md:279` GPU-second billing is
+  "Remaining (Wave 5+)" · `control/api.go:1674` custom jobs charge a per-task estimate today, not
+  per second.
+
+**Kills recorded so they stay dead:**
+- NOT "no build flag" · Metal is a default-on feature, disabled with `--no-default-features`
+  (`agent/Cargo.toml:47`); the page says "metal by default".
+- NOT "the 7b a mac cannot" · the floor is memory (40 GB), not backend, so a large-memory Mac
+  clears it too (`agent/src/models.rs:153`).
+- NOT "metered per GPU-second" in the present tense · billing is roadmap
+  (`docs/internal/ACCRETION.md:279`); the receipts-dialog line was corrected to match the road text.
+- NOT "flip your Mac online" as a universal earn line · quiet hours are device-agnostic, battery is
+  Mac-only, and a Spark reports `on_battery=false` (`agent/src/main.rs:148`).
+
 ## Appendix · composite page lines
 
 Three page lines compose multiple ledger claims rather than quoting one; their constituent
@@ -263,11 +323,14 @@ receipts, so the ctrl-F contract holds:
   (`control/quote.go:57` `DetectedFields ... top-level keys in the sample`,
   `control/quote.go:561` "handlePipelineQuote prices a detected MULTI-STAGE pipeline"); the
   model list is claim 4.
-- **Earn row** `flip your Mac online and it earns while it idles · ...`: supplier earnings are
-  the held supplier_credit ledger entries written per verified task (claim 8,
-  `control/payment.go:108` `Kind: KindSupplierCredit`) · quiet-hours and battery eligibility on
-  the device is claim 5 (`agent/src/config.rs:328`) · the 3% take is claim 12
-  (`control/payment.go:63`).
+- **Earn row** `flip your device online and it earns while it idles · quiet hours are enforced on
+  the device itself`: made fully device-agnostic (owner call · any supported device, not just a
+  Mac, can supply · the specific-device enumeration and the Mac-only battery clause were dropped).
+  Supplier earnings are the held supplier_credit ledger entries written per verified task (claim 8,
+  `control/payment.go:108` `Kind: KindSupplierCredit`) · quiet-hours eligibility is device-agnostic
+  and on-device (claim 5, `agent/src/config.rs:328`) · the 3% take is claim 12
+  (`control/payment.go:63`). Battery remains a real but Mac-only gate (`agent/src/main.rs:148`), now
+  left off the page as device-specific detail.
 - **Proof row** `results come back verified · every run ends in a receipt`: verification is
   claim 6; the receipt is real and assembled per job and per pipeline
   (`control/receipt.go:59` `func assembleClearingReceipt(...) ClearingReceipt`,

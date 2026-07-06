@@ -2,51 +2,129 @@
 
 Concrete, copy-pasteable procedures for the four failure modes an operator hits.
 All commands assume the control plane's `DATABASE_URL` and an admin key
-(`Authorization: Bearer <admin_api_key>` from `make seed`). The admin views back
-most diagnosis: `GET /admin/jobs`, `/admin/workers`, `/admin/fraud`, `/admin/payouts`.
+(`Authorization: Bearer <admin_api_key>` from `make seed`). The admin console at
+`/admin` (Fleet · workers table, Fraud flags, Scheduler explain, Audit log) and
+the underlying views back most diagnosis: `GET /admin/jobs`, `/admin/workers`,
+`/admin/fraud`, `/admin/payouts`, `/admin/scheduler/explain`, `/admin/actions`.
 
 ## 1. Stuck job (queued/running but not finishing)
 
 **Symptom.** `GET /v1/jobs/{id}` sits at `queued`/`running`; `tasks_done` not advancing.
 
 **Diagnose.**
-- Supply: `GET /admin/workers` — is any worker the right `hw_class` + `supported_jobs`/`supported_models`, with a recent `last_seen`? No eligible worker ⇒ the hard filter correctly keeps it queued (this is not a bug; it is missing supply).
-- Throttled / under-provisioned supply: `GET /admin/workers` also shows `throttled` + `effective_memory_gb` per worker. A worker that is `throttled=true` (the agent paused for memory pressure) or whose `effective_memory_gb` is below the job's `min_memory_gb` is **deliberately** excluded by the safe-dispatch filter — that is the supplier-protection contract working, not a bug. It self-clears once the provider's memory frees up (next heartbeat). The provider sees the reason locally in `~/.compute-exchange/status.json` (`throttle_reason`). See [ALPHA_READINESS.md](ALPHA_READINESS.md#supplier-throttling).
+- Why won't it claim: `GET /admin/scheduler/explain?worker_id=<id>` runs the exact
+  hard-filter predicates `ClaimTask` uses against every currently-claimable task for
+  that worker and returns per-reason counts (`memory_mismatch`, `model_mismatch`,
+  `job_type_mismatch`, `hw_class_mismatch`, `residency_mismatch`, `throttled`,
+  `payout_floor`, `supplier_inactive`) plus `eligible` — the fastest real diagnosis,
+  since it names the ONE predicate actually failing instead of requiring the operator
+  to reconstruct the claim query by hand. `no_queued_tasks=1` means the queue is
+  genuinely empty for that worker (not a bug). Read-only; never claims, never mutates.
+- Supply: `GET /admin/workers` — is any worker the right `hw_class`, with a recent
+  `last_seen_at`? **Note:** the worker list does NOT include `supported_jobs`/
+  `supported_models` (those live on the worker row internally but are not in this
+  admin view) — use `scheduler/explain` above for the definitive job-type/model
+  eligibility answer instead of trying to eyeball it from `/admin/workers`. No
+  eligible worker ⇒ the hard filter correctly keeps it queued (this is not a bug; it
+  is missing supply).
+- Throttled / under-provisioned supply: `GET /admin/workers` also shows `throttled` +
+  `effective_memory_gb` per worker. A worker that is `throttled=true` (the agent
+  paused for memory pressure) or whose `effective_memory_gb` is below the job's
+  `min_memory_gb` is **deliberately** excluded by the safe-dispatch filter — that is
+  the supplier-protection contract working, not a bug (`scheduler/explain` reports
+  these as `throttled` / `memory_mismatch`). It self-clears once the provider's
+  memory frees up (next heartbeat). The provider sees the reason locally in
+  `~/.compute-exchange/status.json` (`throttle_reason`). See
+  [ALPHA_READINESS.md](ALPHA_READINESS.md#supplier-throttling).
 - Stuck tasks: `psql "$DATABASE_URL" -c "SELECT id,status,claimed_by,visible_at FROM tasks WHERE job_id='<id>'"`. A task `claimed`/`running` past its deadline is auto-requeued by the **stale-task sweep** (its `visible_at` is pushed forward; see workers.go) — wait one sweep interval.
 
-**Fix.** If supply exists but the job is wedged, force-requeue the task lease:
-`psql "$DATABASE_URL" -c "UPDATE tasks SET status='queued', claimed_by=NULL, visible_at=now() WHERE job_id='<id>' AND status IN ('running','retrying')"`.
+**Fix.** If supply exists but the job is wedged, force-requeue the task:
+`POST /admin/tasks/{task_id}/requeue` (optional JSON body `{"reason": "..."}`,
+recorded to the audit log at `GET /admin/actions`). Only acts on a task that is
+`running`/`retrying` (409 otherwise — nothing to force). The equivalent raw SQL,
+if the endpoint is ever unavailable: `psql "$DATABASE_URL" -c "UPDATE tasks SET
+status='queued', claimed_by=NULL, visible_at=now() WHERE job_id='<id>' AND status
+IN ('running','retrying')"`.
 If the buyer wants out: `cx cancel <id>` (refunds unstarted work).
 
 ## 2. Bad / fraudulent worker
 
 **Symptom.** A supplier fails honeypots or diverges on redundancy. Surfaced in
-`GET /admin/fraud` (reputation, mismatch/clawback counts, `quarantined_at`).
+`GET /admin/fraud` (reputation, mismatch/clawback counts, `quarantined_at`) and,
+identically, the Fraud flags panel on the `/admin` console. The console's Fleet ·
+workers table (`GET /admin/workers`) is what maps a flagged `supplier_id` to the
+actual `worker_id` a Suspend/Reinstate action needs — the fraud views are
+supplier-scoped, suspend/reinstate are worker-scoped.
 
 **Behavior (automatic).** A failed honeypot docks reputation, claws back the task
 credit, and **auto-quarantines** the supplier (`status='suspended'`); the scheduler's
-`status='active'` gate then excludes it from all future claims. Repeated redundancy
-mismatches drive reputation below the tier/quarantine threshold.
+`status='active'` gate then excludes it from all future claims. **A repeated
+redundancy MISMATCH alone does NOT auto-quarantine** — it only docks reputation
+(-0.10 per confirmed tiebreak loss) and can push a supplier out of the higher
+trusted tiers (`reputationTier` in reputation.go) or (below 0.5) into the
+`/admin/fraud-flags` review list; only a honeypot fail calls `QuarantineSupplier`
+and flips `status='suspended'` in this codebase today. A supplier that keeps
+losing tiebreaks but never fails a honeypot will keep working, at a lower
+reputation/tier, until an operator manually suspends it — this is a real gap
+between the automatic and manual halves of this procedure, not a documentation
+choice.
 
-**Manual.** Suspend now: `POST /admin/workers/{worker_id}/suspend`. Reinstate after
-review: `psql "$DATABASE_URL" -c "UPDATE suppliers SET status='active', quarantined_at=NULL WHERE id='<supplier_id>'"`.
+**Manual.** Identify the bad worker (Fleet table or `GET /admin/workers`, or the
+Fraud flags panel for the `supplier_id`, cross-referenced against Fleet for its
+`worker_id`). Suspend now: `POST /admin/workers/{worker_id}/suspend` — on screen in
+the console's Fleet table as a "suspend" button per active row. Reinstate after
+review: `POST /admin/workers/{worker_id}/reinstate` (a "reinstate" button appears
+in the same row once suspended; 409 if the worker's supplier is not currently
+suspended, 404 if the worker id doesn't exist). Both suspend and reinstate are
+visible immediately in the Fleet table on the next refresh (15s auto-refresh, or
+the panel's own "refresh" button) — that refresh IS the on-screen confirmation the
+action took effect, no `psql` required.
 
 ## 3. Payout failure
 
 **Symptom.** Owed credits not settling. Inspect: `GET /admin/payouts` (per-supplier
-rollup by state: `pending`/`held`/`released`/`clawed_back`).
+rollup by state: `pending`/`held`/`released`/`clawed_back`; `ready` also appears —
+see below).
 
 **Expected by rail.**
 - **No rail configured** (default): credits reach `ready`/owed and stay there — the
-  honest stub never marks `released` without a real transfer. This is correct, not a failure.
+  honest stub never marks `released` without a real transfer. This is correct, not a
+  failure. **`ready` is a dead end, not a retry queue:** the release-worker sweep
+  (`DuePayouts`) only ever selects `payout_status='held'` rows whose `release_at` has
+  passed — a `ready` row is never automatically revisited by anything in this
+  codebase, even after a payout rail is later configured. It stays `ready`
+  permanently until an operator moves it back to `held` (see Fix below).
 - **Manual export** (`CX_PAYOUT_EXPORT=/path/payouts.csv`): owed credits are appended
   to the CSV for out-of-band settlement; reconcile the CSV against `/admin/payouts`.
 - **Stripe** (`STRIPE_SECRET_KEY` set): a non-2xx transfer surfaces loudly and the
   credit stays owed (never faked released). Re-running the release worker retries
-  idempotently (idempotency key per supplier+amount).
+  idempotently (idempotency key per supplier+amount) — but only for rows already
+  `held` with a due `release_at`, same as above.
 
-**Fix.** Re-hold a prematurely-released-by-error credit:
-`psql "$DATABASE_URL" -c "UPDATE ledger_entries SET payout_status='ready', release_at=now() WHERE id='<entry_id>'"`, then let the release worker retry.
+**Fix.** To make the release worker genuinely retry a credit — whether it is
+currently `held` with a not-yet-due `release_at`, or sitting `ready` with nothing
+retrying it: `POST /admin/payouts/{entry_id}/release` (optional JSON body
+`{"reason": "..."}`, recorded to the audit log at `GET /admin/actions`). This
+accepts an entry that is CURRENTLY `held` OR `ready` (409 for any other status —
+`pending`/`released`/`clawed_back`) and always leaves it `held` with `release_at`
+pulled forward to now(), so the existing release-worker sweep (`DuePayouts`)
+picks it up on its very next cycle — it never marks the entry `released` itself
+(that still requires a real transfer reference, enforced structurally by the
+`ledger_released_requires_ref` constraint), so this can never fake a payout.
+**Do not manually set `payout_status='ready'` on a stuck credit as a "re-hold" or
+"retry" action** — an earlier version of this runbook did exactly that, and it
+silently left the credit permanently stuck: `DuePayouts` (the real release-worker
+sweep query) only ever selects `payout_status='held'` rows, so a row moved to
+`ready` is never automatically revisited by anything in this codebase. The
+endpoint above is the correct fix for both directions (a `ready` stub that needs
+a real retry, and a `held`-but-not-yet-due credit that needs releasing early); if
+it is ever unavailable, the equivalent raw SQL is
+`psql "$DATABASE_URL" -c "UPDATE ledger_entries SET payout_status='held', release_at=now() WHERE id='<entry_id>' AND payout_status IN ('held','ready')"`
+— note `held`, never `ready`, as the target status. To reverse a credit that was
+released BY ERROR (a real transfer did NOT happen but the row says `released`),
+the same target applies: set it back to `held` (never to `ready`), which also
+correctly excludes it from `reconcileLedger`'s "already transferred" accounting
+until it is legitimately released again.
 
 ## 4. Storage failure (object store unreachable / object missing)
 
@@ -59,8 +137,9 @@ presigned GET/PUT signed against the wrong endpoint is the usual culprit.
 
 **Fix.** Restart the object store, then the control plane (it re-verifies deps at
 boot). A missing per-task result object is surfaced by the merge as a hard error
-(never a short artifact); requeue that task (runbook 1) to re-produce it. Restore
-from backup if the store was lost — see **Backups & disaster recovery** below.
+(never a short artifact); requeue that task (`POST /admin/tasks/{task_id}/requeue`,
+runbook 1) to re-produce it. Restore from backup if the store was lost — see
+**Backups & disaster recovery** below.
 
 ## Deploy (first run + redeploy)
 
@@ -94,19 +173,22 @@ edge downtime.
 - **The Stripe webhook is safe to load-balance.** `POST /v1/stripe/webhook` is
   stateless, signature-verified, and idempotent on the event id, so it does not
   matter which instance Caddy routes a given webhook to.
-- **The background sweep loop runs in BOTH instances** (workers.Run: payout
-  release, stale-task requeue, webhook delivery, reconcile, hedge, dispute).
-  Correctness still holds · payout release is idempotent (the per-credit-row id
-  is the rail idempotency key; a row already `released` is a no-op), and
-  stale-requeue / fail-and-refund use exactly-once state transitions. But the
-  reconcile / hedge / dispute sweeps do **redundant work** when both run them.
-  This wastes a little DB/Stripe-API budget; it does not corrupt state.
-- **Follow-up (clean fix):** add a leader gate so only one instance runs the
-  sweeps · e.g. a `pg_try_advisory_lock` around the loop, or a
-  `CX_RUN_WORKERS=false` env on `control-2`. This requires a control-code change
-  (out of scope for ops); until then the redundant-sweep cost is the documented
-  trade for the HA win. The **WedgedTicker** alert covers the case where the
-  sweep loop stalls on either instance.
+- **The background sweep loop (`workers.Run`: payout release, stale-task
+  requeue, webhook delivery, reconcile, hedge, dispute) runs on `control` ONLY.**
+  `control-2` sets `CX_RUN_WORKERS=false` (`docker-compose.prod.yml`), which
+  `control/main.go` checks before starting `workers.Run` — landed and confirmed
+  live (both instances healthy with this env split since 2026-07-01, per the
+  deploy log). This was previously a documented "follow-up, requires a
+  control-code change" gap; it is not anymore, so there is no redundant sweep
+  work to account for today. If `control-2` ever becomes the leader (e.g. during
+  a manual failover that flips the env), it would need `CX_RUN_WORKERS` unset so
+  the sweeps have a home — don't run both instances leaderless.
+- **The wake-on-work LISTEN/NOTIFY listener (`notify.go`) runs on EVERY
+  instance regardless of `CX_RUN_WORKERS`** — it only relays a Postgres
+  notification to that instance's own local long-poll waiters, so there is
+  nothing to double-run or leader-gate there; each instance simply wakes its own
+  callers. The **WedgedTicker** alert covers the case where the sweep loop
+  stalls on `control`.
 
 ## Backups & disaster recovery
 

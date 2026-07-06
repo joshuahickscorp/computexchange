@@ -140,15 +140,109 @@ ENFORCED in this change:
 
 DOCUMENTED FOR FOLLOW-UP (Wave 2 prerequisites, per the audit):
 
-- **hw_class-aware honeypot seeding.** The `honeypots.answer_class` column exists and is
-  honored, but the seed honeypots (`control/seed.go`) are still class-blind (`""`). A
-  byte-exact honeypot therefore does NOT auto-quarantine today (the safe behavior) until
-  answers are seeded WITH their producing class. This is the audit's named de-risking
-  step #1 before the vLLM lane go-live.
-- **Seed the golden baseline.** The `.hashes` file ships UNSEEDED; run the harness with
-  `CX_GOLDEN_RECORD=1` on the reference box of each shipped `(device, engine,
-  build_hash)` class and pin the recorded rows.
+- **hw_class-aware honeypot seeding.** PARTIALLY DONE (Week 6b, 2026-07-06): the
+  `hawking` class's `batch_infer` honeypot is now seeded WITH its producing class
+  (`control/seed.go`, the section below) — the first byte-exact honeypot that can
+  actually fire. Still open: the `candle` class's byte-exact honeypot remains unseeded
+  (its own stability question — `generate_batch`'s exact-length bucketing changes
+  co-batch shape with chunk composition — needs its own harness proof before an answer
+  is seedable), and the vLLM lane's seeding remains the audit's named de-risking step
+  #1 before that lane's go-live. The embed honeypot stays tolerant/class-blind (safe).
+- **Seed the golden baseline.** DONE for the `candle` reference class (rows recorded +
+  gating, see the golden-hash section). For the `hawking` class the seed blob produced
+  by the honeypot harness (below) IS the golden record — the full byte-exact result
+  document, strictly stronger than a hash row — and the class-aware honeypot is the
+  operative cross-worker gate. Extending `agent/tests/golden/*.hashes` to per-class
+  rows (and driving the `.hashes` gate through `hawking_generate` for within-class
+  drift-gating on non-honeypot prompts) is named follow-up; note that within-class
+  SILENT drift is already structurally impossible for kernel edits, because any edit
+  to the vendored inference module moves `build_hash` via `infer_content_id`.
 - **Per-model quant in build_hash.** `CATALOGUE_QUANT` is a fixed `q4_k_m` constant
   today (every shipped GGUF is Q4_K_M). When a runtime ever varies quant per model
   (e.g. a sub-Q4 codec lane), derive it from the loaded weights so a requant lands in a
   distinct class automatically.
+
+## Seeding a hawking-class byte-exact honeypot (operational, Week 6b)
+
+As of 2026-07-06 the FIRST byte-exact honeypot is seeded (`control/seed.go`): a
+`batch_infer` probe whose known answer was produced by the REAL hawking engine —
+`HawkingRunner::run`, the exact production dispatch path, real Llama-3.2-1B-Instruct
+Q4_K_M GGUF on real Metal — on the repo's reference M3 Pro, recorded under that box's
+real registration class (`hawking|a0ce01606255c06e` at capture time; the seed
+constants in `control/seed.go` are authoritative, not this line). This section is the
+recipe — and the hard requirements — for re-generating the seed on any other
+reference box or build. NEVER hand-write a byte-exact known answer, never copy one
+across classes, and never edit the chunk without re-recording.
+
+### Requirement 1 — the answer must be CO-BATCH-MEMBERSHIP-STABLE
+
+This is the hawking-specific subtlety, and it is measured, not theoretical.
+`hawking_pool_size` is operator-configurable (`1..=8`, agent config), so two honest
+workers of the SAME `(hw_class, engine, build_hash)` class can decode the same
+honeypot chunk under DIFFERENT slot memberships. The lane's one documented
+byte-nondeterminism — a genuine argmax near-tie tipping under the multi-seq kernel's
+reduction order — is membership-DEPENDENT (characterized by
+`hawking_churn_neartie_flip_is_membership_dependent_not_corruption`; at free-form
+scale 11/24 rows diverged between memberships, 2026-07-06 dispatch report). A
+membership-unstable known answer would auto-quarantine an HONEST same-class worker
+that merely runs a different pool size.
+
+Therefore a honeypot answer is seedable ONLY if its chunk is proven byte-identical at
+pool_size 1, 2, 4 AND 8 on real Metal. The harness
+`runners::tests::hawking_honeypot_seed_blob_membership_stable_across_pool_sizes`
+(`#[ignore]`d, metal-gated) is both that proof and the recorder. Any prompt that
+flips must be REJECTED and replaced — and this is not hypothetical: the harness's
+FIRST real run (2026-07-06, M3 Pro) rejected "The opposite of hot is", which is
+byte-stable at pools 2 and 8 (the dispatch gate's coverage) yet flips at pool 1
+(`is "cold".` 10 tok vs `is actually "cold".` 11 tok). Two-point stability is NOT
+stability.
+
+### Requirement 2 — every row must hit natural EOS strictly below max_tokens
+
+Honeypots ride on real buyer jobs and inherit their params (`api.go` injects the
+probe into the submitted job; the dispatch manifest carries the BUYER's
+`max_tokens`). A row that is truncated at the recorded `max_tokens` would produce
+different bytes under a job with a larger budget. The harness asserts every row's
+`tokens < max_tokens` (recorded chunk: max row 10 of 24), which makes the answer
+invariant for any job `max_tokens >= 24`.
+
+### Requirement 3 — class fidelity
+
+The blob's `build_hash` is computed by the harness through
+`hardware::engine_build_hash("hawking", agent_version)` — the exact function the
+registration path advertises — on the box that ran the model. Never hand-compute it,
+never reuse one across boxes/builds. The seed writes `answer_class` in the
+verifier's `classKey` format (`engine|build_hash`) via `classKey()` itself, and
+`validateHoneypotSeed` refuses a class-blind byte-exact row outright.
+
+### The flow
+
+1. On the reference box (agent tree, real Metal):
+   `CX_HAWKING_SEED_OUT=/tmp/hawking_seed_blob.json cargo test -p cx-agent
+   --features metal --release
+   hawking_honeypot_seed_blob_membership_stable_across_pool_sizes -- --ignored
+   --nocapture --test-threads=1`
+   The test FAILS (and nothing is seedable) if any pool size flips a byte or any row
+   fails to EOS; on success it writes the seed blob
+   `{engine, build_hash, recorded_max_tokens, max_row_tokens, input_jsonl, known_answer}`.
+2. Dev seed: wire the blob's values into `control/seed.go`'s
+   `demoHoneypotHawk*` constants (`control seed` then inserts the row idempotently
+   AND uploads the input object — both are required; a DB row whose object is
+   missing 404s a real worker's presigned GET forever).
+   Operational seed: `Store.InsertHoneypot(ctx, "batch_infer", "honeypots/...",
+   knownAnswer, classKey("hawking", buildHash))` + `Storage.PutObject` of the
+   blob's exact `input_jsonl` bytes at the same ref.
+3. Verify activation on a live stack: `GetHoneypotAnswer` returns the class;
+   a same-class commit of the exact bytes records `honeypot_pass`; any other class
+   skips (control/honeypot_hawking_regate_test.go is the pinned proof of all paths).
+
+### Known validity bounds (documented, enforcement is named follow-up)
+
+The honeypot injection path (`AvailableSeedHoneypots`) keys on `job_type` only, so
+this probe can ride on a `batch_infer` job for a DIFFERENT model or with
+`max_tokens < 24`; an honest same-class worker would then legitimately produce
+different bytes and be wrongfully docked. Until the injection-time guard lands
+(api.go/pricing_extra.go — outside the Week-6b bundle's file set), byte-exact
+honeypot coverage is safe ONLY on fleets whose `batch_infer` traffic matches the
+recorded model + `max_tokens >= 24`, which holds for the dev seed (the class exists
+only on the reference box). The lane's opt-in status is unchanged.

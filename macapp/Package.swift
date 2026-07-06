@@ -27,7 +27,17 @@ let package = Package(
                 .product(name: "Sparkle", package: "Sparkle"),
             ],
             path: "ComputeExchangeAgent",
-            exclude: ["Info.plist", "ComputeExchangeAgent.entitlements"]
+            // Non-Swift files that live alongside the sources but aren't compiled:
+            // the bundle Info.plist + entitlements, the seatbelt sandbox profile
+            // (cx-agent.sb — embedded into the .app by assemble-app.sh, not SwiftPM),
+            // and its proof harness (sandbox-profile-test.sh). Excluded so `swift
+            // build` doesn't treat them as sources or emit unhandled-file warnings.
+            exclude: [
+                "Info.plist",
+                "ComputeExchangeAgent.entitlements",
+                "cx-agent.sb",
+                "sandbox-profile-test.sh",
+            ]
         )
     ]
 )

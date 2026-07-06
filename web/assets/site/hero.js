@@ -21,6 +21,12 @@ export function mountHero(canvas, opts) {
   const onFail = opts.onFail || function () {};
   const labelEls = opts.labels || {};       // { 'mac-studio': el, 'dgx-spark': el }
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // dev-only instrumentation overlay · gated by opts.dev (the page reads ?perf). Absent
+  // the flag it never renders, so it is effectively stripped from prod. See tick.
+  const dev = !!opts.dev;
+  let devEl = null;
+  const ftBuf = new Array(120).fill(0);
+  let ftN = 0;
 
   let renderer;
   try {
@@ -31,7 +37,9 @@ export function mountHero(canvas, opts) {
     return null;
   }
 
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  // Cap DPR at 1.5 · the full-bleed canvas is pixel-bound and this is a dark metal
+  // render where 2.0 buys little. Halves fill vs 2.0 on a Retina display.
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.0;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -84,6 +92,11 @@ export function mountHero(canvas, opts) {
   let loaded = false;
   const loader = new GLTFLoader();
   loader.load('/assets/site/oracles.glb', (gltf) => {
+    // Groups must sit at the ORIGIN while meshes attach (attach preserves world
+    // transforms · a pre-applied S5 offset would bake in wrong). The next tick
+    // re-applies the beat offsets to the clean groups.
+    groups['mac-studio'].position.set(0, 0, 0);
+    groups['dgx-spark'].position.set(0, 0, 0);
     // Collect meshes FIRST · reparenting (attach) during traverse mutates the tree
     // mid-iteration and corrupts it.
     const meshes = [];
@@ -99,6 +112,15 @@ export function mountHero(canvas, opts) {
       }
     }
     loaded = true;
+    // The geometry is static and the key light is directional, so its shadow map is
+    // camera-independent · bake it ONCE on the next render, then freeze it instead of
+    // recomputing a 2048 depth pass every frame.
+    renderer.shadowMap.autoUpdate = false;
+    renderer.shadowMap.needsUpdate = true;
+    // E7 · intro. A single decelerating arrival into the beat 1 rest, from ~2 percent
+    // along the beat 1 to 2 path (scrollP starts ahead and glides to 0). Skipped if the
+    // user already scrolled or prefers reduced motion · never fight the user for the camera.
+    if (!reduceMotion && scrollTarget < 0.005) scrollP = 0.02;
     frame();
   }, undefined, (err) => onFail(err));
 
@@ -106,53 +128,120 @@ export function mountHero(canvas, opts) {
   // Each beat is a camera state: target point, distance, pitch, exposure. Scroll
   // progress (0..1) lerps between adjacent beats with smoothstep. Drag adds a yaw and
   // pitch offset on top that eases back to zero on release, so the two never fight.
-  const STUDIO_X = -0.135;               // device x positions in the yup glb (metres)
-  const SPARK_X = 0.159;
+  // Device x positions in the yup glb (metres): Studio camera-left, Spark camera-right
+  // (frozen in CONTRACT.md). target.x is the horizontal COMPOSITION control · the
+  // devices shift screen-left when the camera looks to their right (higher tx) and
+  // screen-right when it looks left. These keyframes were tuned and VERIFIED in a
+  // headless projection harness that projects both device silhouettes through the
+  // camera across every intermediate scroll position and asserts the cluster clears
+  // each beat's text column, including under max drag-yaw at rest.
+  const STUDIO_X = -0.135, SPARK_X = 0.159; // the frozen contract anchors (documentation)
+  void STUDIO_X; void SPARK_X;
+  const FADE_START = 0.86;                 // beat 5: canvas opacity eases to 0 by p=1
+  // E2 · dwell plateaus. Beat rests in raw p, and per-beat plateau half-widths (arrival
+  // and earn hold wider, monument tighter). The camera sits exactly at rest across each
+  // plateau (drag available) and travels only between them.
+  const RESTS = [0, 1/6, 2/6, 3/6, 4/6, 5/6, 1];
+  // S9 · how it works grew taller (it now carries the receipts), which pushes the price and
+  // earn section centres a little past their rests. Widen those two plateaus so the camera is
+  // still exactly on their pose when the section is centred (the offset is absorbed, no rest
+  // recompute · the earlier beats and the how rest itself stay dead-on). price holds longest.
+  const DWELL = [0.045, 0.04, 0.04, 0.04, 0.06, 0.05, 0.04];
+  // S5 · the bisected procession (owner direction): models move INDEPENDENTLY in the
+  // left band, the text is a vertical column on the right, always. The page opens on
+  // the STUDIO alone (the Spark parked off-frame left, stDX/spDX are per-device lateral
+  // offsets, 10th/11th columns) · its sections · then the Studio slides away and the
+  // SPARK slides in · its sections · then SIDE BY SIDE for how · the price · earn ·
+  // release with the scene faded and the download beside the footer. Per-beat camera
+  // yaw (9th column). Text may pass over the models during travel (owner sanctioned);
+  // every held rest is verified clean in the projection harness incl. damped drag.
   const BEATS = [
-    // p,   tx,        ty,    tz,   dist, pitch, exp   · what the viewer is on
-    [0.00, 0.012, 0.03, 0.0, 0.92, 0.63, 1.00], // 1 arrival · both, tabletop
-    [0.28, 0.012, 0.02, 0.0, 0.80, 0.50, 1.00], // 2 how · lower, closer two-shot
-    [0.52, 0.012, 0.11, 0.0, 0.98, 0.60, 0.42], // 3 monument · drift to void, devices dim
-    [0.76, STUDIO_X, 0.03, 0.0, 0.60, 0.48, 1.00], // 4 earn · dolly to the Mac Studio
-    [1.00, 0.012, 0.06, 0.0, 1.30, 0.72, 1.00], // 5 release · rise away, ease out
+    // p,    tx,     ty,    tz,  dist, pitch, exp,  ds,   yaw,   stDX, spDX  · on screen
+    [0.000, -0.030,  0.045, 0.0, 0.58, 0.45, 1.00, 0.40, -0.60,  0.0, -0.9], // 1 arrival · the Studio alone
+    [1/6,    0.100,  0.035, 0.0, 0.50, 0.40, 1.00, 0.35, -0.90,  0.0, -0.9], // 2 studio  · closer, its specs
+    [2/6,    0.300,  0.020, 0.0, 0.46, 0.42, 1.00, 0.35, -0.85, -0.9,  0.0], // 3 spark   · the swap · Spark in
+    [3/6,    0.280,  0.050, 0.0, 0.95, 0.52, 1.00, 0.50, -0.25,  0.0,  0.0], // 4 how     · side by side
+    [4/6,    0.200,  0.240, 0.0, 1.15, 0.79, 0.32, 0.30,  0.00,  0.0,  0.0], // 5 price   · sink + dim
+    [5/6,    0.250,  0.040, 0.0, 0.72, 0.48, 1.00, 0.50, -0.35,  0.0,  0.0], // 6 earn    · close pair, low
+    [1.000,  0.150,  0.300, 0.0, 2.20, 0.95, 0.85, 0.15,  0.00,  0.0,  0.0], // 7 release · recede + fade out
   ];
 
-  let scrollP = 0;                       // set by the scroll listener (scalar only)
-  let dragYaw = 0, dragPitch = 0;        // drag target offsets, decay to 0 on release
-  let dispYaw = 0, dispPitch = 0;        // displayed offsets, eased toward the target
-  let dragging = false, lastX = 0, lastY = 0, released = 0;
-  let idlePhase = 0;
+  let scrollTarget = 0;                  // raw scroll fraction (set by the listener)
+  let scrollP = 0;                       // smoothed/displayed fraction, glided toward the target
+  let viewFrac = 0;                      // S6 · smoothed PAGE-scroll fraction (inertia, NO dwell) ·
+                                         // drives the text-layer warp + reveals so the copy carries
+                                         // the same momentum as the camera instead of snapping 1:1.
+  // Time constants for the one glide filter, in ms (E1). Doctrine defaults · the
+  // tighten-then-add-15-percent feel tuning is the owner's on-device pass (see NOTES).
+  // scroll is the camera's mass (heaviest · it also HOLDS the composed shot at each dwell);
+  // view is the text layer's momentum (a touch quicker than the camera so scrolling stays
+  // responsive while the shot settles a beat later); drag is direct manipulation; settle is
+  // the release exhale (longer than drag); veil is any alpha the engine drives.
+  // S6 raised scroll 260 to 320 for more cinematic heft (owner asked for more smoothing) and
+  // added view for the page content, which used to track raw scroll with no inertia at all.
+  const TAU = { scroll: 320, view: 260, drag: 70, settle: 200, veil: 140 };
+  let dragYaw = 0, dragPitch = 0;        // drag target offsets · set to 0 on release
+  let dispYaw = 0, dispPitch = 0;        // displayed offsets, glided toward the target
+  let dragging = false, lastX = 0, lastY = 0;
+  // E4 · the single canvas-alpha authority. Each source writes its own channel; one
+  // place composes with min and writes the opacity once. No other line touches it.
+  const veil = { intro: 1, beat: 1, rm: 1 };
+  let introTarget = 1;                   // E7 sets this to 0 then 1 to run the intro veil
+  let appliedAlpha = -1;
+  let rmIndex = -1;                      // last snapped beat index (reduced-motion crossfade)
+  let firstRendered = false;             // fires opts.onReady once the first live frame paints
   const camT = new THREE.Vector3();      // reused, no per-frame allocation
 
-  function smoothstep(t) { return t * t * (3 - 2 * t); }
-
+  // written into a reused object · zero per-frame allocation
+  const _st = { tx: 0, ty: 0, tz: 0, dist: 0, pitch: 0, exp: 1, ds: 1, yaw: 0, stDX: 0, spDX: 0 };
   function beatState(p) {
-    // find the segment and interpolate with smoothstep
+    // find the segment and interpolate LINEARLY · dwellRemap (E2) owns the easing, so a
+    // second smoothstep here would double-ease. The plateaus give zero velocity at rests.
     let i = 0;
     while (i < BEATS.length - 1 && p > BEATS[i + 1][0]) i++;
     const a = BEATS[i], b = BEATS[Math.min(i + 1, BEATS.length - 1)];
     const span = (b[0] - a[0]) || 1;
-    const s = smoothstep(Math.max(0, Math.min(1, (p - a[0]) / span)));
-    return {
-      tx: a[1] + (b[1] - a[1]) * s, ty: a[2] + (b[2] - a[2]) * s, tz: a[3] + (b[3] - a[3]) * s,
-      dist: a[4] + (b[4] - a[4]) * s, pitch: a[5] + (b[5] - a[5]) * s, exp: a[6] + (b[6] - a[6]) * s,
-    };
+    const s = Math.max(0, Math.min(1, (p - a[0]) / span));
+    _st.tx = a[1] + (b[1] - a[1]) * s; _st.ty = a[2] + (b[2] - a[2]) * s; _st.tz = a[3] + (b[3] - a[3]) * s;
+    // E3 · perceptual interpolation (LAW 8). Dolly distance in LOG space (zoom is
+    // multiplicative), exposure in STOPS (log2 of gain), angles as angles. Positions linear.
+    _st.dist = Math.exp(Math.log(a[4]) + (Math.log(b[4]) - Math.log(a[4])) * s);
+    _st.pitch = a[5] + (b[5] - a[5]) * s;
+    _st.exp = Math.pow(2, Math.log2(a[6]) + (Math.log2(b[6]) - Math.log2(a[6])) * s);
+    _st.ds = a[7] + (b[7] - a[7]) * s;
+    _st.yaw = a[8] + (b[8] - a[8]) * s;   // per-beat camera azimuth (S4) · an angle, linear
+    _st.stDX = a[9] + (b[9] - a[9]) * s;  // per-device lateral offsets (S5) · the models
+    _st.spDX = a[10] + (b[10] - a[10]) * s; // move independently, parking off-frame left
+    return _st;
   }
 
   function placeCamera() {
-    // reduced-motion: snap scroll to the nearest beat centre (no continuous scrub)
+    // reduced-motion: snap scroll to the nearest beat centre (no continuous scrub),
+    // and a short opacity crossfade masks the pose jump at each boundary.
     let p = scrollP;
     if (reduceMotion) {
-      let best = 0, bd = 1;
+      let best = 0, bd = 1, bi = 0;
       for (let i = 0; i < BEATS.length; i++) {
         const d = Math.abs(scrollP - BEATS[i][0]);
-        if (d < bd) { bd = d; best = BEATS[i][0]; }
+        if (d < bd) { bd = d; best = BEATS[i][0]; bi = i; }
       }
       p = best;
+      if (bi !== rmIndex) { rmIndex = bi; veil.rm = 0; }  // boundary · dip the veil, glide back (E4)
     }
     const st = beatState(p);
-    const cy = st.pitch + dispPitch;
-    const yaw = dispYaw;
+    // S5 · the models move independently: apply the beat-lerped lateral offsets to the
+    // device groups. The shadow map is frozen (R1), so any frame a device actually moves
+    // re-bakes it once · zero cost at rest, correct shadows in motion.
+    if (Math.abs(groups['mac-studio'].position.x - st.stDX) > 1e-4
+     || Math.abs(groups['dgx-spark'].position.x - st.spDX) > 1e-4) {
+      groups['mac-studio'].position.x = st.stDX;
+      groups['dgx-spark'].position.x = st.spDX;
+      renderer.shadowMap.needsUpdate = true;
+    }
+    // drag is damped per beat (ds): full orbit at arrival, restrained where the
+    // devices are composed or receding, so a swing can never enter the text column.
+    const cy = st.pitch + dispPitch * st.ds;
+    const yaw = st.yaw + dispYaw * st.ds;   // beat azimuth + damped drag give
     camT.set(st.tx, st.ty, st.tz);
     camera.position.set(
       camT.x + st.dist * Math.cos(cy) * Math.sin(yaw),
@@ -161,17 +250,26 @@ export function mountHero(canvas, opts) {
     );
     camera.lookAt(camT);
     renderer.toneMappingExposure = st.exp;
+    // beat 5 ease-away · a channel of the single alpha authority (E4). It is a function
+    // of the glided p, so it is already smooth; the min-composition happens in the tick.
+    veil.beat = p >= FADE_START ? Math.max(0, 1 - (p - FADE_START) / (1 - FADE_START)) : 1;
   }
 
-  // scroll drives a single scalar; all interpolation happens in the rAF tick. The
-  // beat scrub is opt-in (opts.beats): the engine is built and mechanically verified,
-  // but the pinned-stage layout choreography (device-to-one-side framing, text scrims
-  // so nothing overlaps) needs a dedicated design pass to clear the "no beat feels
-  // like a slide" bar · until then the hero holds the arrival framing (beat 0) with
-  // drag-to-orbit, which is the shipped, clean behaviour.
+  // the ONE place canvas opacity is written · min-composed across every veil channel
+  function applyCanvasAlpha() {
+    const a = Math.min(veil.intro, veil.beat, veil.rm);
+    if (a !== appliedAlpha) { canvas.style.opacity = String(a); appliedAlpha = a; }
+  }
+
+  // scroll drives a SINGLE scalar; all interpolation happens in the rAF tick. The beat
+  // scrub is opt-in (opts.beats). onProgress lets the page reveal its beat copy off the
+  // very same scalar, so there is still exactly one scroll listener for the whole page.
   function onScroll() {
+    // the listener does the minimum · stash the raw target and request a frame. The
+    // smoothing, camera, and reveals all happen once per frame in the tick (so scroll
+    // events firing faster than frames cannot pile up work on the hot path).
     const max = document.documentElement.scrollHeight - window.innerHeight;
-    scrollP = max > 0 ? Math.max(0, Math.min(1, window.scrollY / max)) : 0;
+    scrollTarget = max > 0 ? Math.max(0, Math.min(1, window.scrollY / max)) : 0;
     frame();
   }
   if (opts.beats) window.addEventListener('scroll', onScroll, { passive: true });
@@ -204,7 +302,8 @@ export function mountHero(canvas, opts) {
       hover(cx, cy);
     }
   }
-  function onUp() { dragging = false; released = performance.now(); frame(); }
+  // release · the drag target returns to rest and the display glides back with TAU.settle
+  function onUp() { dragging = false; dragYaw = 0; dragPitch = 0; frame(); }
 
   canvas.addEventListener('mousedown', onDown);
   canvas.addEventListener('touchstart', onDown, { passive: true });
@@ -251,40 +350,127 @@ export function mountHero(canvas, opts) {
   }
 
   // ---- render on demand -------------------------------------------------------------
-  let pending = false;
+  let pending = false, last = 0;
   function frame() { if (!pending) { pending = true; requestAnimationFrame(tick); } }
 
-  function tick() {
+  function tick(now) {
     pending = false;
-    // when released, the drag target decays to zero so the camera returns to the beat
-    if (!dragging) { dragYaw *= 0.9; dragPitch *= 0.9; }
-    // a sub-degree idle drift while at rest (killed by reduced-motion)
-    let idle = 0;
-    if (!reduceMotion && !dragging) { idlePhase += 0.0015; idle = Math.sin(idlePhase) * 0.006; }
-    // ease the displayed offset toward the drag target
-    dispYaw += (dragYaw + idle - dispYaw) * 0.14;
-    dispPitch += (dragPitch - dispPitch) * 0.14;
-    placeCamera();
-    if (loaded) renderer.render(scene, camera);
+    const t0 = dev ? performance.now() : 0;
+    // dt discipline (E1) · the loop stops and restarts, so the first frame after a rest
+    // carries a huge wall-clock delta. Clamp it so a pause is never integrated.
+    const dt = Math.min(now - (last || now), 34);
+    last = now;
 
-    const settling = Math.abs(dispYaw - dragYaw) > 1e-4 || Math.abs(dispPitch - dragPitch) > 1e-4;
-    if (settling || (!reduceMotion && !dragging)) frame();
+    // scroll: raw target to dwell-remapped target to glide (E2 then E1). Reduced motion
+    // jumps instantly so the placeCamera snap-to-nearest-beat survives (no continuous scrub).
+    const sTarget = dwellRemap(scrollTarget, RESTS, DWELL);
+    scrollP = reduceMotion ? sTarget : glide(scrollP, sTarget, TAU.scroll, dt);
+    // S6 · the text layer follows RAW scroll with pure inertia (no dwell · it must always
+    // move when the user scrolls, never hold like the camera). The page warps its content
+    // to viewFrac over the fixed stage, so the copy and the camera share one momentum.
+    viewFrac = reduceMotion ? scrollTarget : glide(viewFrac, scrollTarget, TAU.view, dt);
+    const dtau = dragging ? TAU.drag : TAU.settle;   // tight on grab, longer on the exhale
+    dispYaw = glide(dispYaw, dragYaw, dtau, dt);
+    dispPitch = glide(dispPitch, dragPitch, dtau, dt);
+    // snap to target within epsilon so float residue cannot hold the loop alive
+    if (Math.abs(sTarget - scrollP) < 1e-4) scrollP = sTarget;
+    if (Math.abs(scrollTarget - viewFrac) < 1e-4) viewFrac = scrollTarget;
+    if (Math.abs(dragYaw - dispYaw) < 1e-4) dispYaw = dragYaw;
+    if (Math.abs(dragPitch - dispPitch) < 1e-4) dispPitch = dragPitch;
+
+    placeCamera();
+    // veil channels glide toward their rest (1); placeCamera set veil.beat and any rm dip
+    veil.rm = glide(veil.rm, 1, TAU.veil, dt);
+    veil.intro = glide(veil.intro, introTarget, TAU.veil, dt);
+    if (Math.abs(1 - veil.rm) < 1e-3) veil.rm = 1;
+    if (Math.abs(introTarget - veil.intro) < 1e-3) veil.intro = introTarget;
+    applyCanvasAlpha();
+    if (loaded) renderer.render(scene, camera);
+    // first live frame is on screen · let the page crossfade the still-first LCP out
+    if (loaded && !firstRendered) { firstRendered = true; if (opts.onReady) opts.onReady(); }
+    // reveal the page copy off the smoothed scalars, once per frame (not per scroll event):
+    // scrollP owns the camera-linked opacity timing, viewFrac owns the text-layer position.
+    if (opts.onProgress) opts.onProgress(scrollP, viewFrac);
+
+    // RENDER ON DEMAND · re-arm only while something is actually moving. At rest the loop
+    // STOPS and forgets the clock, so the next wake never teleports on a stale delta.
+    const moving = dragging
+      || Math.abs(sTarget - scrollP) > 1e-4
+      || Math.abs(scrollTarget - viewFrac) > 1e-4
+      || Math.abs(dragYaw - dispYaw) > 1e-4
+      || Math.abs(dragPitch - dispPitch) > 1e-4
+      || Math.abs(1 - veil.rm) > 1e-3
+      || Math.abs(introTarget - veil.intro) > 1e-3;
+    if (dev) devStats(t0, moving);
+    if (moving) frame(); else last = 0;
+  }
+
+  // dev overlay update · last frame time, p95 of the trailing 120, glided p, active beat,
+  // and whether the loop is armed. Frozen at "armed no" once the loop disarms (rest test).
+  function devStats(t0, moving) {
+    const ms = performance.now() - t0;
+    ftBuf[ftN % 120] = ms; ftN++;
+    const arr = ftBuf.slice(0, Math.min(ftN, 120)).sort((a, b) => a - b);
+    const p95 = arr[Math.min(arr.length - 1, Math.floor(arr.length * 0.95))] || 0;
+    let bi = 0, bd = 2;
+    for (let i = 0; i < RESTS.length; i++) { const d = Math.abs(scrollP - RESTS[i]); if (d < bd) { bd = d; bi = i; } }
+    devEl.textContent = 'frame ' + ms.toFixed(1) + 'ms   p95 ' + p95.toFixed(1) + 'ms\n'
+      + 'p ' + scrollP.toFixed(3) + '   beat ' + (bi + 1) + '\narmed ' + (moving ? 'yes' : 'no');
   }
 
   // context loss → fallback
   canvas.addEventListener('webglcontextlost', (e) => { e.preventDefault(); onFail(new Error('context lost')); });
 
+  if (dev) {
+    devEl = document.createElement('div');
+    devEl.style.cssText = 'position:fixed;top:8px;right:8px;z-index:99999;font:11px/1.45 ui-monospace,monospace;'
+      + 'color:#7dd3a0;background:rgba(0,0,0,.62);padding:6px 9px;border-radius:6px;white-space:pre;pointer-events:none';
+    document.body.appendChild(devEl);
+  }
+
+  // S6 · seed the smoothed scroll from the live position so a reload mid-page settles in
+  // place instead of gliding down from the top (the intro nudge only fires at the very top).
+  if (opts.beats) {
+    const max0 = document.documentElement.scrollHeight - window.innerHeight;
+    scrollTarget = max0 > 0 ? Math.max(0, Math.min(1, window.scrollY / max0)) : 0;
+  }
+  viewFrac = scrollTarget;
   resize();
   placeCamera();
   frame();
+  if (opts.onProgress) opts.onProgress(scrollP, viewFrac); // seed the page's initial reveal + warp
 
   return {
     info: () => renderer.info,
+    // dev-only scene introspection (harmless handle · used by the QA evals)
+    debug: () => ({ scene, camera, groups, renderer }),
     dispose: () => { renderer.dispose(); env.dispose && env.dispose(); },
   };
 }
 
 function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+// The ONE smoothing filter (E1 · motion doctrine). Frame-rate independent
+// exponential approach: a first-order critically damped response with no overshoot.
+// tau in ms (smaller is tighter), dt in ms. Every animated scalar passes through this.
+function glide(current, target, tau, dt) { return target + (current - target) * Math.exp(-dt / tau); }
+
+// E2 · dwell plateaus. Map raw scroll p into a curve that HOLDS at each beat rest
+// (a plateau of half-width w[i]) and travels between plateaus with zero slope at both
+// edges (smoothstep). Zero slope at the joints makes the whole path C1: the camera
+// velocity is zero at each rest by design (a dwell), never an accidental stall.
+function dwellRemap(p, rests, w) {
+  if (p <= rests[0] + w[0]) return rests[0];
+  for (let i = 0; i < rests.length - 1; i++) {
+    const a = rests[i] + w[i], b = rests[i + 1] - w[i + 1];
+    if (p < a) return rests[i];               // inside the plateau of rest i
+    if (p < b) {                              // travelling from rest i to rest i+1
+      const t = (p - a) / (b - a);
+      return rests[i] + (t * t * (3 - 2 * t)) * (rests[i + 1] - rests[i]);
+    }
+  }
+  return rests[rests.length - 1];
+}
 
 // A dark abstract gradient environment (metals reflect tone, not a studio).
 function makeGradientEnv(renderer) {

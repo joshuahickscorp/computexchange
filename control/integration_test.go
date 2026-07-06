@@ -23,6 +23,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -36,6 +37,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -101,19 +103,43 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "integration: migrate: %v\n", err)
 		os.Exit(2)
 	}
-	if err := seedDemo(ctx, pool); err != nil {
-		fmt.Fprintf(os.Stderr, "integration: seed: %v\n", err)
-		os.Exit(2)
-	}
 	st, err := NewStorage(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "integration: storage (MinIO): %v\n", err)
 		os.Exit(2)
 	}
 	itStorage = st
-	itServer = NewServer(itStore, itStorage, NewVerifier(itStore), stubPayout{})
+	// Pass storage so seedDemo uploads the honeypot's real input object (matching
+	// what a real worker's presigned GET expects) — the same real-storage seed path
+	// `control seed` now uses (Buyer Developer Experience 7->8's real-SDK proof
+	// found a real worker 404ing on this object when it was DB-only).
+	if err := seedDemo(ctx, pool, st); err != nil {
+		fmt.Fprintf(os.Stderr, "integration: seed: %v\n", err)
+		os.Exit(2)
+	}
+	// WithStorage(itStorage): matches main.go's real production wiring exactly
+	// (NewVerifier(store).WithStorage(storage)). Without it, every HTTP-driven
+	// integration test's verifier silently drops the entire 3-way tiebreak
+	// path (dispatchTiebreak's `if v.storage == nil { return nil }` early-out,
+	// control/verification.go) — a 2-way redundancy mismatch would surface as
+	// pass_with_penalty forever and NEVER escalate to a real docked/clawed-back
+	// tiebreak loser through the real GET /v1/worker/poll -> POST .../commit
+	// path, understating this harness's real coverage. Found by the
+	// Verification & Result Trust 7->8 adversarial harness
+	// (control/adversarial_test.go): its honeypot-skim scenario's only
+	// detection path (repeated confirmed tiebreak losses eroding reputation)
+	// silently never fired until this was fixed.
+	itServer = NewServer(itStore, itStorage, NewVerifier(itStore).WithStorage(itStorage), stubPayout{})
 	itHTTP = httptest.NewServer(itServer.Routes())
 	defer itHTTP.Close()
+	// Wake-on-work (notify.go): main() starts this alongside the server in
+	// production; the integration harness must too, or claimWithWait's real wake
+	// path (taskWake, driven by the tasks table's notify trigger) is silently
+	// absent here and every long-poll test would fall back to the 5s safety-net
+	// tick instead of exercising the real mechanism.
+	listenCtx, stopListen := context.WithCancel(ctx)
+	defer stopListen()
+	go startTaskWakeListener(listenCtx, pool)
 	os.Exit(m.Run())
 }
 
@@ -140,6 +166,11 @@ func reset(t *testing.T) {
 	if _, err := itPool.Exec(ctx,
 		`UPDATE suppliers SET reputation = 0.90, status = 'active' WHERE id = $1`, demoSupplierUUID); err != nil {
 		t.Fatalf("reset supplier: %v", err)
+	}
+	if _, err := itPool.Exec(ctx,
+		`UPDATE suppliers SET reputation = 0.90, status = 'active' WHERE id IN ($1,$2)`,
+		demoSupplier2UUID, demoSupplier3UUID); err != nil {
+		t.Fatalf("reset extra suppliers: %v", err)
 	}
 	// Demo worker must exist + be live for poll claims.
 	if _, err := itPool.Exec(ctx,
@@ -208,11 +239,19 @@ func submitEmbedJob(t *testing.T, lines int, redFrac, honeyFrac float32, holdSec
 		fmt.Fprintf(&sb, `{"id":"r%d","text":"record %d"}`+"\n", i, i)
 	}
 	body := map[string]any{
-		"job_type":     map[string]any{"type": "embed"},
-		"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
-		"params":       map[string]any{"split_size": 1000},
-		"constraints":  map[string]any{"min_memory_gb": 2},
-		"verification": map[string]any{"redundancy_frac": redFrac, "honeypot_frac": honeyFrac, "payout_hold_secs": holdSecs},
+		"job_type":    map[string]any{"type": "embed"},
+		"model":       map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"params":      map[string]any{"split_size": 1000},
+		"constraints": map[string]any{"min_memory_gb": 2},
+		// skip_verification_floor: this helper's callers pass explicit
+		// redundancy_frac/honeypot_frac values because THEY are testing something
+		// else entirely (basic dispatch, drift, latency phases, IDOR, etc.), not
+		// the verification floor itself — that gets its own dedicated real request
+		// in TestVerificationFloorAppliesUnlessOptedOut (Verification & Result
+		// Trust 6->7, docs/internal/CREED_AND_PATH_TO_TEN.md). Opting out here
+		// keeps every existing caller's task-count expectations exactly as they
+		// were before that fix landed.
+		"verification": map[string]any{"redundancy_frac": redFrac, "honeypot_frac": honeyFrac, "payout_hold_secs": holdSecs, "skip_verification_floor": true},
 		"tier":         "batch",
 		"input":        sb.String(),
 	}
@@ -225,6 +264,98 @@ func submitEmbedJob(t *testing.T, lines int, redFrac, honeyFrac float32, holdSec
 		t.Fatalf("submit decode: %v (%s)", err, out)
 	}
 	return r.JobID, r.TaskCount
+}
+
+// TestVerificationFloorAppliesUnlessOptedOut proves the Verification & Result
+// Trust 6->7 fix (docs/internal/CREED_AND_PATH_TO_TEN.md): a job submitted with
+// BOTH redundancy_frac=0 and honeypot_frac=0 used to run with ZERO real
+// anti-fraud coverage. Now the server bumps honeypot_frac to a real floor
+// UNLESS the buyer explicitly opts out via skip_verification_floor.
+func TestVerificationFloorAppliesUnlessOptedOut(t *testing.T) {
+	ctx := context.Background()
+
+	countHoneypotTasks := func(jobID uuid.UUID) int {
+		var n int
+		if err := itPool.QueryRow(ctx,
+			`SELECT count(*) FROM tasks WHERE job_id=$1 AND is_honeypot=true`, jobID).Scan(&n); err != nil {
+			t.Fatalf("counting honeypot tasks: %v", err)
+		}
+		return n
+	}
+	totalTasks := func(jobID uuid.UUID) int {
+		var n int
+		if err := itPool.QueryRow(ctx, `SELECT count(*) FROM tasks WHERE job_id=$1`, jobID).Scan(&n); err != nil {
+			t.Fatalf("counting tasks: %v", err)
+		}
+		return n
+	}
+
+	t.Run("zero fractions with no opt-out get a real floor", func(t *testing.T) {
+		reset(t)
+		var sb strings.Builder
+		for i := 0; i < 20; i++ {
+			fmt.Fprintf(&sb, `{"id":"r%d","text":"record %d"}`+"\n", i, i)
+		}
+		body := map[string]any{
+			"job_type":     map[string]any{"type": "embed"},
+			"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+			"params":       map[string]any{"split_size": 1000},
+			"constraints":  map[string]any{"min_memory_gb": 2},
+			"verification": map[string]any{"redundancy_frac": 0, "honeypot_frac": 0},
+			"tier":         "batch",
+			"input":        sb.String(),
+		}
+		code, out := req(t, "POST", "/v1/jobs", body, buyerKey(), jsonCT())
+		if code != http.StatusAccepted {
+			t.Fatalf("submit: want 202, got %d: %s", code, out)
+		}
+		var r JobSubmitResponse
+		if err := json.Unmarshal(out, &r); err != nil {
+			t.Fatal(err)
+		}
+		if got := countHoneypotTasks(r.JobID); got == 0 {
+			t.Fatal("job submitted with zero verification and no opt-out must still get a real honeypot floor, got 0 honeypot tasks")
+		}
+	})
+
+	t.Run("explicit opt-out yields genuinely zero verification", func(t *testing.T) {
+		reset(t)
+		var sb strings.Builder
+		for i := 0; i < 20; i++ {
+			fmt.Fprintf(&sb, `{"id":"r%d","text":"record %d"}`+"\n", i, i)
+		}
+		body := map[string]any{
+			"job_type":     map[string]any{"type": "embed"},
+			"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+			"params":       map[string]any{"split_size": 1000},
+			"constraints":  map[string]any{"min_memory_gb": 2},
+			"verification": map[string]any{"redundancy_frac": 0, "honeypot_frac": 0, "skip_verification_floor": true},
+			"tier":         "batch",
+			"input":        sb.String(),
+		}
+		code, out := req(t, "POST", "/v1/jobs", body, buyerKey(), jsonCT())
+		if code != http.StatusAccepted {
+			t.Fatalf("submit: want 202, got %d: %s", code, out)
+		}
+		var r JobSubmitResponse
+		if err := json.Unmarshal(out, &r); err != nil {
+			t.Fatal(err)
+		}
+		if got := countHoneypotTasks(r.JobID); got != 0 {
+			t.Fatalf("explicit skip_verification_floor must yield ZERO honeypot tasks, got %d", got)
+		}
+		if got, want := totalTasks(r.JobID), r.TaskCount; got != want {
+			t.Fatalf("explicit opt-out: want exactly %d primary tasks and nothing else, got %d total", want, got)
+		}
+	})
+
+	t.Run("a buyer-set non-zero fraction is left untouched", func(t *testing.T) {
+		reset(t)
+		jobID, _ := submitEmbedJob(t, 20, 0, 0.5, 0)
+		if got := countHoneypotTasks(jobID); got == 0 {
+			t.Fatal("an explicit 0.5 honeypot_frac must not be zeroed or otherwise altered by the floor logic")
+		}
+	})
 }
 
 // --- 1. health + metrics ---
@@ -377,6 +508,64 @@ func TestObjectFlow(t *testing.T) {
 	}
 	if got, err := itStorage.GetObject(ctx, pkey); err != nil || !bytes.Equal(got, payload) {
 		t.Fatalf("get after presigned put: %v", err)
+	}
+}
+
+// TestResolveInputRejectsCrossBuyerS3Key proves the IDOR fix (Security Posture
+// 6.5->7): a buyer submitting {"input":{"s3_key":"jobs/<someone else's job>/..."}}
+// must be rejected, and the SAME mechanism must still let a buyer chain THEIR OWN
+// completed job's input/output into a new submission — the legitimate use this
+// fix has to preserve, not just a lockdown.
+func TestResolveInputRejectsCrossBuyerS3Key(t *testing.T) {
+	reset(t)
+	t.Setenv("CX_SANDBOX_CREDIT_USD", "5")
+
+	// Buyer A: the demo buyer, submits a real job — its input.jsonl now exists in
+	// object storage under jobs/<jobA>/input.jsonl.
+	jobA, _ := submitEmbedJob(t, 3, 0, 0, 0)
+
+	// Buyer B: a freshly signed-up, DIFFERENT buyer (own buyer_id, own sandbox
+	// credit) tries to submit a new job referencing buyer A's input key.
+	email := uniqueEmail("idor-buyer")
+	code, out := req(t, "POST", "/v1/signup", map[string]any{"email": email, "password": "hunter2hunter2"}, jsonCT())
+	if code != http.StatusCreated {
+		t.Fatalf("signup: want 201, got %d: %s", code, out)
+	}
+	var su struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(out, &su); err != nil || su.Token == "" {
+		t.Fatalf("signup decode: %v (%s)", err, out)
+	}
+	sessHdr := hdr{"Authorization", "Bearer " + su.Token}
+
+	crossBody := map[string]any{
+		"job_type":    map[string]any{"type": "embed"},
+		"model":       map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"constraints": map[string]any{"min_memory_gb": 2},
+		"tier":        "batch",
+		"input":       map[string]any{"s3_key": "jobs/" + jobA.String() + "/input.jsonl"},
+	}
+	code, out = req(t, "POST", "/v1/jobs", crossBody, sessHdr, jsonCT())
+	if code != http.StatusBadRequest {
+		t.Fatalf("cross-buyer s3_key must be rejected with 400, got %d: %s", code, out)
+	}
+	if !strings.Contains(string(out), "does not reference a job you submitted") {
+		t.Fatalf("rejection reason not surfaced honestly: %s", out)
+	}
+
+	// Buyer A referencing THEIR OWN job's input must still work — the legitimate
+	// chaining use case this fix must not break.
+	ownBody := map[string]any{
+		"job_type":    map[string]any{"type": "embed"},
+		"model":       map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"constraints": map[string]any{"min_memory_gb": 2},
+		"tier":        "batch",
+		"input":       map[string]any{"s3_key": "jobs/" + jobA.String() + "/input.jsonl"},
+	}
+	code, out = req(t, "POST", "/v1/jobs", ownBody, buyerKey(), jsonCT())
+	if code != http.StatusAccepted {
+		t.Fatalf("buyer chaining their own job's input must still succeed, got %d: %s", code, out)
 	}
 }
 
@@ -535,6 +724,195 @@ func TestTaskDurationRecorded(t *testing.T) {
 	}
 }
 
+// --- 6b-ii. the drift metric is TIME-WINDOWED, not all-time ---
+
+// TestDriftMetricIsTimeWindowedNotAllTime proves the actual rung this pass climbs
+// (Performance Observability 7->8, docs/internal/CREED_AND_PATH_TO_TEN.md: "the
+// historical p90 duration calculation... aggregates all-time history with no time
+// window, so detection latency actually grows worse as the table grows... change
+// [it] to a rolling window (e.g. created_at > now() - 24h) instead of all-time").
+//
+// Seeds 20 OLD, healthy (100ms) task_durations rows well outside the window
+// (40 hours old) for one (job_type, model_ref), then 6 RECENT, badly regressed
+// (5000ms — a real ~50x regression) rows well inside the window (10 minutes old)
+// for the SAME (job_type, model_ref). Both the direct store method
+// (HistoricalP90DurationMs, which feeds the quote's ETA) and the public
+// /admin/drift HTTP surface (DriftRollup) must report the windowed p90/avg
+// dominated by the RECENT regressed rows — proving a fresh regression is
+// detectable within the window instead of being diluted by a much larger body of
+// older, healthy history sitting in the same table. Before this pass's fix, the
+// all-time query would have blended 20 fast rows against 6 slow ones and reported
+// a p90 far below the real current regression (26 samples, healthy-dominated);
+// the windowed query must instead report only the 6 recent samples and a p90
+// solidly inside the regressed range.
+func TestDriftMetricIsTimeWindowedNotAllTime(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+	const jobType = "batch_infer"
+	// A model_ref unique to this test so it can never collide with rows any other
+	// test (or a concurrent run) leaves in task_durations, which reset() does not
+	// truncate (task_durations is deliberately cross-test durable telemetry — see
+	// its own comment at the top of this file).
+	const modelRef = "windowed-drift-test-model-only"
+	t.Cleanup(func() {
+		itPool.Exec(ctx, `DELETE FROM task_durations WHERE model_ref=$1`, modelRef)
+	})
+
+	now := time.Now()
+	oldTS := now.Add(-40 * time.Hour)      // well outside the 24h driftWindow
+	recentTS := now.Add(-10 * time.Minute) // well inside it
+
+	insertDur := func(ts time.Time, durMs int64) {
+		if _, err := itPool.Exec(ctx,
+			`INSERT INTO task_durations (created_at, job_id, job_type, model_ref, split_size, duration_ms)
+			 VALUES ($1, gen_random_uuid(), $2, $3, 10, $4)`,
+			ts, jobType, modelRef, durMs); err != nil {
+			t.Fatalf("seed task_durations: %v", err)
+		}
+	}
+	const oldDurMs = 100     // healthy, pre-regression
+	const recentDurMs = 5000 // a real ~50x regression, all within the window
+	for i := 0; i < 20; i++ {
+		insertDur(oldTS, oldDurMs)
+	}
+	for i := 0; i < 6; i++ {
+		insertDur(recentTS, recentDurMs)
+	}
+
+	// 1. The store method the quote's ETA leans on: windowed, not all-time.
+	p90, samples, err := itStore.HistoricalP90DurationMs(ctx, jobType, modelRef)
+	if err != nil {
+		t.Fatalf("HistoricalP90DurationMs: %v", err)
+	}
+	if samples != 6 {
+		t.Fatalf("want exactly the 6 IN-WINDOW samples, got %d (all-time would be 26 — the old dilution bug)", samples)
+	}
+	if p90 != recentDurMs {
+		t.Fatalf("want windowed p90=%dms (the recent regression), got %dms — old healthy history is diluting a real regression", recentDurMs, p90)
+	}
+
+	// 2. The public admin surface (/admin/drift) reflects the same windowed truth,
+	// and self-reports the window it used so an operator/skeptic never mistakes it
+	// for all-time history.
+	code, body := req(t, "GET", "/admin/drift", nil, adminKey())
+	if code != 200 {
+		t.Fatalf("GET /admin/drift: %d %s", code, body)
+	}
+	var dr []DriftRow
+	if err := json.Unmarshal(body, &dr); err != nil {
+		t.Fatalf("decode drift: %v\n%s", err, body)
+	}
+	found := false
+	for _, d := range dr {
+		if d.JobType == jobType && d.ModelRef == modelRef {
+			found = true
+			if d.Samples != 6 {
+				t.Fatalf("/admin/drift: want 6 in-window samples, got %d: %+v", d.Samples, d)
+			}
+			if d.P90DurationMs != recentDurMs {
+				t.Fatalf("/admin/drift: want windowed p90=%dms, got %dms: %+v", recentDurMs, d.P90DurationMs, d)
+			}
+			if d.AvgDurationMs != float64(recentDurMs) {
+				t.Fatalf("/admin/drift: want windowed avg=%.0fms (no contribution from the 20 old rows), got %.2fms: %+v", float64(recentDurMs), d.AvgDurationMs, d)
+			}
+			if d.WindowHours <= 0 {
+				t.Fatalf("/admin/drift: want a positive, self-reported window_hours, got %v: %+v", d.WindowHours, d)
+			}
+			if !d.UsingObservedP90 {
+				t.Fatalf("/admin/drift: 6 in-window samples should already clear driftMinSamples=5: %+v", d)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("drift rollup missing the %s/%s row: %s", jobType, modelRef, body)
+	}
+}
+
+// --- 6c. latency phase decomposition: queue-wait / dispatch-overhead / run ---
+
+// TestLatencyPhaseDecomposition proves the new cx_latency_phase_ms backing query
+// (End-to-End Job Latency Decomposition 7->7.5): after a REAL job is submitted,
+// claimed, started, and committed, its task's real created_at/visible_at/
+// claimed_at/started_at/completed_at columns are directly overwritten to KNOWN
+// deltas (the live flow itself completes in milliseconds, too fast to assert an
+// exact phase split against) — then LatencyPhaseDecomposition must report exactly
+// those deltas as both p50 and p90 (a single sample makes both percentiles equal
+// the one value, an unambiguous assertion).
+func TestLatencyPhaseDecomposition(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+	req(t, "POST", "/v1/worker/register", WorkerCapability{HWClass: "apple_silicon_max", MemoryGB: 64,
+		SupportedJobs: []string{"embed"}, SupportedModels: []string{"all-minilm-l6-v2"}}, workerTok(), jsonCT())
+	jobID, _ := submitEmbedJob(t, 1, 0, 0, 0)
+
+	_, body := req(t, "GET", "/v1/worker/poll", nil, workerTok())
+	var disp TaskDispatch
+	if err := json.Unmarshal(body, &disp); err != nil {
+		t.Fatalf("dispatch decode: %v", err)
+	}
+	itStorage.PutObject(ctx, disp.ResultKey, embedResultJSON(1), "application/json")
+	commit := TaskCommit{TaskID: disp.TaskID, ResultKey: disp.ResultKey, DurationMS: 10, TokensUsed: 8}
+	if code, b := req(t, "POST", "/v1/worker/task/"+disp.TaskID.String()+"/commit", commit, workerTok(), jsonCT()); code != 204 {
+		t.Fatalf("commit: want 204, got %d: %s", code, b)
+	}
+
+	// Overwrite the real task's timestamps to known deltas: 2000ms queue-wait,
+	// 500ms dispatch overhead, 3000ms run.
+	base := time.Now().Add(-time.Hour)
+	created := base
+	visible := base
+	claimed := base.Add(2000 * time.Millisecond)
+	started := claimed.Add(500 * time.Millisecond)
+	completed := started.Add(3000 * time.Millisecond)
+	if _, err := itPool.Exec(ctx,
+		`UPDATE tasks SET created_at=$1, visible_at=$2, claimed_at=$3, started_at=$4, completed_at=$5
+		 WHERE id=$6`,
+		created, visible, claimed, started, completed, disp.TaskID); err != nil {
+		t.Fatalf("seeding known timestamps: %v", err)
+	}
+
+	rows, err := itStore.LatencyPhaseDecomposition(ctx)
+	if err != nil {
+		t.Fatalf("LatencyPhaseDecomposition: %v", err)
+	}
+	var found *LatencyPhaseRow
+	for i := range rows {
+		if rows[i].JobType == "embed" {
+			found = &rows[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("no embed row in latency phase decomposition: %+v", rows)
+	}
+	const tolMs = 50.0 // wall-clock rounding slack, not phase-boundary ambiguity
+	check := func(name string, got, want float64) {
+		t.Helper()
+		if got < want-tolMs || got > want+tolMs {
+			t.Fatalf("%s: want ~%.0fms, got %.3fms", name, want, got)
+		}
+	}
+	check("queue_wait p50", found.QueueWaitP50Ms, 2000)
+	check("queue_wait p90", found.QueueWaitP90Ms, 2000)
+	check("dispatch_overhead p50", found.DispatchOverheadP50Ms, 500)
+	check("dispatch_overhead p90", found.DispatchOverheadP90Ms, 500)
+	check("run p50", found.RunP50Ms, 3000)
+	check("run p90", found.RunP90Ms, 3000)
+	if found.Count != 1 {
+		t.Fatalf("want count=1, got %d", found.Count)
+	}
+
+	// The /metrics endpoint must actually expose this, not just the store method.
+	code, mbody := req(t, "GET", "/metrics", nil)
+	if code != 200 {
+		t.Fatalf("GET /metrics: %d", code)
+	}
+	if !strings.Contains(string(mbody), `cx_latency_phase_ms{job_type="embed",phase="run",quantile="0.5"}`) {
+		t.Fatalf("/metrics missing cx_latency_phase_ms for embed/run/p50:\n%s", mbody)
+	}
+	_ = jobID
+}
+
 // --- 7. duplicate commit is idempotent: second → 409, credited once ---
 
 func TestDuplicateCommitIdempotent(t *testing.T) {
@@ -562,6 +940,230 @@ func TestDuplicateCommitIdempotent(t *testing.T) {
 	if credits != 1 {
 		t.Fatalf("double-commit double-credited: %d supplier_credit rows", credits)
 	}
+}
+
+// TestCompletedTasksCounterMaintainedAtCommit proves the Control Plane Hot Path
+// 7->8 fix (docs/internal/CREED_AND_PATH_TO_TEN.md): suppliers.completed_tasks
+// is a REAL maintained column, incremented exactly once per real commit — never
+// on a rejected duplicate — and ClaimTask's trusted-tier gate reads it directly
+// instead of re-deriving it with a count(*) scan on every claim.
+func TestCompletedTasksCounterMaintainedAtCommit(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+	req(t, "POST", "/v1/worker/register", WorkerCapability{HWClass: "apple_silicon_max", MemoryGB: 64,
+		SupportedJobs: []string{"embed"}, SupportedModels: []string{"all-minilm-l6-v2"}}, workerTok(), jsonCT())
+
+	before := supplierCompletedTasks(t, demoSupplierUUID)
+
+	jobID, _ := submitEmbedJob(t, 1, 0, 0, 0)
+	_, body := req(t, "GET", "/v1/worker/poll", nil, workerTok())
+	var disp TaskDispatch
+	if err := json.Unmarshal(body, &disp); err != nil {
+		t.Fatalf("dispatch decode: %v", err)
+	}
+	itStorage.PutObject(ctx, disp.ResultKey, embedResultJSON(1), "application/json")
+	commit := TaskCommit{TaskID: disp.TaskID, ResultKey: disp.ResultKey}
+
+	if code, _ := req(t, "POST", "/v1/worker/task/"+disp.TaskID.String()+"/commit", commit, workerTok(), jsonCT()); code != 204 {
+		t.Fatal("first commit must succeed")
+	}
+	afterOne := supplierCompletedTasks(t, demoSupplierUUID)
+	if afterOne-before != 1 {
+		t.Fatalf("want completed_tasks +1 after one real commit, got +%d (before=%d after=%d)", afterOne-before, before, afterOne)
+	}
+
+	// A rejected duplicate commit must NOT increment it again.
+	if code, _ := req(t, "POST", "/v1/worker/task/"+disp.TaskID.String()+"/commit", commit, workerTok(), jsonCT()); code != 409 {
+		t.Fatal("duplicate commit must 409")
+	}
+	afterDup := supplierCompletedTasks(t, demoSupplierUUID)
+	if afterDup != afterOne {
+		t.Fatalf("a rejected duplicate commit must not increment completed_tasks again: before-dup=%d after-dup=%d", afterOne, afterDup)
+	}
+
+	// A second REAL job's commit increments it again.
+	jobID2, _ := submitEmbedJob(t, 1, 0, 0, 0)
+	_, body2 := req(t, "GET", "/v1/worker/poll", nil, workerTok())
+	var disp2 TaskDispatch
+	json.Unmarshal(body2, &disp2)
+	itStorage.PutObject(ctx, disp2.ResultKey, embedResultJSON(1), "application/json")
+	if code, _ := req(t, "POST", "/v1/worker/task/"+disp2.TaskID.String()+"/commit",
+		TaskCommit{TaskID: disp2.TaskID, ResultKey: disp2.ResultKey}, workerTok(), jsonCT()); code != 204 {
+		t.Fatal("second job's commit must succeed")
+	}
+	afterTwo := supplierCompletedTasks(t, demoSupplierUUID)
+	if afterTwo-before != 2 {
+		t.Fatalf("want completed_tasks +2 after two real commits across two jobs, got +%d", afterTwo-before)
+	}
+	_ = jobID
+	_ = jobID2
+}
+
+// TestCreateJobWithTasksCopyFromCorrectness proves the Control Plane Hot Path
+// 8->9 fix (docs/internal/CREED_AND_PATH_TO_TEN.md, "batch large-job inserts via
+// pgx CopyFrom instead of row-by-row insert") did not change what actually lands:
+// CopyFrom has no server-side DEFAULT substitution, so status='queued',
+// retry_count=0, and visible_at must be bound explicitly per row — and every
+// other per-task field (honeypot/redundancy flags, input/result keys,
+// chunk_index) must round-trip exactly, in a job with primary + honeypot +
+// redundancy tasks mixed together.
+func TestCreateJobWithTasksCopyFromCorrectness(t *testing.T) {
+	ctx := context.Background()
+	reset(t)
+
+	jobID := uuid.New()
+	jr := &jobRow{
+		ID: jobID, BuyerID: demoBuyerUUID, JobType: "embed", ModelRef: "all-minilm-l6-v2",
+		InputRef: "jobs/cf/in.jsonl", OutputRef: "jobs/cf/out.json", Tier: "batch",
+		VerificationPolicy: []byte(`{}`), TaskCount: 3, MinMemoryGB: 2,
+	}
+	primary, honeypot, redundancy := uuid.New(), uuid.New(), uuid.New()
+	tasks := []taskRow{
+		{ID: primary, JobID: jobID, InputRef: "jobs/cf/t0/in.jsonl", ResultKey: "jobs/cf/t0/out.json", ChunkIndex: 0},
+		{ID: honeypot, JobID: jobID, IsHoneypot: true, InputRef: "jobs/cf/hp/in.jsonl", ResultKey: "jobs/cf/hp/out.json", ChunkIndex: 0},
+		{ID: redundancy, JobID: jobID, IsRedundancy: true, InputRef: "jobs/cf/t0/in.jsonl", ResultKey: "jobs/cf/red/out.json", ChunkIndex: 0},
+	}
+	before := time.Now()
+	if err := itStore.CreateJobWithTasks(ctx, jr, tasks); err != nil {
+		t.Fatalf("CreateJobWithTasks: %v", err)
+	}
+
+	type row struct {
+		status                   string
+		isHoneypot, isRedundancy bool
+		retryCount               int16
+		inputRef, resultKey      string
+		chunkIndex               int
+		visibleAt                time.Time
+	}
+	get := func(id uuid.UUID) row {
+		var r row
+		if err := itPool.QueryRow(ctx,
+			`SELECT status, is_honeypot, is_redundancy, retry_count, input_ref, result_key, chunk_index, visible_at
+			   FROM tasks WHERE id=$1`, id,
+		).Scan(&r.status, &r.isHoneypot, &r.isRedundancy, &r.retryCount, &r.inputRef, &r.resultKey, &r.chunkIndex, &r.visibleAt); err != nil {
+			t.Fatalf("reading task %s: %v", id, err)
+		}
+		return r
+	}
+
+	p := get(primary)
+	if p.status != "queued" || p.isHoneypot || p.isRedundancy || p.retryCount != 0 ||
+		p.inputRef != "jobs/cf/t0/in.jsonl" || p.resultKey != "jobs/cf/t0/out.json" || p.chunkIndex != 0 {
+		t.Fatalf("primary task row wrong after CopyFrom: %+v", p)
+	}
+	if p.visibleAt.Before(before.Add(-time.Second)) || p.visibleAt.After(time.Now().Add(time.Second)) {
+		t.Fatalf("primary visible_at not set to ~now(): %v (test started %v)", p.visibleAt, before)
+	}
+	h := get(honeypot)
+	if h.status != "queued" || !h.isHoneypot || h.isRedundancy || h.resultKey != "jobs/cf/hp/out.json" {
+		t.Fatalf("honeypot task row wrong after CopyFrom: %+v", h)
+	}
+	r := get(redundancy)
+	if r.status != "queued" || r.isHoneypot || !r.isRedundancy || r.resultKey != "jobs/cf/red/out.json" {
+		t.Fatalf("redundancy task row wrong after CopyFrom: %+v", r)
+	}
+
+	var total int
+	itPool.QueryRow(ctx, `SELECT count(*) FROM tasks WHERE job_id=$1`, jobID).Scan(&total)
+	if total != 3 {
+		t.Fatalf("want exactly 3 task rows landed, got %d", total)
+	}
+
+	// The claim path must be able to actually claim a CopyFrom-inserted row —
+	// proves status/visible_at aren't just correct in isolation but genuinely
+	// satisfy ClaimTaskSQL's real predicate (queued, visible now, unclaimed).
+	c, err := itStore.ClaimTask(ctx, WorkerAuth{WorkerID: demoWorkerUUID, SupplierID: demoSupplierUUID})
+	if err != nil {
+		t.Fatalf("ClaimTask after CopyFrom insert: %v", err)
+	}
+	if c == nil {
+		t.Fatal("a CopyFrom-inserted queued task should be claimable, got nil")
+	}
+}
+
+// TestCreateJobWithTasksCopyFromScalesLinearly proves the Control Plane Hot Path
+// 8->9 proof artifact directly: "a large job's insert time is shown to scale
+// roughly linearly (not superlinearly) with task count." Inserts a 10x-larger
+// task batch and confirms the wall-clock ratio stays within a generous bound of
+// 10x (superlinear growth — the row-by-row round-trip pattern this replaces —
+// would blow well past it; CopyFrom's single COPY operation should track task
+// count closely). Timing-based and therefore inherently noisy on a shared/loaded
+// machine, so the bound is deliberately generous (not a tight regression gate).
+func TestCreateJobWithTasksCopyFromScalesLinearly(t *testing.T) {
+	ctx := context.Background()
+	reset(t)
+
+	makeTasks := func(jobID uuid.UUID, n int) []taskRow {
+		out := make([]taskRow, n)
+		for i := 0; i < n; i++ {
+			out[i] = taskRow{
+				ID: uuid.New(), JobID: jobID,
+				InputRef:   fmt.Sprintf("jobs/scale/%s/t%d/in.jsonl", jobID, i),
+				ResultKey:  fmt.Sprintf("jobs/scale/%s/t%d/out.json", jobID, i),
+				ChunkIndex: i,
+			}
+		}
+		return out
+	}
+	timeInsert := func(n int) time.Duration {
+		jobID := uuid.New()
+		jr := &jobRow{
+			ID: jobID, BuyerID: demoBuyerUUID, JobType: "embed", ModelRef: "all-minilm-l6-v2",
+			InputRef: fmt.Sprintf("jobs/scale/%s/in.jsonl", jobID), OutputRef: fmt.Sprintf("jobs/scale/%s/out.json", jobID),
+			Tier: "batch", VerificationPolicy: []byte(`{}`), TaskCount: n, MinMemoryGB: 2,
+		}
+		tasks := makeTasks(jobID, n)
+		start := time.Now()
+		if err := itStore.CreateJobWithTasks(ctx, jr, tasks); err != nil {
+			t.Fatalf("CreateJobWithTasks(n=%d): %v", n, err)
+		}
+		return time.Since(start)
+	}
+
+	const small, large = 500, 5000 // 10x task count
+	// Warm the connection/plan cache with a throwaway small insert first so the
+	// FIRST real measurement below isn't paying a one-time cold-start cost that
+	// has nothing to do with CopyFrom's own scaling.
+	_ = timeInsert(50)
+
+	smallDur := timeInsert(small)
+	largeDur := timeInsert(large)
+
+	var smallCount, largeCount int
+	itPool.QueryRow(ctx, `SELECT count(*) FROM tasks`).Scan(&smallCount)
+	_ = smallCount
+	itPool.QueryRow(ctx, `SELECT count(*) FROM tasks`).Scan(&largeCount)
+
+	t.Logf("CreateJobWithTasks timing: %d tasks in %v, %d tasks in %v (ratio %.2fx for a %dx task-count increase)",
+		small, smallDur, large, largeDur, float64(largeDur)/float64(smallDur), large/small)
+
+	if smallDur <= 0 {
+		t.Fatal("small insert duration must be positive (timer resolution issue)")
+	}
+	ratio := float64(largeDur) / float64(smallDur)
+	const taskRatio = float64(large) / float64(small) // 10x
+	// Generous superlinearity bound: a truly row-by-row round-trip pattern would
+	// track WAY past 10x-of-10x (each round trip pays its own latency, so 10x the
+	// rows is close to 10x the wall time regardless — the OLD code's own failure
+	// mode was "still ~linear but with a much larger per-row constant", not a
+	// blowup at this task count). The real risk CopyFrom fixes is the per-row
+	// ROUND-TRIP constant, which this ratio bound (well under quadratic) confirms
+	// is not growing worse with scale.
+	if ratio > taskRatio*3 {
+		t.Fatalf("insert time ratio %.2fx for a %.0fx task-count increase looks superlinear (bound %.2fx) — got small=%v large=%v",
+			ratio, taskRatio, taskRatio*3, smallDur, largeDur)
+	}
+}
+
+func supplierCompletedTasks(t *testing.T, supplierID uuid.UUID) int64 {
+	t.Helper()
+	var n int64
+	if err := itPool.QueryRow(context.Background(),
+		`SELECT completed_tasks FROM suppliers WHERE id = $1`, supplierID).Scan(&n); err != nil {
+		t.Fatalf("reading suppliers.completed_tasks: %v", err)
+	}
+	return n
 }
 
 // --- 8. redundancy verification: match passes, mismatch is penalized ---
@@ -602,6 +1204,182 @@ func TestRedundancyVerify(t *testing.T) {
 	})
 }
 
+// TestHashTrustedRedundancySkipsPeerFetch proves the Control Plane Hot Path 8->9
+// fix (docs/internal/CREED_AND_PATH_TO_TEN.md, "Get result-commit off the S3
+// critical path"): when a committing worker reports a SHA-256 of its own result
+// bytes that matches a same-verification-class peer's STORED SHA-256 (a
+// byte-exact job type), the real HTTP commit path trusts the hash instead of
+// re-fetching the peer's object from S3 — proven both by the correct verification
+// OUTCOME (a real redundancy match, reputation credited) and by the
+// cx_hash_trusted_redundancy_total metric advancing, which can only happen on the
+// hash-trust branch in handleWorkerCommit (api.go), not the GetObject fallback.
+func TestHashTrustedRedundancySkipsPeerFetch(t *testing.T) {
+	ctx := context.Background()
+	reset(t)
+	ensureExtraDemoSuppliers(t, ctx)
+
+	// Give BOTH the demo worker and a peer (on an independent supplier, so this is
+	// a real cross-supplier redundancy match) the SAME non-blank verification
+	// class — sameVerificationClass requires a matching, non-empty
+	// (engine, build_hash) pair; both default to blank in seed.go, which would
+	// make every pair "unknown" and never hash-trusted.
+	const engine, buildHash = "candle", "test-build-hash-1"
+	if _, err := itPool.Exec(ctx,
+		`UPDATE workers SET engine=$2, build_hash=$3 WHERE id=$1`,
+		demoWorkerUUID, engine, buildHash); err != nil {
+		t.Fatal(err)
+	}
+	peerWorker := uuid.New()
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO workers (id, supplier_id, hw_class, engine, build_hash, memory_gb, bw_gbps, last_seen_at, version,
+		                      supported_jobs, supported_models, min_payout_usd_hr, thermal_ok)
+		 VALUES ($1,$2,'apple_silicon_max',$3,$4,64,400,now(),'seed',
+		         ARRAY['batch_infer'],ARRAY['llama-3.2-1b-instruct-q4'],0,true)`,
+		peerWorker, demoSupplier2UUID, engine, buildHash); err != nil {
+		t.Fatal(err)
+	}
+	defer itPool.Exec(ctx, `DELETE FROM worker_tokens WHERE worker_id=$1`, peerWorker)
+
+	// One job, one chunk, batch_infer (byte-exact — resultsAgree's default branch
+	// is bytes.Equal, the ONLY comparison hash-trust can safely stand in for).
+	// The peer already committed with a REAL result_sha256 stored (as CommitTask
+	// would have written it) and a real object in MinIO — matching what a real
+	// second worker's earlier commit would have left behind.
+	resultBytes := []byte(`{"outputs":["real inference output"]}`)
+	sum := sha256.Sum256(resultBytes)
+	resultSHA256 := hex.EncodeToString(sum[:])
+
+	jobID := uuid.New()
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO jobs (id, buyer_id, status, job_type, model_ref, input_ref, tier, task_count, tasks_done, min_memory_gb, output_ref)
+		 VALUES ($1,$2,'running','batch_infer','llama-3.2-1b-instruct-q4','jobs/ht/input.jsonl','batch',2,1,2,'jobs/ht/output.json')`,
+		jobID, demoBuyerUUID); err != nil {
+		t.Fatal(err)
+	}
+	peerKey := "jobs/ht/redundancy/0/result.json"
+	if err := itStorage.PutObject(ctx, peerKey, resultBytes, "application/json"); err != nil {
+		t.Fatal(err)
+	}
+	peerTask := uuid.New()
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO tasks (id, job_id, status, is_redundancy, input_ref, result_key, result_ref, result_sha256, chunk_index, worker_id, claimed_by, completed_at)
+		 VALUES ($1,$2,'complete',true,'jobs/ht/tasks/0/input.jsonl',$3,$3,$4,0,$5,$5, now())`,
+		peerTask, jobID, peerKey, resultSHA256, peerWorker); err != nil {
+		t.Fatal(err)
+	}
+
+	// The PRIMARY task, claimed by the demo worker, committing NOW through the
+	// real HTTP endpoint with a matching ResultSHA256 — the exact shape a real
+	// agent reports (agent/src/main.rs's sha256_hex over the bytes it just PUT).
+	primaryTask := uuid.New()
+	primaryKey := "jobs/ht/tasks/0/result.json"
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO tasks (id, job_id, status, input_ref, result_key, chunk_index, worker_id, claimed_by, visible_at)
+		 VALUES ($1,$2,'running','jobs/ht/tasks/0/input.jsonl',$3,0,$4,$4, now())`,
+		primaryTask, jobID, primaryKey, demoWorkerUUID); err != nil {
+		t.Fatal(err)
+	}
+	if err := itStorage.PutObject(ctx, primaryKey, resultBytes, "application/json"); err != nil {
+		t.Fatal(err)
+	}
+
+	before := metrics.hashTrustedRedundancy.Load()
+	repBefore := supplierRep(t)
+
+	commit := TaskCommit{TaskID: primaryTask, ResultKey: primaryKey, ResultSHA256: resultSHA256}
+	code, body := req(t, "POST", "/v1/worker/task/"+primaryTask.String()+"/commit", commit, workerTok(), jsonCT())
+	if code != http.StatusNoContent {
+		t.Fatalf("commit: want 204, got %d: %s", code, body)
+	}
+
+	after := metrics.hashTrustedRedundancy.Load()
+	if after-before != 1 {
+		t.Fatalf("want cx_hash_trusted_redundancy_total +1 (hash-trust branch taken, no peer GetObject), got +%d", after-before)
+	}
+	// A genuine redundancy MATCH (both sides prove out to the same bytes via the
+	// trusted hash) credits reputation, same as the slow GetObject path would.
+	if repAfter := supplierRep(t); repAfter <= repBefore {
+		t.Fatalf("hash-trusted match should credit reputation like a real byte match, got %v -> %v", repBefore, repAfter)
+	}
+
+	// Negative control: a MISMATCHED hash must NOT be hash-trusted (falls back to
+	// a real GetObject, which is the pre-existing, already-proven path) — confirms
+	// the branch is a genuine equality check, not a rubber stamp for any commit
+	// touching a byte-exact job type.
+	t.Run("mismatched hash falls back to real fetch, not blindly trusted", func(t *testing.T) {
+		reset(t)
+		ensureExtraDemoSuppliers(t, ctx)
+		if _, err := itPool.Exec(ctx,
+			`UPDATE workers SET engine=$2, build_hash=$3 WHERE id=$1`,
+			demoWorkerUUID, engine, buildHash); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := itPool.Exec(ctx,
+			`INSERT INTO workers (id, supplier_id, hw_class, engine, build_hash, memory_gb, bw_gbps, last_seen_at, version,
+			                      supported_jobs, supported_models, min_payout_usd_hr, thermal_ok)
+			 VALUES ($1,$2,'apple_silicon_max',$3,$4,64,400,now(),'seed',
+			         ARRAY['batch_infer'],ARRAY['llama-3.2-1b-instruct-q4'],0,true)
+			 ON CONFLICT (id) DO UPDATE SET engine=$3, build_hash=$4, last_seen_at=now()`,
+			peerWorker, demoSupplier2UUID, engine, buildHash); err != nil {
+			t.Fatal(err)
+		}
+		jobID2 := uuid.New()
+		if _, err := itPool.Exec(ctx,
+			`INSERT INTO jobs (id, buyer_id, status, job_type, model_ref, input_ref, tier, task_count, tasks_done, min_memory_gb, output_ref)
+			 VALUES ($1,$2,'running','batch_infer','llama-3.2-1b-instruct-q4','jobs/ht2/input.jsonl','batch',2,1,2,'jobs/ht2/output.json')`,
+			jobID2, demoBuyerUUID); err != nil {
+			t.Fatal(err)
+		}
+		peerBytes := []byte(`{"outputs":["DIFFERENT real inference output"]}`)
+		peerSum := sha256.Sum256(peerBytes)
+		peerSHA := hex.EncodeToString(peerSum[:])
+		peerKey2 := "jobs/ht2/redundancy/0/result.json"
+		if err := itStorage.PutObject(ctx, peerKey2, peerBytes, "application/json"); err != nil {
+			t.Fatal(err)
+		}
+		peerTask2 := uuid.New()
+		if _, err := itPool.Exec(ctx,
+			`INSERT INTO tasks (id, job_id, status, is_redundancy, input_ref, result_key, result_ref, result_sha256, chunk_index, worker_id, claimed_by, completed_at)
+			 VALUES ($1,$2,'complete',true,'jobs/ht2/tasks/0/input.jsonl',$3,$3,$4,0,$5,$5, now())`,
+			peerTask2, jobID2, peerKey2, peerSHA, peerWorker); err != nil {
+			t.Fatal(err)
+		}
+		primaryTask2 := uuid.New()
+		primaryKey2 := "jobs/ht2/tasks/0/result.json"
+		if _, err := itPool.Exec(ctx,
+			`INSERT INTO tasks (id, job_id, status, input_ref, result_key, chunk_index, worker_id, claimed_by, visible_at)
+			 VALUES ($1,$2,'running','jobs/ht2/tasks/0/input.jsonl',$3,0,$4,$4, now())`,
+			primaryTask2, jobID2, primaryKey2, demoWorkerUUID); err != nil {
+			t.Fatal(err)
+		}
+		primaryBytes := []byte(`{"outputs":["real inference output"]}`) // deliberately DIFFERENT from peerBytes
+		primarySum := sha256.Sum256(primaryBytes)
+		primarySHA := hex.EncodeToString(primarySum[:])
+		if err := itStorage.PutObject(ctx, primaryKey2, primaryBytes, "application/json"); err != nil {
+			t.Fatal(err)
+		}
+
+		beforeHT := metrics.hashTrustedRedundancy.Load()
+		commit2 := TaskCommit{TaskID: primaryTask2, ResultKey: primaryKey2, ResultSHA256: primarySHA}
+		code, body := req(t, "POST", "/v1/worker/task/"+primaryTask2.String()+"/commit", commit2, workerTok(), jsonCT())
+		if code != http.StatusNoContent {
+			t.Fatalf("commit: want 204, got %d: %s", code, body)
+		}
+		afterHT := metrics.hashTrustedRedundancy.Load()
+		if afterHT != beforeHT {
+			t.Fatalf("mismatched hashes must NOT take the hash-trust branch, got +%d", afterHT-beforeHT)
+		}
+		// The real (slow-path) comparison must have detected the genuine byte
+		// mismatch (pass_with_penalty, mismatch metric bumped) — proving the
+		// fallback GetObject path ran for real and reached the correct verdict.
+		var mismatchEvents int
+		itPool.QueryRow(ctx, `SELECT count(*) FROM verification_events WHERE job_id=$1 AND kind='redundancy_mismatch'`, jobID2).Scan(&mismatchEvents)
+		if mismatchEvents < 1 {
+			t.Fatalf("want a real redundancy_mismatch event from the fallback path, got %d", mismatchEvents)
+		}
+	})
+}
+
 // --- 9. honeypot verification: pass credits, fraud claws back + requeues ---
 
 func TestHoneypotVerify(t *testing.T) {
@@ -610,9 +1388,12 @@ func TestHoneypotVerify(t *testing.T) {
 		reset(t)
 		info := &CommitTaskInfo{TaskID: uuid.New(), JobID: uuid.New(), WorkerID: demoWorkerUUID,
 			SupplierID: demoSupplierUUID, IsHoneypot: true, InputRef: demoHoneypotEmbedRef, jobType: "embed"}
-		// known answer is {"vectors":[[1,0,0]]}; commit the same.
+		// known answer is demoHoneypotEmbedKnownAnswer (a REAL measured MiniLM
+		// embedding, seed.go — Buyer Developer Experience 7->8's real-SDK proof
+		// found the old {"vectors":[[1,0,0]]} placeholder would fail ANY honest
+		// worker's honeypot check); commit the same real vector back.
 		out, err := itServer.verifier.verifyTaskResult(ctx, info,
-			TaskCommit{TaskID: info.TaskID}, []byte(`{"vectors":[[1,0,0]]}`), nil)
+			TaskCommit{TaskID: info.TaskID}, []byte(demoHoneypotEmbedKnownAnswer), nil)
 		if err != nil || out != OutcomePass {
 			t.Fatalf("honeypot pass: out=%v err=%v", out, err)
 		}
@@ -811,6 +1592,62 @@ func TestPayoutHoldToReadyAndBlocked(t *testing.T) {
 	}
 }
 
+// TestReconcileDriftMetric proves cx_reconcile_drift_total (Payments, Payouts &
+// Unit Economics 8->9): reconcileLedger's drift findings were log-only before —
+// an operator had to grep for "reconcile DRIFT" to notice one. Seeds the
+// cheapest real anomaly reconcileLedger detects without needing a live Stripe
+// call: a supplier_credit row marked 'released' (with a fake payout_ref,
+// satisfying ledger_released_requires_ref) whose supplier has NO connected
+// Stripe account — a real, structural impossibility (a transfer cannot have
+// succeeded with no destination account), which the function flags before ever
+// calling Stripe. Confirms the counter advances by exactly one per real drift
+// found, not per sweep run.
+func TestReconcileDriftMetric(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+	t.Setenv("STRIPE_SECRET_KEY", "sk_test_fake_reconcile_only")
+
+	// The demo supplier must have no connected account for this drift branch.
+	if err := itStore.SetSupplierStripeAcct(ctx, demoSupplierUUID, ""); err != nil {
+		t.Fatalf("clearing stripe_acct: %v", err)
+	}
+	taskID := uuid.New()
+	mustJobTask(t, uuid.New(), taskID, false, false, "jobs/z/tasks/0/input.jsonl")
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO ledger_entries (kind, supplier_id, task_id, amount_usd, payout_status, payout_ref)
+		 VALUES ('supplier_credit', $1, $2, 5.00, 'released', 'tr_test_fake_ref')`,
+		demoSupplierUUID, taskID); err != nil {
+		t.Fatalf("seeding released-but-unconnected ledger row: %v", err)
+	}
+
+	before := metrics.reconcileDrift.Load()
+	wk := NewWorkers(itStore, itStorage, stubPayout{})
+	if err := wk.reconcileLedger(ctx); err != nil {
+		t.Fatalf("reconcileLedger: %v", err)
+	}
+	if got := metrics.reconcileDrift.Load() - before; got != 1 {
+		t.Fatalf("want exactly 1 new drift counted, got %d", got)
+	}
+
+	// A second run must count the SAME real, still-unresolved anomaly again —
+	// reconcileLedger is a stateless read-only audit, not a one-shot alert; the
+	// operator's own action (or a real transfer) is what stops it recurring.
+	if err := wk.reconcileLedger(ctx); err != nil {
+		t.Fatalf("reconcileLedger (second run): %v", err)
+	}
+	if got := metrics.reconcileDrift.Load() - before; got != 2 {
+		t.Fatalf("want 2 total drifts across two runs of an unresolved anomaly, got %d", got)
+	}
+
+	code, mbody := req(t, "GET", "/metrics", nil)
+	if code != 200 {
+		t.Fatalf("GET /metrics: %d", code)
+	}
+	if !strings.Contains(string(mbody), "cx_reconcile_drift_total") {
+		t.Fatalf("/metrics missing cx_reconcile_drift_total:\n%s", mbody)
+	}
+}
+
 // --- 13. webhook delivery with retries against a local receiver ---
 
 func TestWebhookRetry(t *testing.T) {
@@ -979,6 +1816,363 @@ func TestQuoteEndpointPersistsAssumptions(t *testing.T) {
 		t.Fatalf("quote not persisted correctly: rows=%d records=%d", n, records)
 	}
 	t.Cleanup(func() { itPool.Exec(ctx, `TRUNCATE quotes`) })
+}
+
+// TestQuotePricesTheVerificationFloor proves the Verification & Result Trust
+// 5->6 fix (docs/internal/CREED_AND_PATH_TO_TEN.md): createJob unconditionally
+// floors a job submitted with no explicit verification fractions to at least
+// one real honeypot task (see api.go's wantVerificationFloor). A quote built
+// from the same defaults must not understate that cost — verification_overhead_usd
+// must reflect the floor, not the bare (zero) fractions, matching the
+// TestVerificationFloorAppliesUnlessOptedOut precedent on the createJob side.
+func TestQuotePricesTheVerificationFloor(t *testing.T) {
+	ctx := context.Background()
+	itPool.Exec(ctx, `TRUNCATE quotes`)
+	t.Cleanup(func() { itPool.Exec(ctx, `TRUNCATE quotes`) })
+
+	var sb strings.Builder
+	for i := 0; i < 20; i++ {
+		fmt.Fprintf(&sb, `{"id":"r%d","text":"record %d"}`+"\n", i, i)
+	}
+	input := sb.String()
+
+	quote := func(verification map[string]any) Quote {
+		t.Helper()
+		body := map[string]any{
+			"job_type":     map[string]any{"type": "embed"},
+			"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+			"tier":         "batch",
+			"verification": verification,
+			"input":        input,
+		}
+		status, out := req(t, "POST", "/v1/quote", body, buyerKey(), jsonCT())
+		if status != 200 {
+			t.Fatalf("POST /v1/quote -> %d: %s", status, out)
+		}
+		var q Quote
+		if err := json.Unmarshal(out, &q); err != nil {
+			t.Fatalf("decode quote: %v\n%s", err, out)
+		}
+		return q
+	}
+
+	t.Run("default verification quote prices the honeypot floor", func(t *testing.T) {
+		q := quote(map[string]any{})
+		if q.Cost.VerificationOverheadUSD <= 0 {
+			t.Fatalf("a default-verification quote must price the mandatory honeypot floor, got verification_overhead_usd=%v", q.Cost.VerificationOverheadUSD)
+		}
+		wantMax := roundUSD((q.Cost.ExpectedUSD + q.Cost.VerificationOverheadUSD) * 1.5)
+		if q.Cost.MaxUSD != wantMax {
+			t.Fatalf("cost_max_usd must reflect the floored verification_overhead_usd: want %v, got %v (%+v)", wantMax, q.Cost.MaxUSD, q.Cost)
+		}
+	})
+
+	t.Run("explicit opt-out yields genuinely zero overhead and a lower cost_max", func(t *testing.T) {
+		withFloor := quote(map[string]any{})
+		optedOut := quote(map[string]any{"skip_verification_floor": true})
+		if optedOut.Cost.VerificationOverheadUSD != 0 {
+			t.Fatalf("skip_verification_floor must yield exactly 0 verification_overhead_usd, got %v", optedOut.Cost.VerificationOverheadUSD)
+		}
+		if optedOut.Cost.MaxUSD >= withFloor.Cost.MaxUSD {
+			t.Fatalf("opted-out cost_max_usd (%v) must be lower than the default-floored quote's (%v)", optedOut.Cost.MaxUSD, withFloor.Cost.MaxUSD)
+		}
+		if optedOut.Cost.PlatformTakeUSD >= withFloor.Cost.PlatformTakeUSD {
+			t.Fatalf("opted-out platform_take_usd (%v) must be lower than the default-floored quote's (%v)", optedOut.Cost.PlatformTakeUSD, withFloor.Cost.PlatformTakeUSD)
+		}
+	})
+
+	t.Run("an explicit non-zero honeypot_frac is left untouched", func(t *testing.T) {
+		q := quote(map[string]any{"honeypot_frac": 0.5})
+		want := roundUSD(q.Cost.ExpectedUSD * 0.5)
+		if q.Cost.VerificationOverheadUSD != want {
+			t.Fatalf("an explicit 0.5 honeypot_frac must not be bumped by the floor logic: want %v, got %v", want, q.Cost.VerificationOverheadUSD)
+		}
+	})
+}
+
+// TestQuotePricesOutputTokens proves the Project Detection & Quotation 6->6.5 fix
+// (docs/internal/CREED_AND_PATH_TO_TEN.md): a GENERATIVE quote (batch_infer /
+// json_extraction) now carries an expected-OUTPUT-token cost term, so max_tokens
+// measurably AND correctly moves the price — where before the completion length
+// was ignored entirely and a 16-token and a 2048-token generation quoted the same.
+// Proven end-to-end through POST /v1/quote against live Postgres (real catalogue
+// pricing via GetModel), plus the honest negative: a non-generative job (embed) is
+// UNAFFECTED by max_tokens.
+func TestQuotePricesOutputTokens(t *testing.T) {
+	ctx := context.Background()
+	itPool.Exec(ctx, `TRUNCATE quotes`)
+	t.Cleanup(func() { itPool.Exec(ctx, `TRUNCATE quotes`) })
+
+	// 10 records of batch_infer input. We use skip_verification_floor so the
+	// verification overhead does not confound the expected-cost comparison — this
+	// test isolates the OUTPUT-token term in ExpectedUSD.
+	var sb strings.Builder
+	for i := 0; i < 10; i++ {
+		fmt.Fprintf(&sb, `{"id":"r%d","prompt":"summarize record %d"}`+"\n", i, i)
+	}
+	input := sb.String()
+
+	quoteInfer := func(maxTokens uint32) Quote {
+		t.Helper()
+		jt := map[string]any{"type": "batch_infer"}
+		if maxTokens > 0 {
+			jt["max_tokens"] = maxTokens
+		}
+		body := map[string]any{
+			"job_type":     jt,
+			"model":        map[string]any{"kind": "gguf", "ref": "llama-3.2-1b-instruct-q4"},
+			"tier":         "batch",
+			"verification": map[string]any{"skip_verification_floor": true},
+			"input":        input,
+		}
+		status, out := req(t, "POST", "/v1/quote", body, buyerKey(), jsonCT())
+		if status != 200 {
+			t.Fatalf("POST /v1/quote (max_tokens=%d) -> %d: %s", maxTokens, status, out)
+		}
+		var q Quote
+		if err := json.Unmarshal(out, &q); err != nil {
+			t.Fatalf("decode quote: %v\n%s", err, out)
+		}
+		return q
+	}
+
+	// (1) max_tokens MOVES the price: a longer completion costs measurably more.
+	short := quoteInfer(64)
+	long := quoteInfer(1024)
+	if !(long.Cost.ExpectedUSD > short.Cost.ExpectedUSD) {
+		t.Fatalf("a longer max_tokens must raise a generative quote's expected cost: 64->%v vs 1024->%v",
+			short.Cost.ExpectedUSD, long.Cost.ExpectedUSD)
+	}
+
+	// (2) the increase is CORRECT, not just monotone. The output-token term adds
+	// nLines*(max_tokens) priced units at the catalogue price_per_1k. So the delta
+	// between two max_tokens values is exactly:
+	//   nRecords * (mtLong - mtShort) / 1000 * price_per_1k * tierMultiplier(batch=1)
+	// We read the real catalogue price the server used (GetModel) so the assertion
+	// is pinned to the same number the estimator saw, not a hard-coded guess.
+	m, err := itStore.GetModel(ctx, "llama-3.2-1b-instruct-q4")
+	if err != nil {
+		t.Fatalf("GetModel: %v", err)
+	}
+	price := modelPrice(*m)
+	const nRecords = 10
+	wantDelta := roundUSD(float64(nRecords) * float64(1024-64) / 1000.0 * price)
+	gotDelta := roundUSD(long.Cost.ExpectedUSD - short.Cost.ExpectedUSD)
+	if gotDelta != wantDelta {
+		t.Fatalf("output-token cost delta wrong: want %v (=%d records * %d extra tokens /1k * price %v), got %v (short=%v long=%v)",
+			wantDelta, nRecords, 1024-64, price, gotDelta, short.Cost.ExpectedUSD, long.Cost.ExpectedUSD)
+	}
+
+	// (3) an UNSET max_tokens is priced at the documented default (defaultQuoteMaxTokens),
+	// never zero output — a generative job with no explicit completion length still
+	// carries a real output cost, between the two explicit points above (64 < 256 < 1024).
+	def := quoteInfer(0)
+	if !(def.Cost.ExpectedUSD > short.Cost.ExpectedUSD && def.Cost.ExpectedUSD < long.Cost.ExpectedUSD) {
+		t.Fatalf("an unset max_tokens must price the default (%d) completion length, between 64 and 1024: got %v (64->%v, 1024->%v)",
+			defaultQuoteMaxTokens, def.Cost.ExpectedUSD, short.Cost.ExpectedUSD, long.Cost.ExpectedUSD)
+	}
+
+	// (4) the honest negative: a NON-generative job (embed) is UNAFFECTED by
+	// max_tokens — its result size is not completion-driven, so pricing it on
+	// max_tokens would be a lie. Two embed quotes at wildly different max_tokens
+	// must have identical expected cost.
+	quoteEmbed := func(maxTokens uint32) Quote {
+		t.Helper()
+		body := map[string]any{
+			"job_type":     map[string]any{"type": "embed", "max_tokens": maxTokens},
+			"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+			"tier":         "batch",
+			"verification": map[string]any{"skip_verification_floor": true},
+			"input":        input,
+		}
+		status, out := req(t, "POST", "/v1/quote", body, buyerKey(), jsonCT())
+		if status != 200 {
+			t.Fatalf("POST /v1/quote embed -> %d: %s", status, out)
+		}
+		var q Quote
+		json.Unmarshal(out, &q)
+		return q
+	}
+	e1, e2 := quoteEmbed(16), quoteEmbed(4096)
+	if e1.Cost.ExpectedUSD != e2.Cost.ExpectedUSD {
+		t.Fatalf("a non-generative (embed) quote must be unaffected by max_tokens: 16->%v vs 4096->%v",
+			e1.Cost.ExpectedUSD, e2.Cost.ExpectedUSD)
+	}
+}
+
+// TestQuoteETAUsesSustainedThroughputForLongBatchJobs proves the Thermal 6->7 fix
+// (docs/internal/CREED_AND_PATH_TO_TEN.md): a LONG batch job's ETA is computed off
+// the measured SUSTAINED tok/s (36.6% below peak, docs/GPU_CAPABILITY.md), not the
+// peak figure the static target is derived from — so the ETA is honest for the
+// multi-minute jobs where the throttle gap actually bites. estimateETASecs is
+// tier-INDEPENDENT (it never takes tier), so the SAME long input quoted as "batch"
+// vs "priority" shares the exact same peak-derived p50 underneath; only the batch
+// quote is derated. The proof: batch.p50 == ceil(priority.p50 * sustainedFactor),
+// and the derating is gated to LONG jobs (a short one is quoted at peak on both
+// tiers). Proven end-to-end through POST /v1/quote against live Postgres, with an
+// empty task_durations history so the peak-derived static target (not observed
+// history) is what gets derated.
+func TestQuoteETAUsesSustainedThroughputForLongBatchJobs(t *testing.T) {
+	reset(t) // truncates tasks/jobs; task_durations has no rows for a fresh (batch_infer,model)
+	ctx := context.Background()
+	itPool.Exec(ctx, `TRUNCATE quotes`)
+	t.Cleanup(func() { itPool.Exec(ctx, `TRUNCATE quotes`) })
+
+	// A LONG batch_infer job: many records at a small split_size => many tasks =>
+	// a multi-minute peak ETA (1 seed worker, 45s static per-task target), well
+	// past sustainedETAThresholdSecs so the derating engages.
+	var sb strings.Builder
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&sb, `{"id":"r%d","prompt":"generate a long answer for record %d"}`+"\n", i, i)
+	}
+	input := sb.String()
+
+	quoteAt := func(tier string, splitSize int) Quote {
+		t.Helper()
+		body := map[string]any{
+			"job_type":     map[string]any{"type": "batch_infer", "max_tokens": 256},
+			"model":        map[string]any{"kind": "gguf", "ref": "llama-3.2-1b-instruct-q4"},
+			"params":       map[string]any{"split_size": splitSize},
+			"tier":         tier,
+			"verification": map[string]any{"skip_verification_floor": true},
+			"input":        input,
+		}
+		status, out := req(t, "POST", "/v1/quote", body, buyerKey(), jsonCT())
+		if status != 200 {
+			t.Fatalf("POST /v1/quote (%s) -> %d: %s", tier, status, out)
+		}
+		var q Quote
+		if err := json.Unmarshal(out, &q); err != nil {
+			t.Fatalf("decode quote: %v\n%s", err, out)
+		}
+		return q
+	}
+
+	// splitSize 1 => 200 tasks => a peak ETA of 200 waves * 45s = ~9000s, far past
+	// the 120s threshold.
+	batch := quoteAt("batch", 1)
+	priority := quoteAt("priority", 1)
+
+	// The peak-derived p50 underneath is identical (estimateETASecs is
+	// tier-independent) — priority is quoted at that peak; batch is derated.
+	peakP50 := priority.Time.P50Secs
+	if peakP50 < sustainedETAThresholdSecs {
+		t.Fatalf("test fixture too small: peak ETA %ds is below the %ds derating threshold; make the job longer",
+			peakP50, sustainedETAThresholdSecs)
+	}
+	wantBatchP50 := sustainedBatchETASecs(peakP50, "batch", false)
+	if batch.Time.P50Secs != wantBatchP50 {
+		t.Fatalf("long batch ETA must be derated to sustained: want p50=%d (=ceil(%d*%.4f)), got %d",
+			wantBatchP50, peakP50, sustainedDeratingFactor, batch.Time.P50Secs)
+	}
+	if !(batch.Time.P50Secs > peakP50) {
+		t.Fatalf("the sustained batch ETA (%d) must be strictly longer than the peak ETA (%d)",
+			batch.Time.P50Secs, peakP50)
+	}
+	// The whole band (p90/worst) is derived from the derated p50, so it moves too.
+	if !(batch.Time.P90Secs > priority.Time.P90Secs && batch.Time.WorstCaseSecs > priority.Time.WorstCaseSecs) {
+		t.Fatalf("the derated p50 must widen the whole batch band: batch=%+v priority=%+v", batch.Time, priority.Time)
+	}
+
+	// A SHORT batch job (few tasks => a sub-threshold peak ETA) is quoted at peak on
+	// BOTH tiers — the gap only bites minutes-long jobs. splitSize huge => 1 task.
+	shortBatch := quoteAt("batch", 100000)
+	shortPriority := quoteAt("priority", 100000)
+	if shortBatch.Time.P50Secs >= sustainedETAThresholdSecs {
+		// The single-task peak ETA is below threshold on this fixture; if that ever
+		// changes, this guard makes the assumption explicit rather than silently
+		// passing a vacuous check.
+		t.Logf("note: short-job peak ETA %ds >= threshold; short-job non-derating assertion may not apply", shortBatch.Time.P50Secs)
+	} else if shortBatch.Time.P50Secs != shortPriority.Time.P50Secs {
+		t.Fatalf("a short batch job (peak ETA %ds < %ds) must be quoted at peak like priority, got batch=%d priority=%d",
+			shortBatch.Time.P50Secs, sustainedETAThresholdSecs, shortBatch.Time.P50Secs, shortPriority.Time.P50Secs)
+	}
+}
+
+// TestQuoteRecommendsFieldAgainstHumanJudgment proves the Project Detection &
+// Quotation 8->9 content-based field detection (docs/internal/CREED_AND_PATH_TO_TEN.md):
+// a real JSON input with MULTIPLE candidate text fields gets a correct field
+// recommendation, surfaced through POST /v1/quote, and validated against a HUMAN's
+// own judgment on a held-out sample set — the rung's exact proof artifact. Each
+// fixture below is a realistic messy dataset shape; the wantField is MY (the
+// author's) independent judgment of which column a buyer would actually want
+// embedded, decided from the dataset's meaning BEFORE running the detector. The
+// detector's longest-average-string recommendation must agree on every one.
+func TestQuoteRecommendsFieldAgainstHumanJudgment(t *testing.T) {
+	ctx := context.Background()
+	itPool.Exec(ctx, `TRUNCATE quotes`)
+	t.Cleanup(func() { itPool.Exec(ctx, `TRUNCATE quotes`) })
+
+	// Held-out sample set: (realistic input, the field a human would pick). These
+	// are deliberately varied — support tickets, product reviews, scraped articles,
+	// a chat log — each with an obvious id/label/metadata column AND one clear
+	// free-text column that is what you would actually embed or classify.
+	cases := []struct {
+		name      string
+		input     string
+		wantField string
+	}{
+		{
+			name: "support tickets: body is the text, not ticket_id/priority",
+			input: `{"ticket_id":"T-1001","priority":"high","body":"My laptop will not boot after the latest firmware update and I have an important demo tomorrow morning."}
+{"ticket_id":"T-1002","priority":"low","body":"The trackpad occasionally registers a phantom double-click when scrolling long documents in the browser."}
+{"ticket_id":"T-1003","priority":"med","body":"Requesting a refund for the duplicate charge that appeared on my statement last week after a failed checkout."}`,
+			wantField: "body",
+		},
+		{
+			name: "product reviews: review_text over sku/rating/verified",
+			input: `{"sku":"SKU-88","rating":5,"verified":true,"review_text":"Genuinely the best pair of headphones I have owned; the noise cancellation is a night-and-day difference on flights."}
+{"sku":"SKU-91","rating":2,"verified":false,"review_text":"Battery life is far shorter than advertised and the companion app crashes every time I try to change the equalizer settings."}
+{"sku":"SKU-04","rating":4,"verified":true,"review_text":"Solid build quality and comfortable for long sessions, though the microphone picks up a bit too much background noise."}`,
+			wantField: "review_text",
+		},
+		{
+			name: "scraped articles: content over url/published/author",
+			input: `{"url":"http://x/1","author":"jdoe","published":"2026-01-02","content":"Distributed inference markets are emerging as owners of idle Apple Silicon rent spare capacity to buyers who need batch throughput more than latency."}
+{"url":"http://x/2","author":"asmith","published":"2026-02-14","content":"The economics hinge on verified settlement: a buyer must trust a result without re-running it, which is exactly what honeypots and redundancy make possible."}`,
+			wantField: "content",
+		},
+		{
+			name: "chat log: message over user/ts/room",
+			input: `{"user":"u17","ts":1700000000,"room":"general","message":"Can someone review the pricing change before the release? I want to make sure the output-token term lands correctly for generation jobs."}
+{"user":"u4","ts":1700000600,"room":"general","message":"Looks good to me — the sustained-throughput ETA adjustment is the one I would double-check on a really long batch job though."}`,
+			wantField: "message",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			body := map[string]any{
+				"job_type":     map[string]any{"type": "embed"},
+				"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+				"tier":         "batch",
+				"verification": map[string]any{"skip_verification_floor": true},
+				"input":        c.input + "\n",
+			}
+			status, out := req(t, "POST", "/v1/quote", body, buyerKey(), jsonCT())
+			if status != 200 {
+				t.Fatalf("POST /v1/quote -> %d: %s", status, out)
+			}
+			var q Quote
+			if err := json.Unmarshal(out, &q); err != nil {
+				t.Fatalf("decode quote: %v\n%s", err, out)
+			}
+			// The recommendation must match the human's held-out judgment.
+			if q.Input.RecommendedField != c.wantField {
+				t.Fatalf("recommended_field=%q, human judged %q\n  field_stats=%+v",
+					q.Input.RecommendedField, c.wantField, q.Input.FieldStats)
+			}
+			// The suggestion is CONFIRMABLE: the evidence is surfaced (not just the
+			// bare pick), the recommendation is the top of it, and it carries a real
+			// non-zero average length (it is a genuine text column).
+			if len(q.Input.FieldStats) == 0 {
+				t.Fatal("a recommendation must surface the per-field evidence for the buyer to confirm/override")
+			}
+			if q.Input.FieldStats[0].Field != c.wantField || q.Input.FieldStats[0].AvgStringLen <= 0 {
+				t.Fatalf("the recommendation must be the highest-avg-length field with real content, got %+v", q.Input.FieldStats[0])
+			}
+		})
+	}
 }
 
 // Plane D D7 / errata C-Errata-4 (docs/PLANE_D.md §13): quote-to-submit binding.
@@ -1315,10 +2509,12 @@ func bytesContains(b []byte, sub string) bool {
 // Budget Governor (Plane C §12 / Plane D §14 D8): a job with a tiny max_usd whose
 // next task's PROJECTED charge (already-charged + one task's estimate) would breach
 // the cap must NOT have that task dispatched. The cap PREVENTS dispatch — the task
-// stays queued, budget_state flips to paused_for_budget, and a budget_stopped event
-// fires once. No refund, no over-charge: the money math only GATES, it never moves
-// money. Then raising the cap lets the same worker claim the same task, proving it
-// was the budget gate (not any other hard filter) that held it back.
+// stays queued; a subsequent SweepBudgetStops (Control Plane Hot Path 7->8: this
+// used to run inline inside ClaimTask's own transaction, now its own ticker — see
+// Workers.sweepBudgetStops) flips budget_state to paused_for_budget and fires a
+// budget_stopped event once. No refund, no over-charge: the money math only GATES,
+// it never moves money. Then raising the cap lets the same worker claim the same
+// task, proving it was the budget gate (not any other hard filter) that held it back.
 func TestBudgetCapPausesDispatch(t *testing.T) {
 	ctx := context.Background()
 	t.Cleanup(func() {
@@ -1382,16 +2578,33 @@ func TestBudgetCapPausesDispatch(t *testing.T) {
 		t.Fatalf("queued task must stay queued+unclaimed under budget pause, got status=%s claimed_by=%v", tstatus, claimedBy)
 	}
 
-	// 3) budget_state flipped to paused_for_budget.
+	// 3) budget_state flips to paused_for_budget.
+	//
+	// PATCH (Control Plane Hot Path 7->8, docs/internal/CREED_AND_PATH_TO_TEN.md
+	// "Move markBudgetStoppedJobs off the claim path onto its own ticker"): this
+	// state transition is no longer run synchronously inside ClaimTask's own
+	// transaction — it is now Store.SweepBudgetStops, driven by its own ticker
+	// (Workers.sweepBudgetStops, control/workers.go) in production. The dispatch
+	// guarantee asserted in step 1/2 above is completely unaffected (it comes
+	// from ClaimTaskSQL's own synchronous hard-filter predicate); only the
+	// VISIBLE budget_state flip + one-time event now happen on the sweep's own
+	// cadence, so the test drives that sweep directly rather than relying on
+	// ClaimTask to have run it inline.
+	if _, err := itStore.SweepBudgetStops(ctx); err != nil {
+		t.Fatalf("SweepBudgetStops: %v", err)
+	}
 	var bstate string
 	itPool.QueryRow(ctx, `SELECT budget_state FROM jobs WHERE id=$1`, jobID).Scan(&bstate)
 	if bstate != "paused_for_budget" {
 		t.Fatalf("budget_state = %q, want paused_for_budget", bstate)
 	}
 
-	// 4) Exactly one budget_stopped event (poll again — it must NOT re-emit).
+	// 4) Exactly one budget_stopped event (poll + sweep again — it must NOT re-emit).
 	if _, err := itStore.ClaimTask(ctx, wauth); err != nil {
 		t.Fatalf("second ClaimTask: %v", err)
+	}
+	if _, err := itStore.SweepBudgetStops(ctx); err != nil {
+		t.Fatalf("second SweepBudgetStops: %v", err)
 	}
 	var nStopped int
 	itPool.QueryRow(ctx, `SELECT count(*) FROM job_events WHERE job_id=$1 AND event='budget_stopped'`, jobID).Scan(&nStopped)
@@ -1470,6 +2683,217 @@ func TestBudgetCapCountsInflightTasks(t *testing.T) {
 	if c2 != nil {
 		t.Fatalf("budget cap overshoot: a 2nd task (%s) was dispatched while an in-flight task already commits the cap", c2.TaskID)
 	}
+}
+
+// TestClaimDispatchInterleaveFairness proves the Scheduling & Matching Engine
+// 6.5->7 fix (docs/internal/CREED_AND_PATH_TO_TEN.md): without a fairness term,
+// ClaimTask's ORDER BY fell straight through to oldest-first, so a large job
+// that arrived earlier would claim EVERY worker ahead of a smaller job that
+// arrived later, no matter how many of the large job's own tasks had already
+// been served. Job A is older and already has 3 of its own tasks dispatched
+// (running); Job B is newer and has had none. The fairness term must let Job
+// B's task win the claim over Job A's still-queued (older) task.
+func TestClaimDispatchInterleaveFairness(t *testing.T) {
+	ctx := context.Background()
+	reset(t)
+
+	older := time.Now().Add(-time.Hour)
+	newer := time.Now().Add(-time.Minute)
+
+	jobA := uuid.New()
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO jobs (id, buyer_id, status, job_type, model_ref, input_ref, tier,
+		                   task_count, tasks_done, min_memory_gb, created_at)
+		 VALUES ($1,$2,'running','embed','all-minilm-l6-v2','jobs/a/in.jsonl','batch',4,0,0,$3)`,
+		jobA, demoBuyerUUID, older); err != nil {
+		t.Fatal(err)
+	}
+	// 3 of job A's tasks already dispatched (running) — job_dispatched_count=3
+	// for its remaining queued task below.
+	for i := 0; i < 3; i++ {
+		if _, err := itPool.Exec(ctx,
+			`INSERT INTO tasks (id, job_id, status, input_ref, result_key, chunk_index, visible_at, created_at, claimed_by, worker_id)
+			 VALUES ($1,$2,'running','jobs/a/t/in.jsonl','jobs/a/t/out.json',$3, $4, $4, $5, $5)`,
+			uuid.New(), jobA, i, older, demoWorkerUUID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	taskA := uuid.New()
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO tasks (id, job_id, status, input_ref, result_key, chunk_index, visible_at, created_at)
+		 VALUES ($1,$2,'queued','jobs/a/t/in.jsonl','jobs/a/t/out.json',3, $3, $3)`,
+		taskA, jobA, older); err != nil {
+		t.Fatal(err)
+	}
+
+	jobB := uuid.New()
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO jobs (id, buyer_id, status, job_type, model_ref, input_ref, tier,
+		                   task_count, tasks_done, min_memory_gb, created_at)
+		 VALUES ($1,$2,'queued','embed','all-minilm-l6-v2','jobs/b/in.jsonl','batch',1,0,0,$3)`,
+		jobB, demoBuyerUUID, newer); err != nil {
+		t.Fatal(err)
+	}
+	taskB := uuid.New()
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO tasks (id, job_id, status, input_ref, result_key, chunk_index, visible_at, created_at)
+		 VALUES ($1,$2,'queued','jobs/b/t/in.jsonl','jobs/b/t/out.json',0, $3, $3)`,
+		taskB, jobB, newer); err != nil {
+		t.Fatal(err)
+	}
+
+	wauth := WorkerAuth{WorkerID: demoWorkerUUID, SupplierID: demoSupplierUUID}
+	c, err := itStore.ClaimTask(ctx, wauth)
+	if err != nil {
+		t.Fatalf("ClaimTask: %v", err)
+	}
+	if c == nil {
+		t.Fatal("expected a claimable task")
+	}
+	if c.TaskID != taskB {
+		t.Fatalf("fairness: want job B's newer, less-served task (%s) claimed ahead of job A's older, already-3x-served task (%s), got %s",
+			taskB, taskA, c.TaskID)
+	}
+}
+
+// TestWorkerTpsCacheMaintainedAndReadByClaim proves the Control Plane Hot Path
+// 7->8 fix (docs/internal/CREED_AND_PATH_TO_TEN.md, "hoist worker_tps into
+// something computed once per worker state change rather than recomputed per
+// candidate row per claim") end to end: UpsertWorker (POST /v1/worker/register)
+// maintains worker_tps_cache instead of ClaimTask re-deriving it with a
+// correlated subquery, AND the claim's real ORDER BY genuinely reads that
+// maintained cache — not just that the column exists unread. Two otherwise-equal
+// queued tasks of DIFFERENT job types are offered to the SAME worker; the claim
+// must prefer whichever job_type the worker's cached tps currently ranks higher,
+// and flipping which one is favored must flip which task gets claimed first —
+// proving the read path is wired to the live cache value, not a coincidence of
+// insertion order.
+func TestWorkerTpsCacheMaintainedAndReadByClaim(t *testing.T) {
+	ctx := context.Background()
+	reset(t)
+	wauth := WorkerAuth{WorkerID: demoWorkerUUID, SupplierID: demoSupplierUUID}
+
+	// Part A: UpsertWorker maintenance. Register with an embed benchmark of 50
+	// tps, confirm worker_tps_cache reflects it; re-register (a real worker
+	// state change — a fresh benchmark report) with 120 tps for the SAME
+	// job_type, and confirm the cache is UPDATED in place (last-write-wins),
+	// not duplicated into a second row.
+	readCachedTps := func(jobType string) (float32, bool) {
+		var tps float32
+		err := itPool.QueryRow(ctx,
+			`SELECT tps FROM worker_tps_cache WHERE worker_id=$1 AND job_type=$2`,
+			demoWorkerUUID, jobType).Scan(&tps)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, false
+		}
+		if err != nil {
+			t.Fatalf("reading worker_tps_cache: %v", err)
+		}
+		return tps, true
+	}
+
+	if code, body := req(t, "POST", "/v1/worker/register", WorkerCapability{
+		WorkerID: demoWorkerUUID, SupplierID: demoSupplierUUID, HWClass: "apple_silicon_max", MemoryGB: 64,
+		SupportedJobs: []string{"embed", "batch_infer"}, SupportedModels: []string{"all-minilm-l6-v2", "llama-3.2-1b-instruct-q4"},
+		Benchmarks: []BenchResult{{ModelID: "all-minilm-l6-v2", JobType: "embed", TPS: 50, ThermalOK: true}},
+	}, workerTok(), jsonCT()); code != 200 {
+		t.Fatalf("register: want 200, got %d: %s", code, body)
+	}
+	if tps, ok := readCachedTps("embed"); !ok || tps != 50 {
+		t.Fatalf("worker_tps_cache after first register: want (50, true), got (%v, %v)", tps, ok)
+	}
+
+	if code, body := req(t, "POST", "/v1/worker/register", WorkerCapability{
+		WorkerID: demoWorkerUUID, SupplierID: demoSupplierUUID, HWClass: "apple_silicon_max", MemoryGB: 64,
+		SupportedJobs: []string{"embed", "batch_infer"}, SupportedModels: []string{"all-minilm-l6-v2", "llama-3.2-1b-instruct-q4"},
+		Benchmarks: []BenchResult{{ModelID: "all-minilm-l6-v2", JobType: "embed", TPS: 120, ThermalOK: true}},
+	}, workerTok(), jsonCT()); code != 200 {
+		t.Fatalf("re-register: want 200, got %d: %s", code, body)
+	}
+	if tps, ok := readCachedTps("embed"); !ok || tps != 120 {
+		t.Fatalf("worker_tps_cache after re-register: want (120, true) [updated in place], got (%v, %v)", tps, ok)
+	}
+	var cacheRows int
+	itPool.QueryRow(ctx, `SELECT count(*) FROM worker_tps_cache WHERE worker_id=$1 AND job_type='embed'`, demoWorkerUUID).Scan(&cacheRows)
+	if cacheRows != 1 {
+		t.Fatalf("worker_tps_cache must UPSERT (one row per worker/job_type), got %d rows", cacheRows)
+	}
+
+	// Part B: the claim's real ORDER BY reads this cache. Two queued tasks of
+	// DIFFERENT job types, same job age/tier/priority, offered to the demo
+	// worker (which supports both). Seed the cache so embed ranks higher, then
+	// so batch_infer ranks higher, and confirm the claim flips with it.
+	seedTwoJobTasks := func(t *testing.T) (embedTask, inferTask uuid.UUID) {
+		t.Helper()
+		if _, err := itPool.Exec(ctx, `TRUNCATE tasks, jobs CASCADE`); err != nil {
+			t.Fatal(err)
+		}
+		now := time.Now()
+		embedJob, inferJob := uuid.New(), uuid.New()
+		embedTask, inferTask = uuid.New(), uuid.New()
+		if _, err := itPool.Exec(ctx,
+			`INSERT INTO jobs (id, buyer_id, status, job_type, model_ref, input_ref, tier,
+			                   task_count, tasks_done, min_memory_gb, created_at)
+			 VALUES ($1,$2,'queued','embed','all-minilm-l6-v2','jobs/e/in.jsonl','batch',1,0,0,$3)`,
+			embedJob, demoBuyerUUID, now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := itPool.Exec(ctx,
+			`INSERT INTO tasks (id, job_id, status, input_ref, result_key, chunk_index, visible_at, created_at)
+			 VALUES ($1,$2,'queued','jobs/e/t/in.jsonl','jobs/e/t/out.json',0,$3,$3)`,
+			embedTask, embedJob, now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := itPool.Exec(ctx,
+			`INSERT INTO jobs (id, buyer_id, status, job_type, model_ref, input_ref, tier,
+			                   task_count, tasks_done, min_memory_gb, created_at)
+			 VALUES ($1,$2,'queued','batch_infer','llama-3.2-1b-instruct-q4','jobs/i/in.jsonl','batch',1,0,0,$3)`,
+			inferJob, demoBuyerUUID, now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := itPool.Exec(ctx,
+			`INSERT INTO tasks (id, job_id, status, input_ref, result_key, chunk_index, visible_at, created_at)
+			 VALUES ($1,$2,'queued','jobs/i/t/in.jsonl','jobs/i/t/out.json',0,$3,$3)`,
+			inferTask, inferJob, now); err != nil {
+			t.Fatal(err)
+		}
+		return embedTask, inferTask
+	}
+	setCache := func(t *testing.T, jobType string, tps float32) {
+		t.Helper()
+		if _, err := itPool.Exec(ctx,
+			`INSERT INTO worker_tps_cache (worker_id, job_type, tps) VALUES ($1,$2,$3)
+			 ON CONFLICT (worker_id, job_type) DO UPDATE SET tps = EXCLUDED.tps`,
+			demoWorkerUUID, jobType, tps); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("embed favored -> embed claimed first", func(t *testing.T) {
+		embedTask, inferTask := seedTwoJobTasks(t)
+		setCache(t, "embed", 150)
+		setCache(t, "batch_infer", 10)
+		c, err := itStore.ClaimTask(ctx, wauth)
+		if err != nil {
+			t.Fatalf("ClaimTask: %v", err)
+		}
+		if c == nil || c.TaskID != embedTask {
+			t.Fatalf("want embed task %s claimed first (worker_tps_cache favors embed), got %v (other task was %s)", embedTask, c, inferTask)
+		}
+	})
+
+	t.Run("batch_infer favored -> batch_infer claimed first", func(t *testing.T) {
+		embedTask, inferTask := seedTwoJobTasks(t)
+		setCache(t, "embed", 10)
+		setCache(t, "batch_infer", 150)
+		c, err := itStore.ClaimTask(ctx, wauth)
+		if err != nil {
+			t.Fatalf("ClaimTask: %v", err)
+		}
+		if c == nil || c.TaskID != inferTask {
+			t.Fatalf("want batch_infer task %s claimed first (worker_tps_cache favors batch_infer), got %v (other task was %s)", inferTask, c, embedTask)
+		}
+	})
 }
 
 func TestClaimHardFilter(t *testing.T) {
@@ -1672,6 +3096,201 @@ func TestClaimHardFilter(t *testing.T) {
 		}
 		itPool.Exec(ctx, `DELETE FROM private_pool_members WHERE buyer_id=$1`, demoBuyerUUID)
 	})
+}
+
+// TestPrivatePoolBuyerFacingFlow proves the real, end-to-end buyer-facing
+// private-pool flow (Buyer advantage & pricing edge 6->7,
+// docs/internal/CREED_AND_PATH_TO_TEN.md: "Productize the privacy premium
+// instead of leaving it a sentence") — add/list/remove via the real HTTP API
+// (not just a database row), a real priced premium + written attestation on the
+// quote, and a submission refused when the buyer's pool is empty.
+func TestPrivatePoolBuyerFacingFlow(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+	itPool.Exec(ctx, `DELETE FROM private_pool_members WHERE buyer_id=$1`, demoBuyerUUID)
+	defer itPool.Exec(ctx, `DELETE FROM private_pool_members WHERE buyer_id=$1`, demoBuyerUUID)
+
+	// 1. Listing an empty pool returns an empty array, not null/404/500.
+	code, out := req(t, "GET", "/v1/private-pool", nil, buyerKey())
+	if code != http.StatusOK {
+		t.Fatalf("list (empty): want 200, got %d: %s", code, out)
+	}
+	var empty []PrivatePoolMember
+	if err := json.Unmarshal(out, &empty); err != nil {
+		t.Fatalf("list (empty) decode: %v (%s)", err, out)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("expected an empty pool, got %d members", len(empty))
+	}
+
+	// 2. A private_pool submission with zero bound suppliers is refused loudly
+	// (400) BEFORE any storage write — the exact gap the rung names: the job used
+	// to be silently accepted and then could never be claimed by anyone.
+	body := map[string]any{
+		"job_type":     map[string]any{"type": "embed"},
+		"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"constraints":  map[string]any{"min_memory_gb": 2},
+		"verification": map[string]any{"skip_verification_floor": true},
+		"tier":         "batch",
+		"input":        `{"id":"a","text":"hello"}` + "\n",
+		"private_pool": true,
+	}
+	code, out = req(t, "POST", "/v1/jobs", body, buyerKey(), jsonCT())
+	if code != http.StatusBadRequest {
+		t.Fatalf("private_pool submit with zero bound suppliers: want 400, got %d: %s", code, out)
+	}
+	if !strings.Contains(string(out), "zero bound suppliers") {
+		t.Fatalf("rejection reason not surfaced honestly: %s", out)
+	}
+
+	// 3. A private-pool QUOTE (still zero members) prices honestly: the premium
+	// is real and nonzero, the attestation is the real written guarantee, and a
+	// warning names the exact zero-member problem the submit above just hit.
+	quoteBody := map[string]any{
+		"job_type":     map[string]any{"type": "embed"},
+		"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"constraints":  map[string]any{"min_memory_gb": 2},
+		"tier":         "batch",
+		"input":        `{"id":"a","text":"hello"}` + "\n",
+		"private_pool": true,
+	}
+	code, out = req(t, "POST", "/v1/quote", quoteBody, buyerKey(), jsonCT())
+	if code != http.StatusOK {
+		t.Fatalf("private-pool quote: want 200, got %d: %s", code, out)
+	}
+	var q Quote
+	if err := json.Unmarshal(out, &q); err != nil {
+		t.Fatalf("quote decode: %v (%s)", err, out)
+	}
+	if !q.Execution.PrivatePool {
+		t.Fatal("quote must echo private_pool=true")
+	}
+	if q.Execution.PrivatePoolMemberCount != 0 {
+		t.Fatalf("expected 0 bound members before binding any, got %d", q.Execution.PrivatePoolMemberCount)
+	}
+	if q.Cost.PrivatePoolPremiumUSD <= 0 {
+		t.Fatalf("expected a real positive private-pool premium, got %v", q.Cost.PrivatePoolPremiumUSD)
+	}
+	if q.PrivatePoolAttestation == "" {
+		t.Fatal("expected a non-empty written attestation on a private-pool quote")
+	}
+	if !strings.Contains(q.PrivatePoolAttestation, "claimable ONLY by") {
+		t.Fatalf("attestation does not state the actual guarantee: %s", q.PrivatePoolAttestation)
+	}
+	foundZeroWarning := false
+	for _, w := range q.Warnings {
+		if strings.Contains(w, "zero bound suppliers") {
+			foundZeroWarning = true
+		}
+	}
+	if !foundZeroWarning {
+		t.Fatalf("expected a warning about zero bound suppliers, got: %v", q.Warnings)
+	}
+
+	// A non-private quote for the identical workload must NOT carry the premium or
+	// the attestation — the premium is opt-in, never charged by default.
+	plainBody := map[string]any{
+		"job_type":    map[string]any{"type": "embed"},
+		"model":       map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"constraints": map[string]any{"min_memory_gb": 2},
+		"tier":        "batch",
+		"input":       `{"id":"a","text":"hello"}` + "\n",
+	}
+	code, out = req(t, "POST", "/v1/quote", plainBody, buyerKey(), jsonCT())
+	if code != http.StatusOK {
+		t.Fatalf("plain quote: want 200, got %d: %s", code, out)
+	}
+	var plainQ Quote
+	if err := json.Unmarshal(out, &plainQ); err != nil {
+		t.Fatalf("plain quote decode: %v (%s)", err, out)
+	}
+	if plainQ.Cost.PrivatePoolPremiumUSD != 0 {
+		t.Fatalf("a non-private quote must carry zero premium, got %v", plainQ.Cost.PrivatePoolPremiumUSD)
+	}
+	if plainQ.PrivatePoolAttestation != "" {
+		t.Fatalf("a non-private quote must carry no attestation, got %q", plainQ.PrivatePoolAttestation)
+	}
+	if plainQ.Cost.ExpectedUSD >= q.Cost.ExpectedUSD {
+		t.Fatalf("private-pool expected cost (%v) must exceed the plain quote's (%v) — the premium must actually be priced in",
+			q.Cost.ExpectedUSD, plainQ.Cost.ExpectedUSD)
+	}
+
+	// 4. Add the demo supplier to the pool via the real API (not a direct DB write).
+	code, out = req(t, "POST", "/v1/private-pool",
+		map[string]any{"supplier_id": demoSupplierUUID.String()}, buyerKey(), jsonCT())
+	if code != http.StatusNoContent {
+		t.Fatalf("add: want 204, got %d: %s", code, out)
+	}
+	// Idempotent: adding the same supplier again is still 204, not a conflict.
+	code, out = req(t, "POST", "/v1/private-pool",
+		map[string]any{"supplier_id": demoSupplierUUID.String()}, buyerKey(), jsonCT())
+	if code != http.StatusNoContent {
+		t.Fatalf("add (idempotent replay): want 204, got %d: %s", code, out)
+	}
+
+	// 5. List now shows exactly the one bound supplier, with real reputation/status.
+	code, out = req(t, "GET", "/v1/private-pool", nil, buyerKey())
+	if code != http.StatusOK {
+		t.Fatalf("list (one member): want 200, got %d: %s", code, out)
+	}
+	var members []PrivatePoolMember
+	if err := json.Unmarshal(out, &members); err != nil {
+		t.Fatalf("list decode: %v (%s)", err, out)
+	}
+	if len(members) != 1 || members[0].SupplierID != demoSupplierUUID {
+		t.Fatalf("expected exactly [%s], got %v", demoSupplierUUID, members)
+	}
+	if members[0].Status != "active" {
+		t.Fatalf("expected the demo supplier's real status 'active', got %q", members[0].Status)
+	}
+
+	// 6. The SAME private-pool quote now reports member_count=1 — routing
+	// transparency tracks the real, current pool size.
+	code, out = req(t, "POST", "/v1/quote", quoteBody, buyerKey(), jsonCT())
+	if code != http.StatusOK {
+		t.Fatalf("private-pool quote (after bind): want 200, got %d: %s", code, out)
+	}
+	var q2 Quote
+	if err := json.Unmarshal(out, &q2); err != nil {
+		t.Fatalf("quote (after bind) decode: %v (%s)", err, out)
+	}
+	if q2.Execution.PrivatePoolMemberCount != 1 {
+		t.Fatalf("expected 1 bound member after binding, got %d", q2.Execution.PrivatePoolMemberCount)
+	}
+
+	// 7. The private_pool submission now SUCCEEDS (a real bound supplier exists).
+	code, out = req(t, "POST", "/v1/jobs", body, buyerKey(), jsonCT())
+	if code != http.StatusAccepted {
+		t.Fatalf("private_pool submit with a bound supplier: want 202, got %d: %s", code, out)
+	}
+
+	// 8. Remove the supplier via the real API; the pool is empty again.
+	code, out = req(t, "DELETE", "/v1/private-pool/"+demoSupplierUUID.String(), nil, buyerKey())
+	if code != http.StatusNoContent {
+		t.Fatalf("remove: want 204, got %d: %s", code, out)
+	}
+	code, out = req(t, "GET", "/v1/private-pool", nil, buyerKey())
+	if code != http.StatusOK {
+		t.Fatalf("list (after remove): want 200, got %d: %s", code, out)
+	}
+	if err := json.Unmarshal(out, &empty); err != nil {
+		t.Fatalf("list (after remove) decode: %v (%s)", err, out)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("expected an empty pool after remove, got %v", empty)
+	}
+	// Idempotent remove: removing an already-absent member is still 204.
+	code, out = req(t, "DELETE", "/v1/private-pool/"+demoSupplierUUID.String(), nil, buyerKey())
+	if code != http.StatusNoContent {
+		t.Fatalf("remove (idempotent replay): want 204, got %d: %s", code, out)
+	}
+
+	// And now that the pool is empty again, the same private_pool submission is
+	// refused again — the guard tracks LIVE membership, not a one-time check.
+	code, out = req(t, "POST", "/v1/jobs", body, buyerKey(), jsonCT())
+	if code != http.StatusBadRequest {
+		t.Fatalf("private_pool submit after removing the only member: want 400, got %d: %s", code, out)
+	}
 }
 
 // TestSchedulerExplain proves GET /admin/scheduler/explain (Plane D §17 D11): for a
@@ -2064,6 +3683,496 @@ func TestTiebreakThreeWay(t *testing.T) {
 	}
 }
 
+// --- 18b. make cheating economically real (Verification & Result Trust
+// 5.5->6): a confirmed tiebreak LOSER does not just get docked reputation —
+// its payout for the losing task itself is clawed back / withheld, checked
+// against real ledger rows, not just the reputation delta. ---
+
+func TestTiebreakLoserPayoutClawedBack(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+	ensureExtraDemoSuppliers(t, ctx)
+
+	// Same 3-worker, 3-supplier fixture as TestTiebreakThreeWay: primary
+	// (demoWorkerUUID/demoSupplierUUID), a redundancy peer on an independent
+	// supplier, and a third, independent tiebreak peer.
+	peerWorker := uuid.New()
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO workers (id, supplier_id, hw_class, memory_gb, bw_gbps, last_seen_at, version,
+		                      supported_jobs, supported_models, min_payout_usd_hr, thermal_ok)
+		 VALUES ($1,$2,'apple_silicon_max',64,400,now(),'seed',
+		         ARRAY['embed'],ARRAY['all-minilm-l6-v2'],0,true)
+		 ON CONFLICT (id) DO UPDATE SET last_seen_at=now(), supported_jobs=ARRAY['embed']`,
+		peerWorker, demoSupplier2UUID); err != nil {
+		t.Fatal(err)
+	}
+	defer itPool.Exec(ctx, `DELETE FROM worker_tokens WHERE worker_id=$1`, peerWorker)
+
+	tiebreakPeerWorker := uuid.New()
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO workers (id, supplier_id, hw_class, memory_gb, bw_gbps, last_seen_at, version,
+		                      supported_jobs, supported_models, min_payout_usd_hr, thermal_ok)
+		 VALUES ($1,$2,'apple_silicon_max',64,400,now(),'seed',
+		         ARRAY['embed'],ARRAY['all-minilm-l6-v2'],0,true)`,
+		tiebreakPeerWorker, demoSupplier3UUID); err != nil {
+		t.Fatal(err)
+	}
+
+	// A real priced job (estimated_usd=1.00 over 2 tasks ⇒ $0.50/task at commit
+	// time; a 3rd task gets added by InsertTiebreakTask below, but each task's
+	// payout is priced off the ORIGINAL task_count captured before that insert,
+	// matching how scheduleTaskPayout reads job state at the moment it is called
+	// for each already-committed task).
+	jobID := uuid.New()
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO jobs (id, buyer_id, status, job_type, model_ref, input_ref, tier, task_count, tasks_done, min_memory_gb, estimated_usd)
+		 VALUES ($1,$2,'running','embed','all-minilm-l6-v2','jobs/tc/input.jsonl','batch',2,2,2,1.00)`,
+		jobID, demoBuyerUUID); err != nil {
+		t.Fatal(err)
+	}
+
+	primary, redun := uuid.New(), uuid.New()
+	aKey := "jobs/tc/tasks/0/result.json"
+	bKey := "jobs/tc/redundancy/0/result.json"
+	winningBytes := embedResultJSON(1)             // e0 — what primary AND the tiebreak peer will agree on
+	losingBytes := []byte(`{"vectors":[[0,1,0]]}`) // e1 ≠ e0 — the redundancy worker's bad result
+	itStorage.PutObject(ctx, aKey, winningBytes, "application/json")
+	itStorage.PutObject(ctx, bKey, losingBytes, "application/json")
+	for _, r := range []struct {
+		id     uuid.UUID
+		worker uuid.UUID
+		redun  bool
+		key    string
+	}{{primary, demoWorkerUUID, false, aKey}, {redun, peerWorker, true, bKey}} {
+		if _, err := itPool.Exec(ctx,
+			`INSERT INTO tasks (id, job_id, status, is_redundancy, input_ref, result_key, result_ref, chunk_index, worker_id, claimed_by, completed_at)
+			 VALUES ($1,$2,'complete',$3,'jobs/tc/tasks/0/input.jsonl',$4,$4,0,$5,$5, now())`,
+			r.id, jobID, r.redun, r.key, r.worker); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Mirror production exactly: both the primary's and the redundancy worker's
+	// OWN commits already scheduled a real, held supplier_credit ledger row
+	// before the tiebreak resolves (a 2-way disagreement with no third opinion
+	// yet is pass_with_penalty, which IS paid — only a CONFIRMED tiebreak loss
+	// withholds payout). Use the real handler method, not a hand-rolled insert.
+	if err := itServer.scheduleTaskPayout(ctx, &CommitTaskInfo{JobID: jobID, TaskID: primary, SupplierID: demoSupplierUUID}); err != nil {
+		t.Fatalf("scheduleTaskPayout(primary): %v", err)
+	}
+	if err := itServer.scheduleTaskPayout(ctx, &CommitTaskInfo{JobID: jobID, TaskID: redun, SupplierID: demoSupplier2UUID}); err != nil {
+		t.Fatalf("scheduleTaskPayout(redundancy): %v", err)
+	}
+	creditedBefore := ledgerSupplierCredit(t, redun)
+	if creditedBefore <= 0 {
+		t.Fatalf("redundancy task must have a real positive held credit before the tiebreak resolves, got %v", creditedBefore)
+	}
+
+	// A pinned tiebreak task for a THIRD, independent worker — exactly what
+	// dispatchTiebreak creates — now committed with a result agreeing with the
+	// PRIMARY (so the primary+tiebreak side is the majority and the redundancy
+	// worker is the confirmed loser).
+	tbID, err := itStore.InsertTiebreakTask(ctx, jobID, primary, tiebreakPeerWorker, "jobs/tc/tasks/0/input.jsonl", 0)
+	if err != nil {
+		t.Fatalf("InsertTiebreakTask: %v", err)
+	}
+	tbKey := fmt.Sprintf("jobs/%s/tiebreak/%s/result.json", jobID, tbID)
+	itStorage.PutObject(ctx, tbKey, winningBytes, "application/json")
+	if _, err := itPool.Exec(ctx,
+		`UPDATE tasks SET status='complete', worker_id=$2, result_ref=$3, completed_at=now() WHERE id=$1`,
+		tbID, tiebreakPeerWorker, tbKey); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run the REAL verifier (with storage, so the true N-way gatherChunkResults
+	// path executes) for the tiebreak worker's own commit — mirroring exactly
+	// what handleWorkerCommit does when the third opinion lands.
+	v := NewVerifier(itStore).WithStorage(itStorage)
+	info := &CommitTaskInfo{TaskID: tbID, JobID: jobID, WorkerID: tiebreakPeerWorker,
+		SupplierID: demoSupplier3UUID, IsRedundancy: true, jobType: "embed",
+		ModelRef: "all-minilm-l6-v2", MinMemoryGB: 2, ChunkIndex: 0,
+		InputRef: "jobs/tc/tasks/0/input.jsonl"}
+	out, verr := v.verifyTaskResult(ctx, info, TaskCommit{TaskID: tbID}, winningBytes, losingBytes)
+	if verr != nil {
+		t.Fatalf("verifyTaskResult: %v", verr)
+	}
+	if out != OutcomePassWithPenalty {
+		// The tiebreak worker itself is on the WINNING side of the 3-way vote —
+		// its own commit is still paid — but the vote as a whole DID detect a
+		// real mismatch (the redundancy worker's task), so the outcome for THIS
+		// commit is pass_with_penalty (the caller still schedules its payout;
+		// only OutcomeFail/OutcomeLossNoPayout ever suppress payout).
+		t.Fatalf("tiebreak worker on the winning side should be pass_with_penalty (paid, mismatch detected elsewhere), got %v", out)
+	}
+	// Winning side's own commit gets its payout scheduled exactly like any
+	// other clean pass (handleWorkerCommit does this outside the verifier).
+	if err := itServer.scheduleTaskPayout(ctx, info); err != nil {
+		t.Fatalf("scheduleTaskPayout(tiebreak winner): %v", err)
+	}
+
+	// THE PROOF: the redundancy worker's LOSING task must have its credit
+	// clawed back — checked against real ledger rows, not the reputation delta.
+	creditedAfter := ledgerSupplierCredit(t, redun)
+	if creditedAfter != 0 {
+		t.Fatalf("tiebreak loser's task credit must net to zero after clawback, got %v (was %v before)", creditedAfter, creditedBefore)
+	}
+	var clawbackRows int
+	var clawbackAmt float64
+	if err := itPool.QueryRow(ctx,
+		`SELECT count(*), COALESCE(SUM(amount_usd),0) FROM ledger_entries
+		 WHERE task_id=$1 AND kind='clawback' AND payout_status='clawed_back'`, redun).
+		Scan(&clawbackRows, &clawbackAmt); err != nil {
+		t.Fatal(err)
+	}
+	if clawbackRows != 1 {
+		t.Fatalf("expected exactly one clawback ledger row for the loser's task, got %d", clawbackRows)
+	}
+	if clawbackAmt >= 0 {
+		t.Fatalf("clawback amount must be negative (a reversal), got %v", clawbackAmt)
+	}
+	if clawbackAmt != -creditedBefore {
+		t.Fatalf("clawback must exactly reverse the original credit: credit=%v clawback=%v", creditedBefore, clawbackAmt)
+	}
+	// TaskHasClawback (the real signal the dispute resolver and fraud report
+	// already key off) must now report true for the loser's task.
+	clawed, cerr := itStore.TaskHasClawback(ctx, redun)
+	if cerr != nil {
+		t.Fatal(cerr)
+	}
+	if !clawed {
+		t.Fatal("TaskHasClawback must report true for the tiebreak loser's task")
+	}
+
+	// The WINNING side must be unaffected: both the primary's original credit
+	// and the tiebreak worker's own new credit stand, untouched, still held.
+	if got := ledgerSupplierCredit(t, primary); got <= 0 {
+		t.Fatalf("primary (winning) task credit must remain intact, got %v", got)
+	}
+	if got := ledgerSupplierCredit(t, tbID); got <= 0 {
+		t.Fatalf("tiebreak worker's own (winning) task credit must be paid, got %v", got)
+	}
+}
+
+// restoreDemoWorkerEmbedCapability restores the demo worker's full seed job set
+// (embed + the batch types) and clears any single-job-type override a prior test
+// (e.g. latency_moat_test.go's insertStragglerFixture) left behind. reset() does
+// NOT touch supported_jobs, so an embed test that runs after such a test would
+// otherwise find the demo worker unable to claim embed work and poll 204. Making
+// each embed-dependent honeypot test call this keeps it order-independent.
+func restoreDemoWorkerEmbedCapability(t *testing.T, ctx context.Context) {
+	t.Helper()
+	if _, err := itPool.Exec(ctx,
+		`UPDATE workers
+		    SET supported_jobs = ARRAY['embed','batch_infer','batch_classification','json_extraction','rerank'],
+		        supported_models = ARRAY['all-minilm-l6-v2','llama-3.2-1b-instruct-q4'],
+		        last_seen_at = now()
+		  WHERE id = $1`, demoWorkerUUID); err != nil {
+		t.Fatalf("restoreDemoWorkerEmbedCapability: %v", err)
+	}
+}
+
+// --- 18c. make cheating economically real (Verification & Result Trust
+// 5.5->6), the honeypot half: a worker that FAILS a known-answer honeypot does
+// not just get docked reputation and quarantined — it must never be paid for
+// the failed task, proven end to end through the REAL HTTP dispatch/commit
+// path (not a direct verifier call) and checked against real ledger rows. ---
+
+// TestHoneypotFailNoPayout submits a real job through POST /v1/jobs with
+// honeypot_frac=1.0 (guaranteeing the job's single task is the seeded demo
+// honeypot), polls it exactly like a real worker, commits a WRONG answer, and
+// then proves two things against real ledger rows: (1) the worker's own
+// handleWorkerCommit flow never calls scheduleTaskPayout for the failed
+// honeypot task (verifyTaskResult runs strictly before scheduleTaskPayout in
+// api.go, and OutcomeFail is one of the two outcomes — the other being
+// OutcomeLossNoPayout — that the caller's `outcome != OutcomeFail` gate
+// excludes from ever reaching scheduleTaskPayout), so its net ledger balance
+// is exactly zero, never a positive credit; and (2) if a credit had ALREADY
+// been written for that task before the honeypot fail resolved (the
+// defensive case ClawbackTaskCredit exists for — a delayed/retried
+// verification, or any future path that schedules credit before verifying),
+// the clawback reverses it to net zero too, exactly like the tiebreak-loser
+// proof above.
+func TestHoneypotFailNoPayout(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+	restoreDemoWorkerEmbedCapability(t, ctx) // order-independent: reset() does not restore supported_jobs
+
+	// A single-line job with honeypot_frac=1.0: fracCount(1, 1.0) = 1, so ONE
+	// honeypot task (AvailableHoneypots pulls the seeded demoHoneypotEmbedRef,
+	// known answer demoHoneypotEmbedKnownAnswer — a real measured embedding, not
+	// a placeholder) is appended alongside the one real primary/deliverable task
+	// — the honeypot is an EXTRA probe task, not a replacement for the primary
+	// (mirrors submitJob's task-building order).
+	jobID, taskCount := submitEmbedJob(t, 1, 0 /*redFrac*/, 1.0 /*honeyFrac*/, 0)
+	if taskCount != 2 {
+		t.Fatalf("expected 2 tasks (1 primary + 1 honeypot), got %d", taskCount)
+	}
+	var taskID uuid.UUID
+	if err := itPool.QueryRow(ctx,
+		`SELECT id FROM tasks WHERE job_id=$1 AND is_honeypot=true`, jobID).Scan(&taskID); err != nil {
+		t.Fatalf("expected exactly one honeypot task: %v", err)
+	}
+
+	// Real worker loop: this single demo worker polls and commits BOTH dispatched
+	// tasks (the primary and the honeypot, order unspecified) so the job's
+	// lifecycle proceeds exactly like a real single-agent run — but it only
+	// reports the WRONG answer ([0,1,0]) on the honeypot dispatch (identified
+	// here, as a real honeypot-blind worker cannot, purely for staging the
+	// fixture's known-bad input); every other dispatch gets a correct result.
+	var honeypotDispatched bool
+	for i := 0; i < 2; i++ {
+		code, body := req(t, "GET", "/v1/worker/poll", nil, workerTok())
+		if code != 200 {
+			t.Fatalf("poll %d: want 200, got %d: %s", i, code, body)
+		}
+		var disp TaskDispatch
+		if err := json.Unmarshal(body, &disp); err != nil {
+			t.Fatalf("dispatch decode: %v", err)
+		}
+		// NEITHER the result key NOR the input URL may carry a "honeypots/"
+		// substring — a real worker must not be able to identify a trap from
+		// either its own upload target OR its own download URL. The result-PUT
+		// half was closed earlier (opaque per-task result_key); the input-GET
+		// half is closed by Verification & Result Trust 5->5.5 (this bundle):
+		// createJob now copies the seed honeypot's input to an opaque per-task
+		// key "jobs/{job}/tasks/{taskID}/input.jsonl" — byte-for-byte the shape
+		// of a primary chunk — before presigning, so the input URL no longer
+		// leaks the seed's "honeypots/..." address. See TestHoneypotInputURLOpaque
+		// for the dedicated adversarial proof.
+		if strings.Contains(disp.ResultKey, "honeypots/") {
+			t.Fatalf("honeypot identity leaked through the result key: %s", disp.ResultKey)
+		}
+		if strings.Contains(disp.InputURL, "honeypots/") {
+			t.Fatalf("honeypot identity leaked through the input URL: %s", disp.InputURL)
+		}
+		result := embedResultJSON(1)
+		if disp.TaskID == taskID {
+			honeypotDispatched = true
+			result = []byte(`{"vectors":[[0,1,0]]}`) // wrong answer for the honeypot
+		}
+		if err := itStorage.PutObject(ctx, disp.ResultKey, result, "application/json"); err != nil {
+			t.Fatalf("put result: %v", err)
+		}
+		commit := TaskCommit{TaskID: disp.TaskID, ResultKey: disp.ResultKey, DurationMS: 10, TokensUsed: 8}
+		if code, b := req(t, "POST", "/v1/worker/task/"+disp.TaskID.String()+"/commit", commit, workerTok(), jsonCT()); code != 204 {
+			t.Fatalf("commit %d: want 204, got %d: %s", i, code, b)
+		}
+	}
+	if !honeypotDispatched {
+		t.Fatal("the honeypot task was never dispatched to the worker across both polls")
+	}
+
+	// THE PROOF (case 1 — the real path): the failed honeypot task's net ledger
+	// balance is exactly zero. handleWorkerCommit never scheduled a payout for it
+	// at all (OutcomeFail short-circuits before scheduleTaskPayout is ever
+	// called), so there is no positive credit sitting in the ledger for a worker
+	// that failed a known-answer probe.
+	if got := ledgerSupplierCredit(t, taskID); got != 0 {
+		t.Fatalf("a failed honeypot task must never carry a positive net ledger credit, got %v", got)
+	}
+	var creditRows int
+	if err := itPool.QueryRow(ctx,
+		`SELECT count(*) FROM ledger_entries WHERE task_id=$1 AND kind='supplier_credit'`, taskID).
+		Scan(&creditRows); err != nil {
+		t.Fatal(err)
+	}
+	if creditRows != 0 {
+		t.Fatalf("a failed honeypot task must have zero supplier_credit ledger rows, got %d", creditRows)
+	}
+
+	// Auto-quarantine must also have fired (the existing 5->5.5-adjacent
+	// guarantee) — confirms this really did take the honeypot-fail branch, not
+	// some other outcome that happens to also leave the ledger empty.
+	var status string
+	if err := itPool.QueryRow(ctx, `SELECT status FROM suppliers WHERE id=$1`, demoSupplierUUID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "suspended" {
+		t.Fatalf("a failed honeypot must auto-quarantine the supplier, got status %q", status)
+	}
+
+	// THE PROOF (case 2 — defensive clawback): even if a credit HAD already been
+	// scheduled for this exact task before the honeypot fail resolved (mirroring
+	// how the tiebreak-loser proof exercises ClawbackTaskCredit directly), the
+	// clawback path reverses it to net zero, exactly like the tiebreak case.
+	// This exercises ClawbackTaskCredit's real no-prior-credit-is-a-no-op branch
+	// AND its real reversal branch against the same failed task.
+	if err := itServer.scheduleTaskPayout(ctx, &CommitTaskInfo{JobID: jobID, TaskID: taskID, SupplierID: demoSupplierUUID}); err != nil {
+		t.Fatalf("scheduleTaskPayout (simulating a pre-existing credit): %v", err)
+	}
+	creditedBefore := ledgerSupplierCredit(t, taskID)
+	if creditedBefore <= 0 {
+		t.Fatalf("expected a real positive credit to simulate the defensive case, got %v", creditedBefore)
+	}
+	if err := itStore.ClawbackTaskCredit(ctx, demoSupplierUUID, taskID); err != nil {
+		t.Fatalf("ClawbackTaskCredit: %v", err)
+	}
+	if got := ledgerSupplierCredit(t, taskID); got != 0 {
+		t.Fatalf("clawback must reverse a pre-existing credit on a failed honeypot task to net zero, got %v (was %v)", got, creditedBefore)
+	}
+	clawed, cerr := itStore.TaskHasClawback(ctx, taskID)
+	if cerr != nil {
+		t.Fatal(cerr)
+	}
+	if !clawed {
+		t.Fatal("TaskHasClawback must report true after the honeypot-fail task's credit is clawed back")
+	}
+}
+
+// --- 18d. the honeypot input-GET leak, closed (Verification & Result Trust
+// 5->5.5, docs/internal/CREED_AND_PATH_TO_TEN.md). The adversarial proof
+// artifact the rung demands: a worker inspecting its OWN presigned input URL for
+// a honeypot task finds no "honeypots/" substring — the trap is byte-for-byte
+// indistinguishable from a normal chunk on BOTH the GET (input) and PUT (result)
+// wire, and the honeypot STILL verifies correctly (correct answer passes, wrong
+// answer is caught + quarantines) so the fix closed the leak without disarming
+// the trap. ---
+
+// TestHoneypotInputURLOpaque submits a real embed job with honeypot_frac=1.0
+// (one primary + one seeded honeypot), then plays an ADVERSARIAL worker: it
+// polls every dispatched task and inspects the presigned input_url + result_key
+// exactly as a supplier willing to read its own URLs would. The core assertion:
+// NO dispatched URL — for the honeypot or the primary — contains the literal
+// "honeypots/" (or "redundancy/") substring, so the adversary has nothing to key
+// off of to tell a trap from real work. It then proves the trap is still live:
+// the honeypot's opaque input still serves the real probe bytes, a CORRECT answer
+// passes and pays, and (separately) a WRONG answer would be caught (covered by
+// TestHoneypotFailNoPayout). This is the exact proof the rung's "an adversarial
+// test worker that inspects its own presigned URLs finds nothing to key off of"
+// artifact calls for.
+func TestHoneypotInputURLOpaque(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+	// reset() does not restore workers.supported_jobs, and other tests
+	// (latency_moat_test.go's insertStragglerFixture) overwrite it to a single job
+	// type — so restore the demo worker's full embed-capable job set explicitly,
+	// making this test order-independent rather than relying on suite ordering.
+	restoreDemoWorkerEmbedCapability(t, ctx)
+
+	// One primary + one honeypot (honeypot_frac=1.0, one input line).
+	jobID, taskCount := submitEmbedJob(t, 1, 0 /*redFrac*/, 1.0 /*honeyFrac*/, 0)
+	if taskCount != 2 {
+		t.Fatalf("expected 2 tasks (1 primary + 1 honeypot), got %d", taskCount)
+	}
+
+	// Identify the honeypot task server-side (a real worker cannot; we only do it
+	// to assert the honeypot's own URL is opaque and that it verifies).
+	var honeypotTaskID uuid.UUID
+	if err := itPool.QueryRow(ctx,
+		`SELECT id FROM tasks WHERE job_id=$1 AND is_honeypot=true`, jobID).Scan(&honeypotTaskID); err != nil {
+		t.Fatalf("expected exactly one honeypot task: %v", err)
+	}
+
+	// The honeypot task's stored input_ref must be a per-task OPAQUE key, NOT the
+	// seed honeypot's "honeypots/..." address — the DB-level half of the fix.
+	var honeypotInputRef string
+	if err := itPool.QueryRow(ctx,
+		`SELECT COALESCE(input_ref,'') FROM tasks WHERE id=$1`, honeypotTaskID).Scan(&honeypotInputRef); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(honeypotInputRef, "honeypots/") {
+		t.Fatalf("honeypot task's stored input_ref still leaks the seed address: %s", honeypotInputRef)
+	}
+	if !strings.HasPrefix(honeypotInputRef, "jobs/"+jobID.String()+"/tasks/") {
+		t.Fatalf("honeypot task's input_ref must be a per-task opaque key, got: %s", honeypotInputRef)
+	}
+
+	// The opaque object must actually EXIST and serve the probe bytes (the copy
+	// step ran) — otherwise a real worker's GET would 404 and retry forever, the
+	// exact failure mode the seed-upload fix already closed for the seed key.
+	if _, err := itStorage.GetObject(ctx, honeypotInputRef); err != nil {
+		t.Fatalf("opaque honeypot input object must exist and serve bytes: %v", err)
+	}
+
+	// Play the adversarial worker across BOTH dispatches. For every task the
+	// worker receives, its presigned input URL and its result key must be free of
+	// any trap-revealing substring. We commit the CORRECT embed answer to every
+	// task (including the honeypot, whose known answer is the real measured
+	// embedding) so the honeypot PASSES — proving the opaque input still carries a
+	// genuinely verifiable probe.
+	var sawHoneypotDispatch bool
+	for i := 0; i < 2; i++ {
+		code, body := req(t, "GET", "/v1/worker/poll", nil, workerTok())
+		if code != 200 {
+			t.Fatalf("poll %d: want 200, got %d: %s", i, code, body)
+		}
+		var disp TaskDispatch
+		if err := json.Unmarshal(body, &disp); err != nil {
+			t.Fatalf("dispatch decode: %v", err)
+		}
+		// THE ADVERSARIAL ASSERTION: nothing a worker can see distinguishes a
+		// honeypot from a normal chunk — not the input download URL, not the
+		// result upload key. A determined supplier reading its own URLs finds no
+		// "honeypots/" (nor "redundancy/") anywhere.
+		for _, revealing := range []string{"honeypots/", "redundancy/", "honeypot"} {
+			if strings.Contains(disp.InputURL, revealing) {
+				t.Fatalf("task %s input URL leaks %q: %s", disp.TaskID, revealing, disp.InputURL)
+			}
+			if strings.Contains(disp.ResultKey, revealing) {
+				t.Fatalf("task %s result key leaks %q: %s", disp.TaskID, revealing, disp.ResultKey)
+			}
+		}
+		// The presigned input URL must actually serve its chunk (opaque, but real).
+		if r, err := http.Get(disp.InputURL); err != nil || r.StatusCode != 200 {
+			t.Fatalf("fetch presigned input for task %s: err=%v status=%v", disp.TaskID, err, r)
+		} else {
+			r.Body.Close()
+		}
+		if disp.TaskID == honeypotTaskID {
+			sawHoneypotDispatch = true
+		}
+		// Commit the CORRECT answer for every task — the honeypot's known answer is
+		// the real measured MiniLM embedding, so committing it back makes the
+		// honeypot PASS (a live proof the opaque input did not disarm the trap).
+		if err := itStorage.PutObject(ctx, disp.ResultKey, []byte(demoHoneypotEmbedKnownAnswer), "application/json"); err != nil {
+			t.Fatalf("put result: %v", err)
+		}
+		commit := TaskCommit{TaskID: disp.TaskID, ResultKey: disp.ResultKey, DurationMS: 10, TokensUsed: 8}
+		if code, b := req(t, "POST", "/v1/worker/task/"+disp.TaskID.String()+"/commit", commit, workerTok(), jsonCT()); code != 204 {
+			t.Fatalf("commit %d: want 204, got %d: %s", i, code, b)
+		}
+	}
+	if !sawHoneypotDispatch {
+		t.Fatal("the honeypot task was never dispatched across both polls")
+	}
+
+	// The honeypot PASSED (correct answer): a honeypot_pass verification event was
+	// recorded and the supplier is NOT quarantined — proving the trap is still
+	// armed and firing on the opaque input, not silently skipped.
+	var passEvents int
+	if err := itPool.QueryRow(ctx,
+		`SELECT count(*) FROM verification_events WHERE task_id=$1 AND kind='honeypot_pass'`,
+		honeypotTaskID).Scan(&passEvents); err != nil {
+		t.Fatal(err)
+	}
+	if passEvents == 0 {
+		t.Fatal("a correct answer on the opaque-keyed honeypot must record a honeypot_pass event; the trap was disarmed by the input-key change")
+	}
+	var status string
+	if err := itPool.QueryRow(ctx, `SELECT status FROM suppliers WHERE id=$1`, demoSupplierUUID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "active" {
+		t.Fatalf("a PASSED honeypot must leave the supplier active, got %q", status)
+	}
+}
+
+// ledgerSupplierCredit returns the NET supplier_credit ledger balance for one
+// task: positive credits minus any clawback, mirroring exactly how a real
+// payout worker or an admin fraud report would read "does this task's
+// supplier actually still get paid for it".
+func ledgerSupplierCredit(t *testing.T, taskID uuid.UUID) float64 {
+	t.Helper()
+	var net float64
+	if err := itPool.QueryRow(context.Background(),
+		`SELECT COALESCE(SUM(amount_usd),0) FROM ledger_entries
+		 WHERE task_id=$1 AND kind IN ('supplier_credit','clawback')`, taskID).
+		Scan(&net); err != nil {
+		t.Fatal(err)
+	}
+	return net
+}
+
 // --- 19. straggler hedging: a long-running primary gets one hedge to a peer,
 // and the winner's commit cancels the loser (first commit wins) ---
 
@@ -2128,6 +4237,109 @@ func TestStragglerHedge(t *testing.T) {
 	itPool.QueryRow(ctx, `SELECT status FROM tasks WHERE id=$1`, hedgeID).Scan(&hedgeStatus)
 	if hedgeStatus != "failed" {
 		t.Fatalf("losing hedge should be cancelled (failed), got %q", hedgeStatus)
+	}
+}
+
+// TestThrottledWorkerHedgesBeforeElapsedWindow proves the "detect throttling
+// live, not just in benchmarks" rung (docs/internal/CREED_AND_PATH_TO_TEN.md,
+// "Thermal sustained-vs-peak throughput on fanless Apple Silicon" 7→8): a task
+// whose claiming worker's OWN most recent heartbeat reports throttled=true gets
+// hedged after the short hedgeThrottledAfter floor (15s) — well before the
+// normal elapsed-time hedgeAfter window (90s) would fire, and light-years before
+// the 30-minute stale-worker watchdog (staleTaskTimeout) would ever catch it.
+// A second, otherwise-identical task on a NON-throttled worker, started at the
+// exact same time, must NOT be hedged yet — proving the throttled signal is
+// what triggered the early hedge, not merely "some tasks get hedged sometimes".
+func TestThrottledWorkerHedgesBeforeElapsedWindow(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+	ensureExtraDemoSuppliers(t, ctx)
+
+	// A distinct same-class peer on an INDEPENDENT supplier to receive the hedge(s).
+	peer := uuid.New()
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO workers (id, supplier_id, hw_class, memory_gb, bw_gbps, last_seen_at, version,
+		                      supported_jobs, supported_models, min_payout_usd_hr, thermal_ok)
+		 VALUES ($1,$2,'apple_silicon_max',64,400,now(),'seed',ARRAY['embed'],ARRAY['all-minilm-l6-v2'],0,true)
+		 ON CONFLICT (id) DO UPDATE SET last_seen_at=now()`, peer, demoSupplier2UUID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two distinct worker rows on the demo supplier — one currently throttled,
+	// one not — so a throttled vs. non-throttled claimant can be compared under
+	// otherwise-identical conditions (same hw_class, same age, same job type).
+	throttledWorker, healthyWorker := uuid.New(), uuid.New()
+	for _, w := range []uuid.UUID{throttledWorker, healthyWorker} {
+		if _, err := itPool.Exec(ctx,
+			`INSERT INTO workers (id, supplier_id, hw_class, memory_gb, bw_gbps, last_seen_at, version,
+			                      supported_jobs, supported_models, min_payout_usd_hr, thermal_ok, throttled)
+			 VALUES ($1,$2,'apple_silicon_max',64,400,now(),'seed',ARRAY['embed'],ARRAY['all-minilm-l6-v2'],0,true,false)
+			 ON CONFLICT (id) DO UPDATE SET last_seen_at=now()`, w, demoSupplierUUID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Mark ONLY throttledWorker's live heartbeat state as throttled=true — the
+	// exact real signal main.rs's heartbeat sends when either memory pressure OR
+	// runners.rs's LiveThroughputMonitor detects a real sustained tok/s drop.
+	if _, err := itPool.Exec(ctx, `UPDATE workers SET throttled=true WHERE id=$1`, throttledWorker); err != nil {
+		t.Fatal(err)
+	}
+
+	mkRunningTask := func(prefix string, worker uuid.UUID) (jobID, taskID uuid.UUID) {
+		jobID, taskID = uuid.New(), uuid.New()
+		if _, err := itPool.Exec(ctx,
+			`INSERT INTO jobs (id, buyer_id, status, job_type, model_ref, input_ref, tier, task_count, tasks_done, min_memory_gb)
+			 VALUES ($1,$2,'running','embed','all-minilm-l6-v2',$3,'batch',1,0,2)`,
+			jobID, demoBuyerUUID, "jobs/"+prefix+"/input.jsonl"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := itPool.Exec(ctx,
+			`INSERT INTO tasks (id, job_id, status, input_ref, result_key, chunk_index, worker_id, claimed_by, claimed_at, started_at)
+			 VALUES ($1,$2,'running',$3,$4,0,$5,$5, now()-interval '20 seconds', now()-interval '20 seconds')`,
+			taskID, jobID, "jobs/"+prefix+"/tasks/0/input.jsonl", "jobs/"+prefix+"/tasks/0/result.json", worker); err != nil {
+			t.Fatal(err)
+		}
+		return jobID, taskID
+	}
+
+	// Both tasks started 20s ago: well past hedgeThrottledAfter (15s), but far
+	// short of hedgeAfter (90s) — the window this test exists to distinguish.
+	throttledJob, throttledTask := mkRunningTask("tw-throttled", throttledWorker)
+	healthyJob, healthyTask := mkRunningTask("tw-healthy", healthyWorker)
+
+	wk := NewWorkers(itStore, itStorage, stubPayout{})
+	if err := wk.hedgeStragglers(ctx); err != nil {
+		t.Fatalf("hedgeStragglers: %v", err)
+	}
+
+	// The THROTTLED worker's task must already have a real hedge, pinned to the
+	// distinct peer — hedged purely because its own worker reported
+	// throttled=true, not because of elapsed time (20s << hedgeAfter's 90s).
+	var hedgeID, hedgeClaimed uuid.UUID
+	if err := itPool.QueryRow(ctx,
+		`SELECT id, COALESCE(claimed_by,'00000000-0000-0000-0000-000000000000') FROM tasks
+		 WHERE job_id=$1 AND hedged_from=$2 AND is_redundancy=false`, throttledJob, throttledTask).
+		Scan(&hedgeID, &hedgeClaimed); err != nil {
+		t.Fatalf("throttled worker's straggler must be hedged well before hedgeAfter: %v", err)
+	}
+	if hedgeClaimed != peer {
+		t.Fatalf("hedge must be pinned to the distinct peer, got %s", hedgeClaimed)
+	}
+
+	// The HEALTHY (non-throttled) worker's otherwise-identical task must NOT be
+	// hedged yet — proving the throttled signal, not mere elapsed time, is what
+	// triggered the early hedge above.
+	var nHealthyHedges int
+	itPool.QueryRow(ctx, `SELECT count(*) FROM tasks WHERE job_id=$1 AND hedged_from=$2`, healthyJob, healthyTask).Scan(&nHealthyHedges)
+	if nHealthyHedges != 0 {
+		t.Fatalf("a non-throttled worker's 20s-old task must not be hedged before hedgeAfter (90s); got %d hedges", nHealthyHedges)
+	}
+
+	// The real cx_throttled_hedges_total Prometheus counter actually advanced —
+	// not just a DB row, the operator-visible signal named in the metric's own
+	// purpose (distinct from the pre-existing elapsed-time cx_hedges_total).
+	if got := metrics.throttledHedges.Load(); got < 1 {
+		t.Fatalf("cx_throttled_hedges_total must advance on a throttled-worker hedge, got %d", got)
 	}
 }
 
@@ -2526,6 +4738,28 @@ func TestPollNoWaitUnchanged(t *testing.T) {
 // driveOneTask claims the next queued task, PUTs an embed result, and commits it — the
 // minimal worker loop for a single-task job (committing the final task finalizes the job
 // synchronously, which is what fires advancePipeline).
+//
+// It is honeypot-aware: is_honeypot is never signalled to the worker over the wire (see
+// handleWorkerPoll), so a real worker distinguishes a honeypot only by recognizing its
+// input. Here, the presigned input_url embeds the object key (MinIO path-style URLs), so
+// a dispatch for the seeded demo honeypot (control/seed.go's demoHoneypotEmbedRef) is
+// identifiable — and must be answered with the honeypot's actual known answer, or
+// verifyTaskResult correctly treats the generic canned result as wrong and requeues it.
+// taskIsHoneypot reports the server-side is_honeypot truth for a dispatched task.
+// A SERVER-SIDE test harness legitimately reads this from the DB to commit the
+// right known answer; it is NOT a signal a real worker can see (the honeypot
+// input-GET leak fix, Verification & Result Trust 5->5.5, closed the input_url
+// substring that used to leak it on the wire).
+func taskIsHoneypot(t *testing.T, ctx context.Context, taskID uuid.UUID) bool {
+	t.Helper()
+	var isHoneypot bool
+	if err := itPool.QueryRow(ctx,
+		`SELECT COALESCE(is_honeypot,false) FROM tasks WHERE id=$1`, taskID).Scan(&isHoneypot); err != nil {
+		t.Fatalf("taskIsHoneypot(%s): %v", taskID, err)
+	}
+	return isHoneypot
+}
+
 func driveOneTask(t *testing.T, ctx context.Context) {
 	t.Helper()
 	code, body := req(t, "GET", "/v1/worker/poll", nil, workerTok())
@@ -2536,7 +4770,18 @@ func driveOneTask(t *testing.T, ctx context.Context) {
 	if err := json.Unmarshal(body, &disp); err != nil {
 		t.Fatalf("dispatch decode: %v", err)
 	}
-	if err := itStorage.PutObject(ctx, disp.ResultKey, embedResultJSON(1), "application/json"); err != nil {
+	// Commit the honeypot's KNOWN answer when this dispatch is the honeypot, so it
+	// PASSES. The honeypot input-GET leak fix (Verification & Result Trust 5->5.5)
+	// deliberately makes the presigned input_url opaque — a real worker can no
+	// longer tell a trap from the URL — so this harness identifies the honeypot the
+	// only legitimate way a SERVER-SIDE test harness can: the is_honeypot flag in
+	// the DB, keyed by the dispatched task id (a channel a real worker never has,
+	// unlike the old input_url substring check the fix intentionally closed).
+	result := embedResultJSON(1)
+	if taskIsHoneypot(t, ctx, disp.TaskID) {
+		result = []byte(demoHoneypotEmbedKnownAnswer)
+	}
+	if err := itStorage.PutObject(ctx, disp.ResultKey, result, "application/json"); err != nil {
 		t.Fatalf("put result: %v", err)
 	}
 	commit := TaskCommit{TaskID: disp.TaskID, ResultKey: disp.ResultKey, DurationMS: 10, TokensUsed: 8}
@@ -2580,6 +4825,13 @@ func TestPipelineChaining(t *testing.T) {
 	}
 
 	// 2. Drive stage 0's job to completion → the completion hook chains stage 1.
+	// Pipeline-launched jobs get no explicit verification policy, so the
+	// server-side verification floor (Verification & Result Trust 6->7,
+	// docs/internal/CREED_AND_PATH_TO_TEN.md) injects one real honeypot task
+	// alongside the single primary task — a pipeline-orchestrated job is still
+	// real buyer spend and gets the same anti-fraud floor as a direct
+	// submission. Drive both to reach 'complete'.
+	driveOneTask(t, ctx)
 	driveOneTask(t, ctx)
 
 	// 3. Stage 0 must be complete and stage 1 must now be chained (have a job).
@@ -2604,7 +4856,9 @@ func TestPipelineChaining(t *testing.T) {
 		t.Fatalf("pipeline overall: want running (stage 1 not done), got %q", pv.Status)
 	}
 
-	// 4. Drive stage 1 to completion → the whole pipeline is complete.
+	// 4. Drive stage 1 to completion → the whole pipeline is complete. Same
+	// verification-floor honeypot as stage 0 (see above) — drive both tasks.
+	driveOneTask(t, ctx)
 	driveOneTask(t, ctx)
 	code, out = req(t, "GET", "/v1/pipelines/"+cr.PipelineID, nil, buyerKey())
 	if code != 200 {
@@ -3910,5 +6164,890 @@ func TestAdminSummary(t *testing.T) {
 	near(held.USD, 0.90, "payouts_by_status[held].usd")
 	if sum.Workers.Total < 1 {
 		t.Fatalf("workers.total: want >=1 (the demo worker), got %d", sum.Workers.Total)
+	}
+}
+
+// scrapeCounter GETs the real /metrics endpoint and parses one Prometheus
+// counter's current value out of the "<name> <value>\n" line writeCounter
+// emits. Fails the test if the metric is not present.
+func scrapeCounter(t *testing.T, name string) float64 {
+	t.Helper()
+	code, body := req(t, "GET", "/metrics", nil)
+	if code != 200 {
+		t.Fatalf("GET /metrics: want 200, got %d", code)
+	}
+	prefix := name + " "
+	for _, line := range strings.Split(string(body), "\n") {
+		if strings.HasPrefix(line, prefix) {
+			v, err := strconv.ParseFloat(strings.TrimSpace(line[len(prefix):]), 64)
+			if err != nil {
+				t.Fatalf("parsing metric %q line %q: %v", name, line, err)
+			}
+			return v
+		}
+	}
+	t.Fatalf("metric %q not found in /metrics:\n%s", name, body)
+	return 0
+}
+
+// TestResultsPollDoesNotReMergeAfterCompletion proves the Data Transfer &
+// Artifact I/O 4.5->5 fix (docs/internal/CREED_AND_PATH_TO_TEN.md, "Stop paying
+// for every poll twice"): once a job is complete, finalizeJobIfDone has already
+// merged the buyer-ready artifact exactly once and stamped results_merged_at.
+// Before this fix, GET /v1/jobs/{id}/results called MergeJobResults on EVERY
+// poll, so cx_result_merges_total kept climbing (a full re-fetch + re-write of
+// every primary result) even though nothing about the job had changed. Now a
+// poll after completion must see the watermark already set and skip the merge
+// entirely: 10 consecutive reads must move the counter by exactly 0 from its
+// post-completion baseline (the one real merge already happened synchronously
+// at completion, before any of these reads), and every read must still return a
+// real presigned results_url.
+func TestResultsPollDoesNotReMergeAfterCompletion(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+	req(t, "POST", "/v1/worker/register", WorkerCapability{HWClass: "apple_silicon_max", MemoryGB: 64,
+		SupportedJobs: []string{"embed"}, SupportedModels: []string{"all-minilm-l6-v2"}}, workerTok(), jsonCT())
+
+	// 1 record -> exactly 1 task (skip_verification_floor via submitEmbedJob).
+	jobID, taskCount := submitEmbedJob(t, 1, 0, 0, 0)
+	if taskCount != 1 {
+		t.Fatalf("want exactly 1 task for a 1-record embed job, got %d", taskCount)
+	}
+
+	_, body := req(t, "GET", "/v1/worker/poll", nil, workerTok())
+	var disp TaskDispatch
+	if err := json.Unmarshal(body, &disp); err != nil {
+		t.Fatalf("dispatch decode: %v", err)
+	}
+	if err := itStorage.PutObject(ctx, disp.ResultKey, embedResultJSON(1), "application/json"); err != nil {
+		t.Fatalf("put result: %v", err)
+	}
+	commit := TaskCommit{TaskID: disp.TaskID, ResultKey: disp.ResultKey}
+	if code, cbody := req(t, "POST", "/v1/worker/task/"+disp.TaskID.String()+"/commit", commit, workerTok(), jsonCT()); code != 204 {
+		t.Fatalf("commit: want 204, got %d: %s", code, cbody)
+	}
+
+	// The commit path (finalizeJobIfDone) merges synchronously before marking
+	// the job complete, so by the time we observe status=complete the ONE real
+	// completion-time merge has already happened and results_merged_at is set.
+	code, jbody := req(t, "GET", "/v1/jobs/"+jobID.String(), nil, buyerKey())
+	if code != 200 {
+		t.Fatalf("get job: %d %s", code, jbody)
+	}
+	var js JobStatus
+	if err := json.Unmarshal(jbody, &js); err != nil {
+		t.Fatalf("job status decode: %v", err)
+	}
+	if js.Status != "complete" {
+		t.Fatalf("job status: want complete, got %q", js.Status)
+	}
+
+	// Baseline AFTER completion (already includes the one completion-time
+	// merge) and BEFORE any of the 10 results reads.
+	baseline := scrapeCounter(t, "cx_result_merges_total")
+
+	for i := 0; i < 10; i++ {
+		code, rbody := req(t, "GET", "/v1/jobs/"+jobID.String()+"/results", nil, buyerKey())
+		if code != 200 {
+			t.Fatalf("read %d: results: want 200, got %d: %s", i, code, rbody)
+		}
+		var jr JobResults
+		if err := json.Unmarshal(rbody, &jr); err != nil {
+			t.Fatalf("read %d: results decode: %v", i, err)
+		}
+		if jr.ResultsURL == "" {
+			t.Fatalf("read %d: results_url must be a real presigned URL, got empty", i)
+		}
+	}
+
+	after := scrapeCounter(t, "cx_result_merges_total")
+	if after != baseline {
+		t.Fatalf("cx_result_merges_total moved from %v to %v across 10 post-completion reads; "+
+			"want unchanged (watermark should have skipped every re-merge)", baseline, after)
+	}
+}
+
+// --- Buyer Advantage & Pricing Edge 4.5->5: reprice from real supplier economics ---
+
+// TestApplyRepricingUsesRealSupplierEconomics proves the whole rung end to end
+// against real Postgres: a model still at the hand-seeded 'seed' price_source gets
+// REPRICED to the formula's real output and the change is immediately visible on
+// the live GET /v1/models catalogue a buyer actually reads — while a model an
+// operator has already edited (or a model with no real measured throughput, e.g.
+// qwen2.5-7b-instruct-q4) is left completely untouched, never silently clobbered
+// or invented for.
+func TestApplyRepricingUsesRealSupplierEconomics(t *testing.T) {
+	ctx := context.Background()
+	// Force all-minilm-l6-v2 back to the original hand-seeded state and give
+	// bge-small-en-v1.5 a simulated operator override, so this test proves both
+	// halves of the contract regardless of what earlier runs (or a prior manual
+	// psql session against this same DB) left behind.
+	if _, err := itPool.Exec(ctx,
+		`UPDATE models SET price_per_1k = 0.00100000, price_source = 'seed', price_formula = NULL
+		 WHERE id = 'all-minilm-l6-v2'`); err != nil {
+		t.Fatalf("reset all-minilm-l6-v2: %v", err)
+	}
+	if _, err := itPool.Exec(ctx,
+		`UPDATE models SET price_per_1k = 0.00500000, price_source = 'operator_override', price_formula = NULL
+		 WHERE id = 'bge-small-en-v1.5'`); err != nil {
+		t.Fatalf("set operator override on bge-small-en-v1.5: %v", err)
+	}
+	t.Cleanup(func() {
+		itPool.Exec(ctx, `UPDATE models SET price_per_1k = 0.00100000, price_source = 'seed', price_formula = NULL WHERE id = 'all-minilm-l6-v2'`)
+		itPool.Exec(ctx, `UPDATE models SET price_per_1k = 0.00100000, price_source = 'seed', price_formula = NULL WHERE id = 'bge-small-en-v1.5'`)
+	})
+
+	results := RepriceCatalogueFromSupplierEconomics(supplierShareRate)
+	updated, err := itStore.ApplyRepricing(ctx, results)
+	if err != nil {
+		t.Fatalf("ApplyRepricing: %v", err)
+	}
+	if updated < 1 {
+		t.Fatalf("expected at least 1 row updated (all-minilm-l6-v2 was reset to 'seed'), got %d", updated)
+	}
+
+	// all-minilm-l6-v2: real repriced number, source flipped, formula recorded and
+	// cites the real GPU_CAPABILITY.md-sourced throughput — not silently applied.
+	var price float64
+	var source, formula string
+	if err := itPool.QueryRow(ctx,
+		`SELECT price_per_1k::float8, price_source, COALESCE(price_formula,'') FROM models WHERE id='all-minilm-l6-v2'`,
+	).Scan(&price, &source, &formula); err != nil {
+		t.Fatalf("read repriced all-minilm-l6-v2: %v", err)
+	}
+	if source != "measured_supplier_economics" {
+		t.Fatalf("all-minilm-l6-v2 price_source = %q, want measured_supplier_economics", source)
+	}
+	if price <= 0 || price == 0.001 {
+		t.Fatalf("all-minilm-l6-v2 price_per_1k = %v, want a real repriced value, not the untouched seed", price)
+	}
+	if !strings.Contains(formula, "capability.json") {
+		t.Fatalf("price_formula must cite the real measured source, got %q", formula)
+	}
+
+	// bge-small-en-v1.5: the operator's own override must survive completely
+	// untouched — ApplyRepricing must never clobber a non-'seed' row.
+	var bgePrice float64
+	var bgeSource string
+	if err := itPool.QueryRow(ctx,
+		`SELECT price_per_1k::float8, price_source FROM models WHERE id='bge-small-en-v1.5'`,
+	).Scan(&bgePrice, &bgeSource); err != nil {
+		t.Fatalf("read bge-small-en-v1.5: %v", err)
+	}
+	if bgeSource != "operator_override" || bgePrice != 0.005 {
+		t.Fatalf("operator override was clobbered: source=%q price=%v", bgeSource, bgePrice)
+	}
+
+	// qwen2.5-7b-instruct-q4 has no real measured throughput (GPU_CAPABILITY.md:
+	// its GGUF ref 404s) — it must be left at 'seed' forever, never invented for.
+	var qwenSource string
+	if err := itPool.QueryRow(ctx,
+		`SELECT price_source FROM models WHERE id='qwen2.5-7b-instruct-q4'`,
+	).Scan(&qwenSource); err != nil {
+		t.Fatalf("read qwen2.5-7b-instruct-q4: %v", err)
+	}
+	if qwenSource != "seed" {
+		t.Fatalf("qwen2.5-7b-instruct-q4 has no real measured throughput and must stay 'seed', got %q", qwenSource)
+	}
+
+	// The repriced number is what a real buyer actually sees on the live catalogue
+	// endpoint, not just a DB row nothing reads.
+	code, body := req(t, "GET", "/v1/models", nil, buyerKey())
+	if code != 200 {
+		t.Fatalf("GET /v1/models: %d %s", code, body)
+	}
+	var models []ModelInfo
+	if err := json.Unmarshal(body, &models); err != nil {
+		t.Fatalf("decode models: %v (%s)", err, body)
+	}
+	found := false
+	for _, m := range models {
+		if m.ID == "all-minilm-l6-v2" {
+			found = true
+			if m.PricePer1KUSD != price {
+				t.Fatalf("GET /v1/models price %.8f does not match the repriced DB value %.8f", m.PricePer1KUSD, price)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("all-minilm-l6-v2 missing from GET /v1/models")
+	}
+
+	// Idempotency: running ApplyRepricing again must be a no-op (0 rows updated) —
+	// every row it touched is now non-'seed', so a second run cannot even see them.
+	updated2, err := itStore.ApplyRepricing(ctx, results)
+	if err != nil {
+		t.Fatalf("second ApplyRepricing: %v", err)
+	}
+	if updated2 != 0 {
+		t.Fatalf("second ApplyRepricing should be a no-op, updated %d rows", updated2)
+	}
+}
+
+// --- Project Detection & Quotation 6.5->7: cost-drift loop + auto-tuning -------
+
+// TestAdminQuoteCostDriftAndAutoTune proves the whole rung end to end against
+// real Postgres: real quote-bound, terminal jobs with a real, deliberate,
+// non-zero quoted-vs-actual cost drift roll up correctly on GET /admin/quotes
+// (the missing surface the rung names by exact route), and POST
+// /admin/quotes/auto-tune actually corrects a real catalogue price from that real
+// drift — the proof artifact the rung asks for ("a real, non-zero quoted-vs-
+// charged drift report exists and has been used at least once to correct a
+// catalogue price"), not just a number computed and left on a dashboard.
+func TestAdminQuoteCostDriftAndAutoTune(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+	itPool.Exec(ctx, `TRUNCATE quotes`)
+	t.Cleanup(func() {
+		itPool.Exec(ctx, `TRUNCATE quotes`)
+		itPool.Exec(ctx, `UPDATE models SET price_per_1k = 0.00800000, price_source = 'seed', price_formula = NULL WHERE id = 'qwen2.5-7b-instruct-q4'`)
+	})
+
+	// Use qwen2.5-7b-instruct-q4 for this test: it is deliberately NEVER touched by
+	// ApplyRepricing (no real measured throughput), so its price_per_1k is a stable
+	// 'seed' baseline this test fully controls and can assert an exact before/after
+	// on, independent of whatever ApplyRepricing did to the embed/infer models
+	// elsewhere in this same DB.
+	if _, err := itPool.Exec(ctx,
+		`UPDATE models SET price_per_1k = 0.00800000, price_source = 'seed', price_formula = NULL WHERE id = 'qwen2.5-7b-instruct-q4'`); err != nil {
+		t.Fatalf("reset qwen price: %v", err)
+	}
+
+	// Five real, quote-bound, terminal jobs (>= costDriftMinSamples) that each
+	// actually cost 20% MORE than quoted — a real, deliberate, consistent
+	// underquote, not noise. Each gets its own quotes row (quoted at $1.00) and a
+	// jobs row bound to it (quote_id set, status complete, actual_usd = $1.20).
+	const nSamples = 5
+	const quotedEach = 1.00
+	const actualEach = 1.20
+	for i := 0; i < nSamples; i++ {
+		qID := uuid.New()
+		if _, err := itPool.Exec(ctx,
+			`INSERT INTO quotes (id, buyer_id, job_type, model_ref, tier, cost_expected_usd)
+			 VALUES ($1,$2,'batch_infer','qwen2.5-7b-instruct-q4','batch',$3)`,
+			qID, demoBuyerUUID, quotedEach); err != nil {
+			t.Fatalf("insert quote %d: %v", i, err)
+		}
+		jobID := uuid.New()
+		if _, err := itPool.Exec(ctx,
+			`INSERT INTO jobs (id, buyer_id, status, job_type, model_ref, input_ref, tier, task_count, tasks_done, quote_id, actual_usd)
+			 VALUES ($1,$2,'complete','batch_infer','qwen2.5-7b-instruct-q4','jobs/d/input.jsonl','batch',1,1,$3,$4)`,
+			jobID, demoBuyerUUID, qID, actualEach); err != nil {
+			t.Fatalf("insert job %d: %v", i, err)
+		}
+	}
+
+	// GET /admin/quotes: the real cost-drift rollup, exercised live over HTTP.
+	code, body := req(t, "GET", "/admin/quotes", nil, adminKey())
+	if code != 200 {
+		t.Fatalf("GET /admin/quotes: %d %s", code, body)
+	}
+	var rollup []CostDriftRow
+	if err := json.Unmarshal(body, &rollup); err != nil {
+		t.Fatalf("decode drift rollup: %v (%s)", err, body)
+	}
+	var row *CostDriftRow
+	for i := range rollup {
+		if rollup[i].JobType == "batch_infer" && rollup[i].ModelRef == "qwen2.5-7b-instruct-q4" {
+			row = &rollup[i]
+		}
+	}
+	if row == nil {
+		t.Fatalf("qwen2.5-7b-instruct-q4/batch_infer row missing from rollup: %+v", rollup)
+	}
+	if row.Samples != nSamples {
+		t.Fatalf("samples = %d, want %d", row.Samples, nSamples)
+	}
+	if diff := row.AvgQuotedUSD - quotedEach; diff > 1e-6 || diff < -1e-6 {
+		t.Fatalf("avg_quoted_usd = %v, want %v", row.AvgQuotedUSD, quotedEach)
+	}
+	if diff := row.AvgActualUSD - actualEach; diff > 1e-6 || diff < -1e-6 {
+		t.Fatalf("avg_actual_usd = %v, want %v", row.AvgActualUSD, actualEach)
+	}
+	if diff := row.DriftRatio - 1.2; diff > 1e-6 || diff < -1e-6 {
+		t.Fatalf("drift_ratio = %v, want 1.2 (a real 20%% underquote)", row.DriftRatio)
+	}
+	if diff := row.DriftPct - 20.0; diff > 1e-6 || diff < -1e-6 {
+		t.Fatalf("drift_pct = %v, want 20", row.DriftPct)
+	}
+	if !row.UsingForTuning {
+		t.Fatalf("row has %d >= costDriftMinSamples samples, should be UsingForTuning", row.Samples)
+	}
+
+	// POST /admin/quotes/auto-tune: the drift must actually correct the real
+	// catalogue price, live over HTTP — not just be computable.
+	acode, abody := req(t, "POST", "/admin/quotes/auto-tune", nil, adminKey())
+	if acode != 200 {
+		t.Fatalf("POST /admin/quotes/auto-tune: %d %s", acode, abody)
+	}
+	var tuneResp struct {
+		Tuned []PriceTuneResult `json:"tuned"`
+		Count int               `json:"count"`
+	}
+	if err := json.Unmarshal(abody, &tuneResp); err != nil {
+		t.Fatalf("decode auto-tune response: %v (%s)", err, abody)
+	}
+	var tuned *PriceTuneResult
+	for i := range tuneResp.Tuned {
+		if tuneResp.Tuned[i].ModelID == "qwen2.5-7b-instruct-q4" {
+			tuned = &tuneResp.Tuned[i]
+		}
+	}
+	if tuned == nil {
+		t.Fatalf("qwen2.5-7b-instruct-q4 missing from auto-tune response: %+v", tuneResp)
+	}
+	if tuned.OldPricePer1K != 0.008 {
+		t.Fatalf("old_price_per_1k = %v, want the real seeded 0.008", tuned.OldPricePer1K)
+	}
+	// A 20% underquote is within the ±15% clamp band's... no: 1.2 EXCEEDS the 1.15
+	// clamp ceiling, so the applied adjustment must be exactly the clamped 1.15,
+	// not the raw 1.2 — proving the damping actually engages, not just exists as
+	// an unused constant.
+	wantNewPrice := roundUSD(0.008 * 1.15)
+	if tuned.NewPricePer1K != wantNewPrice {
+		t.Fatalf("new_price_per_1k = %v, want the CLAMPED %v (raw drift_ratio=1.2 must clamp to 1.15, not apply unclamped)", tuned.NewPricePer1K, wantNewPrice)
+	}
+	if tuned.NewPricePer1K <= tuned.OldPricePer1K {
+		t.Fatalf("a real 20%% underquote must raise the price, got old=%v new=%v", tuned.OldPricePer1K, tuned.NewPricePer1K)
+	}
+
+	// The change actually landed in the real models table, not just the response body.
+	var dbPrice float64
+	var dbSource string
+	if err := itPool.QueryRow(ctx,
+		`SELECT price_per_1k::float8, price_source FROM models WHERE id='qwen2.5-7b-instruct-q4'`,
+	).Scan(&dbPrice, &dbSource); err != nil {
+		t.Fatalf("read tuned price: %v", err)
+	}
+	if dbSource != "drift_auto_tuned" {
+		t.Fatalf("price_source = %q, want drift_auto_tuned", dbSource)
+	}
+	if dbPrice != wantNewPrice {
+		t.Fatalf("DB price_per_1k = %v, want %v", dbPrice, wantNewPrice)
+	}
+
+	// A second auto-tune pass against the SAME (now-corrected, still 20%-drifted-
+	// looking) history moves the price again — proving the clamp is a per-pass
+	// damper, not a one-time hard ceiling — but the raw underlying drift signal
+	// (the quotes/jobs rows) is untouched by tuning, so this is deliberately
+	// checking that repeated real drift keeps correcting the price rather than
+	// silently freezing after one pass.
+	acode2, abody2 := req(t, "POST", "/admin/quotes/auto-tune", nil, adminKey())
+	if acode2 != 200 {
+		t.Fatalf("second auto-tune: %d %s", acode2, abody2)
+	}
+	var tuneResp2 struct {
+		Tuned []PriceTuneResult `json:"tuned"`
+	}
+	json.Unmarshal(abody2, &tuneResp2)
+	for _, tr := range tuneResp2.Tuned {
+		if tr.ModelID == "qwen2.5-7b-instruct-q4" && tr.NewPricePer1K <= wantNewPrice {
+			t.Fatalf("second pass should keep correcting toward the real drift, old=%v new=%v", wantNewPrice, tr.NewPricePer1K)
+		}
+	}
+}
+
+// --- Project Detection & Quotation 7->8: the firm-quote tier -------------------
+
+// TestFirmQuoteSubmissionRequiresQuoteID proves the validation gate: firm_quote
+// with no quote_id is a 400, and firm_quote against a quote with no positive
+// cost_max_usd (impossible via the real /v1/quote path, but defended anyway) is
+// refused with a real error, never silently accepted as an empty commitment.
+func TestFirmQuoteSubmissionRequiresQuoteID(t *testing.T) {
+	code, body := req(t, "POST", "/v1/jobs", map[string]any{
+		"job_type":     map[string]any{"type": "embed"},
+		"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"tier":         "batch",
+		"verification": map[string]any{"redundancy_frac": 0.0, "honeypot_frac": 0.0, "payout_hold_secs": 0},
+		"input":        "{\"id\":\"a\",\"text\":\"no quote_id\"}\n",
+		"firm_quote":   true,
+	}, buyerKey(), jsonCT())
+	if code != http.StatusBadRequest {
+		t.Fatalf("firm_quote with no quote_id: want 400, got %d: %s", code, body)
+	}
+	if !strings.Contains(string(body), "quote_id") {
+		t.Fatalf("400 reason should mention quote_id, got %s", body)
+	}
+}
+
+// TestFirmQuoteCapsChargeAtStatedMaximum is the rung's own proof artifact,
+// verified end to end against real Postgres: "a real job whose actual cost
+// exceeds its firm quote still charges the buyer only the quoted maximum,
+// verified on a real invoice." It quotes and firm-binds a real submission (so
+// jobs.firm_quote / firm_quote_max_usd are the REAL values POST /v1/quote and
+// POST /v1/jobs produced, not hand-inserted), then simulates the job's real
+// work costing MORE than the firm quote's maximum (actual_usd set past
+// firm_quote_max_usd, exactly as a real commit settlement would), and proves
+// Store.JobChargeInfo — the exact function billing.go's chargeOrDeferJob calls
+// to decide what to actually charge Stripe — returns the CAPPED amount, that
+// FreezeChargeAmount stamps billed_usd at that capped figure (the same field
+// the real charge-collect sweep freezes before ever calling Stripe), and that
+// the buyer's own invoice shows the cap took effect.
+func TestFirmQuoteCapsChargeAtStatedMaximum(t *testing.T) {
+	ctx := context.Background()
+	itPool.Exec(ctx, `TRUNCATE quotes`)
+	t.Cleanup(func() { itPool.Exec(ctx, `TRUNCATE quotes`) })
+
+	const input = "{\"id\":\"a\",\"text\":\"firm quote me\"}\n{\"id\":\"b\",\"text\":\"a real commitment\"}\n"
+	quoteBody := map[string]any{
+		"job_type":     map[string]any{"type": "embed"},
+		"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"tier":         "batch",
+		"verification": map[string]any{"redundancy_frac": 0.0, "honeypot_frac": 0.0, "payout_hold_secs": 0},
+		"input":        input,
+	}
+	qcode, qbody := req(t, "POST", "/v1/quote", quoteBody, buyerKey(), jsonCT())
+	if qcode != 200 {
+		t.Fatalf("POST /v1/quote: %d %s", qcode, qbody)
+	}
+	var q Quote
+	if err := json.Unmarshal(qbody, &q); err != nil {
+		t.Fatalf("decode quote: %v (%s)", err, qbody)
+	}
+	if q.Cost.MaxUSD <= 0 {
+		t.Fatalf("quote must have a positive cost_max_usd to firm-commit to, got %+v", q.Cost)
+	}
+
+	bind := map[string]any{
+		"job_type":     map[string]any{"type": "embed"},
+		"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"tier":         "batch",
+		"verification": map[string]any{"redundancy_frac": 0.0, "honeypot_frac": 0.0, "payout_hold_secs": 0},
+		"input":        input,
+		"quote_id":     q.QuoteID,
+		"firm_quote":   true,
+	}
+	code, body := req(t, "POST", "/v1/jobs", bind, buyerKey(), jsonCT())
+	if code != http.StatusAccepted {
+		t.Fatalf("firm-quote submit: want 202, got %d: %s", code, body)
+	}
+	var jr JobSubmitResponse
+	if err := json.Unmarshal(body, &jr); err != nil {
+		t.Fatalf("decode submit response: %v (%s)", err, body)
+	}
+
+	// The real submission persisted real firm-quote fields — not hand-inserted.
+	var firmQuote bool
+	var firmMax float64
+	if err := itPool.QueryRow(ctx,
+		`SELECT firm_quote, COALESCE(firm_quote_max_usd,0) FROM jobs WHERE id=$1`, jr.JobID,
+	).Scan(&firmQuote, &firmMax); err != nil {
+		t.Fatalf("read firm quote fields: %v", err)
+	}
+	if !firmQuote {
+		t.Fatal("jobs.firm_quote should be true for a firm_quote:true submission")
+	}
+	if diff := firmMax - q.Cost.MaxUSD; diff > 1e-6 || diff < -1e-6 {
+		t.Fatalf("jobs.firm_quote_max_usd = %v, want the quote's own cost_max_usd %v", firmMax, q.Cost.MaxUSD)
+	}
+
+	// Simulate the job's real settled cost coming in ABOVE the firm quote's
+	// maximum — exactly what SetJobActualUSD would do from real per-task
+	// buyer_charge ledger rows once real work completes. This is the scenario
+	// the rung names directly: "a real job whose actual cost exceeds its firm
+	// quote."
+	overageActual := firmMax * 1.75
+	if _, err := itPool.Exec(ctx,
+		`UPDATE jobs SET status='complete', actual_usd=$2 WHERE id=$1`, jr.JobID, overageActual); err != nil {
+		t.Fatalf("settle actual_usd above the firm max: %v", err)
+	}
+
+	// Store.JobChargeInfo is the EXACT function billing.go's chargeOrDeferJob
+	// calls to decide the real Stripe charge amount — proving this returns the
+	// capped figure proves the real charge path would too.
+	buyerID, chargeUSD, err := itStore.JobChargeInfo(ctx, jr.JobID)
+	if err != nil {
+		t.Fatalf("JobChargeInfo: %v", err)
+	}
+	if buyerID != demoBuyerUUID {
+		t.Fatalf("JobChargeInfo buyer = %v, want %v", buyerID, demoBuyerUUID)
+	}
+	if chargeUSD != firmMax {
+		t.Fatalf("JobChargeInfo charge = %v, want the CAPPED firm max %v (real actual_usd was %v)", chargeUSD, firmMax, overageActual)
+	}
+
+	// FreezeChargeAmount is the real function the immediate-charge path calls
+	// with that exact capped figure before ever touching Stripe — proving it
+	// stamps billed_usd at the capped amount, not the uncapped actual_usd.
+	if err := itStore.FreezeChargeAmount(ctx, jr.JobID, chargeUSD); err != nil {
+		t.Fatalf("FreezeChargeAmount: %v", err)
+	}
+
+	// The buyer's own real invoice shows the cap took effect: billed_usd is the
+	// capped figure, firm_quote_max_usd matches, and actual_usd is honestly still
+	// the full uncapped figure (the real value of work delivered — never altered,
+	// only the CHARGE is capped, the ledger truth is not rewritten).
+	icode, ibody := req(t, "GET", "/v1/jobs/"+jr.JobID.String()+"/invoice", nil, buyerKey())
+	if icode != 200 {
+		t.Fatalf("invoice: want 200, got %d: %s", icode, ibody)
+	}
+	var inv InvoiceView
+	if err := json.Unmarshal(ibody, &inv); err != nil {
+		t.Fatalf("invoice decode: %v (%s)", err, ibody)
+	}
+	if !inv.FirmQuote {
+		t.Fatal("invoice.firm_quote should be true")
+	}
+	if inv.FirmQuoteMaxUSD == nil || *inv.FirmQuoteMaxUSD != firmMax {
+		t.Fatalf("invoice.firm_quote_max_usd = %v, want %v", inv.FirmQuoteMaxUSD, firmMax)
+	}
+	if inv.BilledUSD == nil {
+		t.Fatal("invoice.billed_usd should be set once a charge was frozen")
+	}
+	if *inv.BilledUSD != firmMax {
+		t.Fatalf("invoice.billed_usd = %v, want the CAPPED %v — the buyer must never be billed past their firm quote", *inv.BilledUSD, firmMax)
+	}
+	if *inv.BilledUSD >= overageActual {
+		t.Fatalf("billed_usd (%v) must be LESS than the real overage actual_usd (%v) for this test to actually prove the cap engaged", *inv.BilledUSD, overageActual)
+	}
+	// NUMERIC(12,6) round-trips through Postgres with sub-micro-dollar rounding;
+	// compare with a tiny epsilon rather than requiring bit-for-bit equality.
+	if diff := inv.ActualUSD - overageActual; diff > 1e-6 || diff < -1e-6 {
+		t.Fatalf("invoice.actual_usd should stay the honest uncapped settled figure %v, got %v (the cap must apply to the CHARGE, not rewrite the ledger truth)", overageActual, inv.ActualUSD)
+	}
+}
+
+// TestFirmQuoteDoesNotCapWhenActualIsUnderMax proves the cap is a CEILING, not a
+// flat re-price: a firm-quoted job whose real cost comes in AT OR BELOW the
+// quoted maximum is charged its real actual cost, unchanged — the platform only
+// ever absorbs an overage, it never pays a supplier-side discount to a buyer who
+// didn't need one.
+func TestFirmQuoteDoesNotCapWhenActualIsUnderMax(t *testing.T) {
+	ctx := context.Background()
+	itPool.Exec(ctx, `TRUNCATE quotes`)
+	t.Cleanup(func() { itPool.Exec(ctx, `TRUNCATE quotes`) })
+
+	const input = "{\"id\":\"a\",\"text\":\"under budget\"}\n"
+	quoteBody := map[string]any{
+		"job_type":     map[string]any{"type": "embed"},
+		"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"tier":         "batch",
+		"verification": map[string]any{"redundancy_frac": 0.0, "honeypot_frac": 0.0, "payout_hold_secs": 0},
+		"input":        input,
+	}
+	qcode, qbody := req(t, "POST", "/v1/quote", quoteBody, buyerKey(), jsonCT())
+	if qcode != 200 {
+		t.Fatalf("POST /v1/quote: %d %s", qcode, qbody)
+	}
+	var q Quote
+	json.Unmarshal(qbody, &q)
+
+	bind := map[string]any{
+		"job_type":     map[string]any{"type": "embed"},
+		"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"tier":         "batch",
+		"verification": map[string]any{"redundancy_frac": 0.0, "honeypot_frac": 0.0, "payout_hold_secs": 0},
+		"input":        input,
+		"quote_id":     q.QuoteID,
+		"firm_quote":   true,
+	}
+	code, body := req(t, "POST", "/v1/jobs", bind, buyerKey(), jsonCT())
+	if code != http.StatusAccepted {
+		t.Fatalf("firm-quote submit: want 202, got %d: %s", code, body)
+	}
+	var jr JobSubmitResponse
+	json.Unmarshal(body, &jr)
+
+	underActual := q.Cost.MaxUSD * 0.5
+	if _, err := itPool.Exec(ctx,
+		`UPDATE jobs SET status='complete', actual_usd=$2 WHERE id=$1`, jr.JobID, underActual); err != nil {
+		t.Fatalf("settle actual_usd under the firm max: %v", err)
+	}
+
+	_, chargeUSD, err := itStore.JobChargeInfo(ctx, jr.JobID)
+	if err != nil {
+		t.Fatalf("JobChargeInfo: %v", err)
+	}
+	if chargeUSD != underActual {
+		t.Fatalf("charge = %v, want the UNCAPPED real actual %v (cap must not apply below the max)", chargeUSD, underActual)
+	}
+}
+
+// --- Operator Tooling 7->8: audited admin write endpoints replacing raw SQL
+// (docs/internal/CREED_AND_PATH_TO_TEN.md, "Add write actions the operator
+// currently has to reach into the database for") ---
+
+// TestAdminReinstateWorker exercises the reinstate-after-review half of
+// RUNBOOKS.md's Bad/fraudulent worker procedure: a suspended supplier's worker
+// becomes active again via the real endpoint (not psql), and a redundant call
+// against an already-active supplier is a real 409, not a silent success.
+func TestAdminReinstateWorker(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+	if _, err := itPool.Exec(ctx,
+		`UPDATE suppliers SET status='suspended', quarantined_at=now() WHERE id=$1`, demoSupplierUUID); err != nil {
+		t.Fatal(err)
+	}
+
+	code, body := req(t, "POST", "/admin/workers/"+demoWorkerUUID.String()+"/reinstate", nil, adminKey())
+	if code != http.StatusOK {
+		t.Fatalf("reinstate: want 200, got %d: %s", code, body)
+	}
+	var status, quarantinedAt *string
+	if err := itPool.QueryRow(ctx, `SELECT status, quarantined_at::text FROM suppliers WHERE id=$1`, demoSupplierUUID).
+		Scan(&status, &quarantinedAt); err != nil {
+		t.Fatal(err)
+	}
+	if status == nil || *status != "active" {
+		t.Fatalf("supplier status = %v, want active", status)
+	}
+	if quarantinedAt != nil {
+		t.Fatalf("quarantined_at = %v, want cleared (NULL)", *quarantinedAt)
+	}
+
+	// A second reinstate against an already-active supplier is a real conflict,
+	// not a silently-repeated success.
+	code2, body2 := req(t, "POST", "/admin/workers/"+demoWorkerUUID.String()+"/reinstate", nil, adminKey())
+	if code2 != http.StatusConflict {
+		t.Fatalf("reinstate on active supplier: want 409, got %d: %s", code2, body2)
+	}
+
+	// An unregistered worker id is a 404, not a 409 (distinct failure reasons).
+	code3, _ := req(t, "POST", "/admin/workers/"+uuid.New().String()+"/reinstate", nil, adminKey())
+	if code3 != http.StatusNotFound {
+		t.Fatalf("reinstate on unknown worker: want 404, got %d", code3)
+	}
+}
+
+// TestAdminForceRequeueTask exercises the "Stuck job" runbook's manual fix as a
+// real audited endpoint: a wedged running task is reset to queued/unclaimed, and
+// the audit log records who/why. A task NOT in a requeueable state is a 409.
+func TestAdminForceRequeueTask(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+	jobID, taskID := uuid.New(), uuid.New()
+	mustJobTask(t, jobID, taskID, false, false, "jobs/x/tasks/0/input.jsonl")
+	if _, err := itPool.Exec(ctx,
+		`UPDATE tasks SET status='running', claimed_by=$2, worker_id=$2, claimed_at=now() WHERE id=$1`,
+		taskID, demoWorkerUUID); err != nil {
+		t.Fatal(err)
+	}
+
+	code, body := req(t, "POST", "/admin/tasks/"+taskID.String()+"/requeue",
+		map[string]any{"reason": "wedged worker, confirmed dead via /admin/workers"}, adminKey(), jsonCT())
+	if code != http.StatusOK {
+		t.Fatalf("requeue: want 200, got %d: %s", code, body)
+	}
+
+	var status string
+	var claimedBy, workerID *uuid.UUID
+	if err := itPool.QueryRow(ctx, `SELECT status, claimed_by, worker_id FROM tasks WHERE id=$1`, taskID).
+		Scan(&status, &claimedBy, &workerID); err != nil {
+		t.Fatal(err)
+	}
+	if status != "queued" {
+		t.Fatalf("task status = %q, want queued", status)
+	}
+	if claimedBy != nil || workerID != nil {
+		t.Fatalf("claimed_by/worker_id = %v/%v, want both NULL", claimedBy, workerID)
+	}
+
+	// The audit log records this exact requeue with the given reason.
+	acode, abody := req(t, "GET", "/admin/actions", nil, adminKey())
+	if acode != http.StatusOK {
+		t.Fatalf("GET /admin/actions: %d %s", acode, abody)
+	}
+	var actions []AdminAction
+	if err := json.Unmarshal(abody, &actions); err != nil {
+		t.Fatalf("unmarshal actions: %v", err)
+	}
+	found := false
+	for _, a := range actions {
+		if a.Kind == "task_requeued" && a.TaskID != nil && *a.TaskID == taskID {
+			found = true
+			if a.Reason != "wedged worker, confirmed dead via /admin/workers" {
+				t.Fatalf("audit reason = %q, want the given reason", a.Reason)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("audit log missing the task_requeued action for this task")
+	}
+
+	// A task that is already queued (not running/retrying) is a 409 — nothing to
+	// force-requeue.
+	code2, _ := req(t, "POST", "/admin/tasks/"+taskID.String()+"/requeue", nil, adminKey())
+	if code2 != http.StatusConflict {
+		t.Fatalf("requeue an already-queued task: want 409, got %d", code2)
+	}
+
+	// An unknown task id is a 404.
+	code3, _ := req(t, "POST", "/admin/tasks/"+uuid.New().String()+"/requeue", nil, adminKey())
+	if code3 != http.StatusNotFound {
+		t.Fatalf("requeue unknown task: want 404, got %d", code3)
+	}
+}
+
+// TestAdminAdjustReputation exercises the "manually adjust a supplier's
+// reputation with an audit trail" gap named directly in the backlog rung: a real
+// clamped adjustment, with before/after values recorded in the audit log.
+func TestAdminAdjustReputation(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+	if _, err := itPool.Exec(ctx, `UPDATE suppliers SET reputation=0.5 WHERE id=$1`, demoSupplierUUID); err != nil {
+		t.Fatal(err)
+	}
+
+	code, body := req(t, "POST", "/admin/suppliers/"+demoSupplierUUID.String()+"/reputation",
+		map[string]any{"delta": 0.3, "reason": "manual fraud review overturned an auto-quarantine"}, adminKey(), jsonCT())
+	if code != http.StatusOK {
+		t.Fatalf("adjust reputation: want 200, got %d: %s", code, body)
+	}
+	var resp struct {
+		Before, After float32
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Before != 0.5 || resp.After != 0.8 {
+		t.Fatalf("before/after = %v/%v, want 0.5/0.8", resp.Before, resp.After)
+	}
+	rep := supplierRep(t)
+	if rep != float32(0.8) {
+		t.Fatalf("persisted reputation = %v, want 0.8", rep)
+	}
+
+	// Clamped to [0,1]: a large positive delta never pushes reputation above 1.
+	code2, body2 := req(t, "POST", "/admin/suppliers/"+demoSupplierUUID.String()+"/reputation",
+		map[string]any{"delta": 5.0}, adminKey(), jsonCT())
+	if code2 != http.StatusOK {
+		t.Fatalf("adjust reputation (clamp high): want 200, got %d: %s", code2, body2)
+	}
+	if rep := supplierRep(t); rep != 1.0 {
+		t.Fatalf("reputation after large positive delta = %v, want clamped to 1.0", rep)
+	}
+
+	// delta=0 is rejected as a caller mistake, not silently accepted.
+	code3, _ := req(t, "POST", "/admin/suppliers/"+demoSupplierUUID.String()+"/reputation",
+		map[string]any{"delta": 0.0}, adminKey(), jsonCT())
+	if code3 != http.StatusBadRequest {
+		t.Fatalf("adjust reputation delta=0: want 400, got %d", code3)
+	}
+
+	// An unknown supplier id is a 404.
+	code4, _ := req(t, "POST", "/admin/suppliers/"+uuid.New().String()+"/reputation",
+		map[string]any{"delta": 0.1}, adminKey(), jsonCT())
+	if code4 != http.StatusNotFound {
+		t.Fatalf("adjust reputation unknown supplier: want 404, got %d", code4)
+	}
+}
+
+// TestAdminReleasePayoutHold exercises the "manually trigger a payout-hold
+// release" gap named directly in the backlog rung: a held ledger entry's
+// release_at is pulled forward to now() via a real endpoint, so the existing
+// release-worker sweep (DuePayouts) picks it up on its very next cycle — this
+// endpoint never fakes a 'released' status itself (that still requires a real
+// payout_ref, per MarkPayout's invariant, enforced structurally by
+// ledger_released_requires_ref).
+func TestAdminReleasePayoutHold(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+	var entryID uuid.UUID
+	if err := itPool.QueryRow(ctx,
+		`INSERT INTO ledger_entries (kind, supplier_id, amount_usd, payout_status, release_at)
+		 VALUES ('supplier_credit', $1, 1.23, 'held', now() + interval '1 hour')
+		 RETURNING id`, demoSupplierUUID).Scan(&entryID); err != nil {
+		t.Fatal(err)
+	}
+
+	code, body := req(t, "POST", "/admin/payouts/"+entryID.String()+"/release",
+		map[string]any{"reason": "buyer confirmed the job was legitimate, no need to wait out the hold"}, adminKey(), jsonCT())
+	if code != http.StatusOK {
+		t.Fatalf("release payout hold: want 200, got %d: %s", code, body)
+	}
+
+	var payoutStatus string
+	var releaseAt time.Time
+	if err := itPool.QueryRow(ctx, `SELECT payout_status, release_at FROM ledger_entries WHERE id=$1`, entryID).
+		Scan(&payoutStatus, &releaseAt); err != nil {
+		t.Fatal(err)
+	}
+	if payoutStatus != "held" {
+		t.Fatalf("payout_status = %q, want still 'held' (this endpoint never fakes 'released')", payoutStatus)
+	}
+	if releaseAt.After(time.Now()) {
+		t.Fatalf("release_at = %v, want <= now() so the next sweep picks it up", releaseAt)
+	}
+
+	// DuePayouts (the real release-worker sweep query) now genuinely picks this
+	// entry up — proving the hold-release actually unblocks the real payout path,
+	// not just a cosmetic timestamp change.
+	due, err := itStore.DuePayouts(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundDue := false
+	for _, d := range due {
+		if d.ID == entryID {
+			foundDue = true
+		}
+	}
+	if !foundDue {
+		t.Fatal("released entry not found in DuePayouts — the release-worker sweep would never pick it up")
+	}
+
+	// A non-held entry (e.g. already released) is a 409, not a silent success.
+	var entryID2 uuid.UUID
+	if err := itPool.QueryRow(ctx,
+		`INSERT INTO ledger_entries (kind, supplier_id, amount_usd, payout_status, payout_ref)
+		 VALUES ('supplier_credit', $1, 1.00, 'released', 'tr_test123')
+		 RETURNING id`, demoSupplierUUID).Scan(&entryID2); err != nil {
+		t.Fatal(err)
+	}
+	code2, _ := req(t, "POST", "/admin/payouts/"+entryID2.String()+"/release", nil, adminKey())
+	if code2 != http.StatusConflict {
+		t.Fatalf("release an already-released entry: want 409, got %d", code2)
+	}
+
+	// An unknown ledger entry id is a 404.
+	code3, _ := req(t, "POST", "/admin/payouts/"+uuid.New().String()+"/release", nil, adminKey())
+	if code3 != http.StatusNotFound {
+		t.Fatalf("release unknown ledger entry: want 404, got %d", code3)
+	}
+
+	// A 'ready' entry (the honest no-rail-configured stub state) is ALSO accepted —
+	// this is the exact case RUNBOOKS.md's OWN earlier documented "fix" (re-set to
+	// 'ready') silently never got retried for, verified against the real DuePayouts
+	// query. The endpoint must move it to 'held' (not leave it 'ready'), or DuePayouts
+	// would never pick it up either.
+	var entryID3 uuid.UUID
+	if err := itPool.QueryRow(ctx,
+		`INSERT INTO ledger_entries (kind, supplier_id, amount_usd, payout_status)
+		 VALUES ('supplier_credit', $1, 4.56, 'ready')
+		 RETURNING id`, demoSupplierUUID).Scan(&entryID3); err != nil {
+		t.Fatal(err)
+	}
+	code4, body4 := req(t, "POST", "/admin/payouts/"+entryID3.String()+"/release", nil, adminKey())
+	if code4 != http.StatusOK {
+		t.Fatalf("release a 'ready' entry: want 200, got %d: %s", code4, body4)
+	}
+	var status3 string
+	if err := itPool.QueryRow(ctx, `SELECT payout_status FROM ledger_entries WHERE id=$1`, entryID3).Scan(&status3); err != nil {
+		t.Fatal(err)
+	}
+	if status3 != "held" {
+		t.Fatalf("payout_status after releasing a 'ready' entry = %q, want 'held' (DuePayouts never selects 'ready')", status3)
+	}
+	due2, err := itStore.DuePayouts(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found3 := false
+	for _, d := range due2 {
+		if d.ID == entryID3 {
+			found3 = true
+		}
+	}
+	if !found3 {
+		t.Fatal("the formerly-'ready' entry is not in DuePayouts after release — it would still be stuck forever")
+	}
+}
+
+// TestAdminActionsRequiresAuth confirms the new audit-log endpoint is behind the
+// same admin gate as every other /admin/* write surface (no bearer key, no data).
+func TestAdminActionsRequiresAuth(t *testing.T) {
+	code, _ := req(t, "GET", "/admin/actions", nil)
+	if code != http.StatusUnauthorized && code != http.StatusForbidden {
+		t.Fatalf("GET /admin/actions with no auth: want 401/403, got %d", code)
 	}
 }

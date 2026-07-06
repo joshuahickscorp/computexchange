@@ -164,6 +164,15 @@ type VerificationPolicy struct {
 	RedundancyFrac float32 `json:"redundancy_frac"`
 	HoneypotFrac   float32 `json:"honeypot_frac"`
 	PayoutHoldSecs uint32  `json:"payout_hold_secs"`
+	// SkipVerificationFloor explicitly opts a job out of the server-side minimum
+	// combined honeypot+redundancy coverage (Verification & Result Trust 6->7,
+	// docs/internal/CREED_AND_PATH_TO_TEN.md). Without this, redundancy_frac=0
+	// AND honeypot_frac=0 meant a job could run with ZERO real verification —
+	// a buyer and a colluding/careless supplier had no anti-fraud check on that
+	// job's result at all. Default false (the floor applies); an explicit,
+	// auditable true is required to run genuinely unverified, never a silent
+	// side-effect of just leaving both fractions unset.
+	SkipVerificationFloor bool `json:"skip_verification_floor,omitempty"`
 }
 
 // JobManifest is the full job description submitted by a buyer.
@@ -187,6 +196,11 @@ type BenchResult struct {
 	EPS       float32 `json:"eps"` // embeddings/sec
 	P99MS     uint32  `json:"p99_ms"`
 	ThermalOK bool    `json:"thermal_ok"`
+	// LoadMS is the wall-clock milliseconds this model's COLD load took, measured
+	// by the agent at its own unavoidably-cold first load during the startup
+	// benchmark (docs/CREED_AND_PATH_TO_TEN.md, "Warm model pool" 6.5->7). Zero
+	// from an older agent build that doesn't send it yet — never fabricated.
+	LoadMS uint64 `json:"load_ms"`
 }
 
 // WorkerCapability is what a worker advertises on registration. MinPayoutUsdHr is
@@ -246,11 +260,22 @@ type TaskDispatch struct {
 
 // TaskCommit is the worker's result submission.
 type TaskCommit struct {
-	TaskID        uuid.UUID `json:"task_id"`
-	ResultKey     string    `json:"result_key"`
-	DurationMS    uint64    `json:"duration_ms"`
-	TokensUsed    uint64    `json:"tokens_used"`
-	HardwareTempC *float32  `json:"hardware_temp_c"`
+	TaskID     uuid.UUID `json:"task_id"`
+	ResultKey  string    `json:"result_key"`
+	DurationMS uint64    `json:"duration_ms"`
+	TokensUsed uint64    `json:"tokens_used"`
+	// ResultSHA256 is the worker's own SHA-256 (lowercase hex) of the exact bytes
+	// it just PUT to ResultKey (Control Plane Hot Path 8->9,
+	// docs/internal/CREED_AND_PATH_TO_TEN.md "trust a buyer/worker-supplied
+	// SHA-256 for redundancy/honeypot comparison where safe, instead of
+	// re-downloading bytes the worker just uploaded synchronously inside the
+	// commit transaction"). Persisted verbatim to tasks.result_sha256 so a LATER
+	// commit's redundancy compare can trust a hash-to-hash match for byte-exact
+	// job types without a second S3 GetObject. Optional: "" (an older agent, or
+	// one that failed to hash) always falls back to a real GetObject — the hash
+	// is a speed optimization, never a trust requirement the commit can fail on.
+	ResultSHA256  string   `json:"result_sha256,omitempty"`
+	HardwareTempC *float32 `json:"hardware_temp_c"`
 }
 
 // Heartbeat is the periodic liveness + telemetry signal (~30s). The resource
@@ -280,10 +305,30 @@ type Heartbeat struct {
 	LoadedModels       []string   `json:"loaded_models,omitempty"` // model ids warm in the agent's pool (warm-routing re-rank)
 }
 
-// Earnings is returned by GET /v1/worker/earnings.
+// Earnings is returned by GET /v1/worker/earnings. LastPayout*/NextPayoutAt are
+// Supplier onboarding & safety 7->8 (docs/internal/CREED_AND_PATH_TO_TEN.md,
+// "Populate the trust panel with real data"): real payout proof for the menu-bar
+// trust panel, sourced from this supplier's own ledger_entries — never fabricated.
+// Pointers so an absent value (no released payout yet / no held credit pending)
+// round-trips as JSON null, matching the app's optional trust-surface contract.
 type Earnings struct {
-	BalanceUSD  float64 `json:"balance_usd"`
-	LifetimeUSD float64 `json:"lifetime_usd"`
+	BalanceUSD    float64  `json:"balance_usd"`
+	LifetimeUSD   float64  `json:"lifetime_usd"`
+	LastPayoutUSD *float64 `json:"last_payout_usd,omitempty"`
+	LastPayoutAt  *int64   `json:"last_payout_at,omitempty"` // unix seconds
+	NextPayoutAt  *int64   `json:"next_payout_at,omitempty"` // unix seconds
+}
+
+// SupplierVerification is the per-supplier verification (honeypot) aggregate for
+// GET /v1/worker/verification — the trust-panel data source distinct from
+// JobVerification (which is per-JOB, buyer-facing). Sourced from this supplier's
+// own verification_events rows across every job they have ever worked, so the
+// menu-bar app can show a real "N honeypots passed" figure instead of leaving the
+// trust panel permanently empty (Supplier onboarding & safety 7->8).
+type SupplierVerification struct {
+	HoneypotsPassed int    `json:"honeypots_passed"`
+	HoneypotsFailed int    `json:"honeypots_failed"`
+	Label           string `json:"verification_label"` // reuses deriveVerificationLabel's vocabulary
 }
 
 // --- control-plane-local response types (not part of the agent contract) ---
@@ -328,6 +373,16 @@ type JobStatus struct {
 	// real (only outcomes that actually occurred are logged); label is derived, never
 	// asserted beyond what the counts support.
 	Verification Verification `json:"verification"`
+	// Wall-clock speed-SLA (Speed Lane wave 2A). SLAGuaranteeSecs > 0 means this
+	// job carries a bound time guarantee (results merged within that many seconds
+	// of submission) priced at SLAPremiumUSD. SLAMet is the recorded outcome:
+	// absent until decided at finalize (or absent forever without an SLA),
+	// true = met, false = missed — a miss auto-recorded an sla_refund ledger
+	// credit for the premium (visible on the invoice/receipt) plus an sla_missed
+	// timeline event. All three are omitted entirely for a job with no SLA.
+	SLAGuaranteeSecs int     `json:"sla_guarantee_secs,omitempty"`
+	SLAPremiumUSD    float64 `json:"sla_premium_usd,omitempty"`
+	SLAMet           *bool   `json:"sla_met,omitempty"`
 }
 
 // Verification is the buyer-facing verification receipt block of JobStatus. Every

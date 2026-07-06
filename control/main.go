@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -51,6 +52,30 @@ func main() {
 		os.Exit(runHealthcheck())
 	}
 
+	// `control print-claim-sql`: print the EXACT, verbatim SQL text ClaimTask
+	// (scheduler.go) executes for the claim CTE — no DB, no server, just the
+	// rendered string from ClaimTaskSQL to stdout.
+	//
+	// PATCH (Control plane hot path 4.5->5, docs/internal/CREED_AND_PATH_TO_TEN.md
+	// "Make the benchmark measure the real query"): this is the seam
+	// scripts/bench-local.sh uses to EXPLAIN ANALYZE the literal production
+	// query instead of a hand-copied stand-in. Because it calls ClaimTaskSQL —
+	// the SAME function ClaimTask itself calls — there is no second copy of
+	// this SQL anywhere to drift out of sync; a change to the real query is a
+	// change to what this prints, by construction, not by discipline. Default
+	// prints the general "claimed_by IS NULL" branch — the common,
+	// index-servable path tasks_ready_unclaimed_idx is meant to serve, and the
+	// one the benchmark should measure; `--pinned` prints the rare
+	// pinned-branch predicate instead.
+	if len(os.Args) > 1 && os.Args[1] == "print-claim-sql" {
+		predicate := "t.claimed_by IS NULL"
+		if len(os.Args) > 2 && os.Args[2] == "--pinned" {
+			predicate = "t.claimed_by = $1 AND t.started_at IS NULL"
+		}
+		fmt.Print(ClaimTaskSQL(predicate))
+		return
+	}
+
 	// DATABASE_URL is mandatory. BLACKHOLE doctrine: surface every failure —
 	// a missing DSN is a fatal misconfiguration, never a fallback to nothing.
 	dsn := os.Getenv("DATABASE_URL")
@@ -71,10 +96,24 @@ func main() {
 	// secret is FATAL — a prod deploy must never silently run unhardened. Outside
 	// production (CX_ENV unset or any other value) local dev + tests run without them
 	// by design, so we only surface the insecure state loudly. Production sets both in .env.
+	//
+	// Security Posture 6.5->7 (docs/internal/CREED_AND_PATH_TO_TEN.md): CX_ENV requires
+	// the operator to have ALSO remembered to set that separate flag correctly — a real
+	// deploy could carry a LIVE Stripe key (real money moving) while CX_ENV was simply
+	// never set, and this gate would only WARN. A live Stripe key is a harder-to-miss,
+	// self-evident signal that this is production: if STRIPE_SECRET_KEY starts with
+	// "sk_live_", real money is on the line regardless of what CX_ENV says, so the same
+	// FATAL gate applies — an operator cannot accidentally ship live payments unhardened
+	// just by forgetting one env var when a different one already says the stakes.
 	if os.Getenv("CX_TOKEN_KEY") == "" || os.Getenv("CX_STATE_SECRET") == "" {
 		cxEnv := os.Getenv("CX_ENV")
-		if strings.EqualFold(cxEnv, "production") || strings.EqualFold(cxEnv, "prod") {
-			log.Fatal("CX_TOKEN_KEY and/or CX_STATE_SECRET unset with CX_ENV=" + cxEnv + " — refusing to start in production: OAuth tokens would be stored UNENCRYPTED and OAuth state UNSIGNED; set both")
+		liveStripe := strings.HasPrefix(stripeKey(), "sk_live_")
+		if strings.EqualFold(cxEnv, "production") || strings.EqualFold(cxEnv, "prod") || liveStripe {
+			reason := "CX_ENV=" + cxEnv
+			if liveStripe {
+				reason = "STRIPE_SECRET_KEY is a LIVE key (sk_live_...)"
+			}
+			log.Fatal("CX_TOKEN_KEY and/or CX_STATE_SECRET unset with " + reason + " — refusing to start: OAuth tokens would be stored UNENCRYPTED and OAuth state UNSIGNED; set both")
 		}
 		log.Print("WARNING: CX_TOKEN_KEY and/or CX_STATE_SECRET unset — OAuth tokens stored UNENCRYPTED and OAuth state UNSIGNED; set both before production")
 	}
@@ -110,10 +149,17 @@ func main() {
 
 	store := NewStore(pool)
 
-	// `control seed`: run the demo seed and exit (no server, no object store
-	// required). Stable demo UUIDs + ON CONFLICT DO NOTHING make it re-runnable.
+	// `control seed`: run the demo seed and exit (no server required — object
+	// store IS attempted, best-effort, so the seeded honeypot's input object
+	// actually exists for a real worker to fetch; see seed.go's seedDemo doc
+	// comment). Stable demo UUIDs + ON CONFLICT DO NOTHING make it re-runnable.
 	if len(os.Args) > 1 && os.Args[1] == "seed" {
-		if err := seedDemo(ctx, pool); err != nil {
+		seedStorage, serr := NewStorage(ctx)
+		if serr != nil {
+			log.Printf("seed: object storage unavailable (%v) — honeypot input object will NOT be uploaded; DB-only seed", serr)
+			seedStorage = nil
+		}
+		if err := seedDemo(ctx, pool, seedStorage); err != nil {
 			log.Fatalf("seed failed: %v", err)
 		}
 		return
@@ -123,6 +169,19 @@ func main() {
 	// a half-migrated DB is never a silent fallback.
 	if err := store.Migrate(ctx); err != nil {
 		log.Fatalf("migrate failed: %v", err)
+	}
+
+	// Buyer Advantage & Pricing Edge 4.5->5 (docs/internal/CREED_AND_PATH_TO_TEN.md,
+	// "Reprice from real supplier economics, not hand-seeded constants"): replace
+	// the hand-seeded catalogue prices (still price_source='seed' — never an
+	// operator's own edit, see ApplyRepricing) with prices derived from the real
+	// measured throughput docs/GPU_CAPABILITY.md publishes and the real supplier
+	// share rate. Best-effort at startup (never fatal — a pricing update is not a
+	// reason to refuse to serve).
+	if n, rerr := store.ApplyRepricing(ctx, RepriceCatalogueFromSupplierEconomics(supplierShareRate)); rerr != nil {
+		log.Printf("repricing from supplier economics: %v (catalogue left as-is)", rerr)
+	} else if n > 0 {
+		log.Printf("repricing from supplier economics: %d catalogue price(s) updated from measured throughput", n)
 	}
 
 	// Object storage is mandatory: a missing/unreachable store is fatal here, not
@@ -168,6 +227,10 @@ func main() {
 		log.Print("CX_RUN_WORKERS=false · background workers disabled on this instance (API-only, for HA secondaries)")
 	}
 	go server.startRateLimitSweeper(workersCtx) // evict idle rate-limit buckets
+	// Wake-on-work (notify.go): runs on EVERY instance regardless of CX_RUN_WORKERS —
+	// unlike the sweep workers above, claim long-polls are served by every instance,
+	// not just the primary, so every instance needs its own LISTEN connection.
+	go startTaskWakeListener(workersCtx, pool)
 
 	srv := &http.Server{
 		Addr:              addr,

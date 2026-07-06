@@ -141,6 +141,52 @@ func (s *Server) handleSupplierOnboard(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// workerTokenRequest is the body for POST /v1/supplier/worker-tokens.
+type workerTokenRequest struct {
+	Email string `json:"email"`
+}
+
+// handleCreateWorkerToken mints a real, self-serve worker token for a supplier's
+// NEW machine — the missing piece docs/CREED_AND_PATH_TO_TEN.md ("Supplier
+// onboarding & safety" 4.5→5) named as the hard break in the onboarding funnel:
+// CreateWorkerToken existed with zero real callers, so a stranger could never
+// obtain a worker token without the dev seed. Call this once per Mac you want to
+// add — unlike /v1/supplier/onboard (one-time tax/Connect setup), this can be
+// called repeatedly to mint additional tokens for additional machines under the
+// same supplier account. UpsertSupplierByEmail is idempotent and safe to call here
+// even for a supplier who has not done Connect/tax onboarding yet (empty tax
+// fields never overwrite ones already on file — see its ON CONFLICT clause): the
+// agent can run and accrue held credits immediately, and payouts release once
+// Connect is completed separately via /v1/supplier/onboard.
+func (s *Server) handleCreateWorkerToken(w http.ResponseWriter, r *http.Request) {
+	var req workerTokenRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid worker-token json: "+err.Error())
+		return
+	}
+	email := normalizeEmail(req.Email)
+	if !looksLikeEmail(email) {
+		writeErr(w, http.StatusBadRequest, "a valid email is required")
+		return
+	}
+	supplierID, err := s.store.UpsertSupplierByEmail(r.Context(), email, "", "")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "recording supplier: "+err.Error())
+		return
+	}
+	workerID := uuid.New()
+	token, err := s.store.CreateWorkerToken(r.Context(), workerID, supplierID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "minting worker token: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"supplier_id":  supplierID,
+		"worker_id":    workerID,
+		"worker_token": token,
+	})
+}
+
 // handleSupplierStatus reports a supplier's onboarding state by email. connect_status
 // is "none" (no account yet), "pending" (account exists, not yet payout-ready), or
 // "enabled" (Stripe says it can receive transfers). payouts_enabled is the cached

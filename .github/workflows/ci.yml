@@ -84,6 +84,15 @@ jobs:
         run: cd control && go test ./...
       - name: test (integration matrix — live Postgres + MinIO)
         run: cd control && go test -tags integration -count=1 ./...
+      # Buyer DX doc-as-test (Buyer Developer Experience 5->6,
+      # docs/internal/CREED_AND_PATH_TO_TEN.md): run EVERY documented buyer command
+      # from docs/QUICKSTART.md (curl, Python SDK, cx CLI) end to end against the real
+      # control plane, using the CI Postgres + MinIO services already up for this job
+      # (doc-as-test.sh's SERVICE mode). Fails CI if a documented command no longer
+      # works — and its built-in self-test asserts a deliberately-broken doc command
+      # IS caught, so this gate cannot silently pass on doc drift.
+      - name: doc-as-test (QUICKSTART.md is executable truth)
+        run: bash scripts/doc-as-test.sh
 
   # ── Supplier agent (Rust) ────────────────────────────────────────────────────
   # macOS so Candle's default `metal` feature compiles (Metal is unavailable on
@@ -104,10 +113,30 @@ jobs:
         run: cd agent && cargo fmt --check
       - name: clippy (deny warnings)
         run: cd agent && cargo clippy -- -D warnings
+      - name: vulnerability scan (RustSec advisory-db, the agent-side twin of the
+          control plane's govulncheck step — Security Posture 7->8,
+          docs/internal/CREED_AND_PATH_TO_TEN.md)
+        run: |
+          cargo install cargo-audit --locked
+          cd agent && cargo audit
       - name: build
         run: cd agent && cargo build
       - name: test (non-ignored)
         run: cd agent && cargo test
+      # Mac inference sandbox proof (Security Posture 8->9,
+      # docs/internal/CREED_AND_PATH_TO_TEN.md): run the shipped seatbelt profile
+      # (macapp/ComputeExchangeAgent/cx-agent.sb) against standalone binaries and
+      # assert it contains a malicious buyer payload's blast radius on BOTH axes —
+      # filesystem (writes confined to the model cache + data dir; reads of ~/.ssh,
+      # keychain, documents denied) AND network (no inbound/listen; outbound pinned to
+      # 443/80/53 + loopback, an arbitrary port denied) — while still permitting the
+      # reads/writes/egress legitimate inference needs. macOS-only (seatbelt is macOS),
+      # which this runner is. The network rows self-skip on an offline runner.
+      - name: sandbox profile proof (cx-agent.sb contains the blast radius)
+        run: bash macapp/ComputeExchangeAgent/sandbox-profile-test.sh
+      # The menu-bar app (which launches cx-agent under that profile) must compile.
+      - name: macapp compiles (swift build)
+        run: swift build --package-path macapp
 
   # ── Supplier agent — CUDA lane (Linux) ───────────────────────────────────────
   # Compile-gate the NVIDIA/CUDA build so the lane can't silently rot. Installs the

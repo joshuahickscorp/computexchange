@@ -2,6 +2,8 @@ package main
 
 import (
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -32,6 +34,114 @@ func TestScanJSONLCountsAndFields(t *testing.T) {
 	if len(s.DetectedFields) != 3 || s.DetectedFields[0] != "id" ||
 		s.DetectedFields[1] != "prompt" || s.DetectedFields[2] != "text" {
 		t.Fatalf("detected_fields=%v, want %v", s.DetectedFields, want)
+	}
+}
+
+// TestScanJSONLRecommendsLongestStringField proves the Project Detection &
+// Quotation 8->9 content-based detection (docs/internal/CREED_AND_PATH_TO_TEN.md):
+// the sampled records' ACTUAL field data drives a longest-average-string
+// recommendation for which column to embed/classify/extract, surfacing the
+// previously-computed-but-dropped field information as a confirmable suggestion.
+func TestScanJSONLRecommendsLongestStringField(t *testing.T) {
+	// A realistic messy input: a short id, a short category label, and a long
+	// free-text body. The body is unambiguously the text a buyer wants processed.
+	input := []byte(`{"id":"1","category":"news","body":"A long-form article about distributed compute markets and idle GPUs."}
+{"id":"2","category":"blog","body":"Another substantial paragraph of real prose that dwarfs the id and category fields in length."}
+{"id":"3","category":"news","body":"Yet more multi-sentence content here, clearly the primary text column of this dataset."}
+`)
+	s := scanJSONL(input)
+
+	// The recommendation is the long free-text column, not the id or the label.
+	if s.RecommendedField != "body" {
+		t.Fatalf("recommended_field=%q, want \"body\" (the longest-average-string column)", s.RecommendedField)
+	}
+	// The evidence is surfaced and ordered by avg string length DESC — body first.
+	if len(s.FieldStats) != 3 {
+		t.Fatalf("field_stats len=%d, want 3 (id, category, body)", len(s.FieldStats))
+	}
+	if s.FieldStats[0].Field != "body" {
+		t.Fatalf("field_stats[0]=%q, want \"body\" (highest avg length first): %+v", s.FieldStats[0].Field, s.FieldStats)
+	}
+	// The recommendation is strictly the top of the evidence list.
+	if s.FieldStats[0].Field != s.RecommendedField {
+		t.Fatalf("recommendation (%q) must be FieldStats[0] (%q)", s.RecommendedField, s.FieldStats[0].Field)
+	}
+	// body's avg must strictly exceed both other candidates' — the heuristic is
+	// genuinely content-driven, not coincidental.
+	byField := map[string]FieldStat{}
+	for _, fs := range s.FieldStats {
+		byField[fs.Field] = fs
+	}
+	if !(byField["body"].AvgStringLen > byField["category"].AvgStringLen &&
+		byField["category"].AvgStringLen > byField["id"].AvgStringLen) {
+		t.Fatalf("avg string lengths must order body > category > id, got %+v", s.FieldStats)
+	}
+	// Every candidate carried in all 3 sampled records.
+	for _, fs := range s.FieldStats {
+		if fs.Occurrences != 3 {
+			t.Fatalf("field %q occurrences=%d, want 3", fs.Field, fs.Occurrences)
+		}
+	}
+}
+
+// TestScanJSONLNoStringFieldNoRecommendation proves the honest negative: when no
+// field carries string content (all-numeric records), there is NO recommendation
+// — the heuristic never invents a text column that does not exist. The field
+// evidence is still surfaced (avg 0) so the buyer sees the candidates.
+func TestScanJSONLNoStringFieldNoRecommendation(t *testing.T) {
+	input := []byte(`{"a":1,"b":2.5,"c":true}
+{"a":9,"b":0.1,"c":false}
+`)
+	s := scanJSONL(input)
+	if s.RecommendedField != "" {
+		t.Fatalf("no string field must yield NO recommendation, got %q", s.RecommendedField)
+	}
+	if len(s.FieldStats) != 3 {
+		t.Fatalf("field_stats must still list all candidates (avg 0), got %+v", s.FieldStats)
+	}
+	for _, fs := range s.FieldStats {
+		if fs.AvgStringLen != 0 {
+			t.Fatalf("a non-string field must have avg_string_len 0, got %+v", fs)
+		}
+	}
+}
+
+// TestEstimateTokensFixesMultiByteUndercounting proves the Project Detection &
+// Quotation 6->6.5 fix (docs/internal/CREED_AND_PATH_TO_TEN.md): the OLD
+// bytes/4 heuristic badly undercounted multi-byte UTF-8 (CJK/Cyrillic/etc.)
+// text, since a 3-byte-per-rune script divided by 4 gives ~0.75 "tokens" per
+// character when a real tokenizer is much closer to 1 token per character.
+func TestEstimateTokensFixesMultiByteUndercounting(t *testing.T) {
+	// 20 Japanese characters, 60 UTF-8 bytes (3 bytes/rune). The old bytes/4
+	// heuristic would estimate ceil(60/4) = 15 tokens for 20 real characters —
+	// FEWER estimated tokens than actual characters, which is implausible for
+	// any real tokenizer. The fixed rune-based, script-aware estimate must be
+	// close to the rune count, not a fraction of it.
+	cjk := []byte("こんにちはこんにちはこんにちはこんにちは")
+	runeCount := 20
+	if got := utf8.RuneCount(cjk); got != runeCount {
+		t.Fatalf("test fixture: want %d runes, got %d", runeCount, got)
+	}
+	old := int64((len(cjk) + 3) / 4) // the literal old bytes/4 (ceil) computation
+	got := estimateTokens(cjk)
+	if got <= old {
+		t.Fatalf("fixed estimate (%d) must exceed the old bytes/4 estimate (%d) for CJK text — the whole point of the fix", got, old)
+	}
+	if got < int64(runeCount)/2 {
+		t.Fatalf("fixed estimate (%d) is still implausibly low for %d real characters", got, runeCount)
+	}
+}
+
+// TestEstimateTokensUnchangedForASCII proves the fix is additive, not a
+// behavior change for the common English/ASCII case the old heuristic already
+// handled reasonably — every existing ASCII-input test must keep passing
+// unchanged (confirmed by the full suite), and this pins the exact expected
+// arithmetic for a hand-picked ASCII case too.
+func TestEstimateTokensUnchangedForASCII(t *testing.T) {
+	ascii := []byte("the quick brown fox jumps over the lazy dog") // 44 bytes, all ASCII
+	want := int64((44 + 3) / 4)                                    // ceil(44/4) = 11
+	if got := estimateTokens(ascii); got != want {
+		t.Fatalf("ASCII estimate changed: want %d (unchanged bytes/4 behavior), got %d", want, got)
 	}
 }
 
@@ -253,6 +363,53 @@ func TestPerTaskSecsFromP90FallbackAndConversion(t *testing.T) {
 	}
 }
 
+// TestSustainedBatchETASecs proves the Thermal 6->7 sustained-throughput ETA
+// adjustment (docs/internal/CREED_AND_PATH_TO_TEN.md): a LONG batch job whose ETA
+// came from the PEAK-derived static target is derated to the measured sustained
+// pace (36.6% slower → ~1.577× longer), while short jobs, non-batch tiers, and
+// ETAs already driven by real observed history are left EXACTLY at peak. Pure — no
+// DB.
+func TestSustainedBatchETASecs(t *testing.T) {
+	// A long batch job on the peak-derived static target IS derated.
+	long := 600 // 10 min peak estimate — well past the throttle onset
+	got := sustainedBatchETASecs(long, "batch", false /*usedObservedHistory*/)
+	want := 947 // ceil(600 * 1/(1-0.366)) = ceil(946.37)
+	if got != want {
+		t.Fatalf("a long peak-derived batch ETA must derate to sustained: want %d, got %d", want, got)
+	}
+	if got <= long {
+		t.Fatalf("the sustained ETA must be strictly longer than the peak ETA (%d), got %d", long, got)
+	}
+
+	// A SHORT batch job (under the threshold) finishes inside the peak regime — no
+	// derating.
+	shortPeak := sustainedETAThresholdSecs - 1
+	if got := sustainedBatchETASecs(shortPeak, "batch", false); got != shortPeak {
+		t.Fatalf("a short batch ETA (%ds < %ds threshold) must stay at peak, got %d", shortPeak, sustainedETAThresholdSecs, got)
+	}
+
+	// Exactly at the threshold: derating engages (>= threshold).
+	if got := sustainedBatchETASecs(sustainedETAThresholdSecs, "batch", false); got <= sustainedETAThresholdSecs {
+		t.Fatalf("at the threshold the sustained derating must engage, got %d (<= %d)", got, sustainedETAThresholdSecs)
+	}
+
+	// A non-batch tier (priority/trusted are latency tiers, not the minutes-long
+	// sustained regime) is never derated, even when long.
+	if got := sustainedBatchETASecs(long, "priority", false); got != long {
+		t.Fatalf("a non-batch tier must not be derated, got %d (want %d)", got, long)
+	}
+	if got := sustainedBatchETASecs(long, "trusted", false); got != long {
+		t.Fatalf("the trusted tier must not be derated, got %d (want %d)", got, long)
+	}
+
+	// An ETA already driven by REAL observed history must NOT be re-derated — the
+	// observed durations already embody the machine's actual sustained pace, so
+	// derating again would double-count.
+	if got := sustainedBatchETASecs(long, "batch", true /*usedObservedHistory*/); got != long {
+		t.Fatalf("an observed-history ETA must not be re-derated, got %d (want %d)", got, long)
+	}
+}
+
 func containsSub(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {
@@ -260,4 +417,174 @@ func containsSub(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// --- wall-clock speed-SLA quote (Speed Lane wave 2A) — pure unit tests ----------
+// The DB-backed path (quote → firm submit → enforcement → refund) is proven by
+// the real-infra integration test (sla_integration_test.go); these pin the pure
+// math and the honesty gates without a DB.
+
+// TestSLAGuaranteedSecsFormula pins the guarantee formula term by term:
+// ceil(conservative × safety margin) + merge allowance — and its zero handling.
+func TestSLAGuaranteedSecsFormula(t *testing.T) {
+	// conservative 100s → ceil(100×1.25)=125 + 60 = 185.
+	if got := slaGuaranteedSecs(100); got != 185 {
+		t.Fatalf("slaGuaranteedSecs(100)=%d, want 185 (ceil(100*1.25)+60)", got)
+	}
+	// Ceil engages on fractional products: 1 → ceil(1.25)=2 + 60 = 62.
+	if got := slaGuaranteedSecs(1); got != 62 {
+		t.Fatalf("slaGuaranteedSecs(1)=%d, want 62 (ceil(1*1.25)+60)", got)
+	}
+	// No band → no guarantee, never a fabricated one.
+	if got := slaGuaranteedSecs(0); got != 0 {
+		t.Fatalf("slaGuaranteedSecs(0)=%d, want 0", got)
+	}
+	if got := slaGuaranteedSecs(-5); got != 0 {
+		t.Fatalf("slaGuaranteedSecs(-5)=%d, want 0", got)
+	}
+	// Monotone: a bigger band never yields a smaller guarantee.
+	if slaGuaranteedSecs(200) <= slaGuaranteedSecs(100) {
+		t.Fatalf("guarantee must grow with the band: g(200)=%d g(100)=%d",
+			slaGuaranteedSecs(200), slaGuaranteedSecs(100))
+	}
+	// The guarantee is always strictly ABOVE the conservative band itself (margin
+	// + allowance are real additive slack, not a re-label of the band).
+	for _, cons := range []int{1, 10, 47, 100, 3600} {
+		if g := slaGuaranteedSecs(cons); g <= cons {
+			t.Fatalf("guarantee %d must exceed its own conservative band %d", g, cons)
+		}
+	}
+}
+
+// TestSLAGuaranteeIsBuiltOnConservativeNotP50 pins the wave's core honesty rule:
+// the guarantee basis is the planner's CONSERVATIVE band, so for any plan where
+// conservative > p50 (always, by planner construction) the guarantee built on
+// the band strictly exceeds what the p50 would have produced.
+func TestSLAGuaranteeIsBuiltOnConservativeNotP50(t *testing.T) {
+	p50, conservative := 60, 80 // planner invariant: conservative >= p50
+	if g, gp := slaGuaranteedSecs(conservative), slaGuaranteedSecs(p50); g <= gp {
+		t.Fatalf("guarantee on the conservative band (%d) must exceed a p50-based one (%d)", g, gp)
+	}
+}
+
+// TestDeriveQuoteSLAHonestDegradation proves every precondition gate returns
+// nil — no guarantee — and that the offer, when made, carries the documented
+// premium math and every formula term.
+func TestDeriveQuoteSLAHonestDegradation(t *testing.T) {
+	const expected = 10.0
+	// Supply below the SLA threshold → no guarantee.
+	if sla := deriveQuoteSLA(false, true, 100, expected); sla != nil {
+		t.Fatalf("sla offered without eligible supply: %+v", sla)
+	}
+	// ETA not planner-backed (planner disabled / thin rate cache) → no guarantee.
+	if sla := deriveQuoteSLA(true, false, 100, expected); sla != nil {
+		t.Fatalf("sla offered without planner-backed ETA: %+v", sla)
+	}
+	// Degenerate band → no guarantee.
+	if sla := deriveQuoteSLA(true, true, 0, expected); sla != nil {
+		t.Fatalf("sla offered with no conservative band: %+v", sla)
+	}
+	// Premium that rounds to $0 (zero-cost quote) → no guarantee (a $0 remedy is
+	// not a commitment).
+	if sla := deriveQuoteSLA(true, true, 100, 0); sla != nil {
+		t.Fatalf("sla offered with an un-priceable premium: %+v", sla)
+	}
+	// All gates pass → the offer carries the documented terms.
+	sla := deriveQuoteSLA(true, true, 100, expected)
+	if sla == nil {
+		t.Fatal("sla expected when every precondition holds")
+	}
+	if sla.GuaranteedSecs != slaGuaranteedSecs(100) {
+		t.Fatalf("guaranteed_secs=%d, want %d", sla.GuaranteedSecs, slaGuaranteedSecs(100))
+	}
+	if want := roundUSD(expected * slaPremiumRate); sla.PremiumUSD != want {
+		t.Fatalf("premium=%v, want %v (%.0f%% of expected)", sla.PremiumUSD, want, slaPremiumRate*100)
+	}
+	if sla.ConservativeModelSecs != 100 || sla.SafetyMarginFactor != slaSafetyMarginFactor ||
+		sla.MergeAllowanceSecs != slaMergeAllowanceSecs || sla.Remedy == "" {
+		t.Fatalf("offer must surface every formula term + the remedy text: %+v", sla)
+	}
+}
+
+// TestSLAPremiumMath pins the surcharge rate on realistic figures.
+func TestSLAPremiumMath(t *testing.T) {
+	cases := []struct{ expected, want float64 }{
+		{10.00, 1.50},
+		{0.10, 0.015},
+		{0.003072, roundUSD(0.003072 * 0.15)}, // a tiny real batch_infer quote still prices a non-zero premium at 6dp
+	}
+	for _, c := range cases {
+		sla := deriveQuoteSLA(true, true, 50, c.expected)
+		if sla == nil {
+			t.Fatalf("expected an offer for expected=%v", c.expected)
+		}
+		if sla.PremiumUSD != c.want {
+			t.Fatalf("premium for expected=%v: got %v want %v", c.expected, sla.PremiumUSD, c.want)
+		}
+	}
+}
+
+// TestSLARefundAmount pins the remedy figure: the full premium, capped at the
+// chargeable amount — the refund nets a bill down, it never mints money.
+func TestSLARefundAmount(t *testing.T) {
+	if got := slaRefundAmount(1.50, 10.0); got != 1.50 {
+		t.Fatalf("refund=%v, want the full premium 1.50", got)
+	}
+	if got := slaRefundAmount(1.50, 0.40); got != 0.40 {
+		t.Fatalf("refund=%v, want capped at the chargeable 0.40", got)
+	}
+	if got := slaRefundAmount(0, 10.0); got != 0 {
+		t.Fatalf("no premium → no refund, got %v", got)
+	}
+	if got := slaRefundAmount(1.50, 0); got != 0 {
+		t.Fatalf("nothing chargeable → no refund, got %v", got)
+	}
+}
+
+// TestSLASpanMissed pins the miss boundary: the promise is "within
+// guaranteed_secs", so landing exactly ON the guarantee is a MET.
+func TestSLASpanMissed(t *testing.T) {
+	base := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	if slaSpanMissed(base, base.Add(90*time.Second), 90) {
+		t.Fatal("landing exactly on the guarantee must be MET (within = inclusive)")
+	}
+	if !slaSpanMissed(base, base.Add(90*time.Second+time.Millisecond), 90) {
+		t.Fatal("one millisecond past the guarantee must be a MISS")
+	}
+	if slaSpanMissed(base, base.Add(10*time.Second), 90) {
+		t.Fatal("well inside the guarantee must be MET")
+	}
+}
+
+// TestSLABindingValidation pins the submit-side binding rules at the pure
+// level: a firm submission binds the guarantee ONLY when the quote actually
+// carried a priced offer, and the committed price ceiling grows by exactly the
+// premium (the cap covered the work; the surcharge is priced on top, never
+// squeezed out of it). Mirrors createJob's binding block (api.go), which the
+// integration test drives end-to-end over HTTP.
+func TestSLABindingValidation(t *testing.T) {
+	bind := func(q boundQuote) (guarantee int, premium, cap float64) {
+		cap = q.CostMaxUSD
+		if q.SLAGuaranteedSecs > 0 && q.SLAPremiumUSD > 0 {
+			guarantee, premium = q.SLAGuaranteedSecs, q.SLAPremiumUSD
+			cap = q.CostMaxUSD + q.SLAPremiumUSD
+		}
+		return
+	}
+	// SLA-bearing quote: guarantee + premium bind, ceiling grows by the premium.
+	g, p, cap := bind(boundQuote{CostMaxUSD: 20, SLAGuaranteedSecs: 185, SLAPremiumUSD: 1.5})
+	if g != 185 || p != 1.5 || cap != 21.5 {
+		t.Fatalf("sla binding: got g=%d p=%v cap=%v, want 185/1.5/21.5", g, p, cap)
+	}
+	// No offer on the quote → price-only binding, byte-identical to pre-wave.
+	g, p, cap = bind(boundQuote{CostMaxUSD: 20})
+	if g != 0 || p != 0 || cap != 20 {
+		t.Fatalf("price-only binding: got g=%d p=%v cap=%v, want 0/0/20", g, p, cap)
+	}
+	// A guarantee without a priced premium (defensive: half-written row) must
+	// NOT bind — no remedy means no commitment.
+	g, p, cap = bind(boundQuote{CostMaxUSD: 20, SLAGuaranteedSecs: 185})
+	if g != 0 || p != 0 || cap != 20 {
+		t.Fatalf("guarantee without premium must not bind: got g=%d p=%v cap=%v", g, p, cap)
+	}
 }

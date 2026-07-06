@@ -45,6 +45,13 @@ func (s *Store) Migrate(ctx context.Context) error {
 		// so it carries its own chunk key (input_ref) and result target key.
 		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS input_ref TEXT`,
 		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS result_key TEXT`,
+		// Verification-requeue worker exclusion (Scheduling & Matching Engine 8->9,
+		// docs/internal/CREED_AND_PATH_TO_TEN.md): RequeueTask records the worker that
+		// just failed a task here (until excluded_until) so the claim skips it for a
+		// window, then the exclusion expires — a thin fleet is never permanently
+		// starved of the retry. See RequeueTask (store.go) and ClaimTaskSQL (scheduler.go).
+		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS excluded_worker UUID`,
+		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS excluded_until  TIMESTAMPTZ`,
 		// Webhook registrations for job-completion delivery.
 		`CREATE TABLE IF NOT EXISTS webhooks (
 		   id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -123,6 +130,17 @@ func (s *Store) Migrate(ctx context.Context) error {
 		   duration_ms BIGINT
 		 )`,
 		`CREATE INDEX IF NOT EXISTS task_durations_type_model_idx ON task_durations (job_type, model_ref)`,
+		// Performance Observability 6.5->7 (docs/internal/CREED_AND_PATH_TO_TEN.md):
+		// the committing worker's identity + verification class, so a version bump
+		// or a heterogeneous fleet can be sliced out of the same duration history
+		// instead of one blended average hiding a regression on just one build.
+		// build_hash already IS the version-sliced identity this repo tracks
+		// (hardware::engine_build_hash folds in agent version + device backend +
+		// kernel identity — see docs/DETERMINISM_CLASS.md), so it stands in for a
+		// separate raw "agent_version" column.
+		`ALTER TABLE task_durations ADD COLUMN IF NOT EXISTS worker_id UUID`,
+		`ALTER TABLE task_durations ADD COLUMN IF NOT EXISTS engine TEXT`,
+		`ALTER TABLE task_durations ADD COLUMN IF NOT EXISTS build_hash TEXT`,
 		// Concierge intake (intake.go) + buyer billing (billing.go): connected git
 		// sources, detected-pipeline intakes, and the buyer→Stripe-customer map.
 		`CREATE TABLE IF NOT EXISTS git_sources (
@@ -243,11 +261,173 @@ func (s *Store) Migrate(ctx context.Context) error {
 		// One stripe_fee ledger row per PaymentIntent, structurally (the fee recorder
 		// is INSERT-if-absent by payout_ref; the partial unique index closes the race).
 		`CREATE UNIQUE INDEX IF NOT EXISTS ledger_stripe_fee_ref_uniq ON ledger_entries (payout_ref) WHERE kind = 'stripe_fee'`,
+		// Wake-on-work (docs/CREED_AND_PATH_TO_TEN.md, "Control plane hot path" 6→7 /
+		// "Scalability headroom" 5→6 / "End-to-end job latency" 7.5→8 — the same fix
+		// serves all three). Before this, every idle long-polling worker re-attempted
+		// a full ClaimTask transaction every 250ms regardless of whether any work
+		// existed. A STATEMENT-level trigger (fires once per statement, not once per
+		// row, so a 5,500-chunk submit sends one notify, not 5,500) calls pg_notify
+		// whenever a task is inserted (a new job) or its status/visible_at changes (a
+		// requeue, a hedge, a rescue) — notify.go's listener wakes every waiting
+		// long-poll goroutine on receipt, which then re-attempts its own ClaimTask
+		// immediately instead of waiting out the rest of its poll tick. The 250ms
+		// ticker in api.go's claimWithWait becomes a rare-case safety net (a missed
+		// notification, e.g. across a brief connection drop), not the primary
+		// wake mechanism — see notify.go for the listener + broadcast implementation.
+		`CREATE OR REPLACE FUNCTION notify_task_available() RETURNS trigger AS $$
+		 BEGIN
+		   PERFORM pg_notify('cx_task_available', '');
+		   RETURN NULL;
+		 END;
+		 $$ LANGUAGE plpgsql`,
+		`DROP TRIGGER IF EXISTS tasks_notify_available ON tasks`,
+		`CREATE TRIGGER tasks_notify_available
+		   AFTER INSERT OR UPDATE OF status, visible_at ON tasks
+		   FOR EACH STATEMENT EXECUTE FUNCTION notify_task_available()`,
+		// Cold-load timing (docs/CREED_AND_PATH_TO_TEN.md, "Warm model pool" 6.5→7).
+		`ALTER TABLE benchmark_results ADD COLUMN IF NOT EXISTS load_ms BIGINT DEFAULT 0`,
+		// Maintained completed-task counter (Control Plane Hot Path 7->8,
+		// docs/internal/CREED_AND_PATH_TO_TEN.md): ClaimTask used to re-derive a
+		// supplier's lifetime completed-task count with a `count(*)` scan over
+		// `tasks` on EVERY single claim (the trusted-tier gate). Now maintained as
+		// a running column, incremented once per real commit (CommitTask) instead.
+		`ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS completed_tasks BIGINT NOT NULL DEFAULT 0`,
+		// One-time backfill for suppliers that already had completed tasks before
+		// this column existed. Safe to run on every startup: once backfilled, a
+		// real supplier's count is > 0 and this WHERE clause matches nothing for
+		// them; it only ever does real work for a genuinely still-zero supplier,
+		// where the inner count is cheap (no rows to scan for a fresh worker).
+		`UPDATE suppliers s SET completed_tasks = (
+		   SELECT count(*) FROM tasks t
+		    WHERE t.worker_id IN (SELECT id FROM workers WHERE supplier_id = s.id)
+		      AND t.status = 'complete'
+		 ) WHERE completed_tasks = 0`,
+		// Results-merge watermark (Data Transfer & Artifact I/O 4.5->5,
+		// docs/internal/CREED_AND_PATH_TO_TEN.md, "Stop paying for every poll
+		// twice"): set once a job's buyer-ready artifact has actually been merged,
+		// so GET /v1/jobs/{id}/results only re-merges when no successful merge has
+		// happened since completion instead of on every single poll.
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS results_merged_at TIMESTAMPTZ`,
+		// Postgres Data Lifecycle 5->6 (docs/internal/CREED_AND_PATH_TO_TEN.md):
+		// per-table autovacuum tuning for the telemetry tables sweepTelemetryRetention
+		// now DELETEs from hourly (control/workers.go telemetryTables) — mirrors
+		// db/schema.sql, here so a deployment that migrated the tables before this rung
+		// existed still picks up the tuning on next startup.
+		//
+		// Since Postgres Data Lifecycle 6->7 these tables are PARTITIONED, and a
+		// partitioned PARENT rejects storage parameters (they must sit on the leaves —
+		// MigrateTelemetryPartitions below applies them per-leaf). So each ALTER is
+		// guarded to run ONLY while the table is still a PLAIN table (relkind 'r'): on
+		// an already-partitioned DB it is a no-op (relkind 'p'); on an older DB whose
+		// tables are still plain, it tunes them exactly as before, right up until the
+		// conversion below carries the same params onto every leaf. Without the guard,
+		// a second startup after conversion would error ("cannot specify storage
+		// parameters for a partitioned table"). The relkind check makes it idempotent.
+		`DO $$ BEGIN
+		   IF EXISTS (SELECT 1 FROM pg_class WHERE relname='worker_memory_samples' AND relnamespace='public'::regnamespace AND relkind='r') THEN
+		     ALTER TABLE worker_memory_samples SET (
+		       autovacuum_vacuum_scale_factor=0.02, autovacuum_vacuum_threshold=200,
+		       autovacuum_analyze_scale_factor=0.02, autovacuum_analyze_threshold=200,
+		       autovacuum_vacuum_cost_limit=1000);
+		   END IF;
+		 END $$`,
+		`DO $$ BEGIN
+		   IF EXISTS (SELECT 1 FROM pg_class WHERE relname='task_durations' AND relnamespace='public'::regnamespace AND relkind='r') THEN
+		     ALTER TABLE task_durations SET (
+		       autovacuum_vacuum_scale_factor=0.05, autovacuum_vacuum_threshold=100,
+		       autovacuum_analyze_scale_factor=0.05, autovacuum_analyze_threshold=100,
+		       autovacuum_vacuum_cost_limit=500);
+		   END IF;
+		 END $$`,
+		`DO $$ BEGIN
+		   IF EXISTS (SELECT 1 FROM pg_class WHERE relname='job_events' AND relnamespace='public'::regnamespace AND relkind='r') THEN
+		     ALTER TABLE job_events SET (
+		       autovacuum_vacuum_scale_factor=0.1, autovacuum_vacuum_threshold=100,
+		       autovacuum_analyze_scale_factor=0.1, autovacuum_analyze_threshold=100,
+		       autovacuum_vacuum_cost_limit=500);
+		   END IF;
+		 END $$`,
+		// Buyer Advantage & Pricing Edge 4.5->5 (docs/internal/CREED_AND_PATH_TO_TEN.md,
+		// "Reprice from real supplier economics, not hand-seeded constants"): price
+		// provenance columns so a catalogue price is traceable to either the original
+		// hand-typed launch constant or a real measured-throughput formula (see
+		// control/pricing.go). Mirrors db/schema.sql for a DB that only ran Migrate.
+		`ALTER TABLE models ADD COLUMN IF NOT EXISTS price_source TEXT DEFAULT 'seed'`,
+		`ALTER TABLE models ADD COLUMN IF NOT EXISTS price_formula TEXT`,
+		// Project Detection & Quotation 7->8 ("Ship a firm-quote tier: a real
+		// commitment, not just an estimate"): an opt-in per-job flag that caps the
+		// buyer's charge at the quote's stated maximum, with overage absorbed by the
+		// platform rather than passed through (control/firmquote.go).
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS firm_quote BOOLEAN DEFAULT false`,
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS firm_quote_max_usd NUMERIC(12,6)`,
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS billed_usd NUMERIC(12,6)`,
+		// Speed Lane wave 2A (docs/speed-lane-reports/SLA_QUOTE_WAVE2A.md): the
+		// wall-clock speed-SLA binding + outcome, MIRRORS db/schema.sql (the quotes
+		// table's own sla columns live only in schema.sql — quotes itself is
+		// schema.sql-owned). sla_guarantee_secs/sla_premium_usd are stamped at
+		// submit when firm_quote binds an SLA-bearing quote; sla_met is NULL until
+		// the outcome is decided at finalize (true = met, false = missed → an
+		// sla_refund ledger row, made once-only by the partial unique index).
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS sla_guarantee_secs INT`,
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS sla_premium_usd NUMERIC(12,6)`,
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS sla_met BOOLEAN`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS ledger_sla_refund_ref_uniq ON ledger_entries (payout_ref) WHERE kind = 'sla_refund'`,
+		// Control Plane Hot Path 7->8 ("hoist worker_tps into something computed
+		// once per worker state change rather than recomputed per candidate row
+		// per claim"): maintained cache, mirrors db/schema.sql for a DB that only
+		// ran Migrate. See UpsertWorker (maintains it) and ClaimTaskSQL (reads it).
+		`CREATE TABLE IF NOT EXISTS worker_tps_cache (
+		   worker_id  UUID NOT NULL,
+		   job_type   TEXT NOT NULL,
+		   tps        REAL NOT NULL DEFAULT 0,
+		   updated_at TIMESTAMPTZ DEFAULT now(),
+		   PRIMARY KEY (worker_id, job_type)
+		 )`,
+		// Control Plane Hot Path 8->9 ("trust a buyer/worker-supplied SHA-256 for
+		// redundancy/honeypot comparison where safe, instead of re-downloading
+		// bytes the worker just uploaded synchronously inside the commit
+		// transaction"): the worker-reported SHA-256 of its own committed result
+		// bytes, persisted at CommitTask so a later commit's redundancy compare
+		// can trust a hash-to-hash match for byte-exact job types without a
+		// second S3 GetObject. Empty/NULL for an older agent that does not send
+		// one (or a pre-migration row) — the commit handler's fallback is a real
+		// GetObject, so correctness never depends on this column being populated.
+		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS result_sha256 TEXT`,
+		// Operator Tooling 7->8 (docs/internal/CREED_AND_PATH_TO_TEN.md, "Add write
+		// actions the operator currently has to reach into the database for"): an
+		// append-only audit log for every admin write action that used to be a raw
+		// psql UPDATE per RUNBOOKS.md (force-requeue a stuck task, adjust a
+		// supplier's reputation, release a payout hold). Mirrors the job_events /
+		// verification_events append-only pattern already established in this
+		// schema: kind is the closed action set, detail carries the operator's
+		// free-text reason plus whatever before/after values matter for that action
+		// (e.g. old/new reputation), so a later operator can see WHO did WHAT and
+		// WHY without re-deriving it from a diff of table state over time.
+		`CREATE TABLE IF NOT EXISTS admin_actions (
+		   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		   created_at  TIMESTAMPTZ DEFAULT now(),
+		   kind        TEXT NOT NULL,  -- task_requeued|reputation_adjusted|payout_released
+		   task_id     UUID,
+		   supplier_id UUID,
+		   ledger_entry_id UUID,
+		   reason      TEXT,
+		   detail      JSONB
+		 )`,
 	}
 	for _, q := range stmts {
 		if _, err := s.pool.Exec(ctx, q); err != nil {
 			return fmt.Errorf("migrate: %q: %w", q, err)
 		}
+	}
+	// Postgres Data Lifecycle 6->7 (docs/internal/CREED_AND_PATH_TO_TEN.md): convert the
+	// three high-churn telemetry tables to declarative RANGE partitioning by created_at,
+	// in place, preserving every existing row (control/partition.go). Runs LAST — after
+	// the base tables above exist (or were just created) — and is idempotent: a table
+	// already partitioned is a no-op, so this is safe on every startup. A failure here
+	// is fatal at startup exactly like every statement above; a half-migrated table is
+	// impossible because each table's conversion is its own transaction.
+	if err := s.MigrateTelemetryPartitions(ctx); err != nil {
+		return fmt.Errorf("migrate: telemetry partitions: %w", err)
 	}
 	return nil
 }
@@ -383,11 +563,48 @@ func (s *Store) SetBillingPMByCustomer(ctx context.Context, custID, pm string) e
 	return err
 }
 
-// JobChargeInfo returns a job's buyer + settled actual cost (for the auto-charge).
-func (s *Store) JobChargeInfo(ctx context.Context, jobID uuid.UUID) (buyerID uuid.UUID, actualUSD float64, err error) {
-	err = s.pool.QueryRow(ctx, `SELECT buyer_id, COALESCE(actual_usd,0) FROM jobs WHERE id=$1`, jobID).Scan(&buyerID, &actualUSD)
+// JobChargeInfo returns a job's buyer + the amount to actually CHARGE it (for the
+// auto-charge). This is normally the settled actual_usd unchanged — but for a
+// firm-quote job (Project Detection & Quotation 7->8,
+// docs/internal/CREED_AND_PATH_TO_TEN.md, "a real commitment, not just an
+// estimate") the charge is capped at firm_quote_max_usd: the buyer is NEVER
+// charged more than the quoted maximum they committed budget against, even when
+// the real actual_usd (what suppliers actually earned for the real work they
+// did — untouched, see billing.go/CommitTask) exceeds it. The platform absorbs
+// that difference; nothing here reduces what a supplier is owed.
+func (s *Store) JobChargeInfo(ctx context.Context, jobID uuid.UUID) (buyerID uuid.UUID, chargeUSD float64, err error) {
+	var actualUSD float64
+	var firmQuote bool
+	var firmMax float64
+	var slaRefund float64
+	// The sla_refund subquery is the Go-side twin of collect.go's
+	// firmChargeAmountSQL netting (Speed Lane wave 2A): a missed speed-SLA's
+	// premium refund (an sla_refund ledger credit keyed 'sla-<job_id>') comes off
+	// the amount actually collected, on BOTH charge paths, so a refund can never
+	// be bypassed by which path happens to collect the job.
+	err = s.pool.QueryRow(ctx,
+		`SELECT buyer_id, COALESCE(actual_usd,0), firm_quote, COALESCE(firm_quote_max_usd,0),
+		        COALESCE((SELECT SUM(le.amount_usd) FROM ledger_entries le
+		                  WHERE le.kind = 'sla_refund'
+		                    AND le.payout_ref = 'sla-' || jobs.id::text), 0)::float8
+		   FROM jobs WHERE id=$1`,
+		jobID).Scan(&buyerID, &actualUSD, &firmQuote, &firmMax, &slaRefund)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = errNotFound
+		return
+	}
+	if err != nil {
+		return
+	}
+	chargeUSD = actualUSD
+	if firmQuote && firmMax > 0 && actualUSD > firmMax {
+		chargeUSD = firmMax
+	}
+	if slaRefund > 0 {
+		chargeUSD -= slaRefund
+		if chargeUSD < 0 {
+			chargeUSD = 0 // the remedy nets the bill down, never into a negative charge
+		}
 	}
 	return
 }
@@ -433,6 +650,15 @@ func (s *Store) JobOutputRef(ctx context.Context, jobID uuid.UUID) (string, erro
 	var ref string
 	err := s.pool.QueryRow(ctx, `SELECT COALESCE(output_ref,'') FROM jobs WHERE id=$1`, jobID).Scan(&ref)
 	return ref, err
+}
+
+// JobBuyerID returns the buyer who submitted jobID (Security Posture 6.5->7:
+// resolveInput's s3_key ownership check — a buyer may only reference an object
+// key under a job THEY submitted, never another buyer's).
+func (s *Store) JobBuyerID(ctx context.Context, jobID uuid.UUID) (uuid.UUID, error) {
+	var buyerID uuid.UUID
+	err := s.pool.QueryRow(ctx, `SELECT buyer_id FROM jobs WHERE id=$1`, jobID).Scan(&buyerID)
+	return buyerID, err
 }
 
 // --- Compute Autopilot pipelines (user-defined multi-step chains, pipeline.go) ---
@@ -614,6 +840,36 @@ func nullPosFloat(v float64) any {
 	return v
 }
 
+// nullPosInt mirrors nullPosFloat for integer columns where 0 means "unset →
+// persisted NULL" (jobs.sla_guarantee_secs, wave 2A): NULL cleanly means "no
+// SLA" instead of a fake 0-second guarantee.
+func nullPosInt(v int) any {
+	if v <= 0 {
+		return nil
+	}
+	return v
+}
+
+// nullSHA256Hex validates a worker-reported SHA-256 hex string (Control Plane
+// Hot Path 8->9, docs/internal/CREED_AND_PATH_TO_TEN.md "trust a
+// buyer/worker-supplied SHA-256 ... where safe") before it is ever persisted or
+// trusted for a hash-to-hash comparison: exactly 64 lowercase hex characters (a
+// real SHA-256 digest), else nil (SQL NULL — the commit/verify path always falls
+// back to a real GetObject when this is NULL, so a malformed or absent hash can
+// never cause a wrong trust decision, only a missed speed optimization).
+func nullSHA256Hex(h string) any {
+	if len(h) != 64 {
+		return nil
+	}
+	for i := 0; i < len(h); i++ {
+		c := h[i]
+		if !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') {
+			return nil
+		}
+	}
+	return h
+}
+
 // nullUUID maps the zero UUID to nil so an unset reference stays SQL NULL (used for
 // jobs.quote_id: no binding must be NULL so the partial index and the quote→invoice
 // join cleanly skip unbound jobs).
@@ -676,20 +932,64 @@ func (s *Store) LookupWorkerToken(ctx context.Context, token string) (WorkerAuth
 	return w, err
 }
 
-// CreateWorkerToken mints a worker token for a supplier's worker: it generates a
-// random raw token, stores ONLY its hash, and returns the raw token once. The raw
+// CreateWorkerToken mints a worker token for a supplier's NEW worker: it generates
+// a random raw token, stores ONLY its hash, and returns the raw token once. The raw
 // value can never be recovered (it is not stored) — the caller hands it to the
 // supplier. This is the onboarding path real suppliers use instead of seeded tokens.
+//
+// worker_tokens.worker_id has a foreign key into workers, but the real workers row
+// (hw_class, benchmarks, ...) does not exist yet at mint time — the agent only
+// creates/fills it via UpsertWorker's `ON CONFLICT (id) DO UPDATE` the first time it
+// actually registers with this token. So this inserts a minimal PLACEHOLDER workers
+// row first, in the same transaction: hw_class='cpu' (a valid enum member, used only
+// to satisfy the NOT NULL column) with supported_jobs/supported_models left NULL.
+// COALESCE(w.supported_jobs,'{}') @> ARRAY[job_type] in the claim query (scheduler.go)
+// means an empty/NULL supported_jobs can never match ANY job type, so this
+// placeholder is structurally inert — it can never be claimed against — until the
+// agent's first real registration overwrites it with real capability data.
+//
+// It also activates the supplier (status 'pending' -> 'active') if this is their
+// FIRST token. Discovered by testing, not by reading: UpsertSupplierByEmail leaves
+// a brand-new supplier at status='pending', the claim query hard-requires
+// s.status='active' (scheduler.go's quarantine gate), and — before this fix —
+// nothing in production code ever performed that transition; only test fixtures
+// and the demo seed set status='active' directly. Without this, a self-served
+// supplier could authenticate and poll forever but their tasks could NEVER be
+// claimed. The guard is `AND status = 'pending'`, deliberately: minting an
+// ADDITIONAL token for a supplier who was later suspended/quarantined for fraud
+// must never silently reactivate them — activation only ever happens once, on the
+// way up from the initial pending state.
 func (s *Store) CreateWorkerToken(ctx context.Context, workerID, supplierID uuid.UUID) (string, error) {
 	raw := newSecret("cxw_")
 	if raw == "" {
 		return "", errors.New("worker token: entropy failure")
 	}
-	if _, err := s.pool.Exec(ctx,
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO workers (id, supplier_id, hw_class) VALUES ($1, $2, 'cpu')
+		 ON CONFLICT (id) DO NOTHING`,
+		workerID, supplierID,
+	); err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx,
 		`INSERT INTO worker_tokens (token_hash, worker_id, supplier_id, revoked)
 		 VALUES ($1, $2, $3, false)`,
 		hashKey(raw), workerID, supplierID,
 	); err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE suppliers SET status = 'active' WHERE id = $1 AND status = 'pending'`,
+		supplierID,
+	); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return "", err
 	}
 	return raw, nil
@@ -850,9 +1150,31 @@ func (s *Store) UpsertWorker(ctx context.Context, cap WorkerCapability) error {
 	for _, b := range cap.Benchmarks {
 		_, err = tx.Exec(ctx,
 			`INSERT INTO benchmark_results
-			   (worker_id, model_id, job_type, tps, eps, thermal_ok, p99_latency_ms)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-			cap.WorkerID, b.ModelID, b.JobType, b.TPS, b.EPS, b.ThermalOK, float32(b.P99MS),
+			   (worker_id, model_id, job_type, tps, eps, thermal_ok, p99_latency_ms, load_ms)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+			cap.WorkerID, b.ModelID, b.JobType, b.TPS, b.EPS, b.ThermalOK, float32(b.P99MS), int64(b.LoadMS),
+		)
+		if err != nil {
+			return err
+		}
+		// Maintain worker_tps_cache HERE, at the one real worker-state change
+		// (Control Plane Hot Path 7->8, docs/internal/CREED_AND_PATH_TO_TEN.md
+		// "hoist worker_tps into something computed once per worker state change
+		// rather than recomputed per candidate row per claim"), instead of
+		// ClaimTaskSQL re-deriving "this worker's most recent tps for this
+		// job_type" with a correlated subquery over benchmark_results for EVERY
+		// eligible candidate row on EVERY claim. UpsertWorker only ever appends
+		// benchmark_results newest-first (ORDER BY measured_at DESC in the old
+		// subquery), so a plain last-write-wins UPSERT here is equivalent to that
+		// "most recent" semantics — the maintained cache and the historical
+		// benchmark_results ledger (kept, unchanged, for HistoricalP90-style
+		// analysis elsewhere) never disagree about which measurement is newest.
+		_, err = tx.Exec(ctx,
+			`INSERT INTO worker_tps_cache (worker_id, job_type, tps, updated_at)
+			 VALUES ($1,$2,$3, now())
+			 ON CONFLICT (worker_id, job_type) DO UPDATE SET
+			   tps = EXCLUDED.tps, updated_at = now()`,
+			cap.WorkerID, b.JobType, b.TPS,
 		)
 		if err != nil {
 			return err
@@ -1007,6 +1329,77 @@ type AdminWorker struct {
 // pressure (a worker that just freed memory is not penalised for old beats).
 const memSampleWindow = 20
 
+// DeleteOldWorkerMemorySamples prunes rows older than `before` (docs/
+// CREED_AND_PATH_TO_TEN.md, "Postgres data lifecycle" 3→4). worker_memory_samples
+// appends one row per worker per heartbeat-with-memory-reporting — at 1k workers on
+// a 30s heartbeat that is roughly 2.9M rows/day with no bound before this existed.
+// Every real read of this table (ListWorkers above, memSampleWindow's admin/capacity
+// view, and the quote-risk memory-floor check) only ever looks at the most recent
+// memSampleWindow rows per worker, so deleting anything older than a modest
+// retention window changes no query's result — this is pure bloat removal, not a
+// behavior change. Returns the number of rows actually deleted so the caller (the
+// retention ticker) can log real progress, not just "ran".
+func (s *Store) DeleteOldWorkerMemorySamples(ctx context.Context, before time.Time) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM worker_memory_samples WHERE created_at < $1`, before)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+// DeleteOldTaskDurations prunes rows older than `before` (docs/
+// CREED_AND_PATH_TO_TEN.md, "Postgres data lifecycle" 4→5, extending the same fix
+// to the other unbounded telemetry table the audit named). task_durations is purely
+// internal: HistoricalP90DurationMs and the admin drift rollup are its only readers,
+// both aggregate queries with driftMinSamples gating thin history, neither pins to
+// specific old rows by id. Both readers ALSO now bound themselves to driftWindow
+// (24h, Performance Observability 7→8) independent of this retention window — this
+// 30-day window is deliberately wider than driftWindow so retention is never the
+// thing silently narrowing what the drift calculation can see; it just bounds how
+// long the raw rows survive at all, and can be widened later without any code
+// change if the drift/ETA calculation's own window is ever widened past it.
+func (s *Store) DeleteOldTaskDurations(ctx context.Context, before time.Time) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM task_durations WHERE created_at < $1`, before)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+// DeleteOldJobEvents prunes rows older than `before`. UNLIKE the two telemetry
+// tables above, job_events is buyer-VISIBLE history (GET /v1/jobs/{id}/events
+// reads it directly, scoped to one job at a time) — a buyer auditing an old
+// invoice or dispute may reasonably want to see it months later, so this uses a
+// much longer window than task_durations/worker_memory_samples by design; the
+// caller (sweepTelemetryRetention) passes a 180-day cutoff, not the 30-day one
+// used for pure telemetry.
+func (s *Store) DeleteOldJobEvents(ctx context.Context, before time.Time) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM job_events WHERE created_at < $1`, before)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+// TelemetryTableCounts returns the live row count of every table
+// sweepTelemetryRetention prunes (Postgres Data Lifecycle 8->9), keyed by table
+// name — the bloat-ratio half of the retention-health metric: a real count an
+// operator can watch for "still climbing despite the sweep running", not just
+// inferred from the sweep's own self-reported prune count. Table names here are
+// this codebase's own fixed constants (telemetryTables), never request input, so
+// the direct interpolation below carries no injection risk.
+func (s *Store) TelemetryTableCounts(ctx context.Context) (map[string]int64, error) {
+	out := make(map[string]int64, len(telemetryTables))
+	for _, table := range telemetryTables {
+		var n int64
+		if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM `+table).Scan(&n); err != nil {
+			return nil, fmt.Errorf("counting %s: %w", table, err)
+		}
+		out[table] = n
+	}
+	return out, nil
+}
+
 // ListWorkers returns the worker fleet joined to supplier reputation/status, each
 // annotated with its recent memory-pressure average (avg_available_gb over the last
 // memSampleWindow worker_memory_samples — Plane D D4). The LATERAL subquery is a
@@ -1136,6 +1529,236 @@ func (s *Store) SuspendWorker(ctx context.Context, workerID uuid.UUID) error {
 	return nil
 }
 
+// ReinstateWorker closes the "reinstate after review" half of RUNBOOKS.md's Bad /
+// fraudulent worker procedure (Operator Tooling 7->8): until now this was a raw
+// `psql -c "UPDATE suppliers SET status='active', quarantined_at=NULL ..."`. Only
+// clears quarantine on a supplier that IS quarantined/suspended (never touches an
+// already-active supplier, and never reinstates a 'banned' supplier — a ban is a
+// harder stop than a quarantine and must stay a deliberate, separate action, not a
+// side effect of this endpoint).
+func (s *Store) ReinstateWorker(ctx context.Context, workerID uuid.UUID) error {
+	ct, err := s.pool.Exec(ctx,
+		`UPDATE suppliers SET status = 'active', quarantined_at = NULL
+		 WHERE id = (SELECT supplier_id FROM workers WHERE id = $1) AND status = 'suspended'`,
+		workerID)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		// Distinguish "no such worker" from "worker exists but isn't suspended" so
+		// the handler can 404 vs 409 instead of collapsing both into one error.
+		var exists bool
+		if qerr := s.pool.QueryRow(ctx, `SELECT true FROM workers WHERE id = $1`, workerID).Scan(&exists); errors.Is(qerr, pgx.ErrNoRows) {
+			return errNotFound
+		} else if qerr != nil {
+			return qerr
+		}
+		return errNotSuspended
+	}
+	return nil
+}
+
+// errNotSuspended distinguishes "worker exists but its supplier is not currently
+// suspended" from errNotFound, so ReinstateWorker's caller can 409 instead of 404.
+var errNotSuspended = errors.New("supplier is not suspended")
+
+// AdminAction is one row of the append-only operator-write audit log (Operator
+// Tooling 7->8): every admin write endpoint that mutates real operational state
+// records one of these in the SAME transaction as the mutation, so "who did what,
+// when, and why" never depends on re-deriving it from a diff of table state.
+type AdminAction struct {
+	ID            uuid.UUID       `json:"id"`
+	CreatedAt     time.Time       `json:"created_at"`
+	Kind          string          `json:"kind"`
+	TaskID        *uuid.UUID      `json:"task_id,omitempty"`
+	SupplierID    *uuid.UUID      `json:"supplier_id,omitempty"`
+	LedgerEntryID *uuid.UUID      `json:"ledger_entry_id,omitempty"`
+	Reason        string          `json:"reason,omitempty"`
+	Detail        json.RawMessage `json:"detail,omitempty"`
+}
+
+// recordAdminAction inserts one audit row. Called INSIDE the same transaction as
+// the mutation it documents (always a *pgxpool.Tx here) so the audit trail can
+// never exist for a mutation that rolled back, or vice versa.
+func recordAdminAction(ctx context.Context, tx pgx.Tx, kind string, taskID, supplierID, ledgerEntryID *uuid.UUID, reason string, detail any) error {
+	var detailJSON []byte
+	if detail != nil {
+		b, err := json.Marshal(detail)
+		if err != nil {
+			return err
+		}
+		detailJSON = b
+	}
+	_, err := tx.Exec(ctx,
+		`INSERT INTO admin_actions (kind, task_id, supplier_id, ledger_entry_id, reason, detail)
+		 VALUES ($1,$2,$3,$4,$5,$6)`,
+		kind, taskID, supplierID, ledgerEntryID, nullIfEmpty(reason), detailJSON)
+	return err
+}
+
+// ListAdminActions returns the audit log, newest first, capped at 200 — the
+// operator's "what happened and why" review surface for every write action this
+// console now performs instead of raw SQL.
+func (s *Store) ListAdminActions(ctx context.Context) ([]AdminAction, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, created_at, kind, task_id, supplier_id, ledger_entry_id, COALESCE(reason,''), detail
+		 FROM admin_actions ORDER BY created_at DESC LIMIT 200`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AdminAction
+	for rows.Next() {
+		var a AdminAction
+		if err := rows.Scan(&a.ID, &a.CreatedAt, &a.Kind, &a.TaskID, &a.SupplierID, &a.LedgerEntryID, &a.Reason, &a.Detail); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// AdminForceRequeueTask closes the "Stuck job" runbook's manual fix (Operator
+// Tooling 7->8): until now this was a raw
+// `psql -c "UPDATE tasks SET status='queued', claimed_by=NULL, visible_at=now() ..."`.
+// Scoped to the SAME status set the runbook names (running/retrying) — a queued
+// task is already claimable and a complete/failed/cancelled task must never be
+// silently resurrected by an operator fat-fingering an id. Records an audit row
+// in the SAME transaction, so a requeue can never happen without a trace of who
+// forced it and why.
+func (s *Store) AdminForceRequeueTask(ctx context.Context, taskID uuid.UUID, reason string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var jobID uuid.UUID
+	var prevStatus string
+	if err := tx.QueryRow(ctx,
+		`UPDATE tasks SET status = 'queued', claimed_by = NULL, claimed_at = NULL,
+		                  worker_id = NULL, visible_at = now()
+		 WHERE id = $1 AND status IN ('running','retrying')
+		 RETURNING job_id, status`,
+		taskID,
+	).Scan(&jobID, &prevStatus); errors.Is(err, pgx.ErrNoRows) {
+		// Distinguish "no such task" from "task exists but isn't in a requeueable
+		// state" so the handler can 404 vs 409 instead of collapsing both.
+		var exists bool
+		if qerr := tx.QueryRow(ctx, `SELECT true FROM tasks WHERE id = $1`, taskID).Scan(&exists); errors.Is(qerr, pgx.ErrNoRows) {
+			return errNotFound
+		} else if qerr != nil {
+			return qerr
+		}
+		return errNotRequeueable
+	} else if err != nil {
+		return err
+	}
+
+	if err := recordAdminAction(ctx, tx, "task_requeued", &taskID, nil, nil, reason,
+		map[string]any{"job_id": jobID}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// errNotRequeueable distinguishes "task exists but is not in a requeueable state
+// (running/retrying)" from errNotFound.
+var errNotRequeueable = errors.New("task is not in a requeueable state")
+
+// AdminAdjustReputation closes the "manually adjust a supplier's reputation with
+// an audit trail" gap named directly in the backlog rung (Operator Tooling 7->8).
+// Unlike DockReputation/DockReputationMild (which apply a FIXED delta for a named
+// verification event), this is an operator-driven, arbitrary, auditable
+// adjustment — e.g. correcting a reputation score after a manual fraud review
+// overturns or confirms an automated call. Clamped to [0,1] like every other
+// reputation write in this codebase; the audit row records the exact before/after
+// values and the operator's stated reason, so "why is this supplier's reputation
+// what it is" is always answerable without asking anyone.
+func (s *Store) AdminAdjustReputation(ctx context.Context, supplierID uuid.UUID, delta float32, reason string) (before, after float32, err error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback(ctx)
+
+	if err := tx.QueryRow(ctx,
+		`SELECT reputation FROM suppliers WHERE id = $1 FOR UPDATE`, supplierID,
+	).Scan(&before); errors.Is(err, pgx.ErrNoRows) {
+		return 0, 0, errNotFound
+	} else if err != nil {
+		return 0, 0, err
+	}
+
+	after = before + delta
+	if after < 0 {
+		after = 0
+	} else if after > 1 {
+		after = 1
+	}
+	if _, err := tx.Exec(ctx, `UPDATE suppliers SET reputation = $2 WHERE id = $1`, supplierID, after); err != nil {
+		return 0, 0, err
+	}
+
+	if err := recordAdminAction(ctx, tx, "reputation_adjusted", nil, &supplierID, nil, reason,
+		map[string]any{"delta": delta, "before": before, "after": after}); err != nil {
+		return 0, 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, 0, err
+	}
+	return before, after, nil
+}
+
+// AdminReleasePayoutHold closes the "manually trigger a payout-hold release" gap
+// named directly in the backlog rung (Operator Tooling 7->8). Accepts an entry in
+// EITHER of the two real "money is owed but not moving" states this codebase
+// produces: 'held' (a real hold whose release_at simply hasn't come due yet, or a
+// buyer wants it released early) or 'ready' (the honest no-rail-configured stub
+// state releasePayouts falls back to on a failed/deferred transfer — and that
+// DuePayouts, the real release-worker sweep query, never revisits on its own:
+// docs/RUNBOOKS.md's OWN earlier procedure re-set a stuck credit to 'ready' as
+// its documented "fix", verified against the real DuePayouts query to silently
+// never get retried — the exact bug this endpoint closes for good). Either way
+// it (re-)establishes a genuine 'held' row with release_at=now(), so the very
+// next sweep cycle picks it up; it never marks the entry 'released' itself (that
+// still requires a real transfer reference, enforced structurally by
+// ledger_released_requires_ref), so this can never fake a payout.
+func (s *Store) AdminReleasePayoutHold(ctx context.Context, entryID uuid.UUID, reason string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var supplierID uuid.UUID
+	if err := tx.QueryRow(ctx,
+		`UPDATE ledger_entries SET payout_status = 'held', release_at = now()
+		 WHERE id = $1 AND kind = 'supplier_credit' AND payout_status IN ('held','ready')
+		 RETURNING supplier_id`,
+		entryID,
+	).Scan(&supplierID); errors.Is(err, pgx.ErrNoRows) {
+		var exists bool
+		if qerr := tx.QueryRow(ctx, `SELECT true FROM ledger_entries WHERE id = $1`, entryID).Scan(&exists); errors.Is(qerr, pgx.ErrNoRows) {
+			return errNotFound
+		} else if qerr != nil {
+			return qerr
+		}
+		return errNotHeld
+	} else if err != nil {
+		return err
+	}
+
+	if err := recordAdminAction(ctx, tx, "payout_released", nil, &supplierID, &entryID, reason, nil); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// errNotHeld distinguishes "ledger entry exists but is not currently held/ready"
+// (e.g. already released, pending, or clawed back) from errNotFound.
+var errNotHeld = errors.New("ledger entry is not held or ready")
+
 // --- jobs + tasks ---
 
 // CreateJobWithTasks inserts the job row and its task rows in one transaction.
@@ -1149,37 +1772,60 @@ func (s *Store) CreateJobWithTasks(ctx context.Context, j *jobRow, tasks []taskR
 	defer tx.Rollback(ctx)
 
 	// max_usd is NULL when no cap was set (0), so the claim's budget gate can use
-	// `j.max_usd IS NOT NULL` to cleanly tell "no cap" from a real $0 cap.
+	// `j.max_usd IS NOT NULL` to cleanly tell "no cap" from a real $0 cap. Same
+	// pattern for firm_quote_max_usd (Project Detection & Quotation 7->8): NULL
+	// means "not a firm quote", never a fake $0 ceiling.
 	_, err = tx.Exec(ctx,
 		`INSERT INTO jobs
 		   (id, buyer_id, status, job_type, model_ref, input_ref, output_ref,
 		    tier, verification_policy, estimated_usd, actual_usd, task_count, tasks_done,
 		    min_memory_gb, hw_classes, data_residency, job_type_spec, split_size,
 		    offered_rate_usd_hr, eta_secs, max_usd, budget_state, quote_id, min_reputation, private_pool,
-		    deadline_secs)
+		    deadline_secs, firm_quote, firm_quote_max_usd, sla_guarantee_secs, sla_premium_usd)
 		 VALUES ($1,$2,'queued',$3,$4,$5,$6,$7,$8,$9,0,$10,0,
-		         $11,$12,$13,$14,$15,$16,$17,$18,'tracking',$19,$20,$21,$22)`,
+		         $11,$12,$13,$14,$15,$16,$17,$18,'tracking',$19,$20,$21,$22,$23,$24,$25,$26)`,
 		j.ID, j.BuyerID, j.JobType, j.ModelRef, j.InputRef, j.OutputRef,
 		j.Tier, j.VerificationPolicy, j.EstimatedUSD, j.TaskCount,
 		j.MinMemoryGB, nullStrSlice(j.HWClasses), nullStrSlice(j.DataResidency),
 		nullJSON(j.JobTypeSpec), j.SplitSize, j.OfferedRateUsdHr, j.ETASecs,
 		nullPosFloat(j.MaxUSD), nullUUID(j.QuoteID), j.MinReputation, j.PrivatePool,
-		j.DeadlineSecs,
+		j.DeadlineSecs, j.FirmQuote, nullPosFloat(j.FirmQuoteMaxUSD),
+		nullPosInt(j.SLAGuaranteeSecs), nullPosFloat(j.SLAPremiumUSD),
 	)
 	if err != nil {
 		return err
 	}
 
-	for _, t := range tasks {
-		_, err = tx.Exec(ctx,
-			`INSERT INTO tasks
-			   (id, job_id, status, is_honeypot, is_redundancy, retry_count,
-			    input_ref, result_key, chunk_index, visible_at)
-			 VALUES ($1,$2,'queued',$3,$4,0,$5,$6,$7, now())`,
-			t.ID, t.JobID, t.IsHoneypot, t.IsRedundancy, t.InputRef, t.ResultKey, t.ChunkIndex,
+	// PATCH (Control plane hot path 8->9, docs/internal/CREED_AND_PATH_TO_TEN.md
+	// "batch large-job inserts via pgx CopyFrom instead of row-by-row insert"):
+	// this used to be one round-trip INSERT per task, inside the SAME transaction
+	// a large job's buyer-facing submit request waits on — O(task count)
+	// sequential round-trips synchronously in the request path, so a
+	// multi-thousand-task job paid a multi-thousand-statement transaction before
+	// the buyer's POST /v1/jobs ever returned. pgx's CopyFrom streams every row
+	// over the wire in the Postgres COPY binary protocol in ONE operation —
+	// still inside this same transaction (so a mid-copy failure rolls back the
+	// whole job exactly as before; nothing partially lands), but without a
+	// round-trip per row. visible_at/status/retry_count were server-side
+	// DEFAULTs the old per-row INSERT relied on implicitly; CopyFrom has no
+	// DEFAULT-substitution, so they are bound explicitly per row below —
+	// status='queued', retry_count=0, and visible_at pinned to ONE now() read up
+	// front so every row in the copy shares the identical timestamp a single
+	// INSERT statement's now() would have produced.
+	if len(tasks) > 0 {
+		now := time.Now()
+		_, err = tx.CopyFrom(ctx,
+			pgx.Identifier{"tasks"},
+			[]string{"id", "job_id", "status", "is_honeypot", "is_redundancy", "retry_count",
+				"input_ref", "result_key", "chunk_index", "visible_at"},
+			pgx.CopyFromSlice(len(tasks), func(i int) ([]any, error) {
+				t := tasks[i]
+				return []any{t.ID, t.JobID, "queued", t.IsHoneypot, t.IsRedundancy, int16(0),
+					t.InputRef, t.ResultKey, t.ChunkIndex, now}, nil
+			}),
 		)
 		if err != nil {
-			return err
+			return fmt.Errorf("copy tasks: %w", err)
 		}
 	}
 	return tx.Commit(ctx)
@@ -1212,6 +1858,18 @@ type jobRow struct {
 	MinReputation      float32   // Elite-supplier gate: claim only by suppliers with reputation >= this (0 = any)
 	PrivatePool        bool      // Private Deployment: route ONLY to the buyer's bound suppliers (private_pool_members)
 	DeadlineSecs       int       // watchdog policy: -1 opt out, 0 default, 60..604800 explicit wall-clock deadline
+	// FirmQuote / FirmQuoteMaxUSD: the firm-quote tier (Project Detection &
+	// Quotation 7->8, docs/internal/CREED_AND_PATH_TO_TEN.md). When FirmQuote is
+	// true, FirmQuoteMaxUSD is the real ceiling the buyer's eventual charge is
+	// capped at (JobChargeInfo), with any overage absorbed by the platform.
+	FirmQuote       bool
+	FirmQuoteMaxUSD float64
+	// SLAGuaranteeSecs / SLAPremiumUSD: the wall-clock speed-SLA binding (Speed
+	// Lane wave 2A). When > 0 the job's results are guaranteed merged within
+	// SLAGuaranteeSecs of created_at; a miss auto-refunds SLAPremiumUSD via an
+	// sla_refund ledger row (collect.go settleSLAOutcome). 0 = no SLA → NULL.
+	SLAGuaranteeSecs int
+	SLAPremiumUSD    float64
 }
 
 // taskRow mirrors the tasks columns we write at creation. Each task is one chunk
@@ -1249,6 +1907,18 @@ type JobView struct {
 	BudgetState  string
 	ChargeStatus string
 	Verification Verification
+	// ResultsMergedAt is the results-merge watermark: nil until the buyer-ready
+	// artifact has actually been merged at least once (Data Transfer & Artifact
+	// I/O 4.5->5, "Stop paying for every poll twice"). handleJobResults skips
+	// re-merging on read once this is set.
+	ResultsMergedAt *time.Time
+	// SLAGuaranteeSecs / SLAPremiumUSD / SLAMet: the wall-clock speed-SLA (wave
+	// 2A). Guarantee 0 = no SLA bound. SLAMet is nil until the outcome is decided
+	// at finalize (or forever, for a job with no SLA); true = met, false = missed
+	// (an sla_refund ledger credit for the premium was recorded).
+	SLAGuaranteeSecs int
+	SLAPremiumUSD    float64
+	SLAMet           *bool
 }
 
 // GetJob loads a job scoped to a buyer (buyers see only their own jobs).
@@ -1260,12 +1930,14 @@ func (s *Store) GetJob(ctx context.Context, jobID, buyerID uuid.UUID) (*JobView,
 		        COALESCE(estimated_usd,0), COALESCE(actual_usd,0),
 		        COALESCE(eta_secs,0), created_at,
 		        COALESCE(max_usd,0), COALESCE(budget_state,'tracking'),
-		        COALESCE(charge_status,'not_attempted')
+		        COALESCE(charge_status,'not_attempted'), results_merged_at,
+		        COALESCE(sla_guarantee_secs,0), COALESCE(sla_premium_usd,0)::float8, sla_met
 		 FROM jobs WHERE id = $1 AND buyer_id = $2`,
 		jobID, buyerID,
 	).Scan(&j.ID, &j.BuyerID, &j.Status, &j.JobType, &j.Tier, &j.OutputRef,
 		&j.TaskCount, &j.TasksDone, &j.EstimatedUSD, &j.ActualUSD, &j.ETASecs, &j.CreatedAt,
-		&j.MaxUSD, &j.BudgetState, &j.ChargeStatus)
+		&j.MaxUSD, &j.BudgetState, &j.ChargeStatus, &j.ResultsMergedAt,
+		&j.SLAGuaranteeSecs, &j.SLAPremiumUSD, &j.SLAMet)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound
 	}
@@ -1416,13 +2088,20 @@ func (s *Store) CommitTask(ctx context.Context, taskID, workerID uuid.UUID, c Ta
 	}
 	defer tx.Rollback(ctx)
 
+	// Control Plane Hot Path 8->9 (docs/internal/CREED_AND_PATH_TO_TEN.md, "Get
+	// result-commit off the S3 critical path"): validate the worker-supplied
+	// SHA-256 shape before persisting it — a malformed value (wrong length,
+	// non-hex) is stored as SQL NULL (never trusted downstream) rather than an
+	// unusable garbage string a later hash-compare would silently never match.
+	resultSHA256 := nullSHA256Hex(c.ResultSHA256)
+
 	ct, err := tx.Exec(ctx,
 		`UPDATE tasks
 		   SET status = 'complete', completed_at = now(),
 		       result_ref = COALESCE(NULLIF(result_key,''), $3),
-		       worker_id = $2
+		       worker_id = $2, result_sha256 = $4
 		 WHERE id = $1 AND claimed_by = $2 AND status IN ('running','queued')`,
-		taskID, workerID, c.ResultKey)
+		taskID, workerID, c.ResultKey, resultSHA256)
 	if err != nil {
 		return nil, err
 	}
@@ -1461,6 +2140,18 @@ func (s *Store) CommitTask(ctx context.Context, taskID, workerID uuid.UUID, c Ta
 		return nil, err
 	}
 
+	// Maintain the supplier's lifetime completed-task count HERE, at the one
+	// real commit, instead of ClaimTask re-deriving it with a `count(*)` scan on
+	// every single claim (Control Plane Hot Path 7->8,
+	// docs/internal/CREED_AND_PATH_TO_TEN.md). Scoped inside this same
+	// transaction: a commit that rolls back for any reason never leaves a
+	// phantom increment behind.
+	_, err = tx.Exec(ctx,
+		`UPDATE suppliers SET completed_tasks = completed_tasks + 1 WHERE id = $1`, info.SupplierID)
+	if err != nil {
+		return nil, err
+	}
+
 	// Quote-to-actual drift feedback (Plane D D6 / errata C-Errata-6): record the
 	// REAL committed-task wall-time so the Exchange Brain can learn an observed p90
 	// the next quote's ETA leans on. This lives INSIDE the commit transaction so a
@@ -1469,9 +2160,10 @@ func (s *Store) CommitTask(ctx context.Context, taskID, workerID uuid.UUID, c Ta
 	// it can never poison the estimate. duration_ms is the worker's reported value;
 	// we store it verbatim (real telemetry, never fabricated).
 	_, err = tx.Exec(ctx,
-		`INSERT INTO task_durations (job_id, job_type, model_ref, split_size, duration_ms)
-		 VALUES ($1,$2,$3,$4,$5)`,
-		info.JobID, info.jobType, info.ModelRef, splitSize, int64(c.DurationMS))
+		`INSERT INTO task_durations (job_id, job_type, model_ref, split_size, duration_ms, worker_id, engine, build_hash)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		info.JobID, info.jobType, info.ModelRef, splitSize, int64(c.DurationMS),
+		info.WorkerID, info.engine, info.buildHash)
 	if err != nil {
 		return nil, err
 	}
@@ -1488,12 +2180,29 @@ func (s *Store) CommitTask(ctx context.Context, taskID, workerID uuid.UUID, c Ta
 // the estimate cleanly falls back to the target (HistoricalP90DurationMs reports 0).
 const driftMinSamples = 5
 
+// driftWindow bounds both HistoricalP90DurationMs and DriftRollup to recent history
+// (Performance Observability 7->8, docs/internal/CREED_AND_PATH_TO_TEN.md: "the
+// historical p90 duration calculation... aggregates all-time history with no time
+// window, so detection latency actually grows worse as the table grows"). Before
+// this, a build shipped a month ago and a build shipped an hour ago were blended
+// into the SAME p90 for as long as task_durations kept both rows — a fresh
+// regression got diluted in direct proportion to how much older, healthy history
+// sat in the same table, and that dilution could only get worse over time as more
+// old rows accumulated. 24h matches the rung's own stated example window and is
+// wide enough to still clear driftMinSamples on a realistically busy job_type
+// while being narrow enough that a regression introduced this hour dominates the
+// window instead of being averaged away by last month.
+const driftWindow = 24 * time.Hour
+
 // HistoricalP90DurationMs returns the observed 90th-percentile committed-task
-// duration (ms) for a (job_type, model_ref), and how many samples backed it. It
-// uses percentile_disc(0.9) (a real recorded value, not an interpolation) over
-// task_durations. When fewer than driftMinSamples rows exist the history is too
-// thin to trust, so it returns (0, n) and the caller falls back to the static
-// target — the quote NEVER invents an ETA from one lucky sample. A model_ref of ""
+// duration (ms) for a (job_type, model_ref) over the last driftWindow, and how
+// many samples backed it. It uses percentile_disc(0.9) (a real recorded value, not
+// an interpolation) over task_durations, filtered to created_at > now() -
+// driftWindow so old, no-longer-representative history cannot dilute a recent
+// regression. When fewer than driftMinSamples rows exist IN THE WINDOW the history
+// is too thin to trust, so it returns (0, n) and the caller falls back to the
+// static target — the quote NEVER invents an ETA from one lucky sample, and it
+// never reaches past the window to manufacture samples either. A model_ref of ""
 // matches rows regardless of model (job-type-only history).
 func (s *Store) HistoricalP90DurationMs(ctx context.Context, jobType, modelRef string) (p90ms int64, samples int, err error) {
 	err = s.pool.QueryRow(ctx,
@@ -1501,8 +2210,9 @@ func (s *Store) HistoricalP90DurationMs(ctx context.Context, jobType, modelRef s
 		        COALESCE(percentile_disc(0.9) WITHIN GROUP (ORDER BY duration_ms), 0)
 		   FROM task_durations
 		  WHERE job_type = $1
-		    AND ($2 = '' OR model_ref = $2)`,
-		jobType, modelRef,
+		    AND ($2 = '' OR model_ref = $2)
+		    AND created_at > now() - make_interval(secs => $3)`,
+		jobType, modelRef, int(driftWindow.Seconds()),
 	).Scan(&samples, &p90ms)
 	if err != nil {
 		return 0, 0, err
@@ -1521,19 +2231,27 @@ func (s *Store) HistoricalP90DurationMs(ctx context.Context, jobType, modelRef s
 type DriftRow struct {
 	JobType          string  `json:"job_type"`
 	ModelRef         string  `json:"model_ref"`
-	Samples          int     `json:"samples"`             // committed-task durations recorded
-	AvgDurationMs    float64 `json:"avg_duration_ms"`     // mean actual per-task wall-time
-	P90DurationMs    int64   `json:"p90_duration_ms"`     // observed p90 (what the ETA learns from)
-	AvgQuotedETASecs float64 `json:"avg_quoted_eta_secs"` // mean quoted whole-job eta_secs (reused jobs.eta_secs)
+	Samples          int     `json:"samples"`             // committed-task durations recorded IN THE WINDOW (see WindowHours)
+	AvgDurationMs    float64 `json:"avg_duration_ms"`     // mean actual per-task wall-time, windowed
+	P90DurationMs    int64   `json:"p90_duration_ms"`     // observed p90 (what the ETA learns from), windowed
+	AvgQuotedETASecs float64 `json:"avg_quoted_eta_secs"` // mean quoted whole-job eta_secs (reused jobs.eta_secs), windowed
 	UsingObservedP90 bool    `json:"using_observed_p90"`  // true once samples >= the trust floor
+	WindowHours      float64 `json:"window_hours"`        // the rolling window every figure above is bounded to (driftWindow) — named explicitly so a reader never mistakes this for all-time history
 }
 
 // DriftRollup returns the quoted-vs-actual rollup per (job_type, model_ref) for the
-// admin drift surface. Actuals (count, avg, p90) come from task_durations; the quoted
-// side is the average jobs.eta_secs over the jobs that produced those durations
-// (LEFT JOIN so a duration whose job row was pruned still counts its actual side
-// honestly rather than vanishing). Ordered by sample volume so the thickest history —
-// the rows whose observed p90 is actually steering quotes — sorts first.
+// admin drift surface, over the last driftWindow (Performance Observability 7->8:
+// "the historical p90 duration calculation... aggregates all-time history with no
+// time window, so detection latency actually grows worse as the table grows").
+// Actuals (count, avg, p90) come from task_durations, filtered to created_at > now()
+// - driftWindow; the quoted side is the average jobs.eta_secs over the SAME windowed
+// set of jobs (LEFT JOIN so a duration whose job row was pruned still counts its
+// actual side honestly rather than vanishing). Ordered by sample volume so the
+// thickest recent history — the rows whose observed p90 is actually steering
+// quotes right now — sorts first. A (job_type, model_ref) with zero rows in the
+// window simply does not appear (it never did pre-window either — COUNT(*) was
+// always >= 1 to produce a GROUP BY row), so an operator reading a shrunken table
+// after a quiet period is expected behavior, not a bug.
 func (s *Store) DriftRollup(ctx context.Context) ([]DriftRow, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT td.job_type,
@@ -1544,8 +2262,10 @@ func (s *Store) DriftRollup(ctx context.Context) ([]DriftRow, error) {
 		        COALESCE(AVG(j.eta_secs),0)
 		   FROM task_durations td
 		   LEFT JOIN jobs j ON j.id = td.job_id
+		  WHERE td.created_at > now() - make_interval(secs => $1)
 		  GROUP BY td.job_type, td.model_ref
-		  ORDER BY COUNT(*) DESC, td.job_type, td.model_ref`)
+		  ORDER BY COUNT(*) DESC, td.job_type, td.model_ref`,
+		int(driftWindow.Seconds()))
 	if err != nil {
 		return nil, err
 	}
@@ -1558,6 +2278,7 @@ func (s *Store) DriftRollup(ctx context.Context) ([]DriftRow, error) {
 			return nil, err
 		}
 		d.UsingObservedP90 = d.Samples >= driftMinSamples
+		d.WindowHours = driftWindow.Hours()
 		out = append(out, d)
 	}
 	return out, rows.Err()
@@ -1680,17 +2401,98 @@ func (s *Store) DockReputationMild(ctx context.Context, supplierID uuid.UUID, ev
 	return err
 }
 
+// Verification-requeue backoff + worker-exclusion tuning (Scheduling & Matching
+// Engine 8->9, docs/internal/CREED_AND_PATH_TO_TEN.md). A task that just FAILED
+// verification (a bad honeypot answer) should not immediately return to the same
+// worker with no delay: it costs the worker a re-dispatch it will likely fail
+// again, and it costs the job wall-clock. So RequeueTask now (a) pushes visible_at
+// out by an exponential-by-retry backoff, and (b) records the worker that just
+// failed it in excluded_worker/excluded_until so the claim query prefers a
+// DIFFERENT worker for the exclusion window. The exclusion deliberately EXPIRES
+// (excluded_until = the backoff instant + a grace window): on a thin or
+// single-worker fleet the retry is delayed and de-prioritized-away-from-the-failer,
+// never permanently starved.
+const (
+	requeueBackoffBase = 30 * time.Second // first requeue delay; doubles per prior retry
+	requeueBackoffCap  = 10 * time.Minute // ceiling so a high retry_count can't push a task far out
+	// Grace window the failed worker stays excluded AFTER the task becomes visible,
+	// so another worker gets first crack once the backoff elapses instead of the
+	// failer racing back in the same instant. Bounded — see the comment above.
+	requeueExclusionGrace = 2 * time.Minute
+)
+
+// requeueBackoff returns the visibility delay for a task being requeued after a
+// failed verification, given how many times it has already been retried. Exponential
+// (base << priorRetries) with a hard cap, mirroring the stale-task requeue ladder's
+// shape (workers.go) so the two retry paths behave consistently.
+func requeueBackoff(priorRetries int) time.Duration {
+	if priorRetries < 0 {
+		priorRetries = 0
+	}
+	// Cap the shift so the << can't overflow the duration on a pathological retry_count.
+	shift := priorRetries
+	if shift > 20 {
+		shift = 20
+	}
+	d := requeueBackoffBase << uint(shift)
+	if d <= 0 || d > requeueBackoffCap {
+		return requeueBackoffCap
+	}
+	return d
+}
+
 // RequeueTask resets a failed-verification task to retrying and bumps the retry
-// counter so the scheduler hands it to a different worker.
+// counter so the scheduler hands it to a DIFFERENT worker after a delay.
+//
+// PATCH (Scheduling & Matching Engine 8->9, docs/internal/CREED_AND_PATH_TO_TEN.md
+// "add backoff plus worker-exclusion to verification-requeue"): this used to reset
+// visible_at to now() (immediately reclaimable) and clear worker_id, so the exact
+// worker that just failed the task's honeypot could reclaim it on its very next poll
+// with zero delay — burning another dispatch on a machine that just proved it gets
+// this task wrong. Now the task is pushed out by an exponential-per-retry backoff
+// AND the just-failed worker is recorded in excluded_worker/excluded_until (read the
+// worker off the row itself — CommitTask leaves worker_id/claimed_by set to the
+// committing worker, so no caller change is needed), so the claim query prefers a
+// different worker for the window. The exclusion expires (bounded), never starving a
+// thin fleet's retry. Selection-affecting only — nothing about a task's bytes or the
+// job's eventual result changes.
 func (s *Store) RequeueTask(ctx context.Context, taskID uuid.UUID) error {
-	_, err := s.pool.Exec(ctx,
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	// Read the worker that just held this task (still set post-commit) and its retry
+	// count, so the backoff scales and the failer is the one we exclude. FOR UPDATE
+	// pins the row against a concurrent requeue/claim while we compute the delay.
+	var failedWorker *uuid.UUID
+	var priorRetries int
+	if err := tx.QueryRow(ctx,
+		`SELECT COALESCE(worker_id, claimed_by), retry_count FROM tasks WHERE id = $1 FOR UPDATE`,
+		taskID,
+	).Scan(&failedWorker, &priorRetries); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errNotFound
+		}
+		return err
+	}
+	backoff := requeueBackoff(priorRetries)
+
+	if _, err := tx.Exec(ctx,
 		`UPDATE tasks
 		   SET status = 'retrying', claimed_by = NULL, claimed_at = NULL,
 		       worker_id = NULL, retry_count = retry_count + 1,
-		       visible_at = now()
+		       visible_at = now() + make_interval(secs => $2),
+		       excluded_worker = $3,
+		       excluded_until  = now() + make_interval(secs => $4)
 		 WHERE id = $1`,
-		taskID)
-	return err
+		taskID, backoff.Seconds(), failedWorker,
+		(backoff + requeueExclusionGrace).Seconds(),
+	); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // --- honeypots ---
@@ -1760,10 +2562,14 @@ func (s *Store) InsertHoneypot(ctx context.Context, jobType, inputRef string, kn
 // same-class (a real mismatch) or cross-class (provisional trust, not a dock).
 // Returns errNotFound when no committed peer exists yet (the common case — the peer
 // may not have finished, so verification simply has nothing to compare against).
-func (s *Store) PeerResultKey(ctx context.Context, taskID uuid.UUID) (peerResult string, peerSupplier uuid.UUID, peerEngine, peerBuildHash string, err error) {
+// peerSHA256 is the peer's stored tasks.result_sha256 (Control Plane Hot Path
+// 8->9): "" when the peer committed before this column existed, or with an
+// agent build that never reported one — the caller always falls back to a real
+// GetObject in that case, so an absent hash never changes correctness.
+func (s *Store) PeerResultKey(ctx context.Context, taskID uuid.UUID) (peerResult string, peerSupplier uuid.UUID, peerEngine, peerBuildHash, peerSHA256 string, err error) {
 	err = s.pool.QueryRow(ctx,
 		`SELECT COALESCE(p.result_ref,''), w.supplier_id,
-		        COALESCE(w.engine,''), COALESCE(w.build_hash,'')
+		        COALESCE(w.engine,''), COALESCE(w.build_hash,''), COALESCE(p.result_sha256,'')
 		 FROM tasks t
 		   JOIN tasks p ON p.job_id = t.job_id AND p.input_ref = t.input_ref
 		                AND p.id <> t.id AND p.status = 'complete'
@@ -1773,11 +2579,11 @@ func (s *Store) PeerResultKey(ctx context.Context, taskID uuid.UUID) (peerResult
 		 ORDER BY p.completed_at ASC
 		 LIMIT 1`,
 		taskID,
-	).Scan(&peerResult, &peerSupplier, &peerEngine, &peerBuildHash)
+	).Scan(&peerResult, &peerSupplier, &peerEngine, &peerBuildHash, &peerSHA256)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", uuid.Nil, "", "", errNotFound
+		return "", uuid.Nil, "", "", "", errNotFound
 	}
-	return peerResult, peerSupplier, peerEngine, peerBuildHash, err
+	return peerResult, peerSupplier, peerEngine, peerBuildHash, peerSHA256, err
 }
 
 // ChunkResult is one committed result for a chunk: its result key plus the
@@ -1943,7 +2749,16 @@ func (s *Store) ClawbackTaskCredit(ctx context.Context, supplierID, taskID uuid.
 
 // WorkerEarnings sums a supplier's released balance and lifetime credits for
 // GET /v1/worker/earnings. Balance = released-but-not-clawed credits; lifetime
-// = all positive supplier credits ever.
+// = all positive supplier credits ever. LastPayout*/NextPayoutAt are Supplier
+// onboarding & safety 7->8's real payout proof for the menu-bar trust panel:
+// last = the most recent row whose hold has actually expired (payout_status IN
+// ('released','ready') — 'ready' is the honest "owed, queued, no rail yet" state
+// releasePayouts uses when the stub Payout errs, and its release_at is just as
+// real as a fully 'released' row's), keyed by release_at (the real timestamp
+// splitCharge computed as now()+holdSecs, and the exact instant releasePayouts
+// acts on — never a fabricated "paid at" column this table doesn't have); next =
+// the soonest still-'held' row's release_at. Both nil when there is no such row
+// (a fresh or never-paid supplier), never a fabricated zero time.
 func (s *Store) WorkerEarnings(ctx context.Context, supplierID uuid.UUID) (Earnings, error) {
 	var e Earnings
 	err := s.pool.QueryRow(ctx,
@@ -1955,7 +2770,48 @@ func (s *Store) WorkerEarnings(ctx context.Context, supplierID uuid.UUID) (Earni
 		 WHERE supplier_id = $1 AND kind = 'supplier_credit'`,
 		supplierID,
 	).Scan(&e.BalanceUSD, &e.LifetimeUSD)
-	return e, err
+	if err != nil {
+		return e, err
+	}
+
+	var lastAmt float64
+	var lastAt time.Time
+	err = s.pool.QueryRow(ctx,
+		`SELECT amount_usd, release_at FROM ledger_entries
+		  WHERE supplier_id = $1 AND kind = 'supplier_credit'
+		    AND payout_status IN ('released','ready') AND release_at IS NOT NULL
+		  ORDER BY release_at DESC LIMIT 1`,
+		supplierID,
+	).Scan(&lastAmt, &lastAt)
+	switch {
+	case err == nil:
+		e.LastPayoutUSD = &lastAmt
+		t := lastAt.Unix()
+		e.LastPayoutAt = &t
+	case errors.Is(err, pgx.ErrNoRows):
+		// No released/ready credit yet — leave both nil, not zero.
+	default:
+		return e, err
+	}
+
+	var nextAt time.Time
+	err = s.pool.QueryRow(ctx,
+		`SELECT release_at FROM ledger_entries
+		  WHERE supplier_id = $1 AND kind = 'supplier_credit'
+		    AND payout_status = 'held' AND release_at IS NOT NULL
+		  ORDER BY release_at ASC LIMIT 1`,
+		supplierID,
+	).Scan(&nextAt)
+	switch {
+	case err == nil:
+		t := nextAt.Unix()
+		e.NextPayoutAt = &t
+	case errors.Is(err, pgx.ErrNoRows):
+		// Nothing currently held — no scheduled next payout, not a fabricated one.
+	default:
+		return e, err
+	}
+	return e, nil
 }
 
 // FraudFlag is one row of GET /admin/fraud-flags: suppliers below the trust
@@ -2300,6 +3156,49 @@ func (s *Store) JobVerification(ctx context.Context, jobID uuid.UUID) (Verificat
 	return v, nil
 }
 
+// SupplierVerification aggregates a SUPPLIER's own verification_events log — across
+// every job they have ever worked, not one job — into the trust-panel receipt
+// (Supplier onboarding & safety 7->8, docs/internal/CREED_AND_PATH_TO_TEN.md:
+// "Populate the trust panel with real data"). Only honeypot outcomes are counted
+// (the trust panel's own vocabulary — payouts_configured/connected/enabled and
+// honeypots_passed/failed/verification_label); redundancy/tiebreak counts stay
+// job-scoped via JobVerification. Reuses deriveVerificationLabel so the derived
+// label means exactly the same thing here as it does on a job receipt.
+func (s *Store) SupplierVerification(ctx context.Context, supplierID uuid.UUID) (SupplierVerification, error) {
+	var sv SupplierVerification
+	rows, err := s.pool.Query(ctx,
+		`SELECT kind, count(*) FROM verification_events
+		  WHERE supplier_id = $1 AND kind IN ('honeypot_pass','honeypot_fail')
+		  GROUP BY kind`, supplierID)
+	if err != nil {
+		return sv, err
+	}
+	defer rows.Close()
+	var v Verification
+	for rows.Next() {
+		var kind string
+		var n int
+		if err := rows.Scan(&kind, &n); err != nil {
+			return sv, err
+		}
+		switch kind {
+		case "honeypot_pass":
+			sv.HoneypotsPassed = n
+			v.HoneypotsPassed = n
+			v.Checked += n
+		case "honeypot_fail":
+			sv.HoneypotsFailed = n
+			v.HoneypotsFailed = n
+			v.Checked += n
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return sv, err
+	}
+	sv.Label = deriveVerificationLabel(v)
+	return sv, nil
+}
+
 // JobVerificationClasses returns the DISTINCT verification classes ("engine|build_hash")
 // of the workers that produced this job's completed (non-honeypot) results — the
 // "cleared under" provenance for the ClearingReceipt (items 13, 15). A blank class
@@ -2540,23 +3439,54 @@ type Straggler struct {
 	InputRef   string
 	ChunkIndex int
 	MinMemGB   float32
+	// ThrottledHedge is true when this straggler was selected via the SHORT
+	// throttled-worker path (docs/internal/CREED_AND_PATH_TO_TEN.md, "Thermal
+	// sustained-vs-peak throughput on fanless Apple Silicon" 7→8: "detect
+	// throttling live... the same way a stalled worker triggers a hedge
+	// today") rather than the normal elapsed-time `after` path — purely
+	// informational (logging/metrics), never changes hedge mechanics.
+	ThrottledHedge bool
 }
 
 // StragglerTasks finds running PRIMARY tasks (not honeypot, not redundancy, not
-// themselves a hedge) whose elapsed time exceeds `after` — the candidates for a
-// straggler hedge. It excludes any chunk that already has a hedge in flight (so a
-// straggler is hedged at most once) and any whose job already has >= maxInFlight
-// hedges running (hedge sparingly). Ordered oldest-start first, capped at limit.
-func (s *Store) StragglerTasks(ctx context.Context, after time.Duration, maxInFlight, limit int) ([]Straggler, error) {
+// themselves a hedge) that warrant a hedge via EITHER of two independent paths:
+//
+//  1. elapsed time exceeds `after` (the original, pre-existing path — a slow
+//     worker, regardless of why).
+//  2. the CLAIMING WORKER's own most recent heartbeat currently reports
+//     `throttled = true` (memory pressure OR a live sustained-throughput drop —
+//     see agent/src/runners.rs's LiveThroughputMonitor / main.rs's `throttled:
+//     throttle.throttled || live_throttling`) AND the task has run at least
+//     `throttledAfter` (a short floor — never zero — so a task that started a
+//     heartbeat-tick ago isn't hedged before it could possibly have produced a
+//     result either way). This is deliberately MUCH shorter than `after`: a
+//     worker that is DEMONSTRABLY throttling right now, live, is a stronger and
+//     earlier signal than "this task has simply been running a while", which is
+//     exactly the facet's own proof artifact ("triggers a hedge before the
+//     stale-worker watchdog would have caught it" — here, before even the
+//     normal elapsed-time hedge would have caught it).
+//
+// Excludes any chunk that already has a hedge in flight (so a straggler is
+// hedged at most once) and any whose job already has >= maxInFlight hedges
+// running (hedge sparingly). Ordered oldest-start first, capped at limit.
+func (s *Store) StragglerTasks(ctx context.Context, after, throttledAfter time.Duration, maxInFlight, limit int) ([]Straggler, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT t.id, t.job_id, t.worker_id, j.job_type, COALESCE(j.model_ref,''),
-		        COALESCE(t.input_ref,''), COALESCE(t.chunk_index,0), COALESCE(j.min_memory_gb,0)
+		        COALESCE(t.input_ref,''), COALESCE(t.chunk_index,0), COALESCE(j.min_memory_gb,0),
+		        COALESCE(w.throttled, false)
 		 FROM tasks t JOIN jobs j ON j.id = t.job_id
+		 LEFT JOIN workers w ON w.id = t.worker_id
 		 WHERE t.status = 'running'
 		   AND t.is_honeypot = false AND t.is_redundancy = false
 		   AND t.hedged_from IS NULL
 		   AND t.started_at IS NOT NULL
-		   AND t.started_at < now() - make_interval(secs => $1)
+		   AND (
+		     t.started_at < now() - make_interval(secs => $1)
+		     OR (
+		       COALESCE(w.throttled, false)
+		       AND t.started_at < now() - make_interval(secs => $2)
+		     )
+		   )
 		   AND j.status = 'running'
 		   -- this chunk is not already hedged:
 		   AND NOT EXISTS (
@@ -2570,10 +3500,79 @@ func (s *Store) StragglerTasks(ctx context.Context, after time.Duration, maxInFl
 		     SELECT count(*) FROM tasks h2
 		     WHERE h2.job_id = t.job_id AND h2.hedged_from IS NOT NULL
 		       AND h2.is_redundancy = false AND h2.status IN ('queued','running')
+		   ) < $3
+		 ORDER BY t.started_at ASC
+		 LIMIT $4`,
+		after.Seconds(), throttledAfter.Seconds(), maxInFlight, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Straggler
+	for rows.Next() {
+		var s Straggler
+		var throttled bool
+		if err := rows.Scan(&s.TaskID, &s.JobID, &s.WorkerID, &s.JobType, &s.ModelRef,
+			&s.InputRef, &s.ChunkIndex, &s.MinMemGB, &throttled); err != nil {
+			return nil, err
+		}
+		// ThrottledHedge is set whenever the worker is currently throttled AND
+		// this task hasn't yet crossed the normal `after` threshold — i.e. it is
+		// a candidate ONLY because of the throttled-worker path, not the
+		// elapsed-time path too (both can independently be true for an
+		// old-enough task; that's still "elapsed" for attribution purposes).
+		s.ThrottledHedge = throttled
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// EndgameTailTasks finds the ENDGAME RACE candidates (Speed Lane wave 1B,
+// workers.go raceEndgameTails): running PRIMARY tasks (not honeypot, not
+// redundancy, not themselves a hedge) of a running job that has ZERO unclaimed
+// work left — no queued/retrying task with claimed_by IS NULL, visible or not
+// (a backoff-hidden retry still counts as work coming back, so its job is
+// conservatively NOT in endgame). At that point the job's wall-clock IS the
+// slowest running chunk, so each candidate is worth duplicating onto idle
+// spare capacity IMMEDIATELY instead of waiting out the 90s elapsed-time
+// hedge. minRun is a small floor (a chunk that just started is about to finish
+// anyway — duplicating it is pure waste); the not-already-hedged-chunk and
+// per-job in-flight-hedge-cap guards are byte-identical to StragglerTasks so
+// the race and the hedge can never double-duplicate one chunk or blow the same
+// cap. Ordered oldest-start first — the longest-running chunk is the tail.
+func (s *Store) EndgameTailTasks(ctx context.Context, minRun time.Duration, maxInFlight, limit int) ([]Straggler, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT t.id, t.job_id, t.worker_id, j.job_type, COALESCE(j.model_ref,''),
+		        COALESCE(t.input_ref,''), COALESCE(t.chunk_index,0), COALESCE(j.min_memory_gb,0)
+		 FROM tasks t JOIN jobs j ON j.id = t.job_id
+		 WHERE t.status = 'running'
+		   AND t.is_honeypot = false AND t.is_redundancy = false
+		   AND t.hedged_from IS NULL
+		   AND t.started_at IS NOT NULL
+		   AND t.started_at < now() - make_interval(secs => $1)
+		   AND j.status = 'running'
+		   -- ENDGAME: no unclaimed queued/retrying work remains on this job.
+		   AND NOT EXISTS (
+		     SELECT 1 FROM tasks q
+		     WHERE q.job_id = t.job_id AND q.status IN ('queued','retrying')
+		       AND q.claimed_by IS NULL
+		   )
+		   -- this chunk is not already hedged (same guard as StragglerTasks):
+		   AND NOT EXISTS (
+		     SELECT 1 FROM tasks h
+		     WHERE h.job_id = t.job_id AND COALESCE(h.chunk_index,0) = COALESCE(t.chunk_index,0)
+		       AND h.hedged_from IS NOT NULL AND h.is_redundancy = false
+		       AND h.status NOT IN ('failed','cancelled')
+		   )
+		   -- and the job is under its in-flight hedge cap (same as StragglerTasks):
+		   AND (
+		     SELECT count(*) FROM tasks h2
+		     WHERE h2.job_id = t.job_id AND h2.hedged_from IS NOT NULL
+		       AND h2.is_redundancy = false AND h2.status IN ('queued','running')
 		   ) < $2
 		 ORDER BY t.started_at ASC
 		 LIMIT $3`,
-		after.Seconds(), maxInFlight, limit)
+		minRun.Seconds(), maxInFlight, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -2588,6 +3587,38 @@ func (s *Store) StragglerTasks(ctx context.Context, after time.Duration, maxInFl
 		out = append(out, s)
 	}
 	return out, rows.Err()
+}
+
+// BusyWorkerIDs reports which of the given workers currently hold work: a
+// RUNNING task, or a queued/retrying task pinned to them (claimed_by — a
+// tiebreak/hedge/race dispatch they are about to pick up). Used by
+// SelectEndgameRacePeer to restrict the race to genuinely IDLE spare capacity
+// in one query instead of a per-candidate probe. Workers absent from the map
+// are idle.
+func (s *Store) BusyWorkerIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]bool, error) {
+	busy := make(map[uuid.UUID]bool, len(ids))
+	if len(ids) == 0 {
+		return busy, nil
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT t.worker_id FROM tasks t
+		 WHERE t.status = 'running' AND t.worker_id = ANY($1)
+		 UNION
+		 SELECT t.claimed_by FROM tasks t
+		 WHERE t.status IN ('queued','retrying') AND t.claimed_by = ANY($1)`,
+		ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		busy[id] = true
+	}
+	return busy, rows.Err()
 }
 
 // InsertHedgeTask inserts a straggler hedge: a DUPLICATE primary (is_redundancy =
@@ -2617,6 +3648,25 @@ func (s *Store) InsertHedgeTask(ctx context.Context, jobID, primaryTaskID, peerW
 // marked failed so it stops blocking job completion and frees its worker. It never
 // touches the just-committed task, completed tasks, or verification-redundancy
 // tasks (is_redundancy=true with no hedged_from). Idempotent.
+//
+// PATCH (Speed Lane wave 1B, planner.go / raceEndgameTails): "first commit
+// wins" now works in BOTH directions. The original predicate matched ONLY
+// hedge copies (hedged_from IS NOT NULL), so when the HEDGE/RACE duplicate
+// committed FIRST, the hedged ORIGINAL kept running — and since job
+// completion (JobAllTasksDone) requires every task terminal, the job STILL
+// waited out the slow original, which nullified the entire wall-clock point
+// of duplicating the tail. The predicate now also cancels the hedged ORIGINAL
+// — but ONLY when the just-committed keep task ($3) is that original's OWN
+// winning duplicate (h.id = $3 AND h.hedged_from = tasks.id AND
+// h.is_redundancy = false). Deliberately NOT any broader trigger: a
+// verification-redundancy clone or tiebreak commit for the same chunk also
+// flows through this function, and neither may ever cancel a still-running
+// primary (their results are never the deliverable — the chunk would be left
+// with no primary result at all). The cancelled original was never committed,
+// so no payout was ever scheduled for it — money is untouched. A worker that
+// later tries to commit the cancelled task gets the pre-existing 409 conflict
+// (CommitTask requires status running/queued), the same contract a losing
+// hedge has always had.
 func (s *Store) CancelStragglerSiblings(ctx context.Context, jobID uuid.UUID, chunkIndex int, keepTaskID uuid.UUID) error {
 	_, err := s.pool.Exec(ctx,
 		`UPDATE tasks
@@ -2624,7 +3674,13 @@ func (s *Store) CancelStragglerSiblings(ctx context.Context, jobID uuid.UUID, ch
 		 WHERE job_id = $1 AND COALESCE(chunk_index,0) = $2
 		   AND id <> $3
 		   AND status IN ('queued','running','retrying')
-		   AND hedged_from IS NOT NULL AND is_redundancy = false`,
+		   AND is_redundancy = false AND is_honeypot = false
+		   AND (hedged_from IS NOT NULL
+		        OR EXISTS (
+		          SELECT 1 FROM tasks h
+		          WHERE h.id = $3 AND h.hedged_from = tasks.id
+		            AND h.is_redundancy = false
+		        ))`,
 		jobID, chunkIndex, keepTaskID)
 	return err
 }
@@ -3063,6 +4119,19 @@ func (s *Store) MarkJobComplete(ctx context.Context, jobID uuid.UUID) error {
 	return err
 }
 
+// MarkResultsMerged stamps the results-merge watermark (results_merged_at =
+// now()) right after a real successful merge writes the buyer-ready artifact.
+// handleJobResults reads this to skip the re-merge on every poll once it is
+// set (Data Transfer & Artifact I/O 4.5->5, "Stop paying for every poll
+// twice") — it is set unconditionally (not COALESCE-guarded) so a later real
+// merge (e.g. by the completion-sweep fallback) always advances it.
+func (s *Store) MarkResultsMerged(ctx context.Context, jobID uuid.UUID) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE jobs SET results_merged_at = now() WHERE id = $1`,
+		jobID)
+	return err
+}
+
 // SetJobActualUSD recomputes a job's actual_usd from the ledger (sum of buyer
 // charges on its tasks) — the real settled cost, set when the job finalizes.
 func (s *Store) SetJobActualUSD(ctx context.Context, jobID uuid.UUID) error {
@@ -3194,6 +4263,137 @@ func (s *Store) QueueDepth(ctx context.Context) ([]QueueDepthRow, error) {
 	return out, rows.Err()
 }
 
+// taskDurationBucketsMs are the fixed histogram bucket upper bounds (milliseconds)
+// for cx_task_duration_ms (docs/CREED_AND_PATH_TO_TEN.md, "Performance
+// observability" 6→6.5). Chosen to span a real batch task's plausible range: a
+// fast embed chunk (low hundreds of ms) through a slow generative chunk nearing
+// the straggler-hedge threshold (hedgeAfter = 90s) and beyond.
+var taskDurationBucketsMs = []float64{100, 500, 1000, 2500, 5000, 15000, 30000, 60000, 120000}
+
+// TaskDurationHistogramRow is one job_type's histogram: Buckets holds the
+// CUMULATIVE count of observations with duration_ms <= taskDurationBucketsMs[i]
+// (the Prometheus histogram convention — le is "less than or equal", cumulative,
+// not per-bin), alongside the total Count and SumMs Prometheus's _sum/_count lines
+// need.
+type TaskDurationHistogramRow struct {
+	JobType string
+	Buckets []int64 // cumulative, same order/length as taskDurationBucketsMs
+	Count   int64
+	SumMs   int64
+}
+
+// TaskDurationHistogram computes a real cx_task_duration_ms histogram per
+// job_type straight from task_durations — the same table the drift/ETA rollup
+// already reads, so this adds zero new instrumentation, only a new query over
+// data that was already being recorded (docs/CREED_AND_PATH_TO_TEN.md,
+// "Performance observability" 6→6.5: "zero latency histograms anywhere"). The
+// per-bucket FILTER counts are computed in one aggregate query, not fetched row by
+// row, so this scales with job_type cardinality, not with row count.
+func (s *Store) TaskDurationHistogram(ctx context.Context) ([]TaskDurationHistogramRow, error) {
+	// Build "count(*) FILTER (WHERE duration_ms <= $N)" once per bucket boundary,
+	// parameterized (never string-interpolated) even though the boundaries are a
+	// fixed Go slice, not user input — consistent with how every other query in
+	// this file binds values.
+	selectCols := make([]string, 0, len(taskDurationBucketsMs))
+	args := make([]any, 0, len(taskDurationBucketsMs))
+	for i, b := range taskDurationBucketsMs {
+		args = append(args, b)
+		selectCols = append(selectCols, fmt.Sprintf("count(*) FILTER (WHERE duration_ms <= $%d)", i+1))
+	}
+	query := fmt.Sprintf(
+		`SELECT job_type, count(*), COALESCE(sum(duration_ms),0), %s
+		 FROM task_durations
+		 GROUP BY job_type
+		 ORDER BY job_type`,
+		strings.Join(selectCols, ", "),
+	)
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TaskDurationHistogramRow
+	for rows.Next() {
+		var r TaskDurationHistogramRow
+		r.Buckets = make([]int64, len(taskDurationBucketsMs))
+		scanArgs := make([]any, 0, 3+len(r.Buckets))
+		scanArgs = append(scanArgs, &r.JobType, &r.Count, &r.SumMs)
+		for i := range r.Buckets {
+			scanArgs = append(scanArgs, &r.Buckets[i])
+		}
+		if err := rows.Scan(scanArgs...); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// LatencyPhaseRow is one job_type's p50/p90 (milliseconds) for each of the three
+// phases end-to-end task latency decomposes into. Backs cx_latency_phase_ms
+// (End-to-End Job Latency Decomposition 7->7.5, docs/internal/CREED_AND_PATH_TO_TEN.md).
+type LatencyPhaseRow struct {
+	JobType               string
+	QueueWaitP50Ms        float64
+	QueueWaitP90Ms        float64
+	DispatchOverheadP50Ms float64
+	DispatchOverheadP90Ms float64
+	RunP50Ms              float64
+	RunP90Ms              float64
+	Count                 int64
+}
+
+// LatencyPhaseDecomposition computes, per job_type, real p50/p90 millisecond
+// figures for the three phases a completed task's end-to-end latency decomposes
+// into: QUEUE-WAIT (submitted/eligible -> claimed — idle-fleet pickup cost),
+// DISPATCH OVERHEAD (claimed -> started — time the worker spent between taking
+// the claim and actually beginning work, e.g. a cold model load), and RUN
+// (started -> completed — the actual work, including verification + result
+// commit). Turns the existing created_at/visible_at/claimed_at/started_at/
+// completed_at timestamps — already recorded on every task, no new
+// instrumentation — into the first real decomposition of WHERE end-to-end
+// latency goes, rather than just the single total task_duration_ms histogram.
+// Only 'complete' tasks are included (a failed/retrying task's timestamps don't
+// represent a real finished trip through all three phases).
+func (s *Store) LatencyPhaseDecomposition(ctx context.Context) ([]LatencyPhaseRow, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT j.job_type, count(*),
+		       COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY queue_wait_ms), 0),
+		       COALESCE(percentile_disc(0.9) WITHIN GROUP (ORDER BY queue_wait_ms), 0),
+		       COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY dispatch_overhead_ms), 0),
+		       COALESCE(percentile_disc(0.9) WITHIN GROUP (ORDER BY dispatch_overhead_ms), 0),
+		       COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY run_ms), 0),
+		       COALESCE(percentile_disc(0.9) WITHIN GROUP (ORDER BY run_ms), 0)
+		  FROM (
+		    SELECT t.job_id,
+		           EXTRACT(EPOCH FROM (t.claimed_at - GREATEST(t.created_at, t.visible_at))) * 1000 AS queue_wait_ms,
+		           EXTRACT(EPOCH FROM (t.started_at - t.claimed_at)) * 1000 AS dispatch_overhead_ms,
+		           EXTRACT(EPOCH FROM (t.completed_at - t.started_at)) * 1000 AS run_ms
+		      FROM tasks t
+		     WHERE t.status = 'complete'
+		       AND t.claimed_at IS NOT NULL AND t.started_at IS NOT NULL AND t.completed_at IS NOT NULL
+		  ) phases
+		  JOIN jobs j ON j.id = phases.job_id
+		 GROUP BY j.job_type
+		 ORDER BY j.job_type`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []LatencyPhaseRow
+	for rows.Next() {
+		var r LatencyPhaseRow
+		if err := rows.Scan(&r.JobType, &r.Count,
+			&r.QueueWaitP50Ms, &r.QueueWaitP90Ms,
+			&r.DispatchOverheadP50Ms, &r.DispatchOverheadP90Ms,
+			&r.RunP50Ms, &r.RunP90Ms); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // ActiveWorkerCount is the number of workers seen within the last 60s, for the
 // /metrics active_workers gauge.
 func (s *Store) ActiveWorkerCount(ctx context.Context) (int, error) {
@@ -3223,6 +4423,30 @@ type InvoiceView struct {
 	// (Plane D D7), so the invoice shows quoted-vs-actual. omitempty + a pointer keeps
 	// it off the wire for unbound jobs (a literal 0.0 would falsely read as "quoted $0").
 	QuotedUSD *float64 `json:"quoted_usd,omitempty"`
+	// FirmQuote / FirmQuoteMaxUSD / BilledUSD (Project Detection & Quotation 7->8,
+	// docs/internal/CREED_AND_PATH_TO_TEN.md, "Ship a firm-quote tier: a real
+	// commitment, not just an estimate"): when FirmQuote is true, BilledUSD is what
+	// the buyer's Stripe charge was ACTUALLY capped at — the real proof artifact
+	// that "actual cost exceeds its firm quote, still charges the buyer only the
+	// quoted maximum". BilledUSD is nil until a charge is actually attempted
+	// (FreezeChargeAmount/FormChargeBatch stamp it), same never-fabricate discipline
+	// as QuotedUSD. ChargedUSD above stays the pre-existing per-task ledger sum
+	// (the real value of work delivered) — BilledUSD is deliberately the SEPARATE,
+	// possibly-lower number Stripe actually collected.
+	FirmQuote       bool     `json:"firm_quote,omitempty"`
+	FirmQuoteMaxUSD *float64 `json:"firm_quote_max_usd,omitempty"`
+	BilledUSD       *float64 `json:"billed_usd,omitempty"`
+	// Speed-SLA facts (wave 2A), surfaced on the invoice — and therefore on the
+	// ClearingReceipt, which embeds this view. SLAPremiumUSD is the surcharge the
+	// bound guarantee carried (folded into the job's estimate/actual);
+	// SLARefundUSD is the real sla_refund ledger credit recorded on a miss (nil
+	// until one exists — never fabricated); SLAMet is the recorded outcome (nil
+	// = no SLA, or not yet decided). Same never-fabricate discipline as
+	// QuotedUSD/BilledUSD above.
+	SLAGuaranteeSecs int      `json:"sla_guarantee_secs,omitempty"`
+	SLAPremiumUSD    *float64 `json:"sla_premium_usd,omitempty"`
+	SLARefundUSD     *float64 `json:"sla_refund_usd,omitempty"`
+	SLAMet           *bool    `json:"sla_met,omitempty"`
 }
 
 // JobInvoice builds an invoice for a job scoped to its buyer (buyers see only
@@ -3231,17 +4455,42 @@ type InvoiceView struct {
 // the buyer's.
 func (s *Store) JobInvoice(ctx context.Context, jobID, buyerID uuid.UUID) (*InvoiceView, error) {
 	iv := InvoiceView{JobID: jobID}
+	var firmMax, billed *float64
+	var slaGuarantee int
+	var slaPremium *float64
 	err := s.pool.QueryRow(ctx,
 		`SELECT buyer_id, status, job_type, created_at,
-		        COALESCE(estimated_usd,0), COALESCE(actual_usd,0)
+		        COALESCE(estimated_usd,0), COALESCE(actual_usd,0),
+		        firm_quote, firm_quote_max_usd, billed_usd,
+		        COALESCE(sla_guarantee_secs,0), sla_premium_usd, sla_met
 		 FROM jobs WHERE id = $1 AND buyer_id = $2`,
 		jobID, buyerID,
-	).Scan(&iv.BuyerID, &iv.Status, &iv.JobType, &iv.CreatedAt, &iv.EstimatedUSD, &iv.ActualUSD)
+	).Scan(&iv.BuyerID, &iv.Status, &iv.JobType, &iv.CreatedAt, &iv.EstimatedUSD, &iv.ActualUSD,
+		&iv.FirmQuote, &firmMax, &billed, &slaGuarantee, &slaPremium, &iv.SLAMet)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound
 	}
 	if err != nil {
 		return nil, err
+	}
+	iv.FirmQuoteMaxUSD = firmMax
+	iv.BilledUSD = billed
+	iv.SLAGuaranteeSecs = slaGuarantee
+	iv.SLAPremiumUSD = slaPremium
+	// Surface the REAL recorded refund (the sla_refund ledger credit keyed
+	// 'sla-<job_id>'), only when one exists — the invoice shows what actually
+	// happened, never a predicted remedy.
+	if slaGuarantee > 0 {
+		var refund float64
+		if rerr := s.pool.QueryRow(ctx,
+			`SELECT COALESCE(SUM(amount_usd),0)::float8 FROM ledger_entries
+			  WHERE kind = 'sla_refund' AND payout_ref = $1`,
+			"sla-"+jobID.String()).Scan(&refund); rerr != nil {
+			return nil, rerr
+		}
+		if refund > 0 {
+			iv.SLARefundUSD = &refund
+		}
 	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT le.kind, COALESCE(SUM(le.amount_usd),0)

@@ -96,6 +96,15 @@ struct MenuContentView: View {
                 stat("Balance", String(format: "$%.2f", controller.status.balanceUsd))
             }
             GridRow {
+                // Supplier Earnings Economics 4→5: a live "$/day if you stay online"
+                // projection, computed by the agent from THIS worker's own measured
+                // benchmark tok/s (agent/src/status.rs `projected_daily_usd`) — never
+                // a fleet average. Shown right next to the earnings-to-date stats
+                // above. Absent (nil) until the worker has a priced, benchmarked
+                // model; we show an honest placeholder rather than fabricate a number.
+                stat("Projected/day", controller.status.projectedDailyUsd.map { String(format: "$%.2f", $0) } ?? " · ")
+            }
+            GridRow {
                 stat("Thermal", controller.status.thermalState.label)
                 stat("Model cache", controller.status.modelCacheHuman)
             }

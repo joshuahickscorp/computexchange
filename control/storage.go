@@ -232,11 +232,18 @@ func (s *Storage) PutObject(ctx context.Context, key string, data []byte, conten
 		contentType = "application/octet-stream"
 	}
 	// A PUT to a fixed key is idempotent → safe to retry through a transient blip.
+	// The transfer histogram (Data Transfer & Artifact I/O 9->10) is recorded on the
+	// SUCCESSFUL attempt only, and times just that attempt's real network round trip —
+	// a retried-past-a-blip PUT records the wall time of the attempt that actually
+	// moved the bytes, not the wasted retry budget before it (which would inflate the
+	// throughput denominator with time no object crossed the wire).
 	return s.withRetry(ctx, func() (bool, error) {
+		start := time.Now()
 		if _, err := s.internal.PutObject(ctx, s.bucket, key, bytes.NewReader(data), int64(len(data)),
 			minio.PutObjectOptions{ContentType: contentType}); err != nil {
 			return true, fmt.Errorf("put object %q: %w", key, err)
 		}
+		observeTransfer("put", len(data), time.Since(start))
 		return false, nil
 	})
 }
@@ -248,6 +255,7 @@ func (s *Storage) PutObject(ctx context.Context, key string, data []byte, conten
 func (s *Storage) GetObject(ctx context.Context, key string) ([]byte, error) {
 	var data []byte
 	err := s.withRetry(ctx, func() (bool, error) {
+		start := time.Now()
 		obj, err := s.internal.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
 		if err != nil {
 			return true, err
@@ -256,6 +264,12 @@ func (s *Storage) GetObject(ctx context.Context, key string) ([]byte, error) {
 		obj.Close()
 		if rerr == nil {
 			data = d
+			// Transfer histogram (Data Transfer & Artifact I/O 9->10): the wall time
+			// spans the real GetObject + ReadAll (the whole object off the wire), and
+			// the byte count is the object's real size — recorded on success only, so a
+			// definitive NoSuchKey (no bytes moved) never lands a spurious 0-throughput
+			// sample (observeTransfer also clamps a 0-length read out for the same reason).
+			observeTransfer("get", len(d), time.Since(start))
 			return false, nil
 		}
 		if minio.ToErrorResponse(rerr).Code == "NoSuchKey" {
@@ -264,4 +278,72 @@ func (s *Storage) GetObject(ctx context.Context, key string) ([]byte, error) {
 		return true, fmt.Errorf("get object %q: %w", key, rerr)
 	})
 	return data, err
+}
+
+// PutObjectStream uploads r to key with UNKNOWN size (-1), for a caller that has
+// a stream, not a []byte, and does not want to buffer it first to learn its
+// length (Data Transfer & Artifact I/O 7->8 / Scalability Headroom 7->8: the
+// canonical-input tee in createJob's streaming split). minio-go internally
+// switches to a streaming multipart upload when size<0, so this never buffers
+// the whole object in control-plane memory. NOT retried: r is a single-pass
+// stream (often the read side of an io.Pipe whose write side is being driven
+// live by another goroutine), so re-attempting from byte zero after a partial
+// failure is not safe the way a []byte PutObject retry is — the caller sees the
+// error directly and decides whether to fail the whole submission.
+func (s *Storage) PutObjectStream(ctx context.Context, key string, r io.Reader, contentType string) error {
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	_, err := s.internal.PutObject(ctx, s.bucket, key, r, -1, minio.PutObjectOptions{ContentType: contentType})
+	if err != nil {
+		return fmt.Errorf("put object stream %q: %w", key, err)
+	}
+	return nil
+}
+
+// GetObjectReader opens a streaming reader on the object at key, WITHOUT reading
+// it into memory (Data Transfer & Artifact I/O 7->8, "Stream the control-plane
+// storage layer end to end"). Unlike GetObject/withRetry, a transient mid-stream
+// read error cannot be silently retried from byte zero without either buffering
+// everything (defeating the point) or re-opening a fresh ranged GET — so retry
+// here is deliberately limited to the OPEN call (a stat-equivalent, cheap and
+// idempotent): once the caller starts reading the returned io.ReadCloser, any
+// error surfaces directly to them. A missing object (NoSuchKey) surfaces
+// immediately, never retried, matching GetObject's contract. Callers MUST Close
+// the returned reader.
+func (s *Storage) GetObjectReader(ctx context.Context, key string) (io.ReadCloser, error) {
+	if !s.breaker.allow(time.Now()) {
+		return nil, errStoreCircuitOpen
+	}
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(attempt) * 200 * time.Millisecond):
+			}
+		}
+		obj, err := s.internal.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
+		if err != nil {
+			lastErr = fmt.Errorf("get object reader %q: %w", key, err)
+			continue
+		}
+		// minio-go's GetObject only issues the real request lazily on first Read/Stat —
+		// Stat here forces that now, inside the retry loop, so a 404/network failure is
+		// caught and retried/reported HERE rather than surfacing later, mid-stream, to a
+		// caller that already committed to the "open succeeded" path.
+		if _, serr := obj.Stat(); serr != nil {
+			obj.Close()
+			if minio.ToErrorResponse(serr).Code == "NoSuchKey" {
+				return nil, fmt.Errorf("get object reader %q: %w", key, serr)
+			}
+			lastErr = fmt.Errorf("get object reader %q: %w", key, serr)
+			continue
+		}
+		s.breaker.record(time.Now(), true)
+		return obj, nil
+	}
+	s.breaker.record(time.Now(), false)
+	return nil, lastErr
 }

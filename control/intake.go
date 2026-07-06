@@ -682,7 +682,7 @@ func (s *Server) handleLaunchIntake(w http.ResponseWriter, r *http.Request) {
 			if stage.From == "previous" {
 				continue
 			}
-			stageQuotes = append(stageQuotes, s.buildQuote(r.Context(), jobSubmit{
+			stageQuotes = append(stageQuotes, s.buildQuote(r.Context(), auth.BuyerID, jobSubmit{
 				JobType: JobType{Type: stage.Op},
 				Model:   ModelRef{Kind: "gguf", Ref: stage.Model},
 				Tier:    "batch",

@@ -117,6 +117,44 @@ pub const EMBED_MINILM_ID: &str = "all-minilm-l6-v2";
 /// Canonical id of the bge-small-en-v1.5 embedder (the NEW alternate).
 pub const EMBED_BGE_SMALL_ID: &str = "bge-small-en-v1.5";
 
+/// REAL cross-encoder reranker: `cross-encoder/ms-marco-MiniLM-L-6-v2`.
+///
+/// This is a BERT `SequenceClassification` head (`num_labels = 1`), NOT a
+/// bi-encoder. It takes a `(query, doc)` PAIR jointly — the query and doc share
+/// one attention window, so every doc token can attend to every query token —
+/// and emits ONE relevance logit. That query↔doc cross-attention is exactly what
+/// a bi-encoder (embed each side separately, then cosine) cannot see, and is why
+/// a cross-encoder reranks materially better on hard cases (the truly-relevant
+/// doc that is NOT the lexically-closest one). Same BERT trunk as MiniLM-L6
+/// (6 layers, hidden 384, vocab 30522), so its `config.json` deserializes into
+/// the very same Candle `bert::Config`; the only extra weights are the classifier
+/// `Linear(384 -> 1)`. Weights: `model.safetensors` carries `bert.*` (the trunk,
+/// loaded by Candle's `BertModel` via its `model_type`-prefixed fallback) plus
+/// `classifier.weight`/`classifier.bias` (the head, loaded directly in
+/// `runners::CrossEncoder`). The `bert.pooler.*` tensors are present in the file
+/// but UNUSED — ms-marco cross-encoders read the raw `[CLS]` hidden state, not the
+/// pooler output (verified against the reference `CrossEncoder` scoring path).
+pub const RERANK_CROSS_ENCODER: ModelSpec = ModelSpec {
+    repo: "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    files: &["config.json", "tokenizer.json", "model.safetensors"],
+};
+
+/// Canonical id of the real cross-encoder reranker (matches the catalogue id).
+pub const RERANK_CROSS_ENCODER_ID: &str = "ms-marco-minilm-l6-v2";
+
+/// True if `model_ref` selects the REAL cross-encoder rerank path. Matched
+/// case-insensitively on the markers a rerank manifest would carry to ask for it:
+/// our canonical id, the HF repo name, or a bare `cross-encoder` / `reranker`
+/// marker. Any ref that does NOT name the cross-encoder (including the empty ref
+/// and the historical `all-minilm-l6-v2` embed id) resolves to `false`, so the
+/// existing bi-encoder cosine rerank stays byte-for-byte the default — the
+/// cross-encoder is opt-in via the catalogue, and `RerankRunner` also falls back
+/// to the bi-encoder if the cross-encoder weights cannot load.
+pub fn is_cross_encoder_rerank(model_ref: &str) -> bool {
+    let r = model_ref.to_ascii_lowercase();
+    r.contains("ms-marco") || r.contains("cross-encoder") || r.contains("reranker")
+}
+
 /// Resolve an embed `model_ref` to (canonical id, spec, pooling). The MiniLM
 /// default is returned for the empty ref and for any ref that does NOT name the
 /// bge alternate, so existing embed/rerank jobs are byte-for-byte unchanged.
@@ -176,14 +214,31 @@ pub fn is_big_llama(model_ref: &str) -> bool {
 /// output parity is UNPROVEN until a real-GGUF Metal parity run — see
 /// docs/CANDLE_EXPANSION_RESEARCH.md. Earlier this comment wrongly called all three
 /// llama-arch; the official Qwen GGUFs are not.
+///
+/// PATCH (Per-Device Speed & Throughput 7→8, docs/internal/CREED_AND_PATH_TO_TEN.md):
+/// the 7B repo/file used to point at `Qwen/Qwen2.5-7B-Instruct-GGUF`'s
+/// `qwen2.5-7b-instruct-q4_k_m.gguf` — a real HTTP HEAD against that exact path now
+/// 404s. The upstream repo re-quantized and now ships that quant level split across
+/// two shard files (`qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf` /
+/// `-00002-of-00002.gguf`), and `LlamaBackend::load`/`gguf_file::Content::read` only
+/// know how to read a single-file GGUF — there is no multi-shard reassembly in this
+/// codebase. Repointed at `bartowski/Qwen2.5-7B-Instruct-GGUF`'s single-file
+/// `Qwen2.5-7B-Instruct-Q4_K_M.gguf` (verified live via HTTP HEAD: resolves,
+/// content-length 4,683,074,240 bytes ≈ 4.7GB, matching this file's own doc comment)
+/// — same base model (`Qwen/Qwen2.5-7B-Instruct`), same GGUF architecture/metadata
+/// shape (bartowski's quantizer output is llama.cpp-standard, read by the same
+/// qwen2-arch path above), same Q4_K_M quant level, just a different (still
+/// single-file) host repo. The tokenizer resolver (`load_llama_tokenizer` in
+/// runners.rs) already points at the original `Qwen/Qwen2.5-7B-Instruct` repo,
+/// independent of the GGUF host, so it is unaffected by this change.
 pub fn llama_gguf_spec(model_ref: &str) -> ModelSpec {
     let r = model_ref.to_ascii_lowercase();
     if is_big_llama(&r) {
         // Bigger model — only dispatched to high-VRAM workers (see the memory gate
         // in BatchInferRunner::can_run + the catalogue's higher min_memory_gb).
         ModelSpec {
-            repo: "Qwen/Qwen2.5-7B-Instruct-GGUF",
-            files: &["qwen2.5-7b-instruct-q4_k_m.gguf"],
+            repo: "bartowski/Qwen2.5-7B-Instruct-GGUF",
+            files: &["Qwen2.5-7B-Instruct-Q4_K_M.gguf"],
         }
     } else if r.contains("qwen") {
         ModelSpec {

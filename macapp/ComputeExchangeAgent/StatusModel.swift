@@ -21,7 +21,14 @@
 //        "today_earnings_usd": 0.42,        // accrued since local midnight
 //        "balance_usd": 12.50,              // GET /v1/worker/earnings balance
 //        "lifetime_usd": 130.00,
-//        "thermal_state": "nominal" | "fair" | "serious" | "critical",
+//        "projected_daily_usd": 14.24 | null, // "$/day if you stay online" (Supplier
+//                                              // Earnings Economics 4→5), computed
+//                                              // LIVE from THIS worker's own measured
+//                                              // benchmark tok/s — never a fleet
+//                                              // average. null when the worker has no
+//                                              // priced, nonzero-throughput benchmark
+//                                              // yet (never fabricated).
+//        "thermal_state": "unknown" | "nominal" | "fair" | "serious" | "critical",
 //        "gpu_temp_c": 61.0 | null,
 //        "cpu_pct": 18.0,
 //        "model_cache_bytes": 4831838208,   // sum of warm/cached model files on disk
@@ -71,10 +78,17 @@ enum AgentState: String, Codable {
 }
 
 enum ThermalState: String, Codable {
-    case nominal, fair, serious, critical
+    // `unknown` is the honest default when the agent has no thermal reading at
+    // all yet (fresh launch, or off the CUDA lane before the Mac's real
+    // `ProcessInfo.thermalState` reading has been written into the prefs
+    // overlay) — the agent used to report `nominal` in that case, which is a
+    // fabricated claim of safety, not an absence of data (Supplier onboarding &
+    // safety 6→7, docs/internal/CREED_AND_PATH_TO_TEN.md).
+    case unknown, nominal, fair, serious, critical
 
     var label: String {
         switch self {
+        case .unknown:  return "Unknown"
         case .nominal:  return "Nominal"
         case .fair:     return "Fair"
         case .serious:  return "Serious · throttling"
@@ -106,7 +120,14 @@ struct AgentStatus: Codable, Equatable {
     var todayEarningsUsd: Double = 0
     var balanceUsd: Double = 0
     var lifetimeUsd: Double = 0
-    var thermalState: ThermalState = .nominal
+    /// "$/day if you stay online" (Supplier Earnings Economics 4→5,
+    /// docs/internal/CREED_AND_PATH_TO_TEN.md), computed by the agent LIVE from
+    /// THIS worker's own measured benchmark tok/s (agent/src/status.rs
+    /// `projected_daily_usd`) — never a fleet average. Optional: nil until the
+    /// worker has a priced, nonzero-throughput benchmark line; the UI must not
+    /// fabricate a figure when this is nil.
+    var projectedDailyUsd: Double?
+    var thermalState: ThermalState = .unknown
     var gpuTempC: Double?
     var cpuPct: Double = 0
     var modelCacheBytes: Int64 = 0
@@ -162,6 +183,7 @@ struct AgentStatus: Codable, Equatable {
         case todayEarningsUsd = "today_earnings_usd"
         case balanceUsd = "balance_usd"
         case lifetimeUsd = "lifetime_usd"
+        case projectedDailyUsd = "projected_daily_usd"
         case thermalState = "thermal_state"
         case gpuTempC = "gpu_temp_c"
         case cpuPct = "cpu_pct"
