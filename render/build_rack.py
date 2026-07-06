@@ -630,10 +630,22 @@ def build_gpu(cx, cz, yc, idx=0):
         eb.location = (lx, yc, lz); eb.data.materials.append(body_mat); smooth(eb, 30); parts.append(eb)
     cbar = rounded_box("fe-centerbar", Wc, Tc, mm(48.0), mm(3.0), seg=3)
     cbar.location = (cx, yc, cz); cbar.data.materials.append(body_mat); smooth(cbar, 30); parts.append(cbar)
-    # dark fin block behind each fan (flow-through end · silhouette mass + dark backing)
+    # flow-through fin stack behind each fan · G7 (GRADING-REPORT): the real FE rear windows reveal the
+    # fin EDGES receding into the card, dished concave where the fan sits ("vertical heatsink fins that
+    # are all black" · LanOC; "concave right where the fans are located"). Vertical black fins with gaps,
+    # occupying the REAR HALF of the thickness (yc+7 .. yc+19) so they show through the rear window while
+    # the front fan well (ends ~yc+7) still reads from the front · true double flow-through.
     for fz in (zt, zb):
-        fin = box("fe-finstack", Wc - 2 * bw, Tc - mm(6), fan_r * 2, (cx, yc + mm(4), fz))
-        fin.data.materials.append(fin_mat); parts.append(fin)
+        nrf = 23; span = fan_r + mm(4)
+        for k in range(nrf):
+            fxr = (2.0 * (k + 0.5) / nrf - 1.0) * span
+            half_h = math.sqrt(max((fan_r + mm(2)) ** 2 - fxr * fxr, 0.0))   # circular concave profile
+            if half_h < mm(4): continue
+            rf = box("fe-flowfin", mm(0.9), mm(12.0), 2.0 * half_h, (cx + fxr, yc + mm(13.0), fz))
+            rf.data.materials.append(fin_mat); parts.append(rf)
+        # a dark floor a bit deeper so the gaps between fins read as a receding cavity, not open sky
+        back = box("fe-finfloor", Wc - 2 * bw, mm(2.0), fan_r * 2, (cx, yc + mm(6.0), fz))
+        back.data.materials.append(principled(f"fe-finfloor{idx}", (0.010, 0.010, 0.012), 0.6)); parts.append(back)
     # exhaust fin comb on the TOP + BOTTOM short-ends · the aluminium fin edges the FE vents through
     # (reads from the top/bottom views · thin ridges across the width, spaced along the depth).
     for ez, zend in ((cz + Hc / 2.0 - mm(1.0), 1), (cz - Hc / 2.0 + mm(1.0), -1)):
@@ -681,12 +693,15 @@ def build_gpu(cx, cz, yc, idx=0):
     # backplate (dark metal) · a mirrored rear X 'infinity' accent + a blank etched cartouche
     # (NVIDIA logo · blank per trademark gate) + a large flow-through WINDOW over the top fan
     # (air exits the fin stack out the back here · the FE's defining rear feature).
+    # backplate · G7: TWO flow-through windows (one per fan/end), not one · the FE's defining rear
+    # feature is the open double flow-through revealing the fin stacks. Cut both over zt AND zb.
     by = yc + Tc / 2.0 + mm(1.0)
     bp = box("fe-backplate", Wc - mm(4), mm(2.5), Hc - mm(6), (cx, by, cz))
-    win = box("fe-bpwin", mm(98.0), mm(20.0), mm(98.0), (cx, by, zt))
     bpy.context.view_layer.objects.active = bp
-    mdw = bp.modifiers.new("w", "BOOLEAN"); mdw.operation = "DIFFERENCE"; mdw.solver = "EXACT"; mdw.object = win
-    bpy.ops.object.modifier_apply(modifier=mdw.name); bpy.data.objects.remove(win, do_unlink=True)
+    for wi, wz in enumerate((zt, zb)):
+        win = box(f"fe-bpwin{wi}", mm(100.0), mm(20.0), mm(100.0), (cx, by, wz))
+        mdw = bp.modifiers.new(f"w{wi}", "BOOLEAN"); mdw.operation = "DIFFERENCE"; mdw.solver = "EXACT"; mdw.object = win
+        bpy.ops.object.modifier_apply(modifier=mdw.name); bpy.data.objects.remove(win, do_unlink=True)
     bp.data.materials.append(plate_mat); parts.append(bp)
     ybx = by + mm(2.0)
     for sgn in (1, -1):
