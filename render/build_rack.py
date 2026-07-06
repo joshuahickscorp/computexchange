@@ -449,7 +449,7 @@ def build_fan(cx, yf, cz, r, nb=9, blade_rgb=(0.105, 0.105, 0.115), emit_ring=Fa
             location=(cx, yf - mm(0.5), cz), rotation=(math.radians(90), 0, 0),
             major_segments=48, minor_segments=8)
         er = bpy.context.active_object; er.name = "fan-inlet-lit"
-        er.data.materials.append(emissive("fan-inlet-lit-mat", (0.93, 0.957, 1.0), 2.6))
+        er.data.materials.append(emissive("fan-inlet-lit-mat", (0.93, 0.957, 1.0), 4.0))  # true LED · casts GI spill
         smooth(er, 30); parts.append(er)
     return parts
 
@@ -466,7 +466,7 @@ def build_gpu(cx, cz, yc, idx=0):
     plate_mat = machined_metal(f"fe-plate{idx}", (0.10, 0.104, 0.113), 0.45, metallic=0.9)
     brk_mat = principled(f"fe-brk{idx}", (0.078, 0.078, 0.078), 0.50, metallic=0.9)
     dark = principled(f"fe-dark{idx}", (0.02, 0.02, 0.022), 0.6)
-    lit = emissive(f"fe-lit{idx}", (0.93, 0.957, 1.0), 2.3)
+    lit = emissive(f"fe-lit{idx}", (0.93, 0.957, 1.0), 3.2)   # true LED · casts GI spill onto the shroud
     yf = yc - Tc / 2.0
     fan_r = mm(57.0)                          # ~115mm dia
     zt, zb = cz + mm(78.0), cz - mm(78.0)     # the two fan centers (one at each end)
@@ -607,7 +607,9 @@ def rack_rig():
     add_area("fill", (0.1, -1.2, 0.55), 1.1, float(arg("--fill", 16)), (0.97, 0.98, 1.0), aim=aim)
     bpy.ops.mesh.primitive_plane_add(size=8.0, location=(0, 0, 0))
     fl = bpy.context.active_object; fl.name = "floor"
-    fl.data.materials.append(principled("floor", (0.006, 0.006, 0.007), 0.62))
+    # floor · a hair reflective so the rig GROUNDS with a faint reflection (the #1 panel tell was
+    # 'it floats') · stays near-black so the premium void look holds · the reflection reads the weight.
+    fl.data.materials.append(principled("floor", (0.007, 0.007, 0.008), 0.34, metallic=0.0))
     return aim
 
 def rack_camera(aim, shot, res):
