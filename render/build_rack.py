@@ -472,7 +472,7 @@ def build_fan(cx, yf, cz, r, nb=9, blade_rgb=(0.105, 0.105, 0.115), emit_ring=Fa
     parts = []
     well = principled("fan-well", (0.012, 0.012, 0.014), 0.55)
     ring = principled("fan-ring", (0.03, 0.03, 0.033), 0.42, metallic=0.35)
-    blade = principled("fan-blade", blade_rgb, 0.42, metallic=0.05, coat=0.35)   # glossy plastic sheen (real fan blades)
+    blade = principled("fan-blade", blade_rgb, 0.54, metallic=0.0, coat=0.14)   # SATIN black plastic · matte so the low albedo reads dark (a glossy coat reflected the bright LEDs grey)
     bpy.ops.mesh.primitive_cylinder_add(radius=r - mm(1.5), depth=mm(12.0), vertices=44,
         location=(cx, yf + mm(7.0), cz), rotation=(math.radians(90), 0, 0))
     w = bpy.context.active_object; w.name = "fan-well"; w.data.materials.append(well)
@@ -547,9 +547,11 @@ def build_gpu(cx, cz, yc, idx=0):
         for k in range(-6, 7):
             fr = box("fe-topfin", Wc - 2 * bw - mm(4), mm(2.0), mm(3.0), (cx, yc + k * mm(2.7), ez))
             fr.data.materials.append(fin_mat); parts.append(fr)
-    # two fans (7 blades, near-black) with the FE lit inlet rings
+    # two fans (9 blades, BLACK plastic) with the FE lit inlet rings. Reviews call the FE fans flatly
+    # "black" · 0.110 read medium-grey · 0.050 is a proper black plastic (glossy coat keeps the spec/
+    # edge highlights so the blades still read against the dark well). RTX5090FE-SPEC.md.
     for fz in (zt, zb):
-        parts += build_fan(cx, yf, fz, fan_r, nb=9, blade_rgb=(0.110, 0.114, 0.125), emit_ring=True)
+        parts += build_fan(cx, yf, fz, fan_r, nb=9, blade_rgb=(0.050, 0.052, 0.060), emit_ring=True)
     # X 'infinity' accent on the center bar (2 crossing diagonals) + its lit edges
     for sgn in (1, -1):
         xb = rounded_box("fe-xbar", mm(78.0), mm(3.0), mm(10.0), mm(2.0), seg=2)
