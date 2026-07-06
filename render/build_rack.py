@@ -460,7 +460,7 @@ def _fan_blades(cx, yf, cz, r, nb, blade_mat):
         return base * (0.72 + 0.42 * math.sin(math.pi * (0.12 + 0.76 * t)))  # root->mid bulge->tip taper
     def airfoil(u):          # u in [-0.5,0.5] chord fraction -> (mean-camber, half-thickness), chord-fractions
         s = max(1.0 - (2.0 * u) ** 2, 0.0)                  # 1 at mid-chord, 0 at the edges
-        return 0.14 * s, 0.055 * s ** 0.7                   # cambered bow + a thin lens thickness
+        return 0.17 * s, 0.082 * s ** 0.7                   # more camber + thicker lens · panel-5 #2: 0.055 read as a flat plate · thicker foils catch a light gradient across the curve
     cs = [-0.5 + k / (Nc - 1) for k in range(Nc)]           # leading -> trailing
     for i in range(nb):
         a0 = 2 * math.pi * i / nb
