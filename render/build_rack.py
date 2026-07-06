@@ -618,6 +618,13 @@ def build_gpu(cx, cz, yc, idx=0):
         xb.data.materials.append(xacc_mat); smooth(xb, 30); parts.append(xb)
         xl = box("fe-xlit", mm(78.0), mm(1.0), mm(0.9), (cx, yf - mm(3.6), cz))   # thin lit strip · the X was 55% of the clipped area (panel-3 gate) · thinned under the 1% gate while the rings (main spill) stay at 0.7
         xl.rotation_euler = (0, math.radians(sgn * 33.0), 0); xl.data.materials.append(lit); parts.append(xl)
+    # small co-located glow at the X centre · the X emissive lines cast no near-field GI (like the rings
+    # did) · a dim light makes the X spill onto the centre bar too (consistent with the ring-glow fix,
+    # panel-5 #1). Low power (0.14W) · the centre bar is already partly lit by the two ring glows.
+    xg = bpy.data.lights.new("x-glow", "POINT"); xg.energy = 0.14; xg.color = (0.80, 0.89, 1.0)
+    xg.shadow_soft_size = mm(24.0)
+    xgo = bpy.data.objects.new("x-glow", xg); xgo.location = (cx, yf - mm(7.0), cz)
+    bpy.context.collection.objects.link(xgo); parts.append(xgo)
     # top-edge wordmark · a blank lit strip on the 'top edge' (a vertical side edge when portrait,
     # +X so it faces the q34 camera), plus the angled recessed 16-pin power header near it
     wm = box("fe-wordmark", mm(2.0), mm(18.0), mm(70.0), (cx + Wc / 2.0 - mm(1.0), yc, cz + mm(38.0)))
