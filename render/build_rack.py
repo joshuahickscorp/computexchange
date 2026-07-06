@@ -548,7 +548,7 @@ def build_fan(cx, yf, cz, r, nb=9, blade_rgb=(0.105, 0.105, 0.115), emit_ring=Fa
         location=(cx, yf + mm(1.0), cz))
     dome = bpy.context.active_object; dome.name = "fan-hubcap"
     dome.scale = (1.0, 0.30, 1.0); bpy.ops.object.transform_apply(scale=True)   # shallow dome toward the viewer
-    dome.data.materials.append(principled("fan-hubcap", (0.05, 0.05, 0.055), 0.30, metallic=0.3))
+    dome.data.materials.append(principled("fan-hubcap", (0.045, 0.045, 0.05), 0.18, metallic=0.55))   # glossier + more metallic than the matte blades · the LED glow now catches a distinct bright spec on the hub (material identity · panel-5 #5)
     smooth(dome, 40); parts.append(dome)
     if emit_ring:   # the 5090 FE lit inlet ring (static cool white)
         bpy.ops.mesh.primitive_torus_add(major_radius=r + mm(1.0), minor_radius=mm(0.6),
