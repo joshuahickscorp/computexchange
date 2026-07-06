@@ -13,6 +13,14 @@ Studio bead-blast + Spark foam. Each change bounded, cited, gate-verified:
   port reads as a dark recess. Verified with `_rear_detail.py` (lit head-on rear).
 - **Refreshed the stale desktop rear audit tiles** (Studio tile still showed the pre-M1 circular vent)
   → now rectangular vent + dark ports (Studio) and rear foam band + I/O plate (Spark).
+- **R2 · rig-side relight (was near-black).** The side audit frame rendered near-black because the
+  front key/rim/fill all rake off the +X side face the side camera looks at. Added a camera-side
+  softbox + low fill gated on SHOT==side so the frame profile, the edge-on card + fin stack, and the
+  R1 power-lead cascade to the base read. clip 0.014% PASS · front/q34/rear/trio gates untouched.
+- **Full 360 audit sweep this pass · every face reads:** GPU front/q34/rear/rearq34/side/top/bottom/
+  macro (gpu-bottom confirmed already lit by the earlier G17 relight · NOT black); rig front/q34/rear/
+  rearq34/side(fixed)/top; Studio front/rear/side/bottom; Spark front/rear/side/top/bottom. The two
+  hook-flagged near-black frames (gpu-bottom, rig-side) are both resolved.
 
 VERIFIED-ALREADY-CORRECT this pass (checked against spec/report, no change needed · do not re-open):
 FE fan blades + hub caps are already at the spec-corrected near-black (blade 0.050, hub 0.042 · they
