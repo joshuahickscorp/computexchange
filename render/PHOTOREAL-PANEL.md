@@ -121,6 +121,16 @@ tells + what I did (this wave, all gate-verified rig q34 raw clip 0.79-0.94% PAS
 Panel accuracy myths REFUTED this wave: none new (panel-4 was told the verified facts up front · it
 stayed on rendering-quality · confirms the sourced-references-win discipline).
 
+## ESCALATION (owner taste call · loop escalation rule) · the Spark trio-scale glitter
+The ONE remaining lever on the money-shot trio is the DGX Spark reading a touch glittery at trio scale.
+VERIFIED: the foam3d is ACCURATE metal foam + reads as real 3D pores at MACRO (front macro audit) · the
+trio glitter is a SCALE artifact (0.7mm relief doesn't resolve on the tiny trio Spark). To reduce it I
+would make the foam CELLS FINER · but that LOWERS the per-pixel contrast (std) that the gated spark_foam
+tone pin (SP10/SP11, loops 17/19) was tuned to HOLD. So the panel's ask (less glitter) and the gated
+tuning (hold the contrast pin) directly CONFLICT · this is a premium-look TASTE decision. Per the loop's
+escalation rule I am NOT risking the gated tuning · OWNER CALL: keep the current sparkly-premium foam, or
+authorise a finer/matter foam (which needs a re-tune of the spark_foam gate). Everything else is addressed.
+
 ## Execution order (this wave · rack-weighted, but advance a desktop too)
 A. LED GI realism (keep · #1 valid core) + gate: thin the X lit bar (it is 55% of the clip) → under 1%.
 B. Fan refine (#3): less sweep + smaller hub + root fillet.
