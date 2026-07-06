@@ -553,6 +553,14 @@ def build_fan(cx, yf, cz, r, nb=9, blade_rgb=(0.105, 0.105, 0.115), emit_ring=Fa
         er = bpy.context.active_object; er.name = "fan-inlet-lit"
         er.data.materials.append(emissive("fan-inlet-lit-mat", (0.86, 0.92, 1.0), 9.0))  # true LED · THIN light-guide line (minor 1.3->0.6): real FE inlet rings are thin lines · thinner supra-white ring cuts the clipped-pixel AREA under the 1% gate · emission 9 held, raised indirect clamp preserves the cool spill
         smooth(er, 30); parts.append(er)
+        # co-located cool-white LIGHT object (panel-3/4/5 #1: the emissive ring casts near-zero near-field
+        # GI). A light is NOT a camera-visible surface, so it adds the soft cool halo on the shroud + a rim
+        # on the blades + spill to neighbours WITHOUT adding a single clipped pixel · resolves the gate-vs-
+        # spill tension the emissive-only ring could not. Modest power · gate-checked.
+        gl = bpy.data.lights.new("led-glow", "POINT"); gl.energy = float(arg("--ledglow", 0.32))   # 0.32 = the balance · fans read LIT (hub glow + shroud halo + blade rim) but the black blades stay dark, not washed grey
+        gl.color = (0.80, 0.89, 1.0); gl.shadow_soft_size = mm(28.0)
+        go = bpy.data.objects.new("led-glow", gl); go.location = (cx, yf - mm(7.0), cz)
+        bpy.context.collection.objects.link(go); parts.append(go)
     return parts
 
 def build_gpu(cx, cz, yc, idx=0):
