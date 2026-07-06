@@ -424,9 +424,6 @@ def build_gpu(cx, cz, yc, idx=0):
     for dz in (mm(46.0), -mm(46.0)):
         rg = rounded_box("gpu-ridge", Wc - mm(22.0), mm(4.0), mm(7.0), mm(1.5), seg=2)
         rg.location = (cx, lip_y, cz + dz); rg.data.materials.append(shroud_mat); smooth(rg, 30); parts.append(rg)
-    # brushed-metal accent bar just inside the left lip · a soft highlight breaks the flat shroud
-    acc = box("gpu-accent", mm(5.0), mm(3.0), Hc - mm(34.0), (cx - Wc / 2.0 + mm(11.0), yf - mm(2.5), cz))
-    acc.data.materials.append(principled(f"gpu-acc{idx}", (0.20, 0.20, 0.22), 0.32, metallic=0.85)); parts.append(acc)
     # 3 fans recessed in the channel
     for dz in (mm(92.0), 0.0, -mm(92.0)):
         parts += build_fan(cx, yf, cz + dz, mm(40.0))
