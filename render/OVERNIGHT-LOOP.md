@@ -86,12 +86,12 @@ RACK / 6x RTX 5090 FE   front [x]  q34 [x]  rear-q34 [x]  side [~]  top [~]  mac
   macro (fuller/curved) · single-card rig too bright (dark-gunmetal tone) · card TOP-edge exhaust
   vents + make wordmark/16-pin read · fin-stack visible through the rear window · short-end I-O bracket
   (3x DP + 1x HDMI) detail · riser cables tray->cards · real mobo + PSU + cabling · tone/room grounding.
-DGX SPARK               front [x]  q34 [x]  rear [x]  side [ ]  top [ ]  macro [~]
-  REAR BUILT (researched port bank: power/4x USB-C/2x USB-A/HDMI/RJ-45/2x QSFP · DGX-SPARK-360-SPEC.md).
-  audit via render/_audit_desktop.py --which spark --yaw N. open: differentiate port sizes · sides · top.
-MAC STUDIO              front [x]  q34 [x]  rear [x]  side [ ]  top [~]  macro [~]
-  REAR BUILT (circular perforated exhaust vent + port row: power/4x TB5/2x USB-A/HDMI/RJ-45/3.5mm ·
-  MAC-STUDIO-360-SPEC.md). open: port-size differentiation · sides · ST front verify items · top.
+DGX SPARK               front [x]  q34 [x]  rear [x]  side [x]  top [x]  macro [~]  · 360-COMPLETE
+  rear port bank + clean champagne sides + foam/vent top all verified. open (polish): differentiate
+  rear port sizes for a dedicated rear macro. audit: render/_audit_desktop.py --which spark --yaw N.
+MAC STUDIO              front [x]  q34 [x]  rear [x]  side [x]  top [x]  macro [~]  · 360-COMPLETE
+  rear (circular vent + port row) + aluminium sides + aperture top all verified. open (polish): rear
+  port-size differentiation · ST front verify items (corner facet, base reveal, port depth).
 SCALE TRIO              first render [x]  → build_trio.py works (rack base + Studio + Spark on cap,
   true scale). Next: full-quality q34+front heroes, tune desktop placement/lighting, site-scroll notes.
 ```

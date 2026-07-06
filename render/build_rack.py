@@ -524,11 +524,33 @@ def build_gpu_row():
     bar.data.materials.append(principled("gpu-bar", (0.055, 0.055, 0.062), 0.38, metallic=0.8)); parts.append(bar)
     for i in range(n):
         parts += build_gpu(x0 + i * pitch, cz, yc, idx=i)
-    tray = box("mobo-tray", W - mm(160), D - mm(120), mm(4.0), (0, mm(10.0), mm(PLINTH) + mm(95.0)))
-    tray.data.materials.append(principled("mobo-tray-mat", (0.055, 0.055, 0.062), 0.55, metallic=0.3)); parts.append(tray)
+    # base · a DARK mobo tray (was too bright, competed with the cards) carrying a populated
+    # motherboard (dark PCB + CPU cooler + RAM + VRM heatsinks), a PSU, and a PCIe riser ribbon
+    # from each card down to the board · fills the base + wires the rig (owner: 'real server rack').
+    tray_z = mm(PLINTH) + mm(95.0)
+    tray = box("mobo-tray", W - mm(160), D - mm(120), mm(4.0), (0, mm(10.0), tray_z))
+    tray.data.materials.append(principled("mobo-tray-mat", (0.026, 0.026, 0.030), 0.60, metallic=0.25)); parts.append(tray)
+    mobo = box("mobo", mm(305.0), mm(244.0), mm(3.0), (0, mm(42.0), tray_z + mm(3.5)))
+    mobo.data.materials.append(principled("mobo-pcb", (0.020, 0.030, 0.022), 0.55)); parts.append(mobo)
+    heat_mat = principled("mobo-heat", (0.10, 0.10, 0.11), 0.40, metallic=0.7)
+    comp_mat = principled("mobo-comp", (0.05, 0.05, 0.055), 0.50, metallic=0.35)
+    cpu = rounded_box("mobo-cpu", mm(92.0), mm(92.0), mm(30.0), mm(3.0), seg=3)
+    cpu.location = (mm(18.0), mm(52.0), tray_z + mm(20.0)); cpu.data.materials.append(heat_mat); smooth(cpu, 30); parts.append(cpu)
+    for i in range(4):
+        ram = box("mobo-ram", mm(4.0), mm(122.0), mm(32.0), (mm(96.0) + i * mm(9.0), mm(52.0), tray_z + mm(20.0)))
+        ram.data.materials.append(comp_mat); parts.append(ram)
+    for vx in (-mm(96.0), -mm(52.0)):
+        vrm = box("mobo-vrm", mm(52.0), mm(18.0), mm(16.0), (vx, mm(140.0), tray_z + mm(12.0)))
+        vrm.data.materials.append(heat_mat); parts.append(vrm)
     psu = rounded_box("psu", mm(150.0), mm(86.0), mm(150.0), mm(3.0), seg=3)
     psu.location = (-fx + mm(150), mm(30.0), mm(PLINTH) + mm(63.0))
-    psu.data.materials.append(principled("psu-mat", (0.035, 0.035, 0.04), 0.40, metallic=0.4)); smooth(psu, 30); parts.append(psu)
+    psu.data.materials.append(principled("psu-mat", (0.028, 0.028, 0.032), 0.42, metallic=0.4)); smooth(psu, 30); parts.append(psu)
+    rib_mat = principled("riser-ribbon", (0.035, 0.035, 0.040), 0.62, metallic=0.1)
+    for i in range(n):
+        rx = x0 + i * pitch
+        rib = box("riser-ribbon", mm(56.0), mm(1.4), mm(150.0), (rx, yc + mm(58.0), cz - mm(190.0)))
+        rib.rotation_euler = (math.radians(52.0), 0, 0)   # card bottom (front) -> mobo slot (rear, down)
+        rib.data.materials.append(rib_mat); parts.append(rib)
     return parts
 
 # ---- rig · dark-object hero (edge + sheen carve the black out of void black) --------------
