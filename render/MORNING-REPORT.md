@@ -1,3 +1,28 @@
+# Wave 2 · photoreal push (2026-07-06, later) · driven by a 5-lens forensic panel
+
+Ran a 5-lens forensic panel (workflow w5oyz13ew · materials/lighting/geometry/gestalt/accuracy +
+synthesis) on the delivery heroes, then worked the ranked punch-list. Verdict moved from prior
+panels' "4/4 render" toward "GOOD RENDER, nearly-photo in crops." Landed, each gate-verified:
+- **Real lofted-airfoil fan blades** (was flat paddles · the #1 prior tell) · then a gentler sweep so
+  they read as real shallow-swept FE rotors, not curled scythes.
+- **Black satin fans** (reviews call the FE fans "black" · were medium-grey).
+- **LEDs made real:** thin light-guide lines (were fat blown donuts) + raised the indirect clamp that
+  was SUPPRESSING their GI, so they now wash cool light on the shroud · full-res raw clip 1.84%->0.93% PASS.
+- **Darker gunmetal shroud** + a larger key softbox for a specular gradient across the metal.
+
+**Three accuracy myths the panel asserted — all REFUTED by sourced research (kept the model honest):**
+1. "The 5090 FE has no illumination · delete the LEDs" · WRONG · 5 sources (NVIDIA forums, TechPowerUp
+   review+teardown, OC3D, NoobFeed) confirm the FE's static white X/inlet/logo LEDs. Kept.
+2. "The Mac Studio is too tall/cubic" · WRONG · verified it renders as the correct squat 2:1 slab
+   (197x197x95) · the panel misread the small q34 crop.
+3. "The DGX Spark front should be a machined cheese-grater hole-lattice" · WRONG · the Chargerlab
+   teardown confirms it is METAL FOAM ("solid porous structure, not a perforated mesh") · the gated
+   foam3d is accurate · NOT rebuilt (the flip-flop guard prevented a regression).
+Lesson logged: the vision panel is strong on "reads CG" but unreliable on hardware facts · sourced
+references win. Honest next: the materials micro-texture wave (#4) + a re-panel to measure the drop.
+
+---
+
 # Morning report · overnight loop (2026-07-05 -> 07-06)
 
 Ran the OVERNIGHT-LOOP (render -> edit -> audit -> commit) on all three oracles. ~40 clean commits,
