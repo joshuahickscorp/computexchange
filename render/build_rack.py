@@ -900,14 +900,17 @@ elif PART == "gpu":
     _sc = bpy.context.scene
     _cd = bpy.data.cameras.new("cam"); _cd.lens = 85.0; _cd.sensor_width = 36.0
     _cam = bpy.data.objects.new("cam", _cd); bpy.context.collection.objects.link(_cam); _sc.camera = _cam
-    _dist = 0.66
+    _dist = 0.30 if SHOT == "macro" else 0.66
     _shots = {"front": (0, 3), "q34": (32, 10), "rear": (180, 3), "rearq34": (212, 12),
-              "top": (0, 72), "side": (90, 5), "bottom": (0, -60)}
+              "top": (0, 72), "side": (90, 5), "bottom": (0, -60), "macro": (18, 7)}
+    if SHOT == "macro":
+        aim.location = (0.0, 0.0, mm(34.0))   # feature-aimed between the X accent + the top fan
     _yaw, _elev = _shots.get(SHOT, (32, 10))
     _ya, _el = math.radians(_yaw), math.radians(_elev)
-    _cam.location = (_dist * math.cos(_el) * math.sin(_ya), -_dist * math.cos(_el) * math.cos(_ya), _dist * math.sin(_el))
+    ax, ay, az = aim.location
+    _cam.location = (ax + _dist * math.cos(_el) * math.sin(_ya), ay - _dist * math.cos(_el) * math.cos(_ya), az + _dist * math.sin(_el))
     _c = _cam.constraints.new("TRACK_TO"); _c.target = aim; _c.track_axis = "TRACK_NEGATIVE_Z"; _c.up_axis = "UP_Y"
-    _cd.dof.use_dof = True; _cd.dof.focus_object = aim; _cd.dof.aperture_fstop = 8.0
+    _cd.dof.use_dof = True; _cd.dof.focus_object = aim; _cd.dof.aperture_fstop = 2.8 if SHOT == "macro" else 8.0
     _sc.render.resolution_x, _sc.render.resolution_y = (1500, 1800)
     render_to(OUT + f"gpu-{SHOT}.png")
     print("build_rack single 5090 FE done.")
