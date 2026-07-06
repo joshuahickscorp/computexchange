@@ -464,6 +464,12 @@ def build_gpu(cx, cz, yc, idx=0):
     for fz in (zt, zb):
         fin = box("fe-finstack", Wc - 2 * bw, Tc - mm(6), fan_r * 2, (cx, yc + mm(4), fz))
         fin.data.materials.append(fin_mat); parts.append(fin)
+    # exhaust fin comb on the TOP + BOTTOM short-ends · the aluminium fin edges the FE vents through
+    # (reads from the top/bottom views · thin ridges across the width, spaced along the depth).
+    for ez, zend in ((cz + Hc / 2.0 - mm(1.0), 1), (cz - Hc / 2.0 + mm(1.0), -1)):
+        for k in range(-6, 7):
+            fr = box("fe-topfin", Wc - 2 * bw - mm(4), mm(2.0), mm(3.0), (cx, yc + k * mm(2.7), ez))
+            fr.data.materials.append(fin_mat); parts.append(fr)
     # two fans (7 blades, near-black) with the FE lit inlet rings
     for fz in (zt, zb):
         parts += build_fan(cx, yf, fz, fan_r, nb=9, blade_rgb=(0.110, 0.114, 0.125), emit_ring=True)
