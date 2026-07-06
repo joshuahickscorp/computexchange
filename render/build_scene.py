@@ -1097,8 +1097,12 @@ def build_dgx_spark(loc_x=0.0, yaw_deg=0.0):
     (not resting on foam). Champagne anodized shell; smooth sides; the top (150 x 150) carries a
     recessed vent panel. Rear skipped. Trademark gate: caps stay blank (D2 · no logo, ever)."""
     W = mm(SPARK["width"]); D = mm(SPARK["depth"]); H = mm(SPARK["height"])
-    r = mm(SPARK["edge_R"])
-    body = rounded_box("dgx-spark", W, D, H, r, r, r, seg_corner=24, seg_fillet=8)
+    # S4 (GRADING-REPORT): the real Spark is a CRISP machined brick (~1mm arrises · ChargerLAB/STH
+    # teardown), not the soap-bar the 6.09mm fillet gave. Reduced to 2.5mm (crisp but keeps enough
+    # relief that the foam recess does not break the corner). corner_R stays a touch larger for the
+    # plan corners; the smaller top/bottom fillet is what kills the soap-bar read.
+    r = mm(2.5)
+    body = rounded_box("dgx-spark", W, D, H, mm(3.0), r, r, seg_corner=24, seg_fillet=8)
     bpy.context.view_layer.update()
     body.data.materials.append(champagne_gold(0.50))                       # 0 shell
     body.data.materials.append(principled("spark-pill-wall", (0.40, 0.27, 0.085), 0.72, metallic=0.1))  # 1 inner wall
