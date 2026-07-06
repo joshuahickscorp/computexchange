@@ -609,8 +609,13 @@ def build_gpu_row():
     bar = box("gpu-mountbar", pitch * (n - 1) + mm(160), mm(30.0), mm(28.0),
               (0, yc + mm(6.0), cz + mm(304.0) / 2.0 + mm(20.0)))
     bar.data.materials.append(principled("gpu-bar", (0.055, 0.055, 0.062), 0.38, metallic=0.8)); parts.append(bar)
+    # tiny per-card seat jitter (deterministic) · 6 hand-seated cards never sit in perfect co-planar
+    # lockstep · vary the gap (dx) + vertical seat (dz) by <1mm to break the 'array of clones' read
+    # (panel-3 #6). Pure translation (no rotation) · safe + clip-neutral.
+    jit = [(0.6, -0.4), (-0.5, 0.5), (0.3, 0.2), (-0.4, -0.6), (0.5, 0.3), (-0.3, -0.2)]
     for i in range(n):
-        parts += build_gpu(x0 + i * pitch, cz, yc, idx=i)
+        dx, dz = jit[i]
+        parts += build_gpu(x0 + i * pitch + mm(dx), cz + mm(dz), yc, idx=i)
     # base · a DARK mobo tray (was too bright, competed with the cards) carrying a populated
     # motherboard (dark PCB + CPU cooler + RAM + VRM heatsinks), a PSU, and a PCIe riser ribbon
     # from each card down to the board · fills the base + wires the rig (owner: 'real server rack').
