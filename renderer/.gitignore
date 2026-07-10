@@ -1,0 +1,2 @@
+# Rust build artifacts (the repo root .gitignore only covers agent/target/).
+/target
