@@ -196,6 +196,26 @@ def main() -> None:
     )
     parser.add_argument("--repair-top-k", type=int, default=12,
                         help="global shot-wide repaired-tile budget (design default 12)")
+    parser.add_argument(
+        "--repair-selector", choices=("two_draft", "aov_edge"), default="two_draft",
+        help="reference-free worst-tile selector: 'two_draft' (variance divergence, "
+             "default) or 'aov_edge' (normal-AOV edge density — the S4 signal that "
+             "localizes the shared-denoiser-bias edge tiles). aov_edge renders NO "
+             "selection draft (the normal rides in the anchor EXR).",
+    )
+    parser.add_argument(
+        "--repair-denoiser", choices=("inherit", "none"), default="inherit",
+        help="denoiser on the repair re-render: 'inherit' (anchor stack incl. OIDN, "
+             "default) or 'none' (raw high-spp, denoiser OFF — strips OIDN's edge-blur "
+             "bias on the failing tiles, matching the reference's raw config).",
+    )
+    parser.add_argument(
+        "--repair-spp", type=int, default=0,
+        help="explicit repair-render sample CAP (0 = the runner default = "
+             "4x draft_spp). With --repair-denoiser none, set this to ref_spp (e.g. "
+             "4096) so each repaired tile is a TRUE raw mini-reference. Default 0 leaves "
+             "the pre-change behavior (and the plain --repair-enabled manifest) unchanged.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     gpu_plan = parse_gpu_plan(args.gpu_plan, allow_unsupported=args.allow_unsupported_gpu)
@@ -217,11 +237,19 @@ def main() -> None:
         "gpu_probe_timeout_s": 1500,
     }
     if args.repair_enabled:
-        # PASS 3.5 pass-through: runner defaults cover the rest (selector two_draft,
-        # selection_draft_spp 64, 4x repair spp, margin 16 / feather 12 — see
-        # exp_render_stack.py params parse + RENDER_REPAIR_LOOP_DESIGN.md).
+        # PASS 3.5 pass-through: runner defaults cover the rest (selection_draft_spp 64,
+        # 4x repair spp, margin 16 / feather 12 — see exp_render_stack.py params parse +
+        # RENDER_REPAIR_LOOP_DESIGN.md). repair_selector / repair_denoiser are injected
+        # ONLY when non-default so a plain --repair-enabled manifest stays byte-identical
+        # to the pre-change driver (the runner treats absent == two_draft / inherit).
         config["repair_enabled"] = True
         config["repair_top_k"] = args.repair_top_k
+        if args.repair_selector != "two_draft":
+            config["repair_selector"] = args.repair_selector
+        if args.repair_denoiser != "inherit":
+            config["repair_denoiser"] = args.repair_denoiser
+        if args.repair_spp > 0:
+            config["repair_spp"] = args.repair_spp
     manifest = {"gpu_plan": gpu_plan, "config": config, "timeout_s": args.max_minutes * 60}
     if args.dry_run:
         print(json.dumps(manifest, indent=2, sort_keys=True))

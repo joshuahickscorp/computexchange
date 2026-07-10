@@ -195,7 +195,9 @@ class ReferenceFreedomTest(unittest.TestCase):
     def test_repair_helpers_accept_no_reference_argument(self):
         for fn in (ers.tile_divergence_scores, ers.select_repair_tiles,
                    ers.merge_and_margin_rects, ers.build_feather_alpha,
-                   ers.feather_composite):
+                   ers.feather_composite, ers.read_anchor_normal,
+                   ers.normal_edge_field, ers._reduce_field_to_tiles,
+                   ers.aov_edge_tile_scores):
             params = set(inspect.signature(fn).parameters)
             self.assertFalse(
                 params & {"true_rgb", "true_colors", "reference", "ref", "truth"},
@@ -425,10 +427,16 @@ def _make_fake_read_exr(borders_map, tile_rects_fn):
     return fake
 
 
-def run_stubbed(params, module_name="ers_stub"):
+def run_stubbed(params, module_name="ers_stub", read_anchor_normal_fake=None,
+                record_calls=None):
     """Run a FRESH exp_render_stack module instance end-to-end with Blender, the scene
     fetch, the EXR reader and the clock all stubbed deterministically. Returns the
-    emitted metrics dict."""
+    emitted metrics dict.
+
+    read_anchor_normal_fake: optional stub for the aov_edge normal reader (default leaves
+    the real one, which returns None off the fake token paths). record_calls: optional
+    list that captures each run_blender_frame call's kwargs (to assert the repair render's
+    sampling recipe, e.g. the denoiser-OFF raw path)."""
     mod = _load_fresh_stack_module(module_name)
     tmp = tempfile.mkdtemp(prefix="cx_repair_loop_test_")
     mod.WORK_DIR = os.path.join(tmp, "work")
@@ -440,8 +448,17 @@ def run_stubbed(params, module_name="ers_stub"):
     mod.resolve_scene = lambda s: ("/fake/scene.blend", "classroom", "")
     mod.require_gpu_probe = lambda *a, **k: "GPU/FAKE"
     borders_map = {}
-    mod.run_blender_frame = _make_fake_run_blender_frame(borders_map)
+    _base_run = _make_fake_run_blender_frame(borders_map)
+    if record_calls is not None:
+        def _recording(*a, **k):
+            record_calls.append(dict(k))
+            return _base_run(*a, **k)
+        mod.run_blender_frame = _recording
+    else:
+        mod.run_blender_frame = _base_run
     mod.read_exr_layers = _make_fake_read_exr(borders_map, mod._tile_rects)
+    if read_anchor_normal_fake is not None:
+        mod.read_anchor_normal = read_anchor_normal_fake
     mod.time = types.SimpleNamespace(perf_counter=_FakeClock(0.5).perf_counter)
     captured = {}
     mod.emit = lambda obj: captured.setdefault("metrics", obj)
@@ -452,6 +469,25 @@ def run_stubbed(params, module_name="ers_stub"):
     finally:
         sys.argv = old_argv
     return captured["metrics"]
+
+
+def _make_fake_read_anchor_normal(hot_tiles, edge_std=0.6):
+    """A deterministic aov_edge normal reader: a flat surface (n=+Z) with high-frequency
+    normal variation planted in `hot_tiles` — so those tiles have HIGH normal-edge density
+    and aov_edge selects them. Keyed on the anchor token path so each frame is stable."""
+    def fake(path, res_x, res_y):
+        h, w = res_y, res_x
+        rs = np.random.RandomState(zlib.crc32(("normal:" + str(path)).encode()) % (2 ** 31))
+        normal = np.zeros((h, w, 3), np.float32)
+        normal[..., 2] = 1.0
+        rect = {(gy, gx): (y0, y1, x0, x1)
+                for gy, gx, y0, y1, x0, x1 in ers._tile_rects(h, w, GRID)}
+        for gy, gx in hot_tiles:
+            y0, y1, x0, x1 = rect[(gy, gx)]
+            normal[y0:y1, x0:x1] += rs.normal(
+                0, edge_std, (y1 - y0, x1 - x0, 3)).astype(np.float32)
+        return normal
+    return fake
 
 
 BASE_PARAMS = {
@@ -556,6 +592,179 @@ class StubbedRunTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             run_stubbed(dict(BASE_PARAMS, repair_selector="oracle"),
                         "ers_stub_bad_selector")
+
+
+# --------------------------------------------------------------------------- #
+# 10. aov_edge selector: normal-AOV edge density ranks high-edge tiles first     #
+#     (the VERBATIM S4 scorer copied from exp_multi_selector_probe.py)           #
+# --------------------------------------------------------------------------- #
+def _normal_with_hot_tiles(h, w, hot, rs, edge_std=0.6):
+    normal = np.zeros((h, w, 3), np.float32)
+    normal[..., 2] = 1.0  # flat surface facing camera -> zero edge density
+    rect = {(gy, gx): (y0, y1, x0, x1)
+            for gy, gx, y0, y1, x0, x1 in ers._tile_rects(h, w, GRID)}
+    for gy, gx in hot:
+        y0, y1, x0, x1 = rect[(gy, gx)]
+        normal[y0:y1, x0:x1] += rs.normal(
+            0, edge_std, (y1 - y0, x1 - x0, 3)).astype(np.float32)
+    return normal
+
+
+class AovEdgeSelectorTest(unittest.TestCase):
+    def test_high_normal_edge_tiles_rank_first(self):
+        h, w = 128, 128
+        hot = [(2, 3), (5, 6), (0, 7)]
+        rs = np.random.RandomState(19)
+        normal = _normal_with_hot_tiles(h, w, hot, rs)
+        scores = ers.aov_edge_tile_scores(normal, grid=GRID)
+        self.assertEqual(scores.shape, (GRID, GRID))
+        # the constructed high-normal-variance tiles are the top-3 by edge density
+        flat = np.argsort(scores, axis=None)[::-1]
+        top = {(int(i // GRID), int(i % GRID)) for i in flat[:len(hot)]}
+        self.assertEqual(top, set(hot))
+        hot_min = min(scores[gy, gx] for gy, gx in hot)
+        cold_max = max(scores[gy, gx] for gy in range(GRID) for gx in range(GRID)
+                       if (gy, gx) not in hot)
+        self.assertGreater(hot_min, cold_max)
+        # select_repair_tiles consumes the aov_edge scores exactly like divergence scores
+        picked = ers.select_repair_tiles([scores], budget=2, max_per_frame=2)
+        self.assertEqual(len(picked), 2)
+        for _f, gy, gx, _s in picked:
+            self.assertIn((gy, gx), set(hot))
+
+    def test_scorer_math_matches_probe_verbatim(self):
+        # normal_edge_field + _reduce_field_to_tiles must be byte-for-byte the probe's S4
+        # (so this selector IS the validated signal). Compare against a local reimpl.
+        rs = np.random.RandomState(5)
+        n = rs.normal(0, 1, (64, 96, 3)).astype(np.float32)
+        acc = np.zeros((64, 96), np.float64)
+        for c in range(3):
+            gy, gx = np.gradient(n[..., c])
+            acc += gx * gx + gy * gy
+        expect_field = np.sqrt(acc)
+        got_field = ers.normal_edge_field(n)
+        self.assertTrue(np.allclose(got_field, expect_field, atol=1e-5))
+        # per-tile reduction is the plain mean on the grading grid
+        reduced = ers._reduce_field_to_tiles(got_field, grid=GRID)
+        for gy, gx, y0, y1, x0, x1 in ers._tile_rects(64, 96, GRID):
+            if min(y1 - y0, x1 - x0) < 7:
+                self.assertTrue(np.isnan(reduced[gy, gx]))
+            else:
+                self.assertAlmostEqual(
+                    reduced[gy, gx], float(expect_field[y0:y1, x0:x1].mean()), places=5)
+
+    def test_nan_tiles_sanitize_to_zero_and_are_never_selected(self):
+        # 7x7 frame -> every grading tile is < 7px -> the verbatim reducer returns all-NaN
+        normal = np.random.RandomState(1).normal(0, 1, (7, 7, 3)).astype(np.float32)
+        raw = ers._reduce_field_to_tiles(ers.normal_edge_field(normal), grid=GRID)
+        self.assertTrue(np.isnan(raw).all())            # probe-verbatim: NaN, not 0
+        scores = ers.aov_edge_tile_scores(normal, grid=GRID)
+        self.assertTrue(np.isfinite(scores).all())      # selector sanitizes NaN -> 0.0
+        self.assertTrue(np.all(scores == 0.0))
+        self.assertEqual(ers.select_repair_tiles([scores], 10, 10), [])  # 0 never picked
+
+
+# --------------------------------------------------------------------------- #
+# 11. stubbed aov_edge selection + repair_denoiser=none (RAW) end-to-end runs    #
+# --------------------------------------------------------------------------- #
+class AovEdgeAndRawRepairStubbedTest(unittest.TestCase):
+    def test_aov_edge_selects_via_normals_no_selection_draft(self):
+        # plant the high-normal-edge tiles on the SAME set the fake anchor renders noisy,
+        # so aov_edge selects exactly the tiles that grade badly and repair improves them.
+        normal_fake = _make_fake_read_anchor_normal(PLANTED)
+        m = run_stubbed(dict(BASE_PARAMS, repair_enabled=True, repair_selector="aov_edge",
+                             repair_top_k=2, repair_max_per_frame=2),
+                        "ers_stub_aov_edge", read_anchor_normal_fake=normal_fake)
+        self.assertEqual(m["repair_selector"], "aov_edge")
+        self.assertEqual(m["repair_denoiser"], "inherit")  # default denoiser mode
+        # aov_edge renders NO selection draft: every per-frame draft time is 0.0 and the
+        # selection cost is ONLY the (charged) normal-read + scoring time.
+        self.assertEqual(m["per_frame_selection_draft_s"], [0.0, 0.0, 0.0])
+        self.assertAlmostEqual(m["selection_cost_s"],
+                               round(sum(m["per_frame_selection_scoring_s"]), 4), places=4)
+        self.assertGreater(m["selection_cost_s"], 0.0)  # scoring is charged
+        # exactly the budgeted tiles were repaired, all from the planted hot set
+        self.assertEqual(m["repaired_tile_count"], 2)
+        repaired = {(f, tuple(t)) for f, tiles in
+                    enumerate(m["repaired_tile_indices"]) for t in tiles}
+        for _f, tile in repaired:
+            self.assertIn(tile, {tuple(p) for p in PLANTED})
+        # T_stack == anchors + calibration + repair_total (no selection RENDER charged;
+        # only the normal-read+scoring inside selection_cost_s, which is inside repair_total)
+        self.assertAlmostEqual(
+            m["T_stack_s"],
+            round(sum(m["per_keyframe_render_s"]) + m["fixed_overhead_s"]
+                  + m["repair_total_s"], 4), places=4)
+        # net_speedup stays the ONE ratio; repair adds no modeled term (kf=1)
+        self.assertAlmostEqual(m["net_speedup"],
+                               round(m["T_ref_s"] / m["T_stack_s"], 4), places=4)
+        self.assertFalse(m["modeled"])
+        # post-hoc: repaired tiles improved
+        for entry in m["repaired_tile_ssim_after"]:
+            self.assertGreater(entry["ssim_after"], entry["ssim_pre"])
+
+    def test_aov_edge_missing_normal_fails_loudly(self):
+        # the real read_anchor_normal returns None off the fake token paths (no EXR) ->
+        # aov_edge must refuse to fabricate a score and raise (never a massaged positive).
+        with self.assertRaises(RuntimeError):
+            run_stubbed(dict(BASE_PARAMS, repair_enabled=True, repair_selector="aov_edge",
+                             repair_top_k=2), "ers_stub_aov_edge_missing")
+
+    def test_raw_repair_denoiser_off_path_selected_and_charged(self):
+        calls = []
+        m = run_stubbed(dict(BASE_PARAMS, repair_enabled=True, repair_denoiser="none",
+                             repair_top_k=2, repair_max_per_frame=2,
+                             selection_draft_spp=64),
+                        "ers_stub_raw_repair", record_calls=calls)
+        self.assertEqual(m["repair_denoiser"], "none")
+        self.assertEqual(m["repair_selector"], "two_draft")  # unchanged default selector
+        # the bordered REPAIR render used the raw recipe: denoiser OFF, adaptive OFF, no
+        # guides, at the repair spp cap (2048 = 4 x draft). The SELECTION draft stays raw.
+        repair_calls = [c for c in calls if c.get("borders") is not None]
+        self.assertTrue(repair_calls)
+        for c in repair_calls:
+            self.assertEqual(c["denoiser"], "none")
+            self.assertFalse(c["adaptive"])
+            self.assertFalse(c["guides"])
+            self.assertEqual(c["spp"], 2048)
+        # raw render time is REAL wall-clock charged into T_stack exactly like OIDN repair
+        self.assertGreater(sum(m["per_frame_repair_render_s"]), 0.0)
+        self.assertAlmostEqual(
+            m["repair_cost_s"],
+            round(sum(m["per_frame_repair_render_s"])
+                  + sum(m["per_frame_repair_composite_s"]), 4), places=4)
+        self.assertAlmostEqual(
+            m["T_stack_s"],
+            round(sum(m["per_keyframe_render_s"]) + m["fixed_overhead_s"]
+                  + m["repair_total_s"], 4), places=4)
+        self.assertEqual(m["repaired_tile_count"], 2)
+        self.assertFalse(m["modeled"])
+
+    def test_aov_edge_plus_raw_repair_combined(self):
+        # the exact 4K-command combination: aov_edge selection + denoiser-off raw repair.
+        normal_fake = _make_fake_read_anchor_normal(PLANTED)
+        calls = []
+        m = run_stubbed(dict(BASE_PARAMS, repair_enabled=True, repair_selector="aov_edge",
+                             repair_denoiser="none", repair_top_k=2, repair_max_per_frame=2),
+                        "ers_stub_aov_raw", read_anchor_normal_fake=normal_fake,
+                        record_calls=calls)
+        self.assertEqual((m["repair_selector"], m["repair_denoiser"]),
+                         ("aov_edge", "none"))
+        # NO selection draft render at all; only bordered repair renders exist as renders
+        # beyond the anchors/calibration.
+        sel_calls = [c for c in calls
+                     if c.get("borders") is None and not c.get("is_ref")
+                     and c.get("denoiser") == "none" and not c.get("adaptive")
+                     and c.get("res_x", 999) > 8]
+        self.assertEqual(sel_calls, [])  # aov_edge renders no raw selection draft
+        repair_calls = [c for c in calls if c.get("borders") is not None]
+        self.assertTrue(all(c["denoiser"] == "none" and not c["adaptive"]
+                            for c in repair_calls))
+        self.assertEqual(m["repaired_tile_count"], 2)
+        for entry in m["repaired_tile_ssim_after"]:
+            self.assertGreater(entry["ssim_after"], entry["ssim_pre"])
+        self.assertAlmostEqual(m["net_speedup"],
+                               round(m["T_ref_s"] / m["T_stack_s"], 4), places=4)
 
 
 # --------------------------------------------------------------------------- #

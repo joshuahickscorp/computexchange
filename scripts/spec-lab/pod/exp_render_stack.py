@@ -127,14 +127,34 @@ CONFIG (argv[1] JSON, all optional; defaults in parens)
                                              worst-tile repair pass. OFF => the runner
                                              behaves and reports EXACTLY as before
                                              (legacy metrics byte-identical).
-  repair_selector         : "two_draft" (default; only value in v1) — render a SECOND
-                                             cheap RAW draft per frame at a different
-                                             seed; tiles where the two independent
-                                             estimates diverge most are the highest-
-                                             variance tiles (Noise2Noise insight; the
-                                             noisy_a/noisy_b recipe of
-                                             exp_mint_denoise_pairs.py). The selector
-                                             NEVER reads the reference frames.
+  repair_selector         : "two_draft" (default) | "aov_edge" — how the worst tiles are
+                                             CHOSEN (both reference-free; neither reads
+                                             the reference frames).
+                                             * two_draft: render a SECOND cheap RAW draft
+                                               per frame at a different seed; tiles where
+                                               the two independent estimates diverge most
+                                               are the highest-VARIANCE tiles (Noise2Noise
+                                               insight; the noisy_a/noisy_b recipe of
+                                               exp_mint_denoise_pairs.py).
+                                             * aov_edge: score each grading tile by the
+                                               NORMAL-AOV edge density of the anchor render
+                                               (the exact S4 signal exp_multi_selector_probe
+                                               validated — localizes the SHARED-DENOISER-BIAS
+                                               edge tiles that two_draft's variance signal is
+                                               blind to). The Normal AOV rides in the anchor
+                                               EXR at ~zero cost, so aov_edge renders NO
+                                               selection draft (cheaper than two_draft).
+  repair_denoiser         : "inherit" (default) | "none" — the denoiser on the REPAIR
+                                             re-render. inherit = the SAME anchor stack
+                                             (adaptive + OIDN + guides) as before. none =
+                                             render the selected tiles RAW at repair_spp
+                                             (adaptive OFF, denoiser OFF, no guides) —
+                                             matching the reference's raw config so the
+                                             OIDN edge-blur bias is REMOVED on exactly the
+                                             few tiles it was hurting. Same feathered
+                                             composite + same honest wall-clock accounting
+                                             (the raw render time is charged into T_stack
+                                             exactly like the OIDN repair path).
   repair_top_k            : 12   (default)   GLOBAL shot-wide budget of tiles to repair
                                              (ranked by divergence across all frames).
   repair_max_per_frame    : 8    (default)   per-frame cap inside the global budget.
@@ -654,6 +674,22 @@ vl = scene.view_layers[0]
 vl.use_pass_vector = True
 vl.use_pass_z = True
 vl.use_pass_combined = True
+
+# ---- REPAIR aov_edge selector: geometric Normal AOV (reference-free) -----------
+# Enabled ONLY when the caller sets CX_WANT_NORMAL_AOV=1 (repair_selector='aov_edge').
+# The Normal pass is a geometry byproduct of the SAME anchor path trace — it rides in
+# the SAME anchor multilayer EXR at ~zero extra cost (NO extra render) and NEVER
+# changes the Combined result, so with the flag unset this render is byte-identical to
+# the legacy one. It is the exact pass the multi-selector probe validated S4 against.
+# Guarded (try) so a build that cannot produce it simply omits the channel and the
+# caller reports the normal AOV missing HONESTLY (never fabricated).
+if os.environ.get("CX_WANT_NORMAL_AOV", "0") == "1":
+    try:
+        vl.use_pass_normal = True
+        print("CX_NORMAL_AOV_PASS=1", flush=True)
+    except Exception as _e:
+        print("CX_NORMAL_AOV_PASS=0", flush=True)
+        _log("normal AOV pass unavailable:", _e)
 
 # CRITICAL (verified on real L40S hardware, 2026-07-06): Cycles EMPTIES the Vector
 # (motion) pass whenever render motion blur is ENABLED. This is documented, intentional
@@ -1500,6 +1536,116 @@ def feather_composite(delivered_rgb, repair_rgb, alpha):
 
 
 # --------------------------------------------------------------------------- #
+# 7.6 REPAIR-LOOP aov_edge SELECTOR (repair_selector='aov_edge') — REFERENCE-FREE #
+#     normal-AOV edge-density selection. The Normal AOV is a geometry byproduct of  #
+#     the SAME anchor render (CX_WANT_NORMAL_AOV=1 => the Normal pass rides in the   #
+#     anchor multilayer EXR at ~zero cost — NO extra render), read back here. The    #
+#     scorer (normal_edge_field + _reduce_field_to_tiles) is COPIED VERBATIM from    #
+#     exp_multi_selector_probe.py so this selector is byte-for-byte the S4 signal     #
+#     that probe validated (S4 top-3 localized both strict-gate-failing tiles). It    #
+#     reads ONLY the geometric normals — never the reference: reference-freedom is    #
+#     structural, exactly like the two_draft divergence selector above.               #
+# --------------------------------------------------------------------------- #
+def read_anchor_normal(path, res_x, res_y):
+    """Read the geometric Normal AOV [H,W,3] from the anchor multilayer EXR at
+    (res_y,res_x), or None if the pass is absent (e.g. a Blender build/device that did
+    not write it, or OpenEXR missing). Reference-free: this reads the ANCHOR render's
+    own normals — never the reference. Same OpenEXR channel-read pattern as
+    read_exr_layers / exp_multi_selector_probe.read_named_channels; prefers the geometric
+    'Normal' pass (use_pass_normal, exactly what the probe validated) and falls back to
+    the denoise-guide 'Denoising Normal' pass so it also works when only guides wrote a
+    normal. NEVER fabricates: a missing pass returns None so the caller fails LOUD."""
+    import numpy as np
+    try:
+        import OpenEXR  # type: ignore
+        import Imath    # type: ignore
+    except Exception:
+        return None  # named passes need OpenEXR (imageio cannot read them) -> caller fails loud
+
+    try:
+        f = OpenEXR.InputFile(path)
+        header = f.header()
+        dw = header["dataWindow"]
+        w = dw.max.x - dw.min.x + 1
+        h = dw.max.y - dw.min.y + 1
+        chans = list(header["channels"].keys())
+        pt = Imath.PixelType(Imath.PixelType.FLOAT)
+
+        def _chan(name):
+            raw = f.channel(name, pt)
+            return np.frombuffer(raw, dtype=np.float32).reshape(h, w).copy()
+
+        def _find_suffix(suffixes):
+            for want in suffixes:
+                for c in chans:
+                    if c.endswith(want):
+                        return c
+            return None
+
+        # geometric Normal first (".Normal.X" from use_pass_normal — the probe's S4 input);
+        # "Normal.X" also matches the denoise-guide "Denoising Normal.X" as a fallback.
+        nx = _find_suffix([".Normal.X", "Normal.X"])
+        ny = _find_suffix([".Normal.Y", "Normal.Y"])
+        nz = _find_suffix([".Normal.Z", "Normal.Z"])
+        normal = None
+        if nx and ny and nz:
+            normal = np.stack([_chan(nx), _chan(ny), _chan(nz)], axis=-1)
+        f.close()
+    except Exception as e:  # noqa: BLE001 — treat any read failure as "unavailable"
+        log(f"anchor normal read failed ({type(e).__name__}: {e}); aov_edge unavailable")
+        return None
+
+    if normal is None:
+        return None
+    if normal.shape[:2] == (res_y, res_x):
+        return normal
+    from skimage.transform import resize as sk_resize
+    return sk_resize(normal, (res_y, res_x, normal.shape[-1]), order=1,
+                     preserve_range=True, anti_aliasing=False).astype(np.float32)
+
+
+def normal_edge_field(normal_rgb):
+    """S4 pixel field (VERBATIM from exp_multi_selector_probe.normal_edge_field):
+    gradient magnitude of the Normal AOV, summed over the three normal components —
+    geometric-complexity / silhouette-edge density."""
+    import numpy as np
+    n = np.asarray(normal_rgb, dtype=np.float32)
+    acc = None
+    for c in range(n.shape[-1]):
+        gy, gx = np.gradient(n[..., c])
+        e = gx * gx + gy * gy
+        acc = e if acc is None else acc + e
+    return np.sqrt(acc).astype(np.float32)
+
+
+def _reduce_field_to_tiles(field, grid=GRADING_TILE_GRID):
+    """[grid,grid] per-tile MEAN of a [H,W] scalar field on the SAME grading grid
+    (_tile_rects), NaN where a tile is too small to score (< 7px — mirrors the SSIM
+    grading skip so the selector ranks the SAME 64-tile universe). VERBATIM from
+    exp_multi_selector_probe._reduce_field_to_tiles."""
+    import numpy as np
+    h, w = field.shape[:2]
+    out = np.full((grid, grid), np.nan, dtype=np.float64)
+    for gy, gx, y0, y1, x0, x1 in _tile_rects(h, w, grid):
+        tile = field[y0:y1, x0:x1]
+        if min(tile.shape[0], tile.shape[1]) < 7:
+            continue
+        out[gy, gx] = float(np.mean(tile))
+    return out
+
+
+def aov_edge_tile_scores(normal_rgb, grid=GRADING_TILE_GRID):
+    """REFERENCE-FREE aov_edge per-tile selector scores [grid,grid]: the S4 normal-edge
+    density reduced onto the grading grid (higher = more silhouette-edge content =
+    candidate failing tile). NaN (too-small) tiles map to 0.0 so downstream ranking +
+    metrics stay finite and consistent with the two_draft convention (unscoreable tiles
+    are never selected — 0.0 is below any positive floor)."""
+    import numpy as np
+    scores = _reduce_field_to_tiles(normal_edge_field(normal_rgb), grid=grid)
+    return np.nan_to_num(np.asarray(scores, dtype=np.float64), nan=0.0)
+
+
+# --------------------------------------------------------------------------- #
 # main                                                                         #
 # --------------------------------------------------------------------------- #
 def main():
@@ -1539,6 +1685,7 @@ def main():
     # emitted. Design: docs/research/RENDER_REPAIR_LOOP_DESIGN.md. ------------------- #
     repair_enabled = bool(params.get("repair_enabled", False))
     repair_selector = str(params.get("repair_selector", "two_draft"))
+    repair_denoiser = str(params.get("repair_denoiser", "inherit")).lower()
     repair_top_k = int(params.get("repair_top_k", 12))
     repair_max_per_frame = int(params.get("repair_max_per_frame", 8))
     repair_min_divergence = float(params.get("repair_min_divergence", 0.0))
@@ -1576,10 +1723,15 @@ def main():
 
     # ---- REPAIR-LOOP clamps + derived knobs (validated even when disabled so a bad
     # config fails loudly before any money is spent) --------------------------------- #
-    if repair_selector != "two_draft":
+    if repair_selector not in ("two_draft", "aov_edge"):
         raise RuntimeError(
-            f"bad repair_selector {repair_selector!r}; v1 supports only 'two_draft' "
-            f"(two-independent-draft per-tile divergence — reference-free)")
+            f"bad repair_selector {repair_selector!r}; supported: 'two_draft' "
+            f"(two-independent-draft per-tile divergence) | 'aov_edge' (normal-AOV "
+            f"edge density) — both reference-free")
+    if repair_denoiser not in ("inherit", "none"):
+        raise RuntimeError(
+            f"bad repair_denoiser {repair_denoiser!r}; supported: 'inherit' (repair with "
+            f"the anchor stack incl. OIDN) | 'none' (raw repair, denoiser OFF)")
     repair_top_k = max(0, repair_top_k)
     repair_max_per_frame = max(0, repair_max_per_frame)
     repair_min_divergence = max(0.0, repair_min_divergence)
@@ -1604,8 +1756,9 @@ def main():
         f"bounces={bounces} disocc_thresh={disocclusion_thresh} hole_fill={hole_fill} "
         f"cam_motion={cam_motion} seed={seed} device={device_pref}")
     if repair_enabled:
-        log(f"repair: selector={repair_selector} top_k={repair_top_k} "
-            f"max_per_frame={repair_max_per_frame} min_div={repair_min_divergence} "
+        log(f"repair: selector={repair_selector} denoiser={repair_denoiser} "
+            f"top_k={repair_top_k} max_per_frame={repair_max_per_frame} "
+            f"min_div={repair_min_divergence} "
             f"selection_spp={selection_draft_spp} (seed+{selection_seed_offset}) "
             f"repair_spp={repair_spp_eff} adaptive_thr={repair_adaptive_thr_eff} "
             f"margin={repair_margin_px}px feather={repair_feather_px}px")
@@ -1729,42 +1882,60 @@ def main():
 
     keyframe_indices = [t for t in range(frames) if is_keyframe(t)]
     anchor_layers = {}     # t -> {color, motion_prev, depth, motion_next} at ANCHOR quality
+    anchor_exr_paths = {}  # t -> resolved anchor EXR path (reference-free aov_edge normals)
     anchor_devices = set()
     T_stack = 0.0
     n_keyframes = 0
     per_keyframe_s = []
     mean_key_render_s = 0.0
 
-    for t in range(frames):
-        frame_no = t + 1
-        exr = os.path.join(WORK_DIR, f"anchor_{frame_no:04d}.exr")
-        wall_s, dev, resolved = run_blender_frame(
-            blender_bin, script_path, blend=blend, out_exr=exr,
-            res_x=res_x, res_y=res_y, spp=draft_spp, is_ref=False,
-            frame=frame_no, nframes=frames, cam_motion=cam_motion, seed=seed,
-            bounces=bounces, device_pref=device_pref, timeout_s=anchor_timeout,
-            adaptive=True, adaptive_thr=adaptive_threshold,
-            adaptive_min=adaptive_min_samples, denoiser=denoiser,
-            guides=denoise_guides, light_tree=light_tree, require_gpu=require_gpu,
-        )
-        anchor_devices.add(dev)
-        color, motion_prev, depth, motion_next = read_exr_layers(resolved, res_x, res_y)
-        anchor_layers[t] = {
-            "color": color, "motion_prev": motion_prev,
-            "depth": depth, "motion_next": motion_next,
-        }
-        if is_keyframe(t):
-            # HONEST: a keyframe is charged at its FULL MEASURED whole-subprocess time —
-            # this render IS in the shipped pipeline.
-            T_stack += wall_s
-            per_keyframe_s.append(wall_s)
-            n_keyframes += 1
-        else:
-            # NON-KEY anchor render is a measurement/quality input ONLY (patch pixels +
-            # this frame's own motion for the mask); its FULL cost is NOT charged — only
-            # the crop fraction is charged in PASS 3. So DO NOT add wall_s to T_stack.
-            log(f"frame {frame_no}: anchor-quality render for patch/motion "
-                f"(wall={wall_s:.3f}s, NOT charged; only the crop fraction is charged)")
+    # aov_edge selector reads the geometric Normal AOV from each frame's anchor EXR (a
+    # geometry byproduct — NO extra render). Flip the pass ON for the anchor renders ONLY
+    # when it is actually the selector; with the flag unset the anchor render (and thus
+    # the receipt) is byte-identical to the legacy path. run_blender_frame copies
+    # os.environ, so setting it here reaches the subprocess; restored in finally.
+    _want_normal_aov = repair_enabled and repair_selector == "aov_edge"
+    _saved_normal_aov_env = os.environ.get("CX_WANT_NORMAL_AOV")
+    if _want_normal_aov:
+        os.environ["CX_WANT_NORMAL_AOV"] = "1"
+    try:
+        for t in range(frames):
+            frame_no = t + 1
+            exr = os.path.join(WORK_DIR, f"anchor_{frame_no:04d}.exr")
+            wall_s, dev, resolved = run_blender_frame(
+                blender_bin, script_path, blend=blend, out_exr=exr,
+                res_x=res_x, res_y=res_y, spp=draft_spp, is_ref=False,
+                frame=frame_no, nframes=frames, cam_motion=cam_motion, seed=seed,
+                bounces=bounces, device_pref=device_pref, timeout_s=anchor_timeout,
+                adaptive=True, adaptive_thr=adaptive_threshold,
+                adaptive_min=adaptive_min_samples, denoiser=denoiser,
+                guides=denoise_guides, light_tree=light_tree, require_gpu=require_gpu,
+            )
+            anchor_devices.add(dev)
+            color, motion_prev, depth, motion_next = read_exr_layers(resolved, res_x, res_y)
+            anchor_layers[t] = {
+                "color": color, "motion_prev": motion_prev,
+                "depth": depth, "motion_next": motion_next,
+            }
+            anchor_exr_paths[t] = resolved
+            if is_keyframe(t):
+                # HONEST: a keyframe is charged at its FULL MEASURED whole-subprocess time —
+                # this render IS in the shipped pipeline.
+                T_stack += wall_s
+                per_keyframe_s.append(wall_s)
+                n_keyframes += 1
+            else:
+                # NON-KEY anchor render is a measurement/quality input ONLY (patch pixels +
+                # this frame's own motion for the mask); its FULL cost is NOT charged — only
+                # the crop fraction is charged in PASS 3. So DO NOT add wall_s to T_stack.
+                log(f"frame {frame_no}: anchor-quality render for patch/motion "
+                    f"(wall={wall_s:.3f}s, NOT charged; only the crop fraction is charged)")
+    finally:
+        if _want_normal_aov:
+            if _saved_normal_aov_env is None:
+                os.environ.pop("CX_WANT_NORMAL_AOV", None)
+            else:
+                os.environ["CX_WANT_NORMAL_AOV"] = _saved_normal_aov_env
     mean_key_render_s = (sum(per_keyframe_s) / len(per_keyframe_s)) if per_keyframe_s else 0.0
 
     # ---- CALIBRATION: measure the FIXED per-render overhead O (rerender mode only) #
@@ -1878,24 +2049,29 @@ def main():
 
     # ======================================================================== #
     # PASS 3.5 — REPAIR (reference-free) BEGIN                                   #
-    # Lift the worst tiles WITHOUT paying more samples everywhere: (i) render a  #
-    # SECOND cheap RAW draft per frame at a different seed (the noisy_b recipe    #
-    # of exp_mint_denoise_pairs.py) and score per-tile divergence vs the          #
-    # delivered frame — two independent noisy estimates disagree most exactly     #
-    # where variance is highest (Noise2Noise); (ii) GLOBALLY rank + select at     #
-    # most repair_top_k tiles; (iii) re-render ONLY those tiles (margin-expanded, #
-    # merged) with the SAME anchor stack at repair_spp + a HALVED adaptive        #
-    # threshold via a REAL Cycles border render (one subprocess per frame — BVH    #
-    # paid once); (iv) feather-composite the repaired regions into the delivered  #
-    # frames. HONEST ACCOUNTING: every stage here — selection drafts, divergence  #
-    # scoring, repair renders, compositing — is REAL measured wall-clock charged  #
-    # into T_stack (the selection draft is charged even when zero tiles get       #
-    # repaired). NO modeled term is added. REFERENCE-FREE by structure: nothing   #
-    # in this block reads the reference frames; every function it calls sees      #
-    # only delivered pixels and the second draft. SSIM-vs-reference remains       #
-    # measurement-only, computed AFTER delivery in the grading block below.       #
-    # (A unit test extracts this block's source and asserts the reference is      #
-    # never touched between the BEGIN/END markers.)                               #
+    # Lift the worst tiles WITHOUT paying more samples everywhere: (i) SELECT the  #
+    # candidate tiles reference-free — repair_selector='two_draft' renders a       #
+    # SECOND cheap RAW draft per frame at a different seed (noisy_b recipe of       #
+    # exp_mint_denoise_pairs.py) and scores per-tile VARIANCE divergence vs the     #
+    # delivered frame (Noise2Noise), while repair_selector='aov_edge' scores each   #
+    # tile by the NORMAL-AOV EDGE DENSITY read from the anchor EXR (the S4 signal    #
+    # exp_multi_selector_probe validated — no selection draft, ~zero cost);          #
+    # (ii) GLOBALLY rank + select at most repair_top_k tiles; (iii) re-render ONLY   #
+    # those tiles (margin-expanded, merged) via a REAL Cycles border render (one     #
+    # subprocess per frame — BVH paid once) at repair_spp — repair_denoiser=         #
+    # 'inherit' uses the SAME anchor stack (adaptive + OIDN + guides) + a HALVED      #
+    # adaptive threshold, repair_denoiser='none' renders RAW (adaptive OFF, denoiser  #
+    # OFF, no guides) to strip OIDN's edge-blur bias on exactly the failing tiles;    #
+    # (iv) feather-composite the repaired regions into the delivered frames. HONEST   #
+    # ACCOUNTING: every stage here — selection drafts (two_draft), normal read +      #
+    # scoring, repair renders, compositing — is REAL measured wall-clock charged into #
+    # T_stack (the selection stage is charged even when zero tiles get repaired). NO  #
+    # modeled term is added. REFERENCE-FREE by structure: nothing in this block reads #
+    # the reference frames; every function it calls sees only delivered pixels, the   #
+    # second draft, or the anchor's own normals. SSIM-vs-reference remains            #
+    # measurement-only, computed AFTER delivery in the grading block below.           #
+    # (A unit test extracts this block's source and asserts the reference is          #
+    # never touched between the BEGIN/END markers.)                                   #
     # ======================================================================== #
     pre_repair_delivered = None
     repaired_tiles_per_frame = [[] for _ in range(frames)]
@@ -1911,40 +2087,66 @@ def main():
     if repair_enabled:
         repair_timeout = ref_timeout  # headroom; the CHARGE is measured wall, not the cap
 
-        # ---- (i) selection draft B: raw MC, adaptive OFF, denoiser OFF, seed offset --
-        selection_colors = {}
-        for t in range(frames):
-            frame_no = t + 1
-            sel_exr = os.path.join(WORK_DIR, f"sel_{frame_no:04d}.exr")
-            wall_s, dev, resolved = run_blender_frame(
-                blender_bin, script_path, blend=blend, out_exr=sel_exr,
-                res_x=res_x, res_y=res_y, spp=selection_draft_spp, is_ref=False,
-                frame=frame_no, nframes=frames, cam_motion=cam_motion,
-                seed=seed + selection_seed_offset, bounces=bounces,
-                device_pref=device_pref, timeout_s=anchor_timeout,
-                adaptive=False, denoiser="none", guides=False,
-                light_tree=light_tree, require_gpu=require_gpu,
-            )
-            anchor_devices.add(dev)
-            T_stack += wall_s          # CHARGED: the second draft is real pipeline cost
-            selection_cost_s += wall_s
-            per_frame_selection_draft_s.append(wall_s)
-            sel_color, _mp, _d, _mn = read_exr_layers(resolved, res_x, res_y)
-            selection_colors[t] = sel_color
-            log(f"frame {frame_no}: selection draft ({selection_draft_spp}spp raw, "
-                f"seed+{selection_seed_offset}) wall={wall_s:.3f}s CHARGED")
+        if repair_selector == "two_draft":
+            # ---- (i) selection draft B: raw MC, adaptive OFF, denoiser OFF, seed offset --
+            selection_colors = {}
+            for t in range(frames):
+                frame_no = t + 1
+                sel_exr = os.path.join(WORK_DIR, f"sel_{frame_no:04d}.exr")
+                wall_s, dev, resolved = run_blender_frame(
+                    blender_bin, script_path, blend=blend, out_exr=sel_exr,
+                    res_x=res_x, res_y=res_y, spp=selection_draft_spp, is_ref=False,
+                    frame=frame_no, nframes=frames, cam_motion=cam_motion,
+                    seed=seed + selection_seed_offset, bounces=bounces,
+                    device_pref=device_pref, timeout_s=anchor_timeout,
+                    adaptive=False, denoiser="none", guides=False,
+                    light_tree=light_tree, require_gpu=require_gpu,
+                )
+                anchor_devices.add(dev)
+                T_stack += wall_s      # CHARGED: the second draft is real pipeline cost
+                selection_cost_s += wall_s
+                per_frame_selection_draft_s.append(wall_s)
+                sel_color, _mp, _d, _mn = read_exr_layers(resolved, res_x, res_y)
+                selection_colors[t] = sel_color
+                log(f"frame {frame_no}: selection draft ({selection_draft_spp}spp raw, "
+                    f"seed+{selection_seed_offset}) wall={wall_s:.3f}s CHARGED")
 
-        # ---- (ii) divergence scoring (CHARGED: an in-pipeline DECISION, unlike the
-        #      post-delivery grading SSIM) + GLOBAL selection --------------------------
-        for t in range(frames):
-            _sc_t0 = time.perf_counter()
-            scores = tile_divergence_scores(
-                delivered[t], selection_colors[t], grid=GRADING_TILE_GRID)
-            sc_s = time.perf_counter() - _sc_t0
-            T_stack += sc_s
-            selection_cost_s += sc_s
-            per_frame_selection_scoring_s.append(sc_s)
-            divergence_scores.append(scores)
+            # ---- (ii) divergence scoring (CHARGED: an in-pipeline DECISION, unlike the
+            #      post-delivery grading SSIM) --------------------------------------------
+            for t in range(frames):
+                _sc_t0 = time.perf_counter()
+                scores = tile_divergence_scores(
+                    delivered[t], selection_colors[t], grid=GRADING_TILE_GRID)
+                sc_s = time.perf_counter() - _sc_t0
+                T_stack += sc_s
+                selection_cost_s += sc_s
+                per_frame_selection_scoring_s.append(sc_s)
+                divergence_scores.append(scores)
+        else:  # repair_selector == "aov_edge"
+            # ---- (i)+(ii) aov_edge: NO selection draft — the geometric Normal AOV rides
+            #      in each frame's anchor EXR (written by CX_WANT_NORMAL_AOV in PASS 2).
+            #      Score = per-tile normal-edge density (VERBATIM S4). The normal read +
+            #      scoring is an in-pipeline DECISION, so it is CHARGED to T_stack exactly
+            #      like the two_draft divergence scoring; there is no draft RENDER cost. --
+            per_frame_selection_draft_s = [0.0] * frames  # no selection render for aov_edge
+            for t in range(frames):
+                _sc_t0 = time.perf_counter()
+                normal = read_anchor_normal(anchor_exr_paths[t], res_x, res_y)
+                if normal is None:
+                    raise RuntimeError(
+                        f"repair_selector='aov_edge' but the Normal AOV is absent from the "
+                        f"anchor EXR for frame {t + 1} ({anchor_exr_paths[t]}). The anchor "
+                        f"render must write the Normal pass (CX_WANT_NORMAL_AOV=1 enables "
+                        f"use_pass_normal; the denoise guides also carry a normal). Refusing "
+                        f"to fabricate a selector score — a real negative beats a massaged "
+                        f"positive.")
+                scores = aov_edge_tile_scores(normal, grid=GRADING_TILE_GRID)
+                sc_s = time.perf_counter() - _sc_t0
+                T_stack += sc_s
+                selection_cost_s += sc_s
+                per_frame_selection_scoring_s.append(sc_s)
+                divergence_scores.append(scores)
+
         selected_tiles = select_repair_tiles(
             divergence_scores, repair_top_k, repair_max_per_frame, repair_min_divergence)
         log(f"repair selection: {len(selected_tiles)} tile(s) of "
@@ -1972,6 +2174,24 @@ def main():
             borders = [[bx0, by0, bx1, by1]
                        for _core, (by0, by1, bx0, bx1) in regions]
             out_pattern = os.path.join(WORK_DIR, f"repair_{frame_no:04d}_r{{region}}.exr")
+            # repair_denoiser selects the sampling recipe of the re-render:
+            #   'inherit' -> the SAME anchor stack (adaptive cap + HALVED threshold + the
+            #                anchor denoiser + guides). Unchanged legacy repair path.
+            #   'none'    -> RAW Monte-Carlo at a FIXED repair_spp (adaptive OFF, denoiser
+            #                OFF, no guides) — matching the reference's raw config so OIDN's
+            #                shared edge-blur bias is REMOVED on exactly the selected tiles.
+            #                light-tree stays (it is UNBIASED importance sampling — it only
+            #                cuts variance, never shifts the estimate, so the tile converges
+            #                toward the SAME ground truth as the reference, just faster).
+            if repair_denoiser == "none":
+                repair_render_kwargs = dict(
+                    adaptive=False, denoiser="none", guides=False,
+                    light_tree=light_tree)
+            else:  # 'inherit'
+                repair_render_kwargs = dict(
+                    adaptive=True, adaptive_thr=repair_adaptive_thr_eff,
+                    adaptive_min=adaptive_min_samples, denoiser=denoiser,
+                    guides=denoise_guides, light_tree=light_tree)
             wall_s, dev, resolved_list = run_blender_frame(
                 blender_bin, script_path, blend=blend,
                 out_exr=os.path.join(WORK_DIR, f"repair_{frame_no:04d}.exr"),
@@ -1979,10 +2199,9 @@ def main():
                 frame=frame_no, nframes=frames, cam_motion=cam_motion,
                 seed=seed + repair_seed_offset, bounces=bounces,
                 device_pref=device_pref, timeout_s=repair_timeout,
-                adaptive=True, adaptive_thr=repair_adaptive_thr_eff,
-                adaptive_min=adaptive_min_samples, denoiser=denoiser,
-                guides=denoise_guides, light_tree=light_tree, require_gpu=require_gpu,
+                require_gpu=require_gpu,
                 borders=borders, out_pattern=out_pattern,
+                **repair_render_kwargs,
             )
             anchor_devices.add(dev)
             T_stack += wall_s          # CHARGED: real bordered re-render wall-clock
@@ -1999,8 +2218,10 @@ def main():
             T_stack += comp_s          # CHARGED: real compositing (incl. EXR read) time
             repair_render_composite_s += comp_s
             per_frame_repair_composite_s[t] = comp_s
+            _thr_desc = ("adaptive OFF (raw)" if repair_denoiser == "none"
+                         else f"thr={repair_adaptive_thr_eff}")
             log(f"frame {frame_no}: repaired {len(tiles)} tile(s) in {len(regions)} "
-                f"region(s) @ {repair_spp_eff}spp thr={repair_adaptive_thr_eff} "
+                f"region(s) @ {repair_spp_eff}spp {_thr_desc} denoiser={repair_denoiser} "
                 f"render={wall_s:.3f}s composite={comp_s:.3f}s (both CHARGED)")
     # ======================================================================== #
     # PASS 3.5 — REPAIR (reference-free) END                                     #
@@ -2143,24 +2364,44 @@ def main():
             f"modeled=false (fully measured, lower quality on the holes)."
         )
     if repair_enabled:
+        if repair_selector == "two_draft":
+            _sel_desc = (
+                f"a second RAW draft per frame ({selection_draft_spp}spp, adaptive OFF, "
+                f"denoiser OFF, seed+{selection_seed_offset}) scored per-tile divergence "
+                f"vs the delivered frame (two-independent-estimate / Noise2Noise "
+                f"selection)")
+            _sel_limit = ("divergence detects VARIANCE, not a denoiser bias shared across "
+                          "seeds")
+        else:  # aov_edge
+            _sel_desc = (
+                "each grading tile scored by the NORMAL-AOV edge density of the anchor "
+                "render (the S4 signal exp_multi_selector_probe validated; the Normal AOV "
+                "rides in the anchor EXR at ~zero cost, so NO selection draft is rendered)")
+            _sel_limit = ("normal-edge density localizes geometric silhouette content — the "
+                          "shared-denoiser-bias tiles two_draft variance is blind to")
+        if repair_denoiser == "none":
+            _rep_desc = (
+                f"re-rendered RAW at {repair_spp_eff}spp (adaptive OFF, denoiser OFF, no "
+                f"guides — matching the reference's raw config so OIDN's shared edge-blur "
+                f"bias is removed on exactly those tiles)")
+        else:  # inherit
+            _rep_desc = (
+                f"re-rendered with the SAME anchor stack at {repair_spp_eff}spp cap + "
+                f"adaptive_thr={repair_adaptive_thr_eff:g}")
         note += (
-            f" REPAIR PASS (reference-free): a second RAW draft per frame "
-            f"({selection_draft_spp}spp, adaptive OFF, denoiser OFF, seed+"
-            f"{selection_seed_offset}) scored per-tile divergence vs the delivered frame "
-            f"(two-independent-estimate / Noise2Noise selection — the selector NEVER "
-            f"reads the reference; SSIM-vs-reference stays measurement-only, computed "
-            f"after delivery); the top-{repair_top_k} tiles shot-wide (max "
-            f"{repair_max_per_frame}/frame) were re-rendered with the SAME anchor stack "
-            f"at {repair_spp_eff}spp cap + adaptive_thr={repair_adaptive_thr_eff:g} via "
-            f"REAL Cycles border renders (margin {repair_margin_px}px) and feather-"
-            f"composited (outer {repair_feather_px}px linear ramp; the graded tile gets "
-            f"pure repair pixels). EVERY repair second is real measured wall-clock "
-            f"charged into T_stack: selection drafts + divergence scoring "
-            f"({selection_cost_s:.3f}s) and repair renders + compositing "
-            f"({repair_render_composite_s:.3f}s) — charged even when zero tiles are "
-            f"selected. The repair pass adds NO modeled term. KNOWN LIMIT: divergence "
-            f"detects variance, not a denoiser bias shared across seeds; selector_recall "
-            f"(measurement-only) quantifies missed failing tiles each run."
+            f" REPAIR PASS (reference-free, selector={repair_selector}, "
+            f"denoiser={repair_denoiser}): {_sel_desc} — the selector NEVER reads the "
+            f"reference; SSIM-vs-reference stays measurement-only, computed after "
+            f"delivery. The top-{repair_top_k} tiles shot-wide (max "
+            f"{repair_max_per_frame}/frame) were {_rep_desc} via REAL Cycles border "
+            f"renders (margin {repair_margin_px}px) and feather-composited (outer "
+            f"{repair_feather_px}px linear ramp; the graded tile gets pure repair pixels). "
+            f"EVERY repair second is real measured wall-clock charged into T_stack: "
+            f"selection + scoring ({selection_cost_s:.3f}s) and repair renders + "
+            f"compositing ({repair_render_composite_s:.3f}s) — charged even when zero "
+            f"tiles are selected. The repair pass adds NO modeled term. KNOWN LIMIT: "
+            f"{_sel_limit}; selector_recall (measurement-only) quantifies missed failing "
+            f"tiles each run."
         )
     if fallback_note:
         note += " NOTE: " + fallback_note + "."
@@ -2220,6 +2461,7 @@ def main():
         metrics.update({
             "repair_enabled": True,
             "repair_selector": repair_selector,
+            "repair_denoiser": repair_denoiser,
             "repair_top_k": int(repair_top_k),
             "repair_max_per_frame": int(repair_max_per_frame),
             "repair_min_divergence": float(repair_min_divergence),
