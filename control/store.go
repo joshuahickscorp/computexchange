@@ -850,6 +850,18 @@ func nullPosInt(v int) any {
 	return v
 }
 
+// nullStr maps the empty string to nil so a text column stays SQL NULL rather
+// than an empty string (jobs.routing_substrate/routing_reason: "" means "no
+// routing block", persisted NULL, so `routing_substrate IS NULL` cleanly
+// distinguishes a job that carried no substrate decision — a non-generative or
+// empty-input job — from one that did).
+func nullStr(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
 // nullSHA256Hex validates a worker-reported SHA-256 hex string (Control Plane
 // Hot Path 8->9, docs/internal/CREED_AND_PATH_TO_TEN.md "trust a
 // buyer/worker-supplied SHA-256 ... where safe") before it is ever persisted or
@@ -1775,15 +1787,30 @@ func (s *Store) CreateJobWithTasks(ctx context.Context, j *jobRow, tasks []taskR
 	// `j.max_usd IS NOT NULL` to cleanly tell "no cap" from a real $0 cap. Same
 	// pattern for firm_quote_max_usd (Project Detection & Quotation 7->8): NULL
 	// means "not a firm quote", never a fake $0 ceiling.
+	// Routing decision (rubric dimension 5): all four columns persist together,
+	// keyed by RoutingSubstrate. "" → the job carried NO routing block (a
+	// non-generative or empty-input job — the honesty boundary), so every routing
+	// column stays NULL rather than a fake fleet/0s row the receipt would then
+	// falsely project. When present, the numbers are bound verbatim (the fleet ETA
+	// == the job's eta_secs; the GPU figure is [MODELED]).
+	var rSubstrate, rReason, rFleetETA, rGPUModeled any
+	if j.RoutingSubstrate != "" {
+		rSubstrate = j.RoutingSubstrate
+		rReason = nullStr(j.RoutingReason)
+		rFleetETA = j.RoutingFleetETASecs
+		rGPUModeled = j.RoutingGPUModeledSecs
+	}
 	_, err = tx.Exec(ctx,
 		`INSERT INTO jobs
 		   (id, buyer_id, status, job_type, model_ref, input_ref, output_ref,
 		    tier, verification_policy, estimated_usd, actual_usd, task_count, tasks_done,
 		    min_memory_gb, hw_classes, data_residency, job_type_spec, split_size,
 		    offered_rate_usd_hr, eta_secs, max_usd, budget_state, quote_id, min_reputation, private_pool,
-		    deadline_secs, firm_quote, firm_quote_max_usd, sla_guarantee_secs, sla_premium_usd)
+		    deadline_secs, firm_quote, firm_quote_max_usd, sla_guarantee_secs, sla_premium_usd,
+		    routing_substrate, routing_reason, routing_fleet_eta_secs, routing_gpu_modeled_secs)
 		 VALUES ($1,$2,'queued',$3,$4,$5,$6,$7,$8,$9,0,$10,0,
-		         $11,$12,$13,$14,$15,$16,$17,$18,'tracking',$19,$20,$21,$22,$23,$24,$25,$26)`,
+		         $11,$12,$13,$14,$15,$16,$17,$18,'tracking',$19,$20,$21,$22,$23,$24,$25,$26,
+		         $27,$28,$29,$30)`,
 		j.ID, j.BuyerID, j.JobType, j.ModelRef, j.InputRef, j.OutputRef,
 		j.Tier, j.VerificationPolicy, j.EstimatedUSD, j.TaskCount,
 		j.MinMemoryGB, nullStrSlice(j.HWClasses), nullStrSlice(j.DataResidency),
@@ -1791,6 +1818,7 @@ func (s *Store) CreateJobWithTasks(ctx context.Context, j *jobRow, tasks []taskR
 		nullPosFloat(j.MaxUSD), nullUUID(j.QuoteID), j.MinReputation, j.PrivatePool,
 		j.DeadlineSecs, j.FirmQuote, nullPosFloat(j.FirmQuoteMaxUSD),
 		nullPosInt(j.SLAGuaranteeSecs), nullPosFloat(j.SLAPremiumUSD),
+		rSubstrate, rReason, rFleetETA, rGPUModeled,
 	)
 	if err != nil {
 		return err
@@ -1870,6 +1898,18 @@ type jobRow struct {
 	// sla_refund ledger row (collect.go settleSLAOutcome). 0 = no SLA → NULL.
 	SLAGuaranteeSecs int
 	SLAPremiumUSD    float64
+	// Routing*: the SUBSTRATE-ROUTING decision stamped at submit (Speed Lane
+	// road-to-ten rubric dimension 5, control/routing.go + quote.go). Present
+	// only for GENERATIVE jobs with records > 0 — the honesty boundary the quote
+	// path enforces (the A100 sweep measured generative decode only). Persisted so
+	// the clearing receipt can project the "we ran it on X because Y" row
+	// deterministically. RoutingSubstrate "" → all four persist NULL (no block).
+	// RoutingGPUModeledSecs is ALWAYS [MODELED] (the sweep's aggregate tok/s at
+	// this job's shape, excluding rental/provisioning) — never a measurement.
+	RoutingSubstrate      string
+	RoutingReason         string
+	RoutingFleetETASecs   int
+	RoutingGPUModeledSecs float64
 }
 
 // taskRow mirrors the tasks columns we write at creation. Each task is one chunk
@@ -4447,6 +4487,16 @@ type InvoiceView struct {
 	SLAPremiumUSD    *float64 `json:"sla_premium_usd,omitempty"`
 	SLARefundUSD     *float64 `json:"sla_refund_usd,omitempty"`
 	SLAMet           *bool    `json:"sla_met,omitempty"`
+	// Routing* are the persisted SUBSTRATE-ROUTING decision (rubric dimension 5,
+	// jobs.routing_*). Not on the invoice wire — they are read here only so the
+	// clearing receipt handler (which already reads this view) can project the
+	// "we ran it on X because Y" routing block without a second job read.
+	// RoutingSubstrate == "" means the job carried no routing block (all four
+	// columns NULL — a non-generative or empty-input job).
+	RoutingSubstrate      string  `json:"-"`
+	RoutingReason         string  `json:"-"`
+	RoutingFleetETASecs   int     `json:"-"`
+	RoutingGPUModeledSecs float64 `json:"-"`
 }
 
 // JobInvoice builds an invoice for a job scoped to its buyer (buyers see only
@@ -4458,15 +4508,23 @@ func (s *Store) JobInvoice(ctx context.Context, jobID, buyerID uuid.UUID) (*Invo
 	var firmMax, billed *float64
 	var slaGuarantee int
 	var slaPremium *float64
+	// Routing decision (rubric dimension 5): NULL columns (a job with no routing
+	// block) scan into these nullables, then default to the zero substrate ""
+	// below so the receipt cleanly omits the block — never a fabricated fleet/0s.
+	var rSubstrate, rReason *string
+	var rFleetETA *int
+	var rGPUModeled *float64
 	err := s.pool.QueryRow(ctx,
 		`SELECT buyer_id, status, job_type, created_at,
 		        COALESCE(estimated_usd,0), COALESCE(actual_usd,0),
 		        firm_quote, firm_quote_max_usd, billed_usd,
-		        COALESCE(sla_guarantee_secs,0), sla_premium_usd, sla_met
+		        COALESCE(sla_guarantee_secs,0), sla_premium_usd, sla_met,
+		        routing_substrate, routing_reason, routing_fleet_eta_secs, routing_gpu_modeled_secs
 		 FROM jobs WHERE id = $1 AND buyer_id = $2`,
 		jobID, buyerID,
 	).Scan(&iv.BuyerID, &iv.Status, &iv.JobType, &iv.CreatedAt, &iv.EstimatedUSD, &iv.ActualUSD,
-		&iv.FirmQuote, &firmMax, &billed, &slaGuarantee, &slaPremium, &iv.SLAMet)
+		&iv.FirmQuote, &firmMax, &billed, &slaGuarantee, &slaPremium, &iv.SLAMet,
+		&rSubstrate, &rReason, &rFleetETA, &rGPUModeled)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound
 	}
@@ -4477,6 +4535,18 @@ func (s *Store) JobInvoice(ctx context.Context, jobID, buyerID uuid.UUID) (*Invo
 	iv.BilledUSD = billed
 	iv.SLAGuaranteeSecs = slaGuarantee
 	iv.SLAPremiumUSD = slaPremium
+	if rSubstrate != nil {
+		iv.RoutingSubstrate = *rSubstrate
+		if rReason != nil {
+			iv.RoutingReason = *rReason
+		}
+		if rFleetETA != nil {
+			iv.RoutingFleetETASecs = *rFleetETA
+		}
+		if rGPUModeled != nil {
+			iv.RoutingGPUModeledSecs = *rGPUModeled
+		}
+	}
 	// Surface the REAL recorded refund (the sla_refund ledger credit keyed
 	// 'sla-<job_id>'), only when one exists — the invoice shows what actually
 	// happened, never a predicted remedy.

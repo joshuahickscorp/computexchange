@@ -4,13 +4,23 @@ package main
 //
 // Layer discipline (docs/research/SPEED_LANE_GOAL_PROMPT.md, "three explicit
 // layers"): everything in this file is LAYER 1 — planner MATH, proven locally,
-// deterministic, no infrastructure. The simulation test at the bottom is
+// deterministic, no infrastructure. The two simulation tests at the bottom are
 // calibrated with this project's REAL measured rates (M3 Pro 139 tok/s
-// real-traffic batched, rented A100 2345 tok/s @ batch 64) but its outputs are
-// MODELED numbers, labeled as such — never a measured speedup claim. Layer 2
+// real-traffic batched; a GPU reference per sim — see each sim's header for
+// which figure and what it honestly means) but their outputs are MODELED
+// numbers, labeled as such — never a measured speedup claim. Layer 2
 // (real control plane, real Postgres/MinIO, measured wall-clock) lives in
 // planner_integration_test.go; layer 3 (real multi-node vs a real A100) is the
 // owner's runbook in docs/speed-lane-reports/FANOUT_PLANNER_WAVE1B.md.
+//
+// HONESTY NOTE (2026-07-06, audit #2 — docs/research/SPEED_LANE_AUDIT_2_AND_HANDOFF.md
+// Part 7): the first sim's GPU figure (2345 tok/s) is OUR OWN Candle CUDA
+// bench at batch 64 on a rented A100 — a weak configuration, NOT the A100's
+// capability. A real A100 under vLLM measured 44,269 tok/s on the same job
+// shape (docs/speed-lane-reports/A100_REFERENCE_MEASURED.md), so the
+// "break-even ~17 nodes" that sim pins is a HISTORICAL calibration, refuted
+// as a competitive claim on 2026-07-06. The second sim is the honest
+// recalibration against the real number (break-even ~318 nodes).
 
 import (
 	"math/rand"
@@ -269,15 +279,23 @@ func TestTokensPerItemEstimateAndMedianRate(t *testing.T) {
 	}
 }
 
-// --- L1 SIMULATION: the modeled fleet-vs-A100 curve, calibrated with REAL ---
-// --- measured rates. Every number here is MODELED (labeled), the qualitative -
-// --- shape is what the test pins; the quantitative table goes in the report. -
+// --- L1 SIMULATION (HISTORICAL CALIBRATION): the modeled fleet-vs-GPU curve. -
+// --- Kept because the planner MATH it pins is still valid as math; REFUTED ---
+// --- as a competitive claim (see below). Every number here is MODELED --------
+// --- (labeled); the qualitative shape is what the test pins. -----------------
 //
-// Calibration (real measurements, this project):
+// Calibration:
 //   - M3 Pro, Llama-3.2-1B Q4_K_M, real-traffic continuous batching: 139 tok/s
-//     (serial 91–111 tok/s → ±10% node-to-node jitter, seeded below).
-//   - Rented A100, same model: 2345 tok/s aggregate @ batch 64.
-//     (docs/GPU_CAPABILITY.md / SPEED_LANE_CURRENT_STATE.md)
+//     (serial 91–111 tok/s → ±10% node-to-node jitter, seeded below). Real,
+//     measured.
+//   - 2345 tok/s aggregate @ batch 64: OUR OWN Candle CUDA bench on a rented
+//     A100 (docs/GPU_CAPABILITY.md) — a weak configuration, NOT the A100's
+//     capability. A real A100 under vLLM measured 44,269 tok/s on this exact
+//     job shape (docs/speed-lane-reports/A100_REFERENCE_MEASURED.md,
+//     2026-07-06), ~19x this figure. The "break-even ~17 nodes" this scenario
+//     models is therefore a HISTORICAL calibration, refuted as a competitive
+//     claim on 2026-07-06; the honest recalibration is the companion test
+//     below (TestPlanFanoutModeledFleetVsRealA100VLLMBreakEven).
 //
 // Modeled job: 10,000 prompts × 256 completion tokens. Both sides pay the same
 // dispatch overhead; both warm (steady-state comparison — cold-load asymmetry
@@ -286,16 +304,19 @@ func TestPlanFanoutModeledFleetVsA100Curve(t *testing.T) {
 	const (
 		items        = 10000
 		tokPerItem   = 256.0
-		macTokPerSec = 139.0  // real-traffic batched, measured
-		a100TokPerS  = 2345.0 // rented A100 spike, measured
-		jitter       = 0.10   // measured serial spread 91–111 ≈ ±10%
+		macTokPerSec = 139.0 // real-traffic batched, measured
+		// ourCandleA100Batch64TokPerS is OUR Candle CUDA bench @ batch 64 on a
+		// rented A100 — historical calibration only, NOT the A100's capability
+		// (a real A100 under vLLM: 44,269 tok/s — see the sim header).
+		ourCandleA100Batch64TokPerS = 2345.0
+		jitter                      = 0.10 // measured serial spread 91–111 ≈ ±10%
 	)
 	rng := rand.New(rand.NewSource(42)) // seeded: deterministic run-to-run
 
-	a100 := PlanFanout(PlannerJob{Items: items, JobType: "batch_infer"},
-		[]PlannerWorker{warmWorker(0, a100TokPerS/tokPerItem)})
-	if a100.Width != 1 {
-		t.Fatalf("A100 reference must be a single node")
+	candleRef := PlanFanout(PlannerJob{Items: items, JobType: "batch_infer"},
+		[]PlannerWorker{warmWorker(0, ourCandleA100Batch64TokPerS/tokPerItem)})
+	if candleRef.Width != 1 {
+		t.Fatalf("GPU reference must be a single node")
 	}
 
 	// One shared jittered fleet, sliced by N so the curve is over nested fleets.
@@ -314,7 +335,7 @@ func TestPlanFanoutModeledFleetVsA100Curve(t *testing.T) {
 			t.Fatalf("N=%d: conservation failed (%d)", n, planItems(p))
 		}
 		wall[n] = p.WallClockP50Secs
-		if breakEven < 0 && p.WallClockP50Secs <= a100.WallClockP50Secs {
+		if breakEven < 0 && p.WallClockP50Secs <= candleRef.WallClockP50Secs {
 			breakEven = n
 		}
 		// The planner must not leave measurable capacity idle on a big batch:
@@ -331,26 +352,102 @@ func TestPlanFanoutModeledFleetVsA100Curve(t *testing.T) {
 	}
 
 	// Qualitative shape (the L1 assertion): monotone non-increasing wall-clock
-	// (tiny fp/integer tolerance), a break-even near the measured-rate ratio
-	// 2345/139 ≈ 16.9, and a ~3x margin at 50 nodes.
+	// (tiny fp/integer tolerance), a break-even near the historical
+	// calibration's rate ratio 2345/139 ≈ 16.9 — a ratio against OUR Candle
+	// bench figure, NOT against a real A100 (honest break-even vs the real
+	// vLLM number is ~318, pinned by the companion test below) — and a ~3x
+	// margin at 50 nodes.
 	for n := 2; n <= maxN; n++ {
 		if wall[n] > wall[n-1]+0.5 {
 			t.Fatalf("modeled wall-clock must not rise with fleet size: N=%d %.1fs > N=%d %.1fs", n, wall[n], n-1, wall[n-1])
 		}
 	}
 	if breakEven < 15 || breakEven > 19 {
-		t.Fatalf("modeled break-even fleet size %d outside the calibrated band [15,19] (A100 %.1fs)", breakEven, a100.WallClockP50Secs)
+		t.Fatalf("modeled break-even fleet size %d outside the calibrated band [15,19] (Candle ref %.1fs)", breakEven, candleRef.WallClockP50Secs)
 	}
-	margin50 := a100.WallClockP50Secs / wall[50]
+	margin50 := candleRef.WallClockP50Secs / wall[50]
 	if margin50 < 2.5 || margin50 > 3.4 {
 		t.Fatalf("modeled 50-node margin %.2fx outside [2.5,3.4]", margin50)
 	}
 
 	// The quantitative table for the report (MODELED — run with -v to print).
-	t.Logf("MODELED fleet-vs-A100 curve (10k prompts × 256 tok, M3 Pro 139 tok/s ±10%%, A100 %.0f tok/s → %.1fs):", a100TokPerS, a100.WallClockP50Secs)
+	t.Logf("MODELED fleet-vs-Candle-A100-bench curve (HISTORICAL calibration, refuted as a competitive claim — see sim header; 10k prompts × 256 tok, M3 Pro 139 tok/s ±10%%, our Candle A100 bench %.0f tok/s → %.1fs):", ourCandleA100Batch64TokPerS, candleRef.WallClockP50Secs)
 	for _, n := range []int{1, 5, 10, 15, breakEven, 20, 30, 40, 50} {
-		t.Logf("  N=%2d Macs: modeled wall-clock %7.1fs  vs A100 %.2fx", n, wall[n],
-			a100.WallClockP50Secs/wall[n])
+		t.Logf("  N=%2d Macs: modeled wall-clock %7.1fs  vs Candle-bench ref %.2fx", n, wall[n],
+			candleRef.WallClockP50Secs/wall[n])
 	}
-	t.Logf("  MODELED break-even: %d Macs; 50-node margin %.2fx", breakEven, margin50)
+	t.Logf("  MODELED break-even vs the historical Candle figure: %d Macs; 50-node margin %.2fx", breakEven, margin50)
+}
+
+// --- L1 SIMULATION (CURRENT): the HONEST recalibration commissioned by audit -
+// --- #2 (docs/research/SPEED_LANE_AUDIT_2_AND_HANDOFF.md Part 7). ------------
+//
+// Same planner math and jitter pattern as the historical sim above, but the
+// GPU side is the A100's REAL measured capability: NVIDIA A100-SXM4-80GB under
+// vLLM, TinyLlama-1.1B fp16, this exact 10,000×256 job shape — 44,269 tok/s
+// aggregate, T_ref 57.83s (measured 2026-07-06,
+// docs/speed-lane-reports/A100_REFERENCE_MEASURED.md). Every output is MODELED
+// from those measured rates. What this pins: against the real number the
+// fleet's break-even is ~318 M3-Pro-class nodes — FAR above the refuted ~18 —
+// so the fleet must never promise to beat a saturated GPU on big batches. The
+// fleet's honest lane is latency-sensitive / low-concurrency work, where the
+// same GPU at batch=1 is worth only 1–3 Macs
+// (docs/speed-lane-reports/A100_CAPABILITY_SWEEP.md).
+func TestPlanFanoutModeledFleetVsRealA100VLLMBreakEven(t *testing.T) {
+	const (
+		items           = 10000
+		tokPerItem      = 256.0
+		macTokPerSec    = 139.0   // real-traffic batched, measured (M3 Pro)
+		a100VLLMTokPerS = 44269.0 // real A100-SXM4-80GB under vLLM, measured 2026-07-06
+		jitter          = 0.10    // same ±10% node-to-node spread as the sim above
+	)
+	rng := rand.New(rand.NewSource(42)) // seeded: deterministic run-to-run
+
+	a100 := PlanFanout(PlannerJob{Items: items, JobType: "batch_infer"},
+		[]PlannerWorker{warmWorker(0, a100VLLMTokPerS/tokPerItem)})
+	if a100.Width != 1 {
+		t.Fatalf("A100 reference must be a single node")
+	}
+
+	// Nested jittered fleets, grown until the modeled fleet catches the real
+	// A100 reference. (No monotonicity assertion here: near N~318 each node
+	// adds ~0.18s of fractional improvement while integer item rounding moves
+	// the makespan by up to ~1.8s — the shape assertion lives in the
+	// historical sim, where per-node steps dwarf the rounding noise.)
+	const maxN = 400
+	fleet := make([]PlannerWorker, maxN)
+	for i := range fleet {
+		f := 1 + jitter*(2*rng.Float64()-1)
+		fleet[i] = warmWorker(i+1, macTokPerSec*f/tokPerItem)
+	}
+	breakEven := -1
+	for n := 1; n <= maxN; n++ {
+		p := PlanFanout(PlannerJob{Items: items, JobType: "batch_infer"}, fleet[:n])
+		if planItems(p) != items {
+			t.Fatalf("N=%d: conservation failed (%d)", n, planItems(p))
+		}
+		if p.WallClockP50Secs <= a100.WallClockP50Secs {
+			breakEven = n
+			break
+		}
+	}
+	if breakEven < 0 {
+		t.Fatalf("modeled fleet never reached the real A100 vLLM reference within %d nodes (A100 %.1fs)", maxN, a100.WallClockP50Secs)
+	}
+
+	// The honesty assertion audit #2 commissioned: the break-even vs the REAL
+	// A100 number must sit FAR above the refuted ~18-node story.
+	if breakEven <= 250 {
+		t.Fatalf("modeled break-even %d vs the real vLLM reference is implausibly low — the refuted ~18-node claim must stay dead", breakEven)
+	}
+	// Tight band around the modeled value with the planner's overhead terms:
+	// the raw rate ratio is 44269/139 ≈ 318.5; the seeded jitter draws plus
+	// per-worker dispatch overhead and integer item rounding land the sim at
+	// 325, deterministically. Band is ±4% for robustness to small overhead
+	// retunes without ever letting the refuted ~18 back in.
+	if breakEven < 312 || breakEven > 338 {
+		t.Fatalf("modeled break-even fleet size %d outside the calibrated band [312,338] (A100 %.1fs)", breakEven, a100.WallClockP50Secs)
+	}
+
+	t.Logf("MODELED honest break-even vs the real A100 vLLM reference (%.0f tok/s → %.1fs): %d M3-Pro-class nodes", a100VLLMTokPerS, a100.WallClockP50Secs, breakEven)
 }

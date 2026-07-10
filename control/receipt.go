@@ -28,6 +28,14 @@ type ClearingReceipt struct {
 	// Tasks is the per-task drilldown (item 15): each task's worker class + comparison
 	// event, and NEVER the hidden honeypot answer (TaskReceipt has no answer field).
 	Tasks []TaskReceipt `json:"tasks"`
+	// Routing is the SUBSTRATE-ROUTING decision recorded at submit (Speed Lane
+	// road-to-ten rubric dimension 5, control/routing.go + quote.go): the
+	// "we ran it on X because Y" row the product promises — projected verbatim
+	// from the persisted jobs.routing_* columns, never re-decided. Present only
+	// for jobs that carried a routing block (GENERATIVE with records > 0 — the
+	// A100 sweep's generative-decode honesty boundary); omitted for every other
+	// shape. gpu_modeled_secs is ALWAYS [MODELED] (see QuoteRouting.Basis).
+	Routing *QuoteRouting `json:"routing,omitempty"`
 }
 
 // TaskReceipt is one task's verification drilldown (item 15). It deliberately carries NO
@@ -55,8 +63,11 @@ func taskReceiptRow(chunkIndex int, status string, isHoneypot bool, engine, buil
 
 // assembleClearingReceipt joins the already-read facets into one projection (item 13).
 // Pure: the I/O is the caller's; this guarantees every required facet (quote, actuals,
-// verification, class, dispute, settlement) is present in one place and is unit-tested.
-func assembleClearingReceipt(jobID uuid.UUID, status string, inv *InvoiceView, verif Verification, classes []string, tasks []TaskReceipt) ClearingReceipt {
+// verification, class, dispute, settlement, and the substrate-routing decision) is
+// present in one place and is unit-tested. routing is nil for a job that carried no
+// routing block (a non-generative or empty-input job — the honesty boundary the quote
+// and submit paths both enforce), in which case the receipt omits the block entirely.
+func assembleClearingReceipt(jobID uuid.UUID, status string, inv *InvoiceView, verif Verification, classes []string, tasks []TaskReceipt, routing *QuoteRouting) ClearingReceipt {
 	return ClearingReceipt{
 		JobID:        jobID,
 		Status:       status,
@@ -64,6 +75,26 @@ func assembleClearingReceipt(jobID uuid.UUID, status string, inv *InvoiceView, v
 		Verification: verif,
 		Classes:      classes,
 		Tasks:        tasks,
+		Routing:      routing,
+	}
+}
+
+// receiptRouting rebuilds the routing block from the persisted jobs.routing_*
+// columns carried on the invoice view (rubric dimension 5). Returns nil when the
+// job carried no routing block (RoutingSubstrate == "" — every routing column was
+// NULL), so the receipt omits it exactly as the submit response did. Pure — the
+// I/O (the JobInvoice read) is the caller's, keeping assembleClearingReceipt
+// unit-testable. The GPU figure stays [MODELED] via the shared quoteRoutingBasis.
+func receiptRouting(inv *InvoiceView) *QuoteRouting {
+	if inv == nil || inv.RoutingSubstrate == "" {
+		return nil
+	}
+	return &QuoteRouting{
+		Substrate:      inv.RoutingSubstrate,
+		Reason:         inv.RoutingReason,
+		FleetETASecs:   inv.RoutingFleetETASecs,
+		GPUModeledSecs: inv.RoutingGPUModeledSecs,
+		Basis:          quoteRoutingBasis,
 	}
 }
 

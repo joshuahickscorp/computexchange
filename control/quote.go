@@ -311,9 +311,35 @@ type Quote struct {
 	// rates, un-priceable premium) — see deriveQuoteSLA. It binds only when the
 	// submission binds this quote with firm_quote.
 	SLA *QuoteSLA `json:"sla,omitempty"`
+	// Routing is the substrate-routing decision (Speed Lane road-to-ten rubric
+	// dimension 4, routing.go): which substrate this job's SHAPE favors —
+	// fleet, a lit GPU lane, or an honest GPU recommendation — with the
+	// measured basis and the compared numbers stated plainly. Present only for
+	// GENERATIVE jobs with records > 0: the 2026-07-06 A100 vLLM sweep the
+	// decision is grounded in measured generative decode only, so any other
+	// job shape gets NO routing block rather than an unmeasured guess.
+	Routing *QuoteRouting `json:"routing,omitempty"`
 
 	bareID uuid.UUID // quotes.id primary key (the <uuid> inside QuoteID); not on the wire
 }
+
+// QuoteRouting is the wire form of routing.go's SubstrateDecision: the
+// substrate the job's shape favors, the plain-english why, the two numbers
+// that were compared, and the basis naming the sweep artifact the GPU figure
+// was modeled from (gpu_modeled_secs is ALWAYS [MODELED] — the measured
+// sweep's aggregate tok/s interpolated at this job's shape, excluding
+// rental/provisioning time — never a measurement of this job).
+type QuoteRouting struct {
+	Substrate      string  `json:"substrate"` // fleet | gpu_lane | gpu_recommend
+	Reason         string  `json:"reason"`
+	FleetETASecs   int     `json:"fleet_eta_secs"`
+	GPUModeledSecs float64 `json:"gpu_modeled_secs"`
+	Basis          string  `json:"basis"`
+}
+
+// quoteRoutingBasis names the measured artifact behind every routing block's
+// GPU figure, with the honesty label attached to the number itself.
+const quoteRoutingBasis = "gpu_modeled_secs [MODELED] from the measured 2026-07-06 A100-SXM4-80GB vLLM sweep: docs/speed-lane-reports/A100_CAPABILITY_SWEEP.md (raw: artifacts/a100-sxm-capability-sweep-2026-07-06.jsonl)"
 
 // quoteTTL is how long an advisory quote stays bindable to a submission (Plane D
 // D7). A submission carrying an expired quote_id is rejected 409.
@@ -740,6 +766,35 @@ func (s *Server) buildQuote(ctx context.Context, buyerID uuid.UUID, sub jobSubmi
 			minMem = modelMinMem // a job implicitly needs at least the model's floor
 		}
 	}
+	// Substrate routing (rubric dimension 4, routing.go): read the job's shape
+	// and say which substrate runs it fastest, grounded in the measured A100
+	// sweep. GENERATIVE + records > 0 only — the sweep measured generative
+	// decode, so every other shape honestly gets no routing block. Uses the
+	// SAME inputs the rest of this quote already computed: the sustained-
+	// adjusted p50 (the ETA the buyer actually sees), the planner conservative
+	// band + plannerBacked from etaBandSecs, the catalogue memory floor for the
+	// model class, and the planner's own tokens-per-item estimator.
+	var routing *QuoteRouting
+	if generativeJobType(jobType) && scan.Records > 0 {
+		// The LIVE lit-lane supply: real online vLLM-engine workers eligible for
+		// this job (the same predicate as eligible_now, engine-filtered). A DB
+		// error degrades to 0 — honestly "no lit lane" rather than a fabricated
+		// gpu_lane. This is the honest switch: the router says gpu_lane only when
+		// verified GPU supply actually exists, otherwise gpu_recommend.
+		litGPU, _ := s.store.EligibleVLLMWorkerCount(ctx, jobType, sub.Model.Ref, minMem)
+		dec := DecideSubstrate(scan.Records, tier,
+			routingModelClass(sub.Model.Ref, modelMinMem),
+			tokensPerItemEstimate(sub.JobType.MaxTokens, avgLineBytes),
+			p50, conservativeSecs, plannerBacked, litGPU)
+		routing = &QuoteRouting{
+			Substrate:      dec.Substrate,
+			Reason:         dec.Reason,
+			FleetETASecs:   dec.FleetSecs,
+			GPUModeledSecs: dec.GPUModeledSecs,
+			Basis:          quoteRoutingBasis,
+		}
+	}
+
 	eligibleNow, _ := s.store.EligibleWorkerCount(ctx, jobType, sub.Model.Ref, minMem)
 	// Warm supply (warm-routing, D3): eligible workers that already have THIS model
 	// loaded. Drives cold-start risk down + confidence up when present — these are the
@@ -809,6 +864,7 @@ func (s *Server) buildQuote(ctx context.Context, buyerID uuid.UUID, sub jobSubmi
 		Input:                  scan,
 		PrivatePoolAttestation: attestation,
 		SLA:                    quoteSLA,
+		Routing:                routing,
 		Execution: QuoteExecution{
 			RecommendedSplitSize:   split,
 			EstimatedTasks:         tasks,
@@ -1092,6 +1148,34 @@ func (s *Store) EligibleWorkerCount(ctx context.Context, jobType, modelRef strin
 		    AND COALESCE($3,0) <= COALESCE(w.effective_memory_gb, w.memory_gb, 0)
 		    AND COALESCE(w.supported_jobs,'{}') @> ARRAY[$1]
 		    AND ($2 = '' OR COALESCE(w.supported_models,'{}') @> ARRAY[$2])`,
+		jobType, modelRef, minMemGB,
+	).Scan(&n)
+	return n, err
+}
+
+// EligibleVLLMWorkerCount counts the live workers that would pass the SAME claim
+// hard filter as EligibleWorkerCount AND run the vLLM engine (workers.engine =
+// 'vllm') — i.e. the real, currently-online supply of the GPU serving lane for
+// THIS job. It is what makes the substrate router's `gpu_lane` decision HONEST:
+// routing.go reports a lit GPU lane only when this count is > 0, and falls back
+// to an advisory `gpu_recommend` (count 0) otherwise — never claiming supply the
+// exchange does not have. The within-nvidia_* byte-stability soak
+// (docs/speed-lane-reports/VLLM_RESTART_SOAK_2026-07-06.md) is what makes such a
+// worker's output trustworthy (tolerant (engine, build_hash) class + redundancy,
+// not a byte-exact honeypot); this count is the supply half of lighting the lane.
+func (s *Store) EligibleVLLMWorkerCount(ctx context.Context, jobType, modelRef string, minMemGB float32) (int, error) {
+	var n int
+	err := s.pool.QueryRow(ctx,
+		`SELECT count(*)
+		   FROM workers w JOIN suppliers s ON s.id = w.supplier_id
+		  WHERE w.last_seen_at IS NOT NULL
+		    AND w.last_seen_at > now() - interval '60 seconds'
+		    AND s.status = 'active'
+		    AND NOT COALESCE(w.throttled, false)
+		    AND COALESCE($3,0) <= COALESCE(w.effective_memory_gb, w.memory_gb, 0)
+		    AND COALESCE(w.supported_jobs,'{}') @> ARRAY[$1]
+		    AND ($2 = '' OR COALESCE(w.supported_models,'{}') @> ARRAY[$2])
+		    AND w.engine = 'vllm'`,
 		jobType, modelRef, minMemGB,
 	).Scan(&n)
 	return n, err

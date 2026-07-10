@@ -1,5 +1,13 @@
 # Goal prompt — the Speed Lane iterative build loop (paste into a fresh chat)
 
+> **SUPERSEDED 2026-07-06 — do NOT paste this into a fresh chat.** The "beat an A100 on
+> wall-clock" thesis this prompt executes was REFUTED by real measurement: a real
+> A100-SXM4-80GB under vLLM serves 44,269 tok/s (~19× the Candle-bench figure used here);
+> honest break-even is ~318 M3-Pro-class nodes, not ~18. The salvaged, honest routing rule and
+> current state of play: `docs/speed-lane-reports/A100_REFERENCE_MEASURED.md`,
+> `A100_CAPABILITY_SWEEP.md`, `docs/research/SPEED_LANE_AUDIT_2_AND_HANDOFF.md`. Kept unedited
+> below for the receipt trail.
+
 > **Before running this, read `docs/research/SPEED_LANE_HANDOFF.md` first** — it carries the full
 > session state, tells you to keep planning and *sharpen this prompt* before executing, and flags
 > open decisions (build order, the moat-vs-dispatch sequencing, commit?, re-verify research?).

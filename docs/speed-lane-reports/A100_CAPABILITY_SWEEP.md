@@ -12,13 +12,20 @@ Measured on the user-provisioned RunPod A100 SXM via vLLM (fp16), `ignore_eos`,
 
 ## The measured surface — aggregate tok/s
 
-| model | batch=1 | batch=8 | batch=64 | batch=512 | batch=2048 |
-|---|--:|--:|--:|--:|--:|
-| **1.1B** (TinyLlama) | 387 | 2,954 | 19,864 | 43,570 | **44,852** |
-| **7B** (Qwen2.5) | 100 | 784 | 5,355 | 11,116 | **11,310** |
-| **14B** (Qwen2.5) | 52 | 412 | 2,822 | 5,667 | **5,708** |
+| model | batch=1 | batch=8 | batch=64 | batch=512 | batch=2048 | batch1→ceiling |
+|---|--:|--:|--:|--:|--:|--:|
+| **1.1B** (TinyLlama, fp16) | 387 | 2,954 | 19,864 | 43,570 | **44,852** | 116× |
+| **7B** (Qwen2.5, fp16) | 100 | 784 | 5,355 | 11,116 | **11,310** | 113× |
+| **14B** (Qwen2.5, fp16) | 52 | 412 | 2,822 | 5,667 | **5,708** | 109× |
+| **32B** (Qwen2.5, AWQ int4) | 70 | 520 | 1,849 | 2,309 | **2,342** | 33× |
 
-(32B-AWQ row appended when its run lands.)
+Two extra reads from the 32B row: (a) **quantization helps batch-1 latency** — 32B-AWQ
+does 70 tok/s at batch=1, *faster* than 14B-fp16's 52, because int4 moves 1/4 the bytes
+per token on bandwidth-bound decode; (b) **the batching advantage SHRINKS with model
+size** (116× at 1B → 33× at 32B): a bigger model saturates the GPU's compute sooner, so
+there is less headroom for batching to compound. Implication: the larger the model, the
+*less* dominant a single A100 is at high batch — the fleet's relative position improves
+with model size (though our fleet is itself capped ~7B, so we can't yet exploit that).
 
 ## The one insight that changes how we route
 

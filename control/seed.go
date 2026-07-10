@@ -47,6 +47,21 @@ const (
 	// gap, never a wrongful quarantine) until the operator re-generates.
 	demoHoneypotHawkEngine    = "hawking"
 	demoHoneypotHawkBuildHash = "a0ce01606255c06e"
+
+	// The byte-exact hawking honeypot's VALIDITY BOUNDS, now enforced at injection
+	// time (the guard the demoHoneypotHawkKnownAnswer doc names as REQUIRED before
+	// production-scale byte-exact seeding). demoHoneypotHawkKnownAnswer is byte-valid
+	// ONLY for a batch_infer job on demoHoneypotHawkModel with
+	// max_tokens >= demoHoneypotHawkMinMaxTokens: the answer was captured on
+	// llama-3.2-1b-instruct-q4 (its own "model" field), and every row EOS'd strictly
+	// below max_tokens=24 (max row: 10 tokens) so the bytes are invariant only for a
+	// dispatching job whose max_tokens is at least 24. Persisted into
+	// honeypots.answer_model / answer_min_max_tokens so AvailableSeedHoneypots refuses
+	// to draw this probe for a job it is not byte-valid for — a batch_infer job on a
+	// DIFFERENT model, or with max_tokens < 24, where an HONEST same-class worker
+	// legitimately produces different bytes and would otherwise be wrongly quarantined.
+	demoHoneypotHawkModel        = "llama-3.2-1b-instruct-q4"
+	demoHoneypotHawkMinMaxTokens = 24
 )
 
 // demoHoneypotHawkInputJSONL is the hawking honeypot's input chunk — the exact
@@ -89,15 +104,16 @@ const demoHoneypotHawkInputJSONL = `{"id":"0","prompt":"The capital of France is
 //     and inherit their params (api.go), so a truncated row's bytes would
 //     depend on the buyer's max_tokens.
 //
-// KNOWN VALIDITY BOUNDS (documented, enforcement is named follow-up work in
-// docs/speed-lane-reports/HAWKING_REGATE_WAVE2B.md — the injection path is
-// another bundle's file set): the answer is only valid evidence for batch_infer
-// jobs on llama-3.2-1b-instruct-q4 with max_tokens >= 24; AvailableSeedHoneypots
-// keys on job_type only, so a batch_infer job on a DIFFERENT model (or with a
-// smaller max_tokens) that draws this probe would byte-fail an HONEST
-// same-class worker. Acceptable for the DEV seed (this class exists only on the
-// reference box); a production fleet must land the injection-time param/model
-// guard before seeding byte-exact honeypots at scale.
+// KNOWN VALIDITY BOUNDS (now ENFORCED at injection time): the answer is only
+// valid evidence for batch_infer jobs on llama-3.2-1b-instruct-q4 with
+// max_tokens >= 24. These bounds are persisted into honeypots.answer_model /
+// answer_min_max_tokens (the seed INSERT below writes demoHoneypotHawkModel /
+// demoHoneypotHawkMinMaxTokens), and AvailableSeedHoneypots now filters on the
+// job's model + max_tokens, so a batch_infer job on a DIFFERENT model (or with a
+// smaller max_tokens) NO LONGER draws this probe — closing the gap where an
+// HONEST same-class worker running such a job would byte-fail and be wrongly
+// quarantined. The guard docs/speed-lane-reports/HAWKING_REGATE_WAVE2B.md named
+// as REQUIRED before production-scale byte-exact seeding is thus landed.
 const demoHoneypotHawkKnownAnswer = `{"job_type":"batch_infer","model":"llama-3.2-1b-instruct-q4","completions":[{"index":0,"text":"The capital of France is Paris.","tokens":7},{"index":1,"text":"The largest planet in our solar system is Jupiter.","tokens":10},{"index":2,"text":"Blue","tokens":1},{"index":3,"text":"The answer is 4.","tokens":6},{"index":4,"text":"The chemical symbol for water is H2O.","tokens":10},{"index":5,"text":"The chemical symbol for gold is Au.","tokens":8}]}`
 
 // demoHoneypotEmbedKnownAnswer is the REAL all-minilm-l6-v2 embedding of
@@ -239,10 +255,31 @@ func seedDemo(ctx context.Context, pool *pgxpool.Pool, storage *Storage) error {
 		// coverage until an operator re-generates the blob on their own reference
 		// box (the runners.rs harness in the constant's doc comment) and seeds it
 		// operationally.
-		{`INSERT INTO honeypots (job_type, input_ref, known_answer, answer_class)
-		  SELECT 'batch_infer', $1, $2, $3
+		// answer_model + answer_min_max_tokens carry the byte-exact validity bounds
+		// (llama-3.2-1b-instruct-q4, max_tokens >= 24 — see the demoHoneypotHawk*
+		// constants) so the injection-time guard (AvailableSeedHoneypots) only draws
+		// this probe for a job it is actually byte-valid for; drawing it for a
+		// different model or a smaller max_tokens would wrongly quarantine an HONEST
+		// same-class worker whose bytes legitimately differ.
+		{`INSERT INTO honeypots (job_type, input_ref, known_answer, answer_class, answer_model, answer_min_max_tokens)
+		  SELECT 'batch_infer', $1, $2, $3, $4, $5
 		  WHERE NOT EXISTS (SELECT 1 FROM honeypots WHERE job_type='batch_infer' AND input_ref=$1)`,
-			[]any{demoHoneypotInferRef, []byte(demoHoneypotHawkKnownAnswer), hawkClass}},
+			[]any{demoHoneypotInferRef, []byte(demoHoneypotHawkKnownAnswer), hawkClass, demoHoneypotHawkModel, demoHoneypotHawkMinMaxTokens}},
+		// BACKFILL (idempotent, fail-OPEN repair): a batch_infer honeypot row seeded
+		// BEFORE answer_model/answer_min_max_tokens existed keeps them NULL, which
+		// AvailableSeedHoneypots reads as "tolerant" — so the byte-exact hawking probe
+		// could be drawn for ANY model / smaller max_tokens and wrongly quarantine an
+		// HONEST same-class worker whose bytes legitimately differ (a silent fail-OPEN of
+		// the injection guard the INSERT above was added to close). Because that INSERT is
+		// WHERE NOT EXISTS, it never heals such a pre-existing row. This UPDATE stamps the
+		// canonical bounds on exactly that vulnerable row: matched by the demo input_ref
+		// (never an operator's differently-bounded custom honeypot at another ref) and
+		// gated on NULL bounds, so it is a no-op once healed and idempotent across reseeds.
+		{`UPDATE honeypots
+		  SET answer_model=$2, answer_min_max_tokens=$3, answer_class=$4
+		  WHERE job_type='batch_infer' AND input_ref=$1
+		    AND (answer_model IS NULL OR answer_min_max_tokens IS NULL)`,
+			[]any{demoHoneypotInferRef, demoHoneypotHawkModel, demoHoneypotHawkMinMaxTokens, hawkClass}},
 	}
 	for _, st := range stmts {
 		if _, err := pool.Exec(ctx, st.sql, st.args...); err != nil {

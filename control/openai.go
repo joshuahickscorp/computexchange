@@ -199,6 +199,7 @@ func (s *Server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 		Endpoint         string          `json:"endpoint"`
 		CompletionWindow string          `json:"completion_window"`
 		Input            json.RawMessage `json:"input"` // inline alternative to input_file_id
+		Metadata         map[string]any  `json:"metadata"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		openaiErr(w, http.StatusBadRequest, "invalid batch request json: "+err.Error())
@@ -271,17 +272,23 @@ func (s *Server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 	// Reuse the native submission pipeline verbatim (one source of truth): a JSON
 	// string IS the inline JSONL that resolveInput expects.
 	inputField, _ := json.Marshal(string(nativeJSONL))
+	verification := VerificationPolicy{}
+	if v, ok := req.Metadata["cx_skip_verification_floor"].(bool); ok && v {
+		verification.SkipVerificationFloor = true
+	}
 	// LaunchContract (items 1-5): the OpenAI Batch wire format carries NO CX contract
 	// fields (max_usd / private_pool / min_reputation / verification), so a batch job
-	// cannot express a per-job contract — a NAMED external-format dependency, not a drop
-	// we can fix here. It still runs under createJob's account-level guards (the
-	// free-credit spend cap applies). A future CX extension could read a cap from the
-	// batch `metadata`; until then this path is intentionally contract-less.
+	// cannot express a full per-job contract — a NAMED external-format dependency, not
+	// a drop we can fix here. It still runs under createJob's account-level guards
+	// (the free-credit spend cap applies). CX metadata may explicitly opt out of the
+	// verification floor for compatibility smoke runs; default native verification
+	// policy still applies when the metadata key is absent.
 	resp, herr := s.createJob(ctx, auth.BuyerID, jobSubmit{
-		JobType: JobType{Type: jobType},
-		Model:   ModelRef{Kind: "gguf", Ref: model},
-		Tier:    "batch",
-		Input:   inputField,
+		JobType:      JobType{Type: jobType},
+		Model:        ModelRef{Kind: "gguf", Ref: model},
+		Verification: verification,
+		Tier:         "batch",
+		Input:        inputField,
 	})
 	if herr != nil {
 		openaiErr(w, herr.status, "submitting batch job: "+herr.msg)

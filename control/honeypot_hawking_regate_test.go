@@ -113,7 +113,9 @@ func TestHawkingHoneypotSeedFidelity(t *testing.T) {
 	// Dispatchable: the injection path (createJob → AvailableSeedHoneypots)
 	// can now draw a batch_infer probe — the coverage that did not exist
 	// before this wave.
-	hps, err := itStore.AvailableSeedHoneypots(ctx, "batch_infer", 10)
+	// Pass the exact model + a max_tokens at/above the seed's floor so the
+	// injection-time param/model guard (AvailableSeedHoneypots) draws the probe.
+	hps, err := itStore.AvailableSeedHoneypots(ctx, "batch_infer", demoHoneypotHawkModel, demoHoneypotHawkMinMaxTokens, 10)
 	if err != nil {
 		t.Fatalf("AvailableSeedHoneypots: %v", err)
 	}

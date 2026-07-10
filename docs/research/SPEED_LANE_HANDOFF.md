@@ -1,5 +1,12 @@
 # Handoff → next chat: read this FIRST, then plan, then execute
 
+> **SUPERSEDED 2026-07-06.** The "beat an A100 on wall-clock" thesis this handoff carries was
+> REFUTED by real measurement: a real A100-SXM4-80GB under vLLM serves 44,269 tok/s (~19× the
+> Candle-bench figure used here); honest break-even is ~318 M3-Pro-class nodes, not ~18. The
+> salvaged, honest routing rule and current state of play: `docs/speed-lane-reports/A100_REFERENCE_MEASURED.md`,
+> `A100_CAPABILITY_SWEEP.md`, `docs/research/SPEED_LANE_AUDIT_2_AND_HANDOFF.md`. Kept unedited
+> below for the receipt trail.
+
 *Written 2026-07-06 at the end of a very long build session. This is the entry point for the
 next session. Its job: hand you the full state, tell you to keep PLANNING and sharpen the goal
 prompt before you run it, then keep working. Order of operations for you, next session:*

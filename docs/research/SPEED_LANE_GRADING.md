@@ -1,5 +1,12 @@
 # The Speed Lane — graded against the frontier, then against the potential
 
+> **SUPERSEDED 2026-07-06.** The "beat an A100 on wall-clock" thesis this grading is built
+> around was REFUTED by real measurement: a real A100-SXM4-80GB under vLLM serves 44,269 tok/s
+> (~19× the Candle-bench figure used here); honest break-even is ~318 M3-Pro-class nodes, not
+> ~18. The salvaged, honest routing rule and current state of play:
+> `docs/speed-lane-reports/A100_REFERENCE_MEASURED.md`, `A100_CAPABILITY_SWEEP.md`,
+> `docs/research/SPEED_LANE_AUDIT_2_AND_HANDOFF.md`. Kept unedited below for the receipt trail.
+
 *2026-07-06. Grades computexchange's inference-SPEED lane in two tiers, per the owner's ask:
 first vs. the researched frontier (SPEED_LANE_RESEARCH.md), then vs. the beyond-frontier
 potential (what a heterogeneous marketplace can do that no single-GPU vendor can). Same

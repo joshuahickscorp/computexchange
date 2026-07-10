@@ -718,9 +718,17 @@ func settleSLAOutcome(ctx context.Context, store *Store, jobID uuid.UUID) {
 	// so a re-run/sweep replay never duplicates it.
 	_ = store.InsertJobEvent(ctx, jobID, nil, "sla_missed",
 		fmt.Sprintf("Speed SLA missed by %ds · the $%.6f premium was refunded automatically (netted off your charge)", res.OverBySecs, res.RefundUSD), nil)
-	// A dedicated metrics counter would live in metrics.go (outside this
-	// bundle's file set) — the structured log line + the ledger row + the job
-	// event are the observability for now; the counter is a named follow-up.
+	// cx_sla_misses_total (Speed Lane wave 2A): bumped HERE, in the same
+	// decided-a-miss branch that stamps the sla_missed event — reachable only when
+	// SettleJobSLA returned Decided && !Met, i.e. THIS call is the one that durably
+	// stamped sla_met=false and recorded the refund. A re-settle of an
+	// already-missed job returns Decided=false (sla_met is non-NULL, the FOR UPDATE
+	// query no-ops) and bails at the `!res.Decided` guard above without reaching
+	// here, so with three competing settle sites the miss is still counted exactly
+	// ONCE per job — the same replay-proof semantics that gate the event and the
+	// ledger row. This retires the "a dedicated metrics counter would live in
+	// metrics.go" follow-up the prior version of this function noted.
+	metrics.slaMisses.Add(1)
 	log.Printf("sla: job %s MISSED its speed-SLA by %ds — refunded $%.6f (once, ledger sla_refund)", jobID, res.OverBySecs, res.RefundUSD)
 }
 

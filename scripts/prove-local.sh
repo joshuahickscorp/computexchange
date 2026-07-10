@@ -73,6 +73,7 @@ ADMIN_KEY="dev-admin-key-0001"
 WORKER_TOKEN="dev-worker-token-0001"
 WORKER_TOKEN2="dev-worker-token-0002"
 SUPPLIER_ID="00000000-0000-0000-0000-0000000000a1"
+SUPPLIER_ID2="00000000-0000-0000-0000-0000000000a2"
 WORKER_ID="00000000-0000-0000-0000-0000000000b1"
 WORKER_ID2="00000000-0000-0000-0000-0000000000b2"
 BUYER_ID="00000000-0000-0000-0000-0000000000c1"
@@ -314,9 +315,13 @@ import json,sys,urllib.request
 url,key,model,jt,inp,redun,split,hwc=sys.argv[1:9]
 cons={"min_memory_gb":1}
 if hwc!="null": cons["hw_classes"]=json.loads(hwc)
+red=float(redun)
+verification={"redundancy_frac":red,"honeypot_frac":0,"payout_hold_secs":0}
+if red <= 0:
+    verification["skip_verification_floor"]=True
 body=json.dumps({"job_type":json.loads(jt),"model":{"kind":"gguf","ref":model},
   "params":{"split_size":int(split)},"constraints":cons,
-  "verification":{"redundancy_frac":float(redun),"honeypot_frac":0,"payout_hold_secs":0},
+  "verification":verification,
   "tier":"batch","input":inp}).encode()
 r=urllib.request.Request(url+"/v1/jobs",data=body,method="POST",
   headers={"Authorization":"Bearer "+key,"Content-Type":"application/json"})
@@ -505,7 +510,7 @@ PY
   if [ -n "$FILE_ID" ]; then
     BATCH_ID="$(curl -fsS -X POST "$CONTROL_URL/v1/batches" -H "Authorization: Bearer $API_KEY" \
         -H 'Content-Type: application/json' \
-        -d "{\"input_file_id\":\"$FILE_ID\",\"endpoint\":\"/v1/embeddings\",\"completion_window\":\"24h\"}" \
+        -d "{\"input_file_id\":\"$FILE_ID\",\"endpoint\":\"/v1/embeddings\",\"completion_window\":\"24h\",\"metadata\":{\"cx_skip_verification_floor\":true}}" \
         | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])' 2>/dev/null || true)"
   fi
   OUT_FILE=""
@@ -627,37 +632,58 @@ assert r["samples"]>=1 and r["p90_duration_ms"]>0, "no observed duration recorde
   # cross-worker within-class comparison. Proven on one box; real two-Mac hardware
   # is the remaining field test.
   say "    starting a second agent (local multi-supplier run)"
-  ( cd agent && CX_CONTROL_URL="$CONTROL_URL" CX_WORKER_TOKEN="dev-worker-token-0002" CX_STATUS_PATH="$ART/status2.json" \
-      exec "$ROOT/agent/target/release/cx-agent" run --config "$ART/agent.toml" ) >"$ART/agent2.log" 2>&1 &
+  cat >"$ART/agent2.toml" <<TOML
+control_url = "$CONTROL_URL"
+worker_token = "$WORKER_TOKEN2"
+supplier_id = "$SUPPLIER_ID2"
+max_cpu_pct = 90.0
+power_only = false
+min_payout_usd_per_hr = 0.0
+memory_headroom_gb = 0.0
+max_memory_pct = 0.0
+data_dir = "$ART/agent2-data"
+TOML
+  mkdir -p "$ART/agent2-data"
+  ( cd agent && CX_CONTROL_URL="$CONTROL_URL" CX_WORKER_TOKEN="$WORKER_TOKEN2" CX_STATUS_PATH="$ART/status2.json" \
+      exec "$ROOT/agent/target/release/cx-agent" run --config "$ART/agent2.toml" ) >"$ART/agent2.log" 2>&1 &
   AGENT2_PID=$!
-  # Wait for the SECOND agent to ACTUALLY register — it benchmarks on startup, then
-  # logs "registered". (Don't trust the seeded row's last_seen, which can still be
-  # within-window.) Then a batch_infer job (slow per task) with more tasks than one
-  # agent's bounded concurrency (≤4) GUARANTEES claimable tasks remain for the live
-  # second agent, and the job can't complete until its claimed task commits.
-  wait_for 150 "agent2 register" bash -c "grep -q registered '$ART/agent2.log'" || true
-  # Each task is a LONGER generation (max_tokens 96 + a prompt that keeps generating)
-  # so the job stays in flight long enough for the just-registered second agent to
-  # finish loading its model and claim ≥1 task — otherwise a warm agent1 can drain a
-  # handful of trivially-short tasks before agent2 is ready (a timing flake, not a
-  # real single-supplier result). 18 tasks > one agent's bounded concurrency (≤4)
-  # keeps work claimable across the window. Still asserts ≥2 DISTINCT workers.
-  MA_INPUT=""
-  for i in $(seq 1 18); do
-    MA_INPUT="$MA_INPUT{\"id\":\"$i\",\"prompt\":\"Write the numbers from 1 to 50 separated by commas.\"}
-"
+  # Wait for the SECOND agent to ACTUALLY register through the control plane. Logs are
+  # WARN-level by default, and the seeded worker row starts fresh enough to fool a
+  # liveness-only check, so the receipt waits for the worker-2 row to be rewritten by
+  # registration (version != seed) under the server-bound worker token.
+  AGENT2_READY=0
+  AGENT2_DEADLINE=$(( $(date +%s) + 180 ))
+  while :; do
+    kill -0 "$AGENT2_PID" 2>/dev/null || break
+    REG2="$(psql "$DATABASE_URL" -tAc "SELECT count(*) FROM workers WHERE id='$WORKER_ID2' AND version <> 'seed' AND last_seen_at > now() - interval '30 seconds'" 2>/dev/null | tr -d '[:space:]')"
+    if [ "${REG2:-0}" = "1" ]; then AGENT2_READY=1; break; fi
+    [ "$(date +%s)" -ge "$AGENT2_DEADLINE" ] && break
+    sleep 3
   done
-  MULTI_AGENT_JOB="$(submit_job llama-3.2-1b-instruct-q4 '{"type":"batch_infer","max_tokens":96,"temperature":0.0}' \
-    "$MA_INPUT" 0 1 null)"
-  if wait_job "$MULTI_AGENT_JOB" 300 multi-agent; then
-    NW="$(psql "$DATABASE_URL" -tAc "SELECT COUNT(DISTINCT worker_id) FROM tasks WHERE job_id='$MULTI_AGENT_JOB' AND status='complete' AND worker_id IS NOT NULL" 2>/dev/null | tr -d '[:space:]')"
-    if [ "${NW:-0}" -ge 2 ]; then
-      record PASS multi-agent "$NW distinct agents committed results for one job (local two-Mac proof)"
-    else
-      record FAIL multi-agent "only ${NW:-0} distinct worker committed (expected >=2 with two live agents)"
-    fi
+  if [ "$AGENT2_READY" != "1" ]; then
+    record FAIL multi-agent "second live agent did not register as worker $WORKER_ID2 before the proof window"
   else
-    record FAIL multi-agent "multi-agent job did not complete in 300s"
+    # Each task is a LONGER generation (max_tokens 96 + a prompt that keeps generating)
+    # so the job stays in flight long enough for both live agents to claim work. 18
+    # tasks > one agent's bounded concurrency (≤4) keeps work claimable across the
+    # window. Still asserts ≥2 DISTINCT workers.
+    MA_INPUT=""
+    for i in $(seq 1 18); do
+      MA_INPUT="$MA_INPUT{\"id\":\"$i\",\"prompt\":\"Write the numbers from 1 to 50 separated by commas.\"}
+"
+    done
+    MULTI_AGENT_JOB="$(submit_job llama-3.2-1b-instruct-q4 '{"type":"batch_infer","max_tokens":96,"temperature":0.0}' \
+      "$MA_INPUT" 0 1 null)"
+    if wait_job "$MULTI_AGENT_JOB" 300 multi-agent; then
+      NW="$(psql "$DATABASE_URL" -tAc "SELECT COUNT(DISTINCT worker_id) FROM tasks WHERE job_id='$MULTI_AGENT_JOB' AND status='complete' AND worker_id IS NOT NULL" 2>/dev/null | tr -d '[:space:]')"
+      if [ "${NW:-0}" -ge 2 ]; then
+        record PASS multi-agent "$NW distinct agents committed results for one job (local two-agent proof; physical two-Mac proof remains external)"
+      else
+        record FAIL multi-agent "only ${NW:-0} distinct worker committed (expected >=2 with two live agents)"
+      fi
+    else
+      record FAIL multi-agent "multi-agent job did not complete in 300s"
+    fi
   fi
 
   # Load test (Operations): a burst of jobs the two live agents must ALL drain to
@@ -673,6 +699,14 @@ assert r["samples"]>=1 and r["p90_duration_ms"]>0, "no observed duration recorde
     record PASS load-test "$LOAD_DONE/$LOAD_N burst-submitted jobs all completed under load"
   else
     record FAIL load-test "only $LOAD_DONE/$LOAD_N load-test jobs completed"
+  fi
+  # The second agent has done its proof work. Stop it before warm-routing so the
+  # one remaining warm worker's memory heartbeat can recover from the two-agent load.
+  if [ -n "$AGENT2_PID" ]; then
+    kill "$AGENT2_PID" 2>/dev/null || true
+    sleep 1
+    kill -9 "$AGENT2_PID" 2>/dev/null || true
+    AGENT2_PID=""
   fi
 
   # Backups + disaster recovery (Operations): pg_dump the live DB, restore it into a
@@ -827,11 +861,18 @@ assert "eligible_workers_now" in d["execution"], "supply"' 2>/dev/null; then
   # heartbeats, so we wait for a real warm+eligible moment rather than forcing DB state.
   WARM_OK=0
   WARM_ROWS=0
-  WARM_DEADLINE=$(( $(date +%s) + 75 ))
+  WARM_DETAIL=""
+  WARM_DEADLINE=$(( $(date +%s) + 120 ))
   while :; do
     WARM_ROWS="$(psql "$DATABASE_URL" -tAc "SELECT count(*) FROM worker_model_state WHERE worker_id='$WORKER_ID' AND model_id='all-minilm-l6-v2' AND last_seen_warm > now() - interval '60 seconds'" 2>/dev/null | tr -d '[:space:]')"
     if [ "${WARM_ROWS:-0}" -ge 1 ] 2>/dev/null; then
       WQOUT="$(curl -fsS -X POST "$CONTROL_URL/v1/quote" -H "Authorization: Bearer $API_KEY" -H 'Content-Type: application/json' -d "$QBODY" 2>/dev/null || true)"
+      WARM_DETAIL="$(printf '%s' "$WQOUT" | python3 -c 'import sys,json
+try:
+    d=json.load(sys.stdin); ex=d.get("execution",{})
+    print("eligible=%s warm=%s cold_start=%s oom=%s" % (ex.get("eligible_workers_now"), ex.get("warm_eligible_workers"), ex.get("cold_start_risk"), ex.get("oom_risk")))
+except Exception as e:
+    print("quote_decode_error=%s" % e)' 2>/dev/null || true)"
       if printf '%s' "$WQOUT" | python3 -c 'import sys,json
 d=json.load(sys.stdin)
 ex=d["execution"]
@@ -846,7 +887,7 @@ assert ex["cold_start_risk"]=="low", "cold-start should be low with warm supply,
   done
   [ "$WARM_OK" = "1" ] \
     && record PASS warm-routing "agent reported MiniLM warm (worker_model_state row); quote shows warm_eligible_workers>=1 + cold_start_risk=low (Plane D D3)" \
-    || record FAIL warm-routing "warm model state not recorded for the live worker, or the quote did not reflect warm supply (warm_rows=${WARM_ROWS:-0})"
+    || record FAIL warm-routing "warm model state not recorded for the live worker, or the quote did not reflect warm supply (warm_rows=${WARM_ROWS:-0} ${WARM_DETAIL:-no_quote_detail})"
 
   # Plane D D7 — quote-to-submit binding: quote an input, then submit it carrying the
   # quote_id. A matching, unexpired quote binds (202 + jobs.quote_id set + the invoice
@@ -929,11 +970,19 @@ INSERT INTO ledger_entries (kind, buyer_id, task_id, amount_usd, payout_status)
 SQL
   # Drive a worker poll (the live worker is also polling; the cap must block BOTH).
   curl -fsS "$CONTROL_URL/v1/worker/poll" -H "X-Worker-Token: $WORKER_TOKEN" >/dev/null 2>&1 || true
-  sleep 2  # let any in-flight live poll settle
-  BUD_TSTATUS="$(psql "$DATABASE_URL" -tAc "SELECT status FROM tasks WHERE id='$BUD_Q'" 2>/dev/null | tr -d '[:space:]')"
-  BUD_STATE="$(psql "$DATABASE_URL" -tAc "SELECT budget_state FROM jobs WHERE id='$BUD_JOB'" 2>/dev/null | tr -d '[:space:]')"
-  BUD_EV="$(psql "$DATABASE_URL" -tAc "SELECT count(*) FROM job_events WHERE job_id='$BUD_JOB' AND event='budget_stopped'" 2>/dev/null | tr -d '[:space:]')"
-  BUD_REFUND="$(psql "$DATABASE_URL" -tAc "SELECT count(*) FROM ledger_entries WHERE kind='refund' AND task_id IN (SELECT id FROM tasks WHERE job_id='$BUD_JOB')" 2>/dev/null | tr -d '[:space:]')"
+  # The claim path prevents dispatch immediately; the buyer-visible state/event is
+  # intentionally moved to the budget-stop ticker (7s cadence), so wait for the real
+  # background sweep instead of checking after an arbitrary 2s nap.
+  BUD_DEADLINE=$(( $(date +%s) + 25 ))
+  while :; do
+    BUD_TSTATUS="$(psql "$DATABASE_URL" -tAc "SELECT status FROM tasks WHERE id='$BUD_Q'" 2>/dev/null | tr -d '[:space:]')"
+    BUD_STATE="$(psql "$DATABASE_URL" -tAc "SELECT budget_state FROM jobs WHERE id='$BUD_JOB'" 2>/dev/null | tr -d '[:space:]')"
+    BUD_EV="$(psql "$DATABASE_URL" -tAc "SELECT count(*) FROM job_events WHERE job_id='$BUD_JOB' AND event='budget_stopped'" 2>/dev/null | tr -d '[:space:]')"
+    BUD_REFUND="$(psql "$DATABASE_URL" -tAc "SELECT count(*) FROM ledger_entries WHERE kind='refund' AND task_id IN (SELECT id FROM tasks WHERE job_id='$BUD_JOB')" 2>/dev/null | tr -d '[:space:]')"
+    [ "$BUD_TSTATUS" = "queued" ] && [ "$BUD_STATE" = "paused_for_budget" ] && [ "${BUD_EV:-0}" -ge 1 ] 2>/dev/null && [ "${BUD_REFUND:-0}" = "0" ] && break
+    [ "$(date +%s)" -ge "$BUD_DEADLINE" ] && break
+    sleep 1
+  done
   if [ "$BUD_TSTATUS" = "queued" ] && [ "$BUD_STATE" = "paused_for_budget" ] && [ "${BUD_EV:-0}" -ge 1 ] 2>/dev/null && [ "${BUD_REFUND:-0}" = "0" ]; then
     record PASS budget-cap "capped job stopped before breach: task stayed queued, budget_state=paused_for_budget, budget_stopped event, no refund"
   else
@@ -1007,7 +1056,7 @@ print("ok" if parked_ok and nowait_ok else "no")
   # /admin (checked below). A missing file is an honest 404, so this can SKIP when
   # web/index.html is absent at the control CWD, mirroring the admin-console check.
   root_body="$(curl -fsS "$CONTROL_URL/" 2>/dev/null || true)"
-  if printf '%s' "$root_body" | grep -qi 'SITE-CLAIMS'; then
+  if grep -qi 'SITE-CLAIMS' <<<"$root_body"; then
     record PASS root-site "public site served at / (SITE_PATH=web/index.html)"
   elif [ -z "$root_body" ] && [ ! -f web/index.html ]; then
     record SKIP root-site "site not served (web/index.html missing at control CWD)"
@@ -1020,7 +1069,7 @@ print("ok" if parked_ok and nowait_ok else "no")
   # Buffered (no curl|grep pipe): grep -q exiting early SIGPIPEs curl under
   # pipefail, which mis-reported the multi-MB console page as not served.
   admin_body="$(curl -fsS "$CONTROL_URL/admin" 2>/dev/null || true)"
-  if printf '%s' "$admin_body" | grep -qiE 'control room|passkey'; then
+  if grep -qiE 'control room|passkey' <<<"$admin_body"; then
     record PASS admin-console "Control Room served at /admin (ADMIN_PATH=web/admin.html)"
   else
     record SKIP admin-console "admin console not served (web/admin.html missing at control CWD)"

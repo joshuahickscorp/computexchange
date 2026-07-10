@@ -634,6 +634,14 @@ func (wk *Workers) raceEndgameTails(ctx context.Context) error {
 			return ierr
 		}
 		metrics.hedges.Add(1) // an endgame race IS a hedge dispatch (same machinery, same cap)
+		// Speed Lane wave 1B: also count the endgame-race SUBSET of that hedge, at
+		// the exact same event site as metrics.hedges above — i.e. only once the
+		// duplicate is REALLY inserted (InsertHedgeTask returned no error), never on
+		// a candidate merely considered (cold-model skip and no-idle-peer skip both
+		// `continue` above without reaching here). cx_hedges_total cannot tell an
+		// operator whether a hedge came from the ordinary 90s straggler path or from
+		// the seconds-matter endgame race; this splits that out.
+		metrics.endgameRaces.Add(1)
 		log.Printf("workers: endgame race: duplicated slowest running task %s (chunk %d of job %s, type %s) onto idle fastest same-class peer %s — zero unclaimed tasks left, worker %s is the job's wall-clock (fan-out planner wave 1B)",
 			s.TaskID, s.ChunkIndex, s.JobID, s.JobType, peer, s.WorkerID)
 	}

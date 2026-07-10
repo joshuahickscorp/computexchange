@@ -907,7 +907,13 @@ func (s *Server) createJob(ctx context.Context, buyerID uuid.UUID, sub jobSubmit
 		nHoneypot = 1
 	}
 	if nHoneypot > 0 {
-		hps, herr := s.store.AvailableSeedHoneypots(ctx, sub.JobType.Type, nHoneypot)
+		// Pass the job's model + max_tokens so the injection-time param/model guard
+		// (AvailableSeedHoneypots) only draws a byte-exact seed honeypot for a job it
+		// is actually byte-valid for: a batch_infer job on a DIFFERENT model, or with
+		// max_tokens below the seed's captured floor, would make an HONEST same-class
+		// worker produce different bytes and get wrongly quarantined. A tolerant seed
+		// (NULL bounds) is unaffected — it still matches on job_type alone.
+		hps, herr := s.store.AvailableSeedHoneypots(ctx, sub.JobType.Type, sub.Model.Ref, sub.JobType.MaxTokens, nHoneypot)
 		if herr != nil {
 			return JobSubmitResponse{}, &httpError{http.StatusInternalServerError, "loading honeypots: " + herr.Error()}
 		}
@@ -979,10 +985,74 @@ func (s *Server) createJob(ctx context.Context, buyerID uuid.UUID, sub jobSubmit
 	// model price_per_1k × representative units/hr (see offeredRateUsdHr). The
 	// claim's min-payout gate compares it to the worker's reservation price.
 	offeredRate := s.offeredRateUsdHr(ctx, sub.JobType.Type, sub.Model.Ref)
-	// eta_secs: a simple queue-depth/throughput estimate (see s.estimateETASecs),
-	// model-aware so a (job_type, model) with enough committed history uses its
-	// observed p90 per-task duration instead of the static target (Plane D D6).
-	etaSecs := s.estimateETASecs(ctx, sub.JobType.Type, sub.Model.Ref, len(tasks))
+	// eta_secs: a simple queue-depth/throughput estimate, model-aware so a
+	// (job_type, model) with enough committed history uses its observed p90
+	// per-task duration instead of the static target (Plane D D6). We call
+	// etaBandSecs (the source estimateETASecs wraps) instead of estimateETASecs so
+	// the SAME single call ALSO yields the planner's conservative band +
+	// plannerBacked flag for the substrate-routing decision below — the p50 (eta)
+	// is byte-identical to what estimateETASecs would have returned, so eta_secs is
+	// unchanged.
+	//
+	// NOTE (quote-vs-submit ETA parity, deferred): the quote path additionally
+	// derates this p50 to the sustained pace for long batch jobs
+	// (quote.go: sustainedBatchETASecs), which createJob does NOT — so the quote
+	// reads a longer ETA than the submit for the same input. Applying the derating
+	// here is NOT the fix: the two paths ALSO compute different task counts (the
+	// quote's scanned-sample split vs the submit's exact-stream split), so their
+	// base p50 differs BEFORE any derating (measured: quote base ~137s vs submit
+	// base ~182s for the same 500-record job). Deracting submit alone pushed it
+	// FURTHER from the quote and into the wrong direction (submit slower than
+	// quoted). Real parity requires unifying the split/task-count computation AND
+	// the derating together — tracked as a separate task, not bolted on here.
+	etaSecs, conservativeSecs, plannerBacked := s.etaBandSecs(ctx, sub.JobType.Type, sub.Model.Ref, len(tasks))
+
+	// Substrate routing (Speed Lane road-to-ten rubric dimension 5, routing.go +
+	// quote.go): read the job's SHAPE and say which substrate runs it fastest —
+	// fleet, a lit GPU lane, or an honest GPU recommendation — grounded in the
+	// measured 2026-07-06 A100 sweep. This MIRRORS quote.go's buildQuote routing
+	// block EXACTLY: same generativeJobType + records>0 honesty guard (the sweep
+	// measured generative decode only, so every other shape gets NO routing block
+	// rather than an unmeasured guess), same DecideSubstrate inputs, same
+	// QuoteRouting mapping and [MODELED] Basis label. avgLineBytes is EXACT here —
+	// derived from the full-stream totalBytes/totalRecords the split pass already
+	// produced (not the quote path's whole-input scan, but the same exact
+	// per-record byte average) — so the routing block on the submitted job agrees
+	// with what the quote showed for the same input. A nil routing block (the
+	// non-generative / empty-input boundary) persists no columns and returns no
+	// block, exactly as the quote omits it.
+	var routing *QuoteRouting
+	if generativeJobType(sub.JobType.Type) && totalRecords > 0 {
+		// totalRecords > 0 is guaranteed by the guard above, so this is the exact
+		// per-record byte average with no divide-by-zero guard needed.
+		avgLineBytes := float64(totalBytes) / float64(totalRecords)
+		var modelMinMem float32
+		if m, merr := s.store.GetModel(ctx, sub.Model.Ref); merr == nil {
+			modelMinMem = m.MinMemoryGB
+		}
+		// Effective memory floor for the supply query: the model's catalogue floor
+		// or the buyer's constraint, whichever is higher (a job implicitly needs at
+		// least the model's floor) — mirrors the quote path's minMem.
+		vllmMinMem := sub.Constraints.MinMemoryGB
+		if modelMinMem > vllmMinMem {
+			vllmMinMem = modelMinMem
+		}
+		// LIVE lit-lane supply (see quote.go's EligibleVLLMWorkerCount): real
+		// online vLLM workers eligible for this job. Error → 0 (honest "no lit
+		// lane"). Makes the submit path's routing block agree with the quote's.
+		litGPU, _ := s.store.EligibleVLLMWorkerCount(ctx, sub.JobType.Type, sub.Model.Ref, vllmMinMem)
+		dec := DecideSubstrate(totalRecords, sub.Tier,
+			routingModelClass(sub.Model.Ref, modelMinMem),
+			tokensPerItemEstimate(sub.JobType.MaxTokens, avgLineBytes),
+			etaSecs, conservativeSecs, plannerBacked, litGPU)
+		routing = &QuoteRouting{
+			Substrate:      dec.Substrate,
+			Reason:         dec.Reason,
+			FleetETASecs:   dec.FleetSecs,
+			GPUModeledSecs: dec.GPUModeledSecs,
+			Basis:          quoteRoutingBasis,
+		}
+	}
 
 	jr := &jobRow{
 		ID:                 jobID,
@@ -1011,6 +1081,15 @@ func (s *Server) createJob(ctx context.Context, buyerID uuid.UUID, sub jobSubmit
 		FirmQuoteMaxUSD:    firmQuoteMaxUSD,  // the real charge ceiling (0 = not firm → persisted NULL)
 		SLAGuaranteeSecs:   slaGuaranteeSecs, // wave 2A time guarantee (0 = none → persisted NULL)
 		SLAPremiumUSD:      slaPremiumUSD,    // wave 2A premium = the miss remedy (0 = none → NULL)
+	}
+	// Persist the substrate-routing decision (rubric dimension 5) on the job row so
+	// the clearing receipt can project it deterministically. All-or-nothing: a nil
+	// routing block leaves every routing column NULL (the honesty boundary).
+	if routing != nil {
+		jr.RoutingSubstrate = routing.Substrate
+		jr.RoutingReason = routing.Reason
+		jr.RoutingFleetETASecs = routing.FleetETASecs
+		jr.RoutingGPUModeledSecs = routing.GPUModeledSecs
 	}
 	if err := s.store.CreateJobWithTasks(ctx, jr, tasks); err != nil {
 		return JobSubmitResponse{}, &httpError{http.StatusInternalServerError, "failed to create job: " + err.Error()}
@@ -1053,6 +1132,16 @@ func (s *Server) createJob(ctx context.Context, buyerID uuid.UUID, sub jobSubmit
 			fmt.Sprintf("Speed SLA bound: results guaranteed within %ds of submission · premium $%.6f is refunded automatically on a miss", slaGuaranteeSecs, slaPremiumUSD), nil)
 	}
 
+	// Record the substrate-routing decision on the timeline (rubric dimension 5):
+	// the buyer sees "we ran it on X because Y" in their own event stream at
+	// submit, not only on the receipt. Best-effort like the events above; only
+	// when a routing block was actually decided (the generative + records>0
+	// honesty boundary). The Reason carries the measured basis + [MODELED] label.
+	if routing != nil {
+		_ = s.store.InsertJobEvent(ctx, jobID, nil, "routed",
+			fmt.Sprintf("routed to %s: %s", routing.Substrate, routing.Reason), nil)
+	}
+
 	// Estimated completion from the queue-depth/throughput ETA (priority work is
 	// estimated to clear faster — see estimateETASecs), with a tier floor so the
 	// human-facing RFC3339 timestamp stays sane.
@@ -1066,6 +1155,7 @@ func (s *Server) createJob(ctx context.Context, buyerID uuid.UUID, sub jobSubmit
 		EstimatedUSD:        estimate,
 		ETASecs:             etaSecs,
 		EstimatedCompletion: time.Now().Add(dur).UTC().Format(time.RFC3339),
+		Routing:             routing, // nil for non-generative / empty-input (honesty boundary)
 	}, nil
 }
 
@@ -2583,7 +2673,7 @@ func (s *Server) handleJobReceipt(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, terr.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, assembleClearingReceipt(id, inv.Status, inv, verif, classes, tasks))
+	writeJSON(w, http.StatusOK, assembleClearingReceipt(id, inv.Status, inv, verif, classes, tasks, receiptRouting(inv)))
 }
 
 // secureHTMLHeaders sets defensive headers on same-origin HTML responses:
@@ -3157,9 +3247,13 @@ func perTaskSecsFromP90(p90ms int64) int {
 
 // estimateETASecs is a simple queue-depth/throughput estimate: the time for this
 // job's tasks plus everything already queued ahead of them to drain across the
-// live fleet. Kept as the one-value wrapper (same signature as ever) over
-// etaBandSecs below — createJob and every other caller that only needs the p50
-// stays byte-identical.
+// live fleet. The p50-only wrapper over etaBandSecs below — its byte-identical p50
+// is the conceptual anchor the surrounding comments (and quote.go's
+// sustained-derating notes) refer to by name. createJob itself now calls
+// etaBandSecs directly (it needs the conservative band + plannerBacked for the
+// substrate-routing decision), so this accessor currently has no in-tree caller;
+// it is retained as the documented single-value entry point rather than inlining
+// the wrap at every future p50-only site.
 func (s *Server) estimateETASecs(ctx context.Context, jobType, modelRef string, nTasks int) int {
 	eta, _, _ := s.etaBandSecs(ctx, jobType, modelRef, nTasks)
 	return eta

@@ -6808,6 +6808,78 @@ mod tests {
         });
     }
 
+    /// LIVE-POD proof (opt-in, `#[ignore]`d): drives the REAL `VllmRunner::run` soak
+    /// path against a REAL pinned vLLM server — the mock test above proves the mapping
+    /// code, this proves it against genuine vLLM output. Runs only when `CX_VLLM_LIVE_URL`
+    /// points at a reachable pinned server (e.g. an SSH tunnel to a RunPod A100 serving
+    /// `--served-model-name qwen2.5-1.5b-instruct` at greedy/temp=0). Asserts a real
+    /// `BatchInferResult` AND byte-stability of the runner's OWN output across two runs
+    /// (the within-run half of the docs/VLLM_LANE.md soak, exercised end-to-end through
+    /// the production runner rather than a raw curl). Invoke:
+    ///   CX_VLLM_LIVE_URL=http://127.0.0.1:8000 \
+    ///     cargo test -p cx-agent --no-default-features \
+    ///     vllm_runner_soak_mode_against_live_pod -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn vllm_runner_soak_mode_against_live_pod() {
+        let live_url = match std::env::var("CX_VLLM_LIVE_URL") {
+            Ok(u) if !u.trim().is_empty() => u,
+            _ => {
+                eprintln!("SKIP: CX_VLLM_LIVE_URL unset (needs a reachable pinned vLLM server)");
+                return;
+            }
+        };
+        let _lock = vllm_env_lock().lock().unwrap();
+        let _guard = VllmEnvGuard;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            std::env::set_var(VLLM_SERVER_ENV, &live_url);
+            std::env::set_var(VLLM_SOAK_MODE_ENV, "1");
+
+            // model_ref must reduce (short_model_id) to the pod's served model name.
+            let mut manifest = test_manifest(JobType::BatchInfer {
+                max_tokens: 64,
+                temperature: 0.0,
+            });
+            manifest.model.model_ref = "qwen2.5-1.5b-instruct".to_string();
+            let pool = ModelPool::new();
+            let input = b"{\"id\":\"a\",\"prompt\":\"The capital of France is\"}\n{\"id\":\"b\",\"prompt\":\"Water boils at\"}\n";
+
+            let run = || async {
+                VllmRunner
+                    .run(&manifest, input, &pool)
+                    .await
+                    .expect("vllm soak-mode run should succeed against the live pod")
+            };
+            let out1 = run().await;
+            let out2 = run().await;
+
+            let v: serde_json::Value = serde_json::from_slice(&out1.result).unwrap();
+            assert_eq!(v["job_type"], "batch_infer", "job_type contract");
+            assert_eq!(
+                v["completions"].as_array().unwrap().len(),
+                2,
+                "one completion per prompt"
+            );
+            assert!(
+                !v["completions"][0]["text"].as_str().unwrap().is_empty(),
+                "the live pod produced a non-empty completion"
+            );
+            assert!(out1.tokens_used > 0, "real tokens were generated");
+            // Byte-stability through the REAL runner against the REAL pod (greedy).
+            assert_eq!(
+                out1.result, out2.result,
+                "VllmRunner output must be byte-identical across two runs (greedy determinism)"
+            );
+            eprintln!(
+                "LIVE-POD OK: {} completions, {} tokens, byte-stable across 2 runs; first='{}'",
+                v["completions"].as_array().unwrap().len(),
+                out1.tokens_used,
+                v["completions"][0]["text"].as_str().unwrap().replace('\n', " ")
+            );
+        });
+    }
+
     /// The general-compute lane: a `custom` job routes to CustomRunner (claimed via
     /// `can_run`, not the AI runners), and `run` validates input HONESTLY — an
     /// image-less job is rejected before any container is spawned, never a fabricated

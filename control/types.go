@@ -341,6 +341,16 @@ type JobSubmitResponse struct {
 	EstimatedUSD        float64   `json:"estimated_usd"`
 	ETASecs             int       `json:"eta_secs"`
 	EstimatedCompletion string    `json:"estimated_completion"` // RFC3339
+	// Routing is the SUBSTRATE-ROUTING decision (Speed Lane road-to-ten rubric
+	// dimension 5, control/routing.go + quote.go): which substrate this job's
+	// SHAPE favors — fleet, a lit GPU lane, or an honest GPU recommendation — with
+	// the measured basis and the compared numbers stated plainly, MIRRORING the
+	// quote's routing block for the same input. Present only for GENERATIVE jobs
+	// with records > 0 (the A100 sweep measured generative decode only, so every
+	// other shape gets NO block rather than an unmeasured guess). It is a routing
+	// STATEMENT, never a refusal: a gpu_recommend job still runs on the fleet at
+	// the quoted eta_secs — the eta_secs, pricing, and SLA above are unchanged.
+	Routing *QuoteRouting `json:"routing,omitempty"`
 }
 
 // JobStatus is the GET /v1/jobs/{id} body. ETASecs is the submit-time

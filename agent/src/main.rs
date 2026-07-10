@@ -2130,7 +2130,7 @@ async fn run_agent(mut cfg: AgentConfig) -> Result<()> {
     // away. `ModelPool` is cheap to clone (Arc-backed); reused, not recreated,
     // below.
     let pool = ModelPool::new();
-    let cap = hardware::detect_and_benchmark(
+    let mut cap = hardware::detect_and_benchmark(
         cfg.supplier_id,
         AGENT_VERSION,
         cfg.min_payout_usd_per_hr,
@@ -2140,7 +2140,7 @@ async fn run_agent(mut cfg: AgentConfig) -> Result<()> {
         &pool,
     )
     .await;
-    let worker_id = cap.worker_id;
+    let advertised_worker_id = cap.worker_id;
     let permits = cfg.concurrency(cap.memory_gb);
 
     let client = ControlPlaneClient::new(cfg.control_url.clone(), cfg.worker_token.clone())
@@ -2161,9 +2161,15 @@ async fn run_agent(mut cfg: AgentConfig) -> Result<()> {
         .build()
         .context("building S3 client")?;
 
-    tracing::info!(%worker_id, control = %cfg.control_url, max_concurrent_tasks = permits, "registering with control plane");
+    tracing::info!(worker_id = %advertised_worker_id, control = %cfg.control_url, max_concurrent_tasks = permits, "registering with control plane");
     let confirmed = client.register(&cap).await.context("registration failed")?;
-    tracing::info!(worker_id = %confirmed.worker_id, "registered");
+    // The control plane binds worker/supplier identity from the token and echoes the
+    // authoritative ids. Use those ids for every receipt/status/heartbeat after
+    // registration; the locally generated id is only a pre-registration placeholder.
+    cap.worker_id = confirmed.worker_id;
+    cap.supplier_id = confirmed.supplier_id;
+    let worker_id = cap.worker_id;
+    tracing::info!(worker_id = %worker_id, supplier_id = %cap.supplier_id, "registered");
 
     // Menu-bar status surface: write the status file now (idle), then on every
     // heartbeat and task transition. The macOS app reads it (see macapp/).

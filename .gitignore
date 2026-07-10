@@ -28,6 +28,7 @@ scripts/*.log
 # ── Secrets / local config ───────────────────────────────────────────────────
 .env
 .env.local
+.secrets/
 # The agent's runtime config holds a worker token — commit agent.example.toml,
 # never the real one.
 agent/agent.toml
@@ -82,3 +83,13 @@ render/cache/
 # agent worktrees / local tooling
 .claude/
 web/admin-demo.html
+
+# rust crate build dirs (spec-engine, token-spec-poc, renderer)
+target/
+
+# python bytecode
+__pycache__/
+*.pyc
+
+# regenerable render diagnostics (pixel artifacts; the builders + ledgers are the trail)
+diag_images/

@@ -84,6 +84,32 @@ type metricsState struct {
 	// an operator see how often the cold-to-cold hedge storm is actually being
 	// averted in real traffic, not just assumed from the code.
 	coldModelHedgesSuppressed atomic.Int64
+	// Speed Lane wave 1B (planner.go / raceEndgameTails in workers.go): a REAL
+	// endgame race — a duplicate of the slowest running chunk actually INSERTED
+	// onto an idle warm same-class peer the moment a job's queue emptied, instead
+	// of waiting out the 90s hedge window. Every such insert already bumps
+	// cx_hedges_total (an endgame race IS a hedge dispatch, same InsertHedgeTask
+	// machinery + shared cap), but that counter cannot tell an operator whether a
+	// hedge fired from the ordinary 90s straggler path or from the seconds-matter
+	// endgame race — this splits the endgame-race subset out, so the fan-out
+	// planner's tail-latency work has its own event-site receipt in real traffic
+	// (counted once per duplicate inserted, exactly like metrics.hedges, NOT once
+	// per candidate considered — a race suppressed for a cold model or skipped for
+	// want of an idle peer never bumps this).
+	endgameRaces atomic.Int64
+	// Speed Lane wave 2A (docs/speed-lane-reports/SLA_QUOTE_WAVE2A.md,
+	// collect.go's SettleJobSLA / settleSLAOutcome): a job's bound speed-SLA
+	// settled as MISSED — the buyer-visible span (submit → merged artifact)
+	// exceeded the guarantee, sla_met was durably stamped false, the once-only
+	// sla_refund credit recorded, and the sla_missed timeline event emitted.
+	// Until now the miss's only observability was that log line + the ledger row +
+	// the job event (settleSLAOutcome even carried a "a dedicated metrics counter
+	// would live in metrics.go" note deferring this) — so a dashboard had no way
+	// to alert on the SLA miss RATE. Counted ONCE per job's miss: bumped only on
+	// the SettleJobSLA call that ACTUALLY stamped the miss (Decided && !Met), so a
+	// re-settle that finds sla_met already false — the idempotent common case with
+	// three competing settle sites — never double-counts.
+	slaMisses atomic.Int64
 }
 
 var metrics metricsState
@@ -302,6 +328,8 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writeCounter(w, "cx_hash_trusted_redundancy_total", "Redundancy comparisons that trusted a worker/peer SHA-256 match instead of re-fetching the peer's result object from S3 inside the commit request.", metrics.hashTrustedRedundancy.Load())
 	writeCounter(w, "cx_no_peer_requeues_total", "Wedged tasks requeued by the class-aware no-peer watchdog (heartbeating worker holding a task with no eligible same-class peer), escaping the 30-minute stale reaper.", metrics.noPeerRequeues.Load())
 	writeCounter(w, "cx_cold_model_hedges_suppressed_total", "Straggler hedges suppressed because the slowness was an expected cold GGUF load (worker not yet warm on the model), averting a spurious cold-to-cold hedge storm.", metrics.coldModelHedgesSuppressed.Load())
+	writeCounter(w, "cx_endgame_races_total", "Endgame-race duplicates actually inserted onto an idle warm same-class peer (Speed Lane wave 1B): the slowest running chunk raced the moment a job's queue emptied, ahead of the 90s hedge window. A subset of cx_hedges_total, split out so the fan-out planner's tail-latency work has its own signal.", metrics.endgameRaces.Load())
+	writeCounter(w, "cx_sla_misses_total", "Jobs whose bound speed-SLA settled as MISSED (Speed Lane wave 2A): the buyer-visible span exceeded the guarantee, sla_met stamped false, the once-only sla_refund credit recorded. Counted once per job (only the settle call that decided the miss bumps it).", metrics.slaMisses.Load())
 	writeCounter(w, "cx_no_hedge_peer_total", "Dispatch-time heterogeneous-fleet degradation: a redundancy/hedge peer was needed but no eligible same-class peer existed on the fleet (silent loss of hedging + warm-routing). Alerted on by monitoring/alerts.yml.", NoHedgePeerCount())
 
 	// Bound the metric DB queries; widened to 10s so a slow scrape under load still

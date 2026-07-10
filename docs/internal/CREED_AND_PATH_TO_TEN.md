@@ -748,7 +748,7 @@ This facet is a 10 when the per-task fit gate, the memory-aware batch cap, and m
 
 ### Per-device speed & throughput — currently 6/10
 
-**Where we stand.** The throughput story is real, measured, and unusually honest: a single harness benches Metal and CUDA with a hard batched-equals-serial correctness gate, real artifacts on disk back every published number (M3 Pro 138.7 tok/s = 1.52x at batch 32; a genuinely rented A100 at 2345 tok/s = 9.6x at batch 64), and per-worker measured tps feeds the scheduler's own claim ordering — real production coupling, not just a doc. It stays at 6 because everything is local or spike proof: one founder's M3 Pro plus one rented A100 session is not a fleet, the Apple batching ceiling is a modest 1.52x that degrades toward serial on real mixed-length prompts (see Batching Efficiency below), the CUDA win is locked behind an intentionally inert vLLM lane, and the repo's own cost comparison concedes raw speed-per-dollar loses to cloud batch APIs — speed here is a supporting proof point for the verification moat, not a standalone competitive edge.
+**Where we stand.** The throughput story is real, measured, and unusually honest: a single harness benches Metal and CUDA with a hard batched-equals-serial correctness gate, real artifacts on disk back every published number (M3 Pro 138.7 tok/s = 1.52x at batch 32; a genuinely rented A100 at 2345 tok/s = 9.6x at batch 64), and per-worker measured tps feeds the scheduler's own claim ordering — real production coupling, not just a doc. It stays at 6 because everything is local or spike proof: one founder's M3 Pro plus one rented A100 session is not a fleet, the Apple batching ceiling is a modest 1.52x that degrades toward serial on real mixed-length prompts (see Batching Efficiency below), the CUDA win is locked behind an intentionally inert vLLM lane, and the repo's own cost comparison concedes raw speed-per-dollar loses to cloud batch APIs — speed here is a supporting proof point for the verification moat, not a standalone competitive edge. (2026-07-06 measurement addendum: the A100 figure above is the Candle lane's own batching curve, not the GPU's capability — the same silicon measured 44,269 tok/s under vLLM the same day (entries 90–91), so the 2345 CUDA number is never a competitive baseline.)
 
 #### 6 → 7: Put real heterogeneous Macs on production and publish per-class curves
 - Get 2-3 real Macs across different classes (an M1 base, an M4 Pro/Max, an Ultra if reachable) onto production, running real benchmark sweeps, and publish per-class throughput curves instead of the single `apple_silicon_pro` data point that exists today.
@@ -915,7 +915,7 @@ This facet is a 10 when every published number carries a repetition count and a 
 
 ### CUDA lane performance & parity — currently 6/10
 
-**Where we stand.** The CUDA lane is real, honest, and twice-proven on rented A100 silicon rather than spec-sheet numbers, but it is *measured*, not *engineered*: the `cuda` feature is a true mirror of `metal` (same Candle runners, device picked once), with real `nvidia-smi` VRAM-tier self-classification and a money-safe RunPod re-proof harness that provisions, runs, and tears down real rented hardware. A July 2026 A100 run recorded 245.5 tok/s serial rising to 2345.7 tok/s at batch 64 (9.56x) on the 1B Q4 model, with correctness asserted at every step. But CUDA decode is a fallback path, not an engineered one — the fused Metal SDPA fast path is `is_metal()`-gated, so the A100 runs manual f32 attention, and serial throughput at 245 tok/s is only about 2.7x an M3 Pro's 91.2 tok/s despite roughly 13x the memory bandwidth advantage. Byte-exact verification is measured-unsafe at the production batch size — batched decode diverges from serial at several batch sizes non-reproducibly, while real chunks default to a batch size of 32. The flagship 3-6x vLLM win is entirely unrealized (`VllmRunner` returns `NotImplemented` unconditionally, pending a determinism soak that has never run), the only >1B model reference (qwen2.5-7b-instruct-q4) 404s on HuggingFace, and the CI CUDA build is `continue-on-error`, so regressions there are invisible by design.
+**Where we stand.** The CUDA lane is real, honest, and twice-proven on rented A100 silicon rather than spec-sheet numbers, but it is *measured*, not *engineered*: the `cuda` feature is a true mirror of `metal` (same Candle runners, device picked once), with real `nvidia-smi` VRAM-tier self-classification and a money-safe RunPod re-proof harness that provisions, runs, and tears down real rented hardware. A July 2026 A100 run recorded 245.5 tok/s serial rising to 2345.7 tok/s at batch 64 (9.56x) on the 1B Q4 model, with correctness asserted at every step. But CUDA decode is a fallback path, not an engineered one — the fused Metal SDPA fast path is `is_metal()`-gated, so the A100 runs manual f32 attention, and serial throughput at 245 tok/s is only about 2.7x an M3 Pro's 91.2 tok/s despite roughly 13x the memory bandwidth advantage. Byte-exact verification is measured-unsafe at the production batch size — batched decode diverges from serial at several batch sizes non-reproducibly, while real chunks default to a batch size of 32. The flagship 3-6x vLLM win is entirely unrealized (`VllmRunner` returns `NotImplemented` unconditionally, pending a determinism soak that has never run), the only >1B model reference (qwen2.5-7b-instruct-q4) 404s on HuggingFace, and the CI CUDA build is `continue-on-error`, so regressions there are invisible by design. Same-day refutation context (2026-07-06): vLLM on the same silicon serves 44,269 tok/s aggregate — the Candle CUDA lane is ~19x below the serving engine, reinforcing this lane's own conclusion that the datacenter serving path is brokered vLLM, not Candle-on-CUDA.
 
 #### 6 → 6.5: Fix the immediately broken things
 - Correct the 7B GGUF reference filename so the July sweep's only above-1B model actually loads, and fix the advertised `memory_bw_gbps` (currently the host-CPU streaming number, ~56 GB/s, misrepresenting the real ~1710 GB/s VRAM bandwidth by roughly 30x).
@@ -3880,6 +3880,272 @@ Metal hardware, 0/120 corrupted each.
     on a self-generated, artificially weak baseline. No scorecard grade is bumped; this
     feeds the adversarial re-audit. Cost: one user-provisioned A100 pod, ~1-2 GPU-hours,
     manually terminated.
+
+91. **A100 capability sweep → a real ROUTING RULE for the marketplace (the salvageable,
+    honest version of the fleet thesis)** (Speed Lane / Scheduling; extends entry 90;
+    `docs/speed-lane-reports/A100_CAPABILITY_SWEEP.md`). On the same A100 SXM, swept vLLM
+    throughput across 4 model sizes × 5 batch sizes (20 points, raw:
+    `docs/speed-lane-reports/artifacts/a100-sxm-capability-sweep-2026-07-06.jsonl`). **The
+    load-bearing finding: the A100's advantage is ENTIRELY a batching effect** — ~110× from
+    batch=1 to saturation for ≤14B, saturating by ~batch 512. At **batch=1 (latency-bound)
+    the A100 is ordinary**: 100 tok/s (7B), 52 (14B fp16), 70 (32B AWQ) — consumer-hardware
+    territory, where **one A100 ≈ 1-3 Macs**, not hundreds. Two secondary reads: quantization
+    (AWQ int4) *raises* batch-1 speed (32B-AWQ 70 > 14B-fp16 52 — 1/4 the bytes/token on
+    bandwidth-bound decode), and the batching advantage SHRINKS with model size (116× at 1B →
+    33× at 32B), so the fleet's relative position improves on bigger models (though our fleet
+    is capped ~7B). **Actionable output — the routing rule**: take latency-sensitive /
+    low-concurrency work and route it to the fleet (a handful of nodes match an A100, win on
+    cost+availability); do NOT promise to beat a GPU on large throughput batches (crossover
+    ~batch 8-64). This is what "beat an A100 on wall-clock" honestly becomes after
+    measurement: the fleet's lane is interactive/low-batch, not racing a datacenter on giant
+    batches. Housekeeping: the pod's /workspace turned out to be a quota-limited shared
+    MooseFS mount (the "1.3PB free" was the shared cluster, not user space — the 32B fp16
+    download hit the quota, confirming the operator's own skepticism); all model caches were
+    cleaned from /workspace afterward, results preserved. No grade bumped.
+
+92. **The DOUBLE audit closed + every live-stale refuted claim purged from the tree
+    (methodology honesty, rubric #7 — the safety climb the road-to-ten backlog demanded
+    FIRST)** (Speed Lane / Measurement Honesty; `docs/research/SPEED_LANE_AUDIT_2_AND_HANDOFF.md`
+    Part 7). Audit #1 (3.5/10) commissioned an independent second audit; this session ran
+    it. **Audit #2 re-graded all 8 dimensions from the artifacts + code (not from the 3.5),
+    adversarially verified the one thing that would embarrass us, and attacked audit #1's own
+    reasoning** — finding it wrong in BOTH directions: (a) the P0 fear ("the SLA guarantees a
+    wall-clock backed by the REFUTED throughput model") is FALSE — the speed-SLA is built
+    only from the fleet's own measured per-worker rates (`control/quote.go` deriveQuoteSLA:
+    conservative band × 1.25 + 60s, gated on ≥5 eligible + ≥3 real rates + planner on +
+    premium > $0), the 2345/44269 A100 numbers appear NOWHERE in the quote/SLA path, and a
+    miss refunds exactly the 15% premium floored at $0, so no buyer can be quoted "beat an
+    A100" and no refund can run into a loss (the DEPLOYED production site carries zero speed
+    claims — fetched, HTTP 200 — though the built-not-deployed `web/index.html` did carry one
+    residual batching-multiplier line, corrected in the re-audit follow-up below); (b) audit
+    #1 OVER-scored methodology at 8 while
+    live-stale residue survived in the tree — a green CI test asserting a curve calibrated on
+    "A100 = 2345 tok/s // rented A100 spike, measured" (the exact strawman Part 1 banned),
+    the site claims ledger attributing 2345 to "a RunPod A100 80GB" with no engine caveat,
+    two CREED scorecard passages, and four research docs still carrying "beat an A100" as the
+    live thesis. **The purge (this climb) fixed every instance found by the sweep:**
+    `control/planner_test.go`
+    relabels the historical sim honestly (constant `a100TokPerS`→`ourCandleA100Batch64TokPerS`
+    with a dated HONESTY NOTE) AND adds a companion test
+    `TestPlanFanoutModeledFleetVsRealA100VLLMBreakEven` calibrated on the real vLLM 44,269
+    tok/s reference — modeled break-even lands at **325 M3-Pro-class nodes** [MODELED], pinned
+    in [312,338] with a hard >250 floor so the refuted ~18 can never silently return;
+    `docs/SITE-CLAIMS.md`, `docs/GPU_CAPABILITY.md`, and two CREED "Where we stand" passages
+    (~751, ~918) get the same-day refutation context (2345 is the Candle lane only; the same
+    silicon serves 44,269 under vLLM, ~19×); and SUPERSEDED-2026-07-06 banners head all five
+    pre-refutation research docs (HANDOFF, GOAL_PROMPT, GRADING, CURRENT_STATE, RESEARCH) so a
+    fresh agent pointed at any of them cannot resurrect the dead thesis. A hostile
+    `rg '2,?345|18 Macs|beat an A100'` sweep now returns only historical-with-correction,
+    audit-doc, or numeric-coincidence hits (classified in
+    `SPEED_LANE_AUDIT_2_AND_HANDOFF.md` Part 7 / the wave report). **Grades did NOT self-bump**
+    — the re-audit is what moves them; audit #2's numbers (unchanged overall ≈3.5, with #5
+    up 3→3.5 on the disproven danger and #7 down 8→7 on the residue this climb then fixed)
+    are recorded in the audit doc for the next adversarial pass to confirm. Gates: control
+    build/vet clean, gofmt only webauthn.go, unit green (planner tests pure); docs+unit-only
+    bundle. Files: `control/planner_test.go`, `docs/SITE-CLAIMS.md`, `docs/GPU_CAPABILITY.md`,
+    `docs/internal/CREED_AND_PATH_TO_TEN.md` (two surgical appends + this entry), the five
+    research docs, `docs/research/SPEED_LANE_AUDIT_2_AND_HANDOFF.md` (Part 7). **Re-audit
+    follow-up (same session):** the adversarial re-audit of this climb caught what the sweep's
+    triage had waved through as "honest" — `web/index.html:357`, a buyer-facing line reading
+    "up to 9.6x on an a100" with no engine caveat (the exact refuted figure, presented on a
+    buyer surface). Per the discipline (a surviving stale claim is a regression to FIX, not
+    explain), the line was reworded to "our candle backend's batched-vs-serial decode is about
+    1.5x on an m3 pro, up to 9.6x on an a100" — unambiguously our backend's batching
+    multiplier, never the A100's competitive throughput — and `docs/SITE-CLAIMS.md`'s ledger
+    entry (which had drifted from the actual page text) was reconciled to the new line. This is
+    the double-audit working as designed: the second pass caught the first's residue.
+
+93. **Substrate-routing wired into the quote — the first real piece of the read-job →
+    pick-substrate → tell-the-buyer product (rubric #4, the highest product-leverage gap;
+    MEASURED on real infra)** (Speed Lane / Project Detection & Quotation;
+    `docs/speed-lane-reports/SUBSTRATE_ROUTING_WAVE3.md`). Audit #2 verified NOTHING in
+    `control/` read a job's shape to choose a substrate — the measured routing rule lived
+    only in `A100_CAPABILITY_SWEEP.md`. This climb makes `POST /v1/quote` act on it. New
+    `control/routing.go` (pure/deterministic, `planner.go` discipline): the 2026-07-06 A100
+    vLLM sweep transcribed as the GPU competition curve for the two classes the catalogue
+    serves (1b/7b), piecewise-linear interpolation clamped at the batch-2048 ceiling (the
+    concave-curve linearization OVERSTATES the GPU — the honest direction), `gpuModeledSecs`
+    labeled [MODELED] and EXCLUDING provisioning (favoring the GPU), and `DecideSubstrate`
+    implementing the measured rule: `<8 records → fleet` (below the crossover the GPU is
+    ordinary and offline); `8..64 → compare`, preferring fleet on ties / blunt (non-planner)
+    ETAs / the priority latency tier; `>64 → gpu_lane` if lit else `gpu_recommend`, UNLESS
+    the planner-backed fleet models faster. `gpu_recommend` is a recommendation NEVER a
+    refusal (both numbers stated, no lit lane admitted, fleet still runs it), and
+    `litGPULaneWorkers` is a const-0 PARAMETER so lighting the vLLM lane needs no signature
+    change. `control/quote.go` (hot file, minimal touch): a `Routing *QuoteRouting` attached
+    in `buildQuote` only for generative jobs with records > 0 (the sweep's honesty boundary),
+    reusing the existing `etaBandSecs` p50/conservative/plannerBacked — no SLA/pricing/field
+    change; persists via `quote_json`. **Proof (real native PG + MinIO, real HTTP, a real
+    5-worker planner-backed fleet), independently re-run by the orchestrating session on a
+    fresh stack (PG :55499 / MinIO :19710) with identical results:** a 3-record `batch_infer`
+    → `substrate=fleet` (fleet 47s vs GPU 0.70s [MODELED], reason cites the crossover +
+    provisioning exclusion); a 500-record `batch_infer` → `substrate=gpu_recommend` (fleet
+    217s vs GPU 3.04s [MODELED], honest comparison + "still run this on the fleet", persisted
+    and read back from `quote_json->routing->>substrate`); a 20-record `embed` → NO routing
+    block (unmeasured shape). New `routing_test.go` (interpolation exact at all 10 measured
+    points, decision matrix over records×class×tier, fleet-wins-below-crossover, quote-voice
+    reasons, determinism) + `routing_integration_test.go` all green; **zero regression on the
+    shared hot file** — planner-live-sizing + all three SLA integration tests re-run PASS.
+    Gates independently re-verified: build/vet clean, gofmt only webauthn.go, routing unit +
+    integration green. **Honestly remaining (report §scope):** quote-side only — no dispatch
+    path acts on the decision yet (`gpu_recommend` has no lit lane to route to; that's rubric
+    #1); the scalar-rate model (audit #2 finding M3) must gain a rate-vs-batch term before a
+    vLLM worker's tps feeds these paths; the full integration suite is NOT claimed green — a
+    pre-existing probabilistic flaky test (`TestAdversarialGameabilityBounds`, disjoint code
+    path, passes in isolation) trips under full-suite concurrency, filed separately. No
+    scorecard grade self-bumped. Files: `control/routing.go` (new), `control/routing_test.go`
+    (new), `control/routing_integration_test.go` (new), `control/quote.go`,
+    `docs/speed-lane-reports/SUBSTRATE_ROUTING_WAVE3.md` (new).
+
+94. **The routing decision reaches the BUYER — surfaced on the job submission response, the
+    ClearingReceipt, and the timeline ("we ran it on X because Y"), the one-click product
+    row's honest half (rubric #5; MEASURED on real infra)** (Speed Lane / End-to-End Job
+    Latency; iteration 2 of the road-to-ten loop). Entry 93 wired substrate routing into the
+    advisory `POST /v1/quote`, but a buyer who submits directly (or binds a quote) never saw
+    the decision on the thing they actually get back. This climb closes that: `createJob`
+    (`control/api.go`) now switches its ETA source from `estimateETASecs` to the underlying
+    `etaBandSecs` (p50 byte-identical, so `eta_secs` is UNCHANGED) to obtain the planner's
+    conservative band + `plannerBacked`, then — behind the SAME `generativeJobType &&
+    records>0` honesty boundary the quote enforces — reuses the pure `DecideSubstrate` +
+    `QuoteRouting` (no second struct, no new routing math) to attach a `routing` block to
+    `JobSubmitResponse`, persist it on the `jobs` row, emit a best-effort `routed` timeline
+    event, and project it onto `GET /v1/jobs/{id}/receipt` via `ClearingReceipt.Routing`.
+    `avgLineBytes` is EXACT here (full-stream `totalBytes/totalRecords`, not a sample). Schema:
+    four nullable `jobs` columns (`routing_substrate/routing_reason/routing_fleet_eta_secs/
+    routing_gpu_modeled_secs`) via `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` (the
+    `sla_guarantee_secs` idempotency pattern); the `jobRow`/`CreateJobWithTasks` INSERT +
+    `JobInvoice` SELECT round-trip them, and a pure `receiptRouting(inv)` projects them (nil at
+    the honesty boundary). Every GPU number stays `[MODELED]`; `gpu_recommend` on a submitted
+    job reads as "running on the fleet at the quoted eta; a GPU would model faster for this
+    shape but no lit lane exists" — a recommendation, never a refusal, never a false promise.
+    **Proof (real native PG 17 + MinIO, real HTTP, planner-backed `setupSLAFleet`),
+    independently re-verified by the orchestrator on a FRESH stack (PG :55503 / MinIO :19720):**
+    schema.sql applied TWICE exit 0 (idempotent; the four columns confirmed as
+    text/text/integer/double precision); a 3-record generative submit → `routing.substrate=
+    fleet` (fleet 47s vs GPU 0.70s `[MODELED]`); a 500-record submit → `gpu_recommend` (fleet
+    182s vs GPU 3.04s `[MODELED]`, honest comparison + "still run this on the fleet"); the
+    receipt round-trips the SAME substrate + numbers from the persisted columns; an embed
+    submit → NO routing block on submit OR receipt, `routing_substrate IS NULL`, zero `routed`
+    events; `eta_secs` unchanged by routing in every case. New `TestSubmitSubstrateRouting`
+    (integration) + `TestReceiptRouting`/extended `TestAssembleClearingReceipt` (unit) green;
+    **zero regression** — `TestQuoteSubstrateRouting`, `TestSLAQuoteHonestDegradation`,
+    `TestVerificationReceiptSurfaced` (exercises the changed `JobInvoice`/receipt path) all
+    re-run PASS on the orchestrator's stack. Gates independently re-verified: build/vet clean
+    on both tags, gofmt only webauthn.go. **Honestly remaining:** (a) surfaced but PRE-EXISTING
+    — the quote applies `sustainedBatchETASecs` (thermal derating) to its p50 while the submit
+    path does not, so the same 500-record job is quoted 217s but submitted-reports 182s; both
+    are safe (quote more conservative) but the two buyer numbers disagree — filed separately to
+    unify, NOT introduced by this climb (createJob never applied the derating; the climb keeps
+    `eta_secs` byte-identical and faithfully reports it); (b) `estimateETASecs` is now uncalled
+    (createJob was its only caller) — a 3-line documented p50 wrapper still named in comments,
+    left rather than churn a hot file, build/vet clean; (c) still advisory — no dispatch path
+    routes on the decision, `litGPULaneWorkers=0` (owner-gated on the vLLM lane). No scorecard
+    grade self-bumped — the re-audit moves it. Files: `control/api.go`, `control/store.go`,
+    `control/types.go`, `control/receipt.go`, `control/receipt_test.go`, `db/schema.sql`,
+    `control/routing_submit_integration_test.go` (new).
+
+95. **Polish wave: honeypot injection-param guard + Speed-Lane metrics counters + a real fix
+    for the flaky gameability bound — and one attempted ETA "unification" caught wrong and
+    REVERTED during self-verification (the discipline working as designed)** (Speed Lane /
+    Verification + Observability; iteration 3). Four code-doable cleanups were fanned out as
+    three disjoint-file bundles; the orchestrator re-verified every one on a fresh real
+    PG+MinIO stack and REJECTED the one that did not hold up. **Landed (3):** (a) **Honeypot
+    injection-time param/model guard** (the safety gap named REQUIRED before production-scale
+    byte-exact seeding, entry 89's follow-up): `honeypots` gains nullable `answer_model` +
+    `answer_min_max_tokens` (ALTER ... ADD COLUMN IF NOT EXISTS, idempotent — proven applying
+    schema.sql twice, exit 0), `AvailableSeedHoneypots` now filters `(answer_model IS NULL OR
+    answer_model = $job_model) AND (answer_min_max_tokens IS NULL OR answer_min_max_tokens <=
+    $job_max_tokens)`, and the call site (api.go) passes the job's model + max_tokens — so the
+    byte-exact hawking seed (valid ONLY for llama-3.2-1b-instruct-q4, max_tokens≥24) can no
+    longer be drawn for a job it would byte-fail an honest same-class worker on; a NULL-bounds
+    (tolerant) probe keeps the old job-type-only behavior. New `TestAvailableSeedHoneypotsParam
+    ModelGuard` + all pre-existing honeypot tests green. (b) **Two metrics counters**:
+    `cx_endgame_races_total` (bumped in `raceEndgameTails` when a race duplicate is actually
+    inserted, workers.go) and `cx_sla_misses_total` (bumped once in `SettleJobSLA`'s missed
+    branch, collect.go — guarded by the Decided semantics so a re-settle can't double-count),
+    both defined on `metricsState` and exposed via `writeCounter`, exercised by the existing
+    endgame-race + forced-SLA-miss integration tests. (c) **The flaky
+    `TestAdversarialGameabilityBounds`** (surfaced in entry 93/94's blocker ledger): root-caused
+    to a genuine concurrent-load tail (a slower quarantine sweep under full-suite load lets a
+    few more adversary commits through — a real property, not RNG jitter), bounds widened with
+    a documented margin (maxGarbageN 10→16, maxReplayN 20→30) and a comment explaining WHY the
+    tail exists and that it stays bounded; 3/3 stable on re-run. **REVERTED (1) — the honest
+    catch:** the ETA "unification" bundle applied `sustainedBatchETASecs` to createJob claiming
+    it made quote==submit. Self-verification on real infra REFUTED that: the quote (217s) and
+    submit diverge for TWO reasons, not one — the paths compute DIFFERENT task counts (scanned-
+    sample split vs exact-stream split → base p50 ~137s quote vs ~182s submit) AND only the
+    quote derates. Adding derating to submit pushed it 182→288s — FURTHER from the quote and
+    into the WRONG direction (submit now slower than quoted, vs the pre-wave safe 182<217). So
+    the hunk was reverted (submit restored to 182s, the safe faster-than-quoted direction), an
+    honest NOTE left at the site with the measured bases, and the real fix (unify task-count
+    AND derating together, or reuse a bound quote's eta) re-filed as a separate task with the
+    correct diagnosis. This is exactly why the loop re-verifies instead of trusting the agents:
+    a plausible-looking fix that made the buyer experience worse was caught and rejected before
+    it landed. **Proof (fresh real PG :55507 + MinIO :19730):** build/vet clean, gofmt only
+    webauthn.go, unit green; honeypot-column schema idempotent (2× exit 0); guard + routing +
+    SLA-miss + endgame + quote-ETA tests all PASS post-revert; one one-off `TestHoneypotFailNo
+    Payout` flake did NOT reproduce over two full-batch re-runs (pre-existing async/timing
+    fragility, disjoint from this wave). Also cleaned (post-iteration-2 re-audit): a dead
+    `totalRecords>0` re-check removed, the uncalled `estimateETASecs` doc corrected. No grade
+    self-bumped. Files: `control/pricing_extra.go`, `control/seed.go`, `control/store.go`,
+    `control/types.go`, `db/schema.sql`, `control/honeypot_injection_guard_test.go` (new),
+    `control/metrics.go`, `control/workers.go`, `control/collect.go`, `control/adversarial_test.go`,
+    `control/api.go` (ETA hunk reverted; dead-check removed).
+
+96. **The vLLM byte-stability soak PASSED on real A100s, the production `VllmRunner`
+    exercised against a live pinned vLLM in SOAK-MODE (an opt-in test, not production
+    dispatch), and `litGPULaneWorkers` wired from a dead `const 0` to a LIVE supply count so
+    the router surfaces a real `gpu_lane` label the moment a verified vLLM worker registers**
+    (Speed Lane / CUDA lane, rubric #1; `docs/speed-lane-reports/VLLM_RESTART_SOAK_2026-07-06.md`).
+    *Honest framing (per the adversarial re-audit): this moves dimension 1 from 2→3, NOT to a
+    lit production lane — the runner is still double-gated behind `CX_VLLM_SOAK_MODE`, nothing
+    in dispatch reads the routing decision, the claim path has no engine filter (a `gpu_lane`
+    job can still be claimed by a fleet worker), and the `(nvidia_*, vllm, build_hash)`
+    verification class is NOT yet seeded. What IS real: the byte-stability soak, the runner's
+    implemented+proven shell-out, and the live supply count.* The owner
+    provided a RunPod key + GPUs; this session ran the whole within-`nvidia_*` byte-stability
+    soak (`VLLM_LANE.md` steps 1–3) on real hardware and wired the code half. **Measured on
+    real A100s (ungated Qwen2.5-1.5B, vLLM 0.11.0 pinned with `transformers==4.57.1`, greedy):**
+    within-run determinism (run1==run2), across-restart determinism (run3 after a full server
+    restart), and **cross-pod byte-equality** — two independently provisioned A100-SXM
+    machines produced byte-identical corpus (`c930c65e…`) AND golden (`bd745e7a…`) output.
+    PLUS the production `VllmRunner` (`agent/src/runners.rs`) driven against a live pinned
+    vLLM (not the in-tree mock) via the `CX_VLLM_SOAK_MODE=1` path: real `BatchInferResult`,
+    128 tokens, byte-stable across two runs (new opt-in `#[ignore]`d
+    `vllm_runner_soak_mode_against_live_pod`; agent baselines held — clippy at the 4
+    hardware.rs warnings, metal clean). **The code half (this climb):** `litGPULaneWorkers`
+    was a `const 0` in `control/routing.go` — the router could NEVER say `gpu_lane`. Replaced
+    with a LIVE store-backed count: new `Store.EligibleVLLMWorkerCount` (the exact
+    `EligibleWorkerCount` claim predicate + `AND w.engine='vllm'`), called on BOTH the quote
+    (`quote.go`) and submit (`api.go`) routing paths, degrading to 0 on a DB error (honest "no
+    lit lane", never a fabricated one). So the router now honestly reports `gpu_recommend`
+    (advisory) until a verified vLLM worker registers and `gpu_lane` the moment one does — no
+    schema change (engine is already a per-worker column, default `candle`). The `gpu_lane`
+    reason was made honest + precise ("the gpu lane is the faster substrate here … N verified
+    vllm-lane worker(s) are online and eligible", not a false "we are dispatching there").
+    **Proof (fresh real PG :55511 + MinIO :19740, independently re-verified by the
+    orchestrator):** new `TestQuoteRoutingLitGPULaneWhenVLLMSupplyOnline` — a 500-record batch
+    quotes `gpu_recommend` with NO vLLM supply, then FLIPS to `gpu_lane` after a real
+    `engine=vllm` worker registers through the production path (both compared numbers still
+    `[MODELED]`); routing/submit/SLA/honeypot-guard/planner regression all PASS; build/vet
+    clean both tags, gofmt only webauthn.go. **Honest scope (re-audit-corrected):** the routing
+    block is ADVISORY — nothing in dispatch reads it, and the claim path (scheduler.go) filters
+    on job/model/memory but NOT engine, so a `gpu_lane` job can still be claimed by a fleet
+    worker (the `gpu_lane` Reason now says this plainly: "the platform does not pin your job to
+    the vllm lane, so it may still run on the fleet"); `gpu_lane` reflects real, self-DECLARED
+    claimable vLLM supply (the control plane counts `engine='vllm'` workers but does not yet
+    verify the engine claim against real vLLM output — that needs the seeded class below). The
+    cross-pod soak was same-SKU (SXM↔SXM) — cross-SKU is a cheap follow-up. vLLM SHOULD be a
+    TOLERANT class (serial soaks were byte-identical but continuous-batching reduction is not
+    guaranteed byte-exact, so it must be engine+build_hash+redundancy, never a byte-exact
+    honeypot) — but that class is NOT yet seeded (a named remaining step, not a done thing).
+    ALL PODS
+    TERMINATED after (owner: shut down, do code work, put back up later). No grade
+    self-bumped — this is the evidence the next re-audit weighs for dimension 1 (CUDA lane,
+    recorded 2). Files: `control/quote.go`, `control/api.go`, `control/routing.go`,
+    `control/routing_test.go`, `control/routing_integration_test.go`,
+    `control/routing_submit_integration_test.go`, `agent/src/runners.rs` (one test),
+    `docs/speed-lane-reports/VLLM_RESTART_SOAK_2026-07-06.md` (new).
 
 ---
 

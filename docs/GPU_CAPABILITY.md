@@ -201,6 +201,14 @@ gpubench + the deep sweep ran on real silicon. Model: `llama-3.2-1b-instruct-q4`
 And the fixed-B=32 correctness gate (`prove-cuda.sh`, batched==serial enforced): serial
 230 → **batched 1295 tok/s = 5.6×, byte-identical**.
 
+> **Context (added 2026-07-06):** the table above is the CANDLE lane's numbers on an A100 —
+> our own backend's batching curve, not the GPU's capability. A production serving engine
+> (vLLM) on the same GPU measures **44,269 tok/s aggregate at saturation** — ~19× this lane's
+> batch-64 peak (measured 2026-07-06,
+> [speed-lane-reports/A100_REFERENCE_MEASURED.md](speed-lane-reports/A100_REFERENCE_MEASURED.md)).
+> On datacenter GPUs the serving path is therefore brokered vLLM ([VLLM_LANE.md](VLLM_LANE.md)),
+> and this table must not be read as what an A100 can do.
+
 ### The two-axis result (this is the honest, useful finding)
 
 **Throughput — CUDA wins big.** The A100's parallelism makes batching pay off far

@@ -25,10 +25,23 @@ func TestAssembleClearingReceipt(t *testing.T) {
 		taskReceiptRow(0, "complete", true, "candle", "abc123", "honeypot_pass"),
 	}
 
-	rc := assembleClearingReceipt(jobID, "complete", inv, verif, classes, tasks)
+	routing := &QuoteRouting{
+		Substrate: "gpu_recommend", Reason: "gpu recommended: ... [modeled] ...",
+		FleetETASecs: 900, GPUModeledSecs: 1.43, Basis: quoteRoutingBasis,
+	}
+	rc := assembleClearingReceipt(jobID, "complete", inv, verif, classes, tasks, routing)
 
 	if rc.Invoice == nil || rc.Invoice.QuotedUSD == nil || *rc.Invoice.QuotedUSD != 9.5 {
 		t.Fatal("receipt must carry the QUOTE")
+	}
+	// Rubric dimension 5: the receipt carries the persisted substrate-routing
+	// decision verbatim — the "we ran it on X because Y" product row.
+	if rc.Routing == nil || rc.Routing.Substrate != "gpu_recommend" ||
+		rc.Routing.FleetETASecs != 900 || rc.Routing.GPUModeledSecs != 1.43 {
+		t.Fatalf("receipt must carry the ROUTING decision; got %+v", rc.Routing)
+	}
+	if rc.Routing.Basis != quoteRoutingBasis {
+		t.Fatalf("routing basis must be the shared [MODELED] citation; got %q", rc.Routing.Basis)
 	}
 	if rc.Invoice.ActualUSD != 8.0 {
 		t.Fatal("receipt must carry ACTUALS")
@@ -59,6 +72,33 @@ func TestTaskReceiptNeverLeaksHoneypotAnswer(t *testing.T) {
 	lower := strings.ToLower(string(b))
 	if strings.Contains(lower, "answer") || strings.Contains(lower, "result") {
 		t.Fatalf("a task drilldown must NOT expose any answer/result field; got %s", b)
+	}
+}
+
+// Rubric dimension 5: receiptRouting projects the persisted jobs.routing_*
+// columns (carried on the invoice view) into the receipt's routing block, and
+// respects the honesty boundary — an empty RoutingSubstrate (every routing column
+// was NULL: a non-generative or empty-input job) yields NO block.
+func TestReceiptRouting(t *testing.T) {
+	// A job that carried a routing block: projected verbatim, with the shared
+	// [MODELED] basis attached.
+	inv := &InvoiceView{
+		RoutingSubstrate: "fleet", RoutingReason: "running on the fleet: ...",
+		RoutingFleetETASecs: 42, RoutingGPUModeledSecs: 0.19,
+	}
+	r := receiptRouting(inv)
+	if r == nil || r.Substrate != "fleet" || r.FleetETASecs != 42 || r.GPUModeledSecs != 0.19 {
+		t.Fatalf("routing must project the persisted columns verbatim; got %+v", r)
+	}
+	if r.Basis != quoteRoutingBasis {
+		t.Fatalf("routing basis must be the shared [MODELED] citation; got %q", r.Basis)
+	}
+	// The honesty boundary: no routing block persisted → no block on the receipt.
+	if got := receiptRouting(&InvoiceView{}); got != nil {
+		t.Fatalf("a job with no routing block must project no routing; got %+v", got)
+	}
+	if got := receiptRouting(nil); got != nil {
+		t.Fatalf("a nil invoice must project no routing; got %+v", got)
 	}
 }
 

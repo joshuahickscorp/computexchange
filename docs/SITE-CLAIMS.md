@@ -288,8 +288,13 @@ phrasings are recorded as kills below so they stay dead.
   `agent/src/models.rs:153` `BIG_LLAMA_MIN_MEMORY_GB = 40.0`, gated to high-VRAM workers
   (nvidia_48g/80g/180g AND the large Apple unified-memory classes) · a memory floor, not a backend
   gate, so a large-memory Mac clears it too.
-- `the batched win is bigger on cuda · up to 9.6x, measured on an a100`:
-  `docs/GPU_CAPABILITY.md:64` up to 9.6x at batch 64, 2345 tok/s on a RunPod A100 80GB.
+- `our candle backend's batched-vs-serial decode is about 1.5x on an m3 pro, up to 9.6x on an a100`:
+  `docs/GPU_CAPABILITY.md:64` up to 9.6x at batch 64, 2345 tok/s — OUR Candle backend's
+  serial→batched multiplier measured on a RunPod A100 80GB, which is all the site line claims
+  (the phrasing was tightened 2026-07-06 to say "batched-vs-serial" explicitly so it can never
+  be read as the A100's competitive throughput). NOT the A100's capability: the same GPU serves
+  ~44,269 tok/s under vLLM (`docs/speed-lane-reports/A100_REFERENCE_MEASURED.md`, 2026-07-06),
+  so this number must never be read as what an A100 can do.
 - `a locked-down container sandbox only a cuda host can run · no network, read-only root, all caps
   dropped, a hard timeout`: `agent/src/sandbox.rs:8` the hardened profile · `agent/src/sandbox.rs:12`
   "Linux + Docker + the NVIDIA Container Toolkit only" · `agent/src/hardware.rs:406` the `custom`

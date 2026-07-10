@@ -1,5 +1,12 @@
 # The Inference Speed Frontier — a research report for computexchange's speed lane
 
+> **SUPERSEDED 2026-07-06.** The "beat an A100 on wall-clock" thesis this research fed was
+> REFUTED by real measurement: a real A100-SXM4-80GB under vLLM serves 44,269 tok/s (~19× the
+> Candle-bench figure the thesis leaned on); honest break-even is ~318 M3-Pro-class nodes, not
+> ~18. The salvaged, honest routing rule and current state of play:
+> `docs/speed-lane-reports/A100_REFERENCE_MEASURED.md`, `A100_CAPABILITY_SWEEP.md`,
+> `docs/research/SPEED_LANE_AUDIT_2_AND_HANDOFF.md`. Kept unedited below for the receipt trail.
+
 *Compiled 2026-07-06 by a fan-out/verify deep-research pass (5 search angles → source fetch →
 adversarial verification) plus domain synthesis. The verify/synthesize phase hit a transient
 API outage mid-run, so claims below are tagged by verification status:*

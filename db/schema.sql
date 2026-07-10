@@ -271,6 +271,20 @@ CREATE TABLE IF NOT EXISTS honeypots (
 -- auto-quarantining cross-class byte mismatches, which is the safe behavior. Full
 -- hw_class-aware honeypot seeding is the Wave-2 prerequisite (docs/DETERMINISM_CLASS.md).
 ALTER TABLE honeypots ADD COLUMN IF NOT EXISTS answer_class TEXT NOT NULL DEFAULT '';
+-- INJECTION-TIME PARAM/MODEL GUARD (byte-exact honeypot safety, docs/DETERMINISM_CLASS.md;
+-- named REQUIRED before production-scale byte-exact seeding in seed.go's
+-- demoHoneypotHawkKnownAnswer doc). A byte-exact honeypot's known answer is only
+-- valid evidence for a job that runs the EXACT model + at least the max_tokens the
+-- answer was captured under (the hawking seed: llama-3.2-1b-instruct-q4, every row
+-- EOS'd strictly below max_tokens=24). Keying AvailableSeedHoneypots on job_type
+-- ALONE would draw this probe for a batch_infer job on a DIFFERENT model, or with a
+-- SMALLER max_tokens, where an HONEST same-class worker legitimately produces
+-- different bytes and would be wrongly quarantined. These columns record the bounds
+-- so the injection query can refuse to draw the probe for a job it is not byte-valid
+-- for. NULLABLE by design: a NULL answer_model marks a tolerant-class (embed/etc.)
+-- probe with no model/param bound — those keep the old job_type-only behavior.
+ALTER TABLE honeypots ADD COLUMN IF NOT EXISTS answer_model          TEXT;  -- byte-exact seed's required model_ref (NULL = tolerant probe, no model bound)
+ALTER TABLE honeypots ADD COLUMN IF NOT EXISTS answer_min_max_tokens INT;   -- byte-exact seed's minimum valid job max_tokens (NULL = no floor)
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Webhooks + model catalogue
@@ -1003,3 +1017,31 @@ CREATE INDEX IF NOT EXISTS site_events_created_at_idx ON site_events (created_at
 CREATE INDEX IF NOT EXISTS site_events_type_idx ON site_events (event_type, created_at);
 CREATE INDEX IF NOT EXISTS site_events_page_id_idx ON site_events (page_id);
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS billed_usd          NUMERIC(12,6);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Speed Lane road-to-ten (rubric dimension 5) — the SUBSTRATE-ROUTING receipt.
+-- The quote path (control/quote.go) already reads the job's SHAPE and says which
+-- substrate runs it fastest (fleet | gpu_lane | gpu_recommend), grounded in the
+-- measured 2026-07-06 A100-SXM4-80GB vLLM sweep (control/routing.go). This wave
+-- carries that same decision onto the SUBMIT path and PERSISTS it, so the
+-- clearing receipt (GET /v1/jobs/{id}/receipt) can project the "we ran it on X
+-- because Y" row deterministically from the job row — the same read the invoice
+-- already makes, never a re-decision.
+--
+--   routing_substrate       — fleet | gpu_lane | gpu_recommend (NULL = no routing
+--                             block: a non-generative job or an empty input, the
+--                             SAME honesty boundary the quote enforces — the sweep
+--                             measured generative decode only).
+--   routing_reason          — the plain-english why, quote-warnings voice, naming
+--                             the measured basis (control/routing.go's Reason).
+--   routing_fleet_eta_secs  — the fleet ETA the decision compared (== eta_secs).
+--   routing_gpu_modeled_secs— the [MODELED] one-A100 wall-clock the decision
+--                             compared: the measured sweep's aggregate tok/s
+--                             interpolated at this job's shape, EXCLUDING
+--                             rental/provisioning — never a measurement of this job.
+-- All four are NULL together (routing_substrate IS NULL) for a job with no
+-- routing block, exactly as the submit response omits the block.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS routing_substrate        TEXT;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS routing_reason           TEXT;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS routing_fleet_eta_secs   INT;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS routing_gpu_modeled_secs DOUBLE PRECISION;
