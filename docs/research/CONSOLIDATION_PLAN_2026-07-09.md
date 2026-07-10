@@ -156,6 +156,25 @@ accept/repair path, not a silent gate loosening.
   evidence (C).
 - THIS doc updated with the honest staged-multiplier table + the exact next cloud experiment.
 
+## RESULT (2026-07-10): STRICT DELIVERY EARNED — DECISION=GROW
+
+The owned integrated engine produced a **delivery-grade** end-to-end receipt: **DECISION=GROW**
+(the harness's top verdict: "exact control stream and measured delivery-quality render"),
+global SSIM **0.9902** (>=0.98), worst-tile **0.9501** (>=0.95), all 4 frames clear
+[0.9539/0.9501/0.9506/0.9531], p5 0.9738, `modeled=false`, token lane lossless — measured
+end-to-end **2.45x** on H100 (hardware-relative; H100's fast 4096-spp reference compresses the
+ratio). This is a real, measured **quality/speed dial**: **5.56x @ preview (worst-tile 0.91)**
+or **2.45x @ strict delivery (worst-tile 0.95, all frames)**, both `baseline/spec` on one box,
+never a product of lane multipliers. The delivery point used an un-tuned over-repair budget (32
+tiles); repairing only the ~2-4 sub-0.95 tiles/frame projects ~3-3.5x at the same quality.
+
+How the strict tier was earned — every step forced by a measurement, no gate ever loosened:
+reprojection wall -> per-frame anchor (5.56x@0.91) -> variance selector dead -> cross-denoiser
+dead -> multi-selector (aov_edge localizes the failing tiles; sample-count proves they're
+converged) -> raw repair still 0.914 -> reference-self-consistency probe (SSIM 1.0: the gate is
+REAL) -> code read finds the one-boolean light-tree mismatch -> match-reference raw repair (tiles
+-> exactly 1.0) -> per-frame repair budget -> all 4 frames >= 0.95.
+
 ## Live staged-multiplier table (updated by the 2026-07-09 synthesis; no products until earned)
 
 Honest state after Branch A/B/C ran design -> build -> verify. Every number is labeled; NO row is
