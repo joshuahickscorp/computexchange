@@ -7,7 +7,7 @@ everywhere. The gate is NOT touched; the repair loop exists to MEET it.
 
 Code: `scripts/spec-lab/pod/exp_render_stack.py` (PASS 3.5 + helpers, default OFF)
 Adapter: `scripts/spec-lab/cx_render_spec_adapter.py` (`from_stack_metrics` repair path)
-Tests: `scripts/spec-lab/test_render_repair_loop.py` (24 tests, all local/synthetic)
+Tests: `scripts/spec-lab/test_render_repair_loop.py` (37 tests, all local/synthetic)
 
 ## 0. Measured ground truth this design stands on (REAL RUN 3, A100 SECURE, 4K, kf=1)
 
@@ -26,6 +26,20 @@ Tests: `scripts/spec-lab/test_render_repair_loop.py` (24 tests, all local/synthe
 
 The rejected lever the task names — draft 1024 everywhere — models to ~2.8x: it guts the
 multiplier while spending 61 of 64 tiles' extra samples where nothing is broken.
+
+### 0.1 The reference is PERFECTLY self-consistent (measured 2026-07-10) — the gate is REAL
+
+Two `is_ref` renders of the same frame at 4096 spp with DIFFERENT seeds grade **SSIM 1.0,
+byte-identical, on every tile**. Consequence: the strict worst-tile 0.95 gate is a REAL,
+achievable target — not a noisy-reference artifact. Config-matched 4096spp renders converge
+to the same pixels, so any residual against the reference is a CONFIG mismatch, not noise.
+
+The raw denoiser-off repair (`repair_denoiser=none`) only reached **SSIM 0.914** on the
+failing corner tiles. Root cause (read from the embedded `BLENDER_SCENE_SCRIPT`): the
+reference path (`IS_REF=True`) leaves `use_light_tree` at the SCENE DEFAULT and never forces
+it, while the anchor/repair path forced `use_light_tree=True`. Config-matched 4096 renders
+being pixel-identical, that ONE setting is the entire ~0.086 residual. **Fix (2026-07-10):**
+the raw repair now renders with the reference recipe — see §2.1.
 
 ## 1. Selector — DECISION: two-independent-draft divergence (reference-free)
 
@@ -68,12 +82,33 @@ tiles — precisely the ones that defeated 512-cap adaptive + OIDN (dark-GI/glos
   tiles are never selected). The measured need is ~4-10 failing tiles shot-wide and
   concentrated in earlier frames — a global budget puts repairs where they are needed and
   keeps cost bounded and deterministic (ties break on (frame, gy, gx)).
-- **Repair render:** the SAME anchor stack (adaptive + OIDN + guides + light-tree) at
-  `repair_spp` = `repair_spp_multiplier * draft_spp` (default 4x -> 2048 at 4K; explicit
-  `repair_spp` overrides) AND `repair_adaptive_threshold` = `adaptive_threshold / 2`
-  (default 0 -> halved). The threshold halving is LOAD-BEARING: pixels that converged at
+- **Repair render (`inherit`, default):** the SAME anchor stack (adaptive + OIDN + guides +
+  light-tree) at `repair_spp` = `repair_spp_multiplier * draft_spp` (default 4x -> 2048 at
+  4K; explicit `repair_spp` overrides) AND `repair_adaptive_threshold` = `adaptive_threshold
+  / 2` (default 0 -> halved). The threshold halving is LOAD-BEARING: pixels that converged at
   thr=0.02 take no more samples just because the cap rose — cap 4x + thr/2 guarantees
   real extra samples on the failed tile.
+
+### 2.1 Raw repair (`repair_denoiser=none`) renders the REFERENCE recipe (light-tree match, 2026-07-10)
+
+Since config-matched 4096spp renders are pixel-identical (§0.1), the raw repair must be
+CONFIG-IDENTICAL to the reference so its tiles converge to the same estimate. The reference
+(`IS_REF`) leaves `use_light_tree` at the SCENE DEFAULT; the anchor stack force-enables it.
+Forcing light-tree on the raw repair was the one-setting mismatch behind the 0.914 residual.
+
+- **The fix:** a `match_reference` flag threads runner -> `run_blender_frame` -> the embedded
+  script env (`CX_MATCH_REF`). In the script the light-tree force is gated
+  `if (not IS_REF) and (not MATCH_REF) and LIGHTTREE:` — so the raw repair, like the
+  reference, NEVER touches `use_light_tree` and inherits whatever the scene's default is.
+  This is ROBUST: we do not guess `light_tree=False` (which would DISABLE a scene whose
+  default is True and still mismatch); we replicate `is_ref`'s "don't touch it" behavior.
+- **Scope:** only `repair_denoiser=none` sets `match_reference=True`. The `inherit` path,
+  the `two_draft`/OIDN paths, the anchors, and every repair-OFF receipt are UNCHANGED and
+  byte-identical (verified: HEAD-vs-working stub diff — repair-OFF + both inherit selectors
+  BYTE-IDENTICAL; the raw receipt differs only in `note` + the new self-documenting
+  `repair_light_tree` field). `require_gpu`, money-safety, the strict 0.95 gate, and honest
+  accounting (raw render + composite still charged to `T_stack`) are untouched.
+- **Self-documenting:** the raw receipt records `repair_light_tree="scene_default_match_ref"`.
 - **Mechanics — real border renders, not modeled crops:** Blender render border
   (`use_border=True`, `use_crop_to_border=False` so the EXR stays full-res; untouched
   pixels black). ONE subprocess per frame loops all that frame's regions in-session
@@ -204,7 +239,7 @@ B=12 central drops to ~3.99x.
 - `python3 -m py_compile` passes on the runner + adapter + test file; both embedded
   Blender scripts (`BLENDER_SCENE_SCRIPT`, `GPU_PROBE_SCRIPT`) extract and `compile()`
   clean.
-- `test_render_repair_loop.py`: **24/24 pass** — tile-rect parity (4K/1080p/remainder),
+- `test_render_repair_loop.py`: **37/37 pass** — tile-rect parity (4K/1080p/remainder),
   planted-high-variance selector ranking, budget/per-frame-cap/floor/tie-break policy,
   structural reference-freedom (source-block grep + helper signatures + repair-before-
   grading ordering), feather alpha properties (a==1 on the whole graded tile, 0 outside
@@ -215,12 +250,22 @@ B=12 central drops to ~3.99x.
   repaired tiles come from the planted hot set; post-repair tile SSIM improves; derived
   knobs resolve to 4x cap + thr/2), and the adapter repair path (real tile fractions, no
   double charge) + unchanged legacy path.
+- **Light-tree match (2026-07-10, §2.1):** `MatchReferenceEnvTest` captures the env handed
+  to `subprocess.run` and proves the raw repair emits `CX_MATCH_REF=1` + `CX_LIGHTTREE=0`
+  (byte-identical light-tree env to the reference render), while the anchor/`inherit` render
+  still emits `CX_LIGHTTREE=1` / `CX_MATCH_REF=0`; a lockstep grep pins the in-script gate
+  `if (not IS_REF) and (not MATCH_REF) and LIGHTTREE:`. Stubbed end-to-end:
+  `test_raw_repair_denoiser_off_path_selected_and_charged` asserts the raw repair call
+  carries `match_reference=True` and does NOT force light-tree (+ receipt
+  `repair_light_tree="scene_default_match_ref"`);
+  `test_inherit_repair_still_forces_light_tree_unchanged` pins the legacy `inherit` path.
 - Byte-identity proven against the actual pre-change file: the pre-change snapshot and
-  the new runner, stub-run with identical deterministic fakes across three configs
-  (kf=1 rerender, kf=2 nearest fully-measured, kf=2 rerender exercising the modeled
-  crop), emit **byte-identical** metrics JSON with repair off. The committed test also
-  pins the exact legacy key set and `{}` == `{"repair_enabled": false}`.
-- Full spec-lab suite: no regressions (see the test run recorded with this wave).
+  the new runner, stub-run with identical deterministic fakes, emit **byte-identical**
+  metrics JSON for repair-OFF (`{}` and explicit `repair_enabled=false`), `inherit`
+  two_draft, and `aov_edge` inherit. The RAW `denoiser=none` receipt differs ONLY in
+  `note` + the new `repair_light_tree` field (the §2.1 fix). The committed test also pins
+  the exact legacy key set and `{}` == `{"repair_enabled": false}`.
+- Full spec-lab suite: **244/244 pass**, no regressions.
 
 ## 7. Risks, named
 

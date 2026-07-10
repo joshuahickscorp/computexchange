@@ -349,6 +349,78 @@ class EmbeddedScriptCompileTest(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# match_reference (raw-repair reference-recipe) env plumbing + in-script gate    #
+# --------------------------------------------------------------------------- #
+class MatchReferenceEnvTest(unittest.TestCase):
+    """run_blender_frame's ENV is the contract between the runner and the embedded Blender
+    script. These tests prove the RAW repair renders with the reference recipe (light-tree
+    NOT forced) while the anchor/inherit renders keep forcing it — WITHOUT launching
+    Blender, by capturing the env handed to subprocess.run."""
+
+    def _capture_env(self, **kwargs):
+        captured = {}
+
+        class _Stop(Exception):
+            pass
+
+        def fake_run(cmd, env=None, **kw):
+            captured["env"] = dict(env or {})
+            raise _Stop()
+
+        orig = ers.subprocess
+        ers.subprocess = types.SimpleNamespace(run=fake_run)
+        try:
+            with self.assertRaises(_Stop):
+                ers.run_blender_frame(
+                    "/fake/blender", "/fake/script.py", blend="/fake.blend",
+                    out_exr="/tmp/cx_x.exr", res_x=64, res_y=64, spp=16,
+                    frame=1, nframes=1, cam_motion=1.0, seed=0, bounces=4,
+                    device_pref="AUTO", timeout_s=10, **kwargs)
+        finally:
+            ers.subprocess = orig
+        return captured["env"]
+
+    def test_raw_repair_env_matches_reference_recipe(self):
+        # RAW repair: match_reference=True, light-tree NOT forced -> the exact reference
+        # light-tree env. CX_MATCH_REF=1 makes the in-script gate skip forcing use_light_tree.
+        env = self._capture_env(is_ref=False, match_reference=True)
+        self.assertEqual(env["CX_MATCH_REF"], "1")
+        self.assertEqual(env["CX_LIGHTTREE"], "0",
+                         "raw repair must NOT emit the force-light-tree env")
+
+    def test_reference_and_raw_repair_have_identical_lighttree_env(self):
+        # The whole point: the raw repair's light-tree env is BYTE-IDENTICAL to the
+        # reference render's, so the two configs are the same for that lever.
+        ref_env = self._capture_env(is_ref=True)  # reference: never forces light-tree
+        raw_env = self._capture_env(is_ref=False, match_reference=True)  # raw repair
+        self.assertEqual(ref_env["CX_LIGHTTREE"], raw_env["CX_LIGHTTREE"])
+        # the reference does not use MATCH_REF (its IS_REF guard already skips the force);
+        # the raw repair uses MATCH_REF to skip the SAME force from the anchor code path.
+        self.assertEqual(ref_env["CX_MATCH_REF"], "0")
+        self.assertEqual(raw_env["CX_MATCH_REF"], "1")
+
+    def test_inherit_and_anchor_still_force_light_tree(self):
+        # OIDN/inherit repair + the anchor render force light-tree exactly as before:
+        # light_tree=True, match_reference unset -> CX_LIGHTTREE=1, CX_MATCH_REF=0.
+        env = self._capture_env(is_ref=False, light_tree=True)
+        self.assertEqual(env["CX_LIGHTTREE"], "1")
+        self.assertEqual(env["CX_MATCH_REF"], "0")
+
+    def test_default_call_is_unchanged_no_match_ref(self):
+        # every existing call site (no match_reference kwarg) emits CX_MATCH_REF=0, a
+        # behavioral no-op -> all existing renders are byte-identical.
+        env = self._capture_env(is_ref=False)
+        self.assertEqual(env["CX_MATCH_REF"], "0")
+
+    def test_in_script_gate_reads_match_ref_env(self):
+        # LOCKSTEP: the embedded Blender script actually GATES the light-tree force on
+        # MATCH_REF, and parses it from CX_MATCH_REF. Without this the env would be inert.
+        s = ers.BLENDER_SCENE_SCRIPT
+        self.assertIn('MATCH_REF = os.environ.get("CX_MATCH_REF", "0") == "1"', s)
+        self.assertIn("if (not IS_REF) and (not MATCH_REF) and LIGHTTREE:", s)
+
+
+# --------------------------------------------------------------------------- #
 # 6 + 7. stubbed end-to-end runs: accounting sums + default-off byte-identity   #
 #        (fresh module instance per run; Blender/scene/EXR/time all stubbed)     #
 # --------------------------------------------------------------------------- #
@@ -379,8 +451,8 @@ def _make_fake_run_blender_frame(borders_map):
     def fake(blender_bin, script_path, *, blend, out_exr, res_x, res_y, spp, is_ref,
              frame, nframes, cam_motion, seed, bounces, device_pref, timeout_s,
              adaptive=False, adaptive_thr=0.01, adaptive_min=16, denoiser="none",
-             guides=False, light_tree=False, require_gpu=False, borders=None,
-             out_pattern=None):
+             guides=False, light_tree=False, match_reference=False, require_gpu=False,
+             borders=None, out_pattern=None):
         if borders is not None:
             wall = 12.0 + 2.0 * len(borders)
             paths = []
@@ -727,6 +799,17 @@ class AovEdgeAndRawRepairStubbedTest(unittest.TestCase):
             self.assertFalse(c["adaptive"])
             self.assertFalse(c["guides"])
             self.assertEqual(c["spp"], 2048)
+            # THE FIX: the raw repair border render replicates the REFERENCE recipe —
+            # match_reference=True so use_light_tree is LEFT AT SCENE DEFAULT (not forced),
+            # making the tiles config-identical to the reference. It must NOT force
+            # light-tree the way the anchor stack does.
+            self.assertTrue(c["match_reference"],
+                            "raw repair must render with the reference recipe")
+            self.assertFalse(c.get("light_tree", False),
+                             "raw repair must NOT force light-tree (reference leaves it "
+                             "at the scene default)")
+        # the receipt self-documents the raw repair's light-tree mode
+        self.assertEqual(m["repair_light_tree"], "scene_default_match_ref")
         # raw render time is REAL wall-clock charged into T_stack exactly like OIDN repair
         self.assertGreater(sum(m["per_frame_repair_render_s"]), 0.0)
         self.assertAlmostEqual(
@@ -739,6 +822,25 @@ class AovEdgeAndRawRepairStubbedTest(unittest.TestCase):
                   + m["repair_total_s"], 4), places=4)
         self.assertEqual(m["repaired_tile_count"], 2)
         self.assertFalse(m["modeled"])
+
+    def test_inherit_repair_still_forces_light_tree_unchanged(self):
+        # REGRESSION GUARD: the legacy 'inherit' (OIDN) repair path is UNCHANGED — it still
+        # forces light-tree (light_tree=True) and never sets match_reference. The fix is
+        # surgical to the RAW path only.
+        calls = []
+        m = run_stubbed(dict(BASE_PARAMS, repair_enabled=True, repair_denoiser="inherit",
+                             light_tree=True, repair_top_k=2, repair_max_per_frame=2),
+                        "ers_stub_inherit_lighttree", record_calls=calls)
+        self.assertEqual(m["repair_denoiser"], "inherit")
+        repair_calls = [c for c in calls if c.get("borders") is not None]
+        self.assertTrue(repair_calls)
+        for c in repair_calls:
+            self.assertTrue(c["light_tree"], "inherit repair must still FORCE light-tree")
+            self.assertFalse(c.get("match_reference", False),
+                             "inherit repair must NOT use the reference recipe")
+            self.assertEqual(c["denoiser"], "oidn")  # anchor stack denoiser inherited
+        # inherit receipts stay legacy-shaped: NO repair_light_tree key leaks in
+        self.assertNotIn("repair_light_tree", m)
 
     def test_aov_edge_plus_raw_repair_combined(self):
         # the exact 4K-command combination: aov_edge selection + denoiser-off raw repair.

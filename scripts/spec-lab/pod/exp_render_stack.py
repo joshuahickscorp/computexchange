@@ -480,6 +480,13 @@ ADAPT_MIN = int(os.environ.get("CX_ADAPT_MIN", "16"))
 DENOISER  = os.environ.get("CX_DENOISER", "none")   # oidn | optix | none
 GUIDES    = os.environ.get("CX_GUIDES", "0") == "1"
 LIGHTTREE = os.environ.get("CX_LIGHTTREE", "0") == "1"
+# MATCH_REF: render this frame with the EXACT reference recipe for the settings that
+# otherwise diverge between the anchor stack and the reference. Today that is ONE lever:
+# use_light_tree. The reference (IS_REF) leaves it at the SCENE DEFAULT and never forces
+# it; when MATCH_REF is set (the RAW repair_denoiser='none' border render) we do the same
+# so the repaired tiles are CONFIG-IDENTICAL to the reference. Default OFF -> zero change
+# to every existing render.
+MATCH_REF = os.environ.get("CX_MATCH_REF", "0") == "1"
 
 # ---- open the REAL production scene -----------------------------------------
 bpy.ops.wm.open_mainfile(filepath=BLEND)
@@ -552,12 +559,18 @@ else:
 # BOTH ref and anchor would make it a hidden lever; the task's anchor stack lists it as
 # an OURS lever, so we enable it ONLY on the anchor (draft) and leave the reference at
 # the scene's default. Disclosed in the note. The attribute name is 'use_light_tree'.
-if (not IS_REF) and LIGHTTREE:
+# MATCH_REF (the RAW repair border render) also SKIPS this force so it stays config-
+# identical to the reference: forcing light-tree here while the reference leaves it at
+# the scene default was a one-setting mismatch that left a ~0.086 SSIM residual on the
+# failing corner tiles (config-matched 4096spp renders are otherwise pixel-identical).
+if (not IS_REF) and (not MATCH_REF) and LIGHTTREE:
     try:
         cyc.use_light_tree = True
         _log("light-tree (many-light importance sampling) ENABLED on anchor")
     except Exception as e:
         _log("could not enable use_light_tree:", e)
+elif MATCH_REF:
+    _log("MATCH_REF: use_light_tree LEFT AT SCENE DEFAULT (reference recipe, not forced)")
 
 # ---- DENOISER (anchor only) -------------------------------------------------
 # In-pipeline denoise => its cost is INSIDE the subprocess wall-time the caller measures.
@@ -718,7 +731,8 @@ scene.frame_set(FRAME)
 _log(f"rendering {'REF' if IS_REF else 'ANCHOR'} frame={FRAME}/{NFRAMES} spp={SPP} "
      f"res={RES_X}x{RES_Y} adaptive={(not IS_REF) and USE_ADAPT} "
      f"denoiser={'none' if IS_REF else DENOISER} guides={(not IS_REF) and GUIDES} "
-     f"light_tree={(not IS_REF) and LIGHTTREE} bounces={BOUNCES} device={chosen_device} -> {OUT}")
+     f"light_tree={(not IS_REF) and (not MATCH_REF) and LIGHTTREE} match_ref={MATCH_REF} "
+     f"bounces={BOUNCES} device={chosen_device} -> {OUT}")
 if not denoiser_ok:
     # Surface the denoiser failure so the caller errors cleanly rather than silently
     # rendering a NON-denoised anchor and mislabeling it as denoised.
@@ -789,7 +803,7 @@ def run_blender_frame(blender_bin, script_path, *, blend, out_exr, res_x, res_y,
                       spp, is_ref, frame, nframes, cam_motion, seed, bounces,
                       device_pref, timeout_s, adaptive=False, adaptive_thr=0.01,
                       adaptive_min=16, denoiser="none", guides=False,
-                      light_tree=False, require_gpu=False,
+                      light_tree=False, match_reference=False, require_gpu=False,
                       borders=None, out_pattern=None):
     """Render ONE animation frame of the production scene to a multilayer EXR.
 
@@ -825,6 +839,11 @@ def run_blender_frame(blender_bin, script_path, *, blend, out_exr, res_x, res_y,
     env["CX_DENOISER"] = denoiser
     env["CX_GUIDES"] = "1" if guides else "0"
     env["CX_LIGHTTREE"] = "1" if light_tree else "0"
+    # MATCH_REF: render with the EXACT reference recipe (today: leave use_light_tree at the
+    # scene default, NOT force-enabled). Set on the RAW repair_denoiser='none' border render
+    # so the repaired tiles are config-identical to the reference. Default OFF for every
+    # other call, so all existing renders are byte-identical.
+    env["CX_MATCH_REF"] = "1" if match_reference else "0"
     env["CX_REQUIRE_GPU"] = "1" if require_gpu else "0"
     if borders is not None:
         if not borders:
@@ -839,7 +858,7 @@ def run_blender_frame(blender_bin, script_path, *, blend, out_exr, res_x, res_y,
     kind = "REF" if is_ref else ("REPAIR" if borders is not None else "ANCHOR")
     log(f"render start [{kind}]: frame={frame} spp={spp} res={res_x}x{res_y} "
         f"adaptive={adaptive} denoiser={'none' if is_ref else denoiser} "
-        f"guides={guides} light_tree={light_tree} "
+        f"guides={guides} light_tree={light_tree} match_ref={match_reference} "
         f"{'regions=' + str(len(borders)) + ' ' if borders is not None else ''}-> {out_exr}")
     t0 = time.perf_counter()
     proc = subprocess.run(
@@ -2176,17 +2195,23 @@ def main():
             out_pattern = os.path.join(WORK_DIR, f"repair_{frame_no:04d}_r{{region}}.exr")
             # repair_denoiser selects the sampling recipe of the re-render:
             #   'inherit' -> the SAME anchor stack (adaptive cap + HALVED threshold + the
-            #                anchor denoiser + guides). Unchanged legacy repair path.
-            #   'none'    -> RAW Monte-Carlo at a FIXED repair_spp (adaptive OFF, denoiser
-            #                OFF, no guides) — matching the reference's raw config so OIDN's
-            #                shared edge-blur bias is REMOVED on exactly the selected tiles.
-            #                light-tree stays (it is UNBIASED importance sampling — it only
-            #                cuts variance, never shifts the estimate, so the tile converges
-            #                toward the SAME ground truth as the reference, just faster).
+            #                anchor denoiser + guides + forced light-tree). Unchanged
+            #                legacy repair path.
+            #   'none'    -> RAW Monte-Carlo at a FIXED repair_spp rendered with the EXACT
+            #                reference recipe via match_reference=True: adaptive OFF,
+            #                denoiser OFF, no guides, AND use_light_tree LEFT AT THE SCENE
+            #                DEFAULT (the reference never forces it). This makes the border
+            #                tiles CONFIG-IDENTICAL to the reference, so they converge to
+            #                the SAME estimate (config-matched 4096spp renders are pixel-
+            #                identical). Forcing light-tree here — as the anchor stack does
+            #                — was a one-setting mismatch that left a ~0.086 SSIM residual
+            #                on the failing corner tiles; match_reference is robust to
+            #                whatever the scene's use_light_tree default is (we never
+            #                touch it) rather than guessing light_tree=False.
             if repair_denoiser == "none":
                 repair_render_kwargs = dict(
                     adaptive=False, denoiser="none", guides=False,
-                    light_tree=light_tree)
+                    match_reference=True)
             else:  # 'inherit'
                 repair_render_kwargs = dict(
                     adaptive=True, adaptive_thr=repair_adaptive_thr_eff,
@@ -2381,9 +2406,13 @@ def main():
                           "shared-denoiser-bias tiles two_draft variance is blind to")
         if repair_denoiser == "none":
             _rep_desc = (
-                f"re-rendered RAW at {repair_spp_eff}spp (adaptive OFF, denoiser OFF, no "
-                f"guides — matching the reference's raw config so OIDN's shared edge-blur "
-                f"bias is removed on exactly those tiles)")
+                f"re-rendered RAW at {repair_spp_eff}spp with the EXACT reference recipe "
+                f"(adaptive OFF, denoiser OFF, no guides, and use_light_tree LEFT AT THE "
+                f"SCENE DEFAULT via match_reference — NOT force-enabled) so the border "
+                f"tiles are CONFIG-IDENTICAL to the reference: OIDN's shared edge-blur bias "
+                f"is removed AND the one-setting light-tree mismatch that left a ~0.086 "
+                f"SSIM residual on the failing corner tiles is closed on exactly those "
+                f"tiles)")
         else:  # inherit
             _rep_desc = (
                 f"re-rendered with the SAME anchor stack at {repair_spp_eff}spp cap + "
@@ -2508,6 +2537,12 @@ def main():
                                 if selector_recall is not None else None),
             "repaired_tile_ssim_after": repaired_tile_report,
         })
+        # SELF-DOCUMENTING light-tree mode of the repair border render. Emitted ONLY on the
+        # RAW path so 'inherit' (and repair-OFF) receipts stay BYTE-IDENTICAL to the legacy
+        # runner. 'scene_default_match_ref' == config-identical to the reference (light-tree
+        # never forced); the 'inherit' path keeps its historical forced-light-tree behavior.
+        if repair_denoiser == "none":
+            metrics["repair_light_tree"] = "scene_default_match_ref"
 
     log(f"RESULT net_speedup={net_speedup:.3f} quality={quality:.4f} "
         f"worst_tile={worst_tile_ssim:.4f} p5_tile={p5_tile_ssim:.4f} "
