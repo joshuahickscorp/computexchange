@@ -93,3 +93,6 @@ __pycache__/
 
 # regenerable render diagnostics (pixel artifacts; the builders + ledgers are the trail)
 diag_images/
+
+# raw bulk tuning trace (69MB machine log; the distilled reports + smaller ledgers are the trail)
+docs/speed-lane-reports/spec-lab/tuning_ledger.jsonl
