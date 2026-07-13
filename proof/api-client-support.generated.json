@@ -1760,7 +1760,7 @@
       "surface": "public_or_operational"
     }
   ],
-  "input_sha256": "01152026403c600a87489d157f77a6e8a0f34702674fe7092e1d5e74332a9543",
+  "input_sha256": "5d2683cd0834ad6ebcc240abc893c17d3262895741f7365bafd6f7d3b5c86811",
   "openai_batch_subset": {
     "compatibility_scope": "batch_workflow_subset",
     "drop_in_sdk_compatible": false,
