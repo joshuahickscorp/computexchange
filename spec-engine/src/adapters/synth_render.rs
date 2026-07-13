@@ -119,7 +119,10 @@ impl Verifier<RenderTile> for SsimGate {
         // A little real work so verify_cost registers, and so the return is a
         // function of the draft too (kept, not asserted on).
         let _ = fnv_spin(unit.id as u64 ^ 0x5353_494D, VERIFY_ITERS); // "SSIM"
-        Verification { score: ssim, truth: None }
+        Verification {
+            score: ssim,
+            truth: None,
+        }
     }
 }
 
@@ -187,7 +190,13 @@ pub fn pipeline(
     branch_id: &str,
 ) -> crate::engine::SpecPipeline<RenderTile, LowSppDrafter, SsimGate, TileGatePolicy, ReRenderRepair>
 {
-    crate::engine::SpecPipeline::render(branch_id, LowSppDrafter, SsimGate, TileGatePolicy, ReRenderRepair)
+    crate::engine::SpecPipeline::render(
+        branch_id,
+        LowSppDrafter,
+        SsimGate,
+        TileGatePolicy,
+        ReRenderRepair,
+    )
 }
 
 #[cfg(test)]
@@ -201,9 +210,18 @@ mod tests {
     //  0.40 -> global 0.60                        -> Fail     (repair to reference)
     fn mixed_tiles() -> Vec<RenderTile> {
         vec![
-            RenderTile { id: 0, residual: 0.00 },
-            RenderTile { id: 1, residual: 0.05 },
-            RenderTile { id: 2, residual: 0.40 },
+            RenderTile {
+                id: 0,
+                residual: 0.00,
+            },
+            RenderTile {
+                id: 1,
+                residual: 0.05,
+            },
+            RenderTile {
+                id: 2,
+                residual: 0.40,
+            },
         ]
     }
 
@@ -229,7 +247,10 @@ mod tests {
 
         assert_eq!(receipt.modality, Modality::render());
         assert_eq!(receipt.units, 3);
-        assert!(!receipt.exact, "render is never bit-exact vs a full reference");
+        assert!(
+            !receipt.exact,
+            "render is never bit-exact vs a full reference"
+        );
 
         // accepted_fraction is a sane ratio in [0,1]: tiles 0 and 1 reuse the draft
         // (accepted 1 each), tile 2 is repaired (accepted 0) => 2/3.
@@ -241,15 +262,23 @@ mod tests {
 
         // Exactly the failed tile was repaired.
         assert!((receipt.repaired_fraction - 1.0 / 3.0).abs() < 1e-9);
-        assert!(receipt.repair_cost_s > 0.0, "a repaired tile must cost repair time");
+        assert!(
+            receipt.repair_cost_s > 0.0,
+            "a repaired tile must cost repair time"
+        );
 
-        // total = draft + verify + repair, and it is positive.
+        // total = every charged phase, including orchestration, and is positive.
         assert!(receipt.total_product_time_s > 0.0);
-        let sum = receipt.draft_cost_s + receipt.verify_cost_s + receipt.repair_cost_s;
+        let sum = receipt.draft_cost_s
+            + receipt.verify_cost_s
+            + receipt.repair_cost_s
+            + receipt.overhead_cost_s;
         assert!((receipt.total_product_time_s - sum).abs() < 1e-12);
 
         // speedup = baseline / spec, present because the baseline was Modeled.
-        let sp = receipt.speedup_vs_baseline.expect("modeled baseline => Some");
+        let sp = receipt
+            .speedup_vs_baseline
+            .expect("modeled baseline => Some");
         assert!((sp - 1.0 / receipt.total_product_time_s).abs() < 1e-9);
 
         // JSON round-trips.
@@ -266,8 +295,14 @@ mod tests {
         // Only delivery/preview tiles: nothing is repaired.
         let pipe = pipeline("cx_synth_render_norepair");
         let tiles = vec![
-            RenderTile { id: 10, residual: 0.00 },
-            RenderTile { id: 11, residual: 0.05 },
+            RenderTile {
+                id: 10,
+                residual: 0.00,
+            },
+            RenderTile {
+                id: 11,
+                residual: 0.05,
+            },
         ];
         let (_outs, receipt) = pipe.run_batch(
             &tiles,
@@ -276,7 +311,10 @@ mod tests {
             Evidence::Synthetic,
             Details::new(),
         );
-        assert_eq!(receipt.repair_cost_s, 0.0, "no repaired tile => exactly zero repair cost");
+        assert_eq!(
+            receipt.repair_cost_s, 0.0,
+            "no repaired tile => exactly zero repair cost"
+        );
         assert_eq!(receipt.repaired_fraction, 0.0);
         // Both drafts reused.
         assert!((receipt.accepted_fraction - 1.0).abs() < 1e-9);

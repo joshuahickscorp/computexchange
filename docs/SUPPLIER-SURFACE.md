@@ -1,3 +1,4 @@
+<!-- CLAIM-SCOPE: internal-engineering-non-authoritative -->
 # Supplier surface + workflows · where they live
 
 Relocated from `web/skeleton.html` when that role-tab skeleton was retired (the

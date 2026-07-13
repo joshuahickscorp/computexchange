@@ -1,3 +1,4 @@
+<!-- CLAIM-SCOPE: internal-engineering-non-authoritative -->
 # Postgres telemetry-table disk / IO sizing — measured, not guessed
 
 > **Facet:** Postgres Data Lifecycle & unbounded history growth (7→8, "Size the

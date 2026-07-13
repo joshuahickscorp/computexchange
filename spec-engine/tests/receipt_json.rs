@@ -8,11 +8,13 @@ use cx_spec_engine::{BaselineSource, Details, Evidence, SpecReceipt};
 /// The exact snake_case keys the Go `SpecReceipt` mirror binds (see
 /// `docs/research/SPEC_ENGINE_SUBSTRATE_DESIGN.md` §Go ingestion mirror).
 const GO_MIRROR_KEYS: &[&str] = &[
+    "schema_version",
     "branch_id",
     "modality",
     "draft_cost_s",
     "verify_cost_s",
     "repair_cost_s",
+    "overhead_cost_s",
     "total_product_time_s",
     "baseline_total_time_s",
     "baseline_source",
@@ -20,6 +22,7 @@ const GO_MIRROR_KEYS: &[&str] = &[
     "accepted_fraction",
     "repaired_fraction",
     "exact",
+    "artifact_verified",
     "quality_tier",
     "speedup_vs_baseline",
     "evidence",
@@ -28,10 +31,24 @@ const GO_MIRROR_KEYS: &[&str] = &[
 
 fn demo_receipt(baseline_source: BaselineSource) -> SpecReceipt {
     let pipe = synth_token::pipeline("cx_json_it");
-    let windows = vec![window_with_match(0, 3, 8, 6), window_with_match(1, 30, 4, 4)];
+    let windows = vec![
+        window_with_match(0, 3, 8, 6),
+        window_with_match(1, 30, 4, 4),
+    ];
     let mut details = Details::new();
     details.insert("prompt_class".into(), serde_json::json!("repeat"));
-    let (_outs, receipt) = pipe.run_batch(&windows, 0.02, baseline_source, Evidence::Synthetic, details);
+    let baseline_s = if baseline_source == BaselineSource::Absent {
+        0.0
+    } else {
+        0.02
+    };
+    let (_outs, receipt) = pipe.run_batch(
+        &windows,
+        baseline_s,
+        baseline_source,
+        Evidence::Synthetic,
+        details,
+    );
     receipt
 }
 
@@ -41,7 +58,10 @@ fn receipt_carries_every_go_mirror_key() {
     let v = serde_json::to_value(&receipt).unwrap();
     let obj = v.as_object().expect("receipt serializes to a JSON object");
     for k in GO_MIRROR_KEYS {
-        assert!(obj.contains_key(*k), "receipt JSON is missing Go-mirror key `{k}`");
+        assert!(
+            obj.contains_key(*k),
+            "receipt JSON is missing Go-mirror key `{k}`"
+        );
     }
     // modality is a bare string (transparent newtype), details is an object.
     assert!(obj["modality"].is_string());
@@ -94,7 +114,8 @@ fn legacy_python_ledger_row_reads_via_aliases() {
         "meta": { "prompt_class": "repeat" }
     }"#;
 
-    let r: SpecReceipt = serde_json::from_str(legacy).expect("legacy row must deserialize via aliases");
+    let r: SpecReceipt =
+        serde_json::from_str(legacy).expect("legacy row must deserialize via aliases");
 
     // Costs mapped from the legacy *_s names.
     assert_eq!(r.draft_cost_s, 0.0000041);
@@ -105,7 +126,10 @@ fn legacy_python_ledger_row_reads_via_aliases() {
     assert_eq!(r.speedup_vs_baseline, Some(1025.0)); // speedup_x
 
     // Free bag mapped from the legacy `meta` key.
-    assert_eq!(r.details.get("prompt_class").unwrap(), &serde_json::json!("repeat"));
+    assert_eq!(
+        r.details.get("prompt_class").unwrap(),
+        &serde_json::json!("repeat")
+    );
 
     // Honest defaults for the labels a legacy row never carried.
     assert_eq!(r.evidence, Evidence::Imported);

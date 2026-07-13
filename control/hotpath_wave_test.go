@@ -64,6 +64,8 @@ func TestRequeueTaskBacksOffAndExcludesFailedWorker(t *testing.T) {
 		worker2, demoSupplier2UUID); err != nil {
 		t.Fatalf("seed worker2: %v", err)
 	}
+	replaceWorkerAuthorizationsForTest(t, ctx, worker2,
+		[2]string{"embed", "all-minilm-l6-v2"})
 
 	// A single-task job with ONE task, currently 'running', claimed by the demo
 	// worker — the exact state a task is in right after a commit whose honeypot then
@@ -196,18 +198,22 @@ func TestNoHedgePeerMetricFiresOnHeterogeneousFleet(t *testing.T) {
 		t.Fatalf("pin anchor: %v", err)
 	}
 
-	// (1) Heterogeneous: only a live nvidia_24g peer (different class) + a distinct
-	// supplier. It IS eligible for the embed job type (so CandidateWorkers returns
-	// it — the fleet has supply), but it is the WRONG class for a same-class peer.
+	// (1) Heterogeneous: only a live apple_silicon_ultra peer (different class) +
+	// a distinct supplier. It has a real advertised Candle/Metal embed cell, so
+	// CandidateWorkers returns it, but it is the WRONG class for a same-class peer.
+	// A CUDA/vLLM fixture would be dishonest here: that lane is still soak-only in
+	// the generated runtime matrix and therefore correctly has no dispatch authority.
 	otherClass := uuid.New()
 	if _, err := itPool.Exec(ctx,
 		`INSERT INTO workers (id, supplier_id, hw_class, engine, build_hash, memory_gb, bw_gbps, last_seen_at, version,
 		                      supported_jobs, supported_models, min_payout_usd_hr, thermal_ok, effective_memory_gb, throttled)
-		 VALUES ($1,$2,'nvidia_24g','vllm','bh2',24,600,now(),'seed',
-		         ARRAY['embed'], ARRAY['all-minilm-l6-v2'], 0, true, 24, false)`,
+		 VALUES ($1,$2,'apple_silicon_ultra','candle','bh2',192,800,now(),'seed',
+		         ARRAY['embed'], ARRAY['all-minilm-l6-v2'], 0, true, 192, false)`,
 		otherClass, demoSupplier2UUID); err != nil {
 		t.Fatalf("seed wrong-class peer: %v", err)
 	}
+	replaceWorkerAuthorizationsForTest(t, ctx, otherClass,
+		[2]string{"embed", "all-minilm-l6-v2"})
 
 	before := NoHedgePeerCount()
 	_, err := itStore.SelectRedundancyPeer(ctx, "embed", "all-minilm-l6-v2", 2, demoWorkerUUID)
@@ -229,6 +235,8 @@ func TestNoHedgePeerMetricFiresOnHeterogeneousFleet(t *testing.T) {
 		sameClass, demoSupplier3UUID); err != nil {
 		t.Fatalf("seed same-class peer: %v", err)
 	}
+	replaceWorkerAuthorizationsForTest(t, ctx, sameClass,
+		[2]string{"embed", "all-minilm-l6-v2"})
 	before2 := NoHedgePeerCount()
 	peer, err := itStore.SelectRedundancyPeer(ctx, "embed", "all-minilm-l6-v2", 2, demoWorkerUUID)
 	if err != nil {

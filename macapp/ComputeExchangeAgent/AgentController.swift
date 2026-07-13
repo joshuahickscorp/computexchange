@@ -12,6 +12,7 @@
 
 import Foundation
 import Combine
+import EnrollmentCore
 
 /// Canonical paths under the agent's data dir. The app and the agent must agree
 /// on these; they match agent/src/config.rs `data_dir` (defaulting to
@@ -71,6 +72,10 @@ enum AgentPaths {
     /// name) becomes a no-op and does not wrap the process a second time. Must match the
     /// Rust `CX_SANDBOXED_ENV` constant exactly.
     static let sandboxedEnvKey = "CX_SANDBOXED"
+    /// The distributed app is a production launch path: if neither the launcher nor
+    /// the agent can apply the seatbelt profile, the child must stop instead of
+    /// accepting buyer work unsandboxed. Must match the Rust constant exactly.
+    static let requireSandboxEnvKey = "CX_REQUIRE_SANDBOX"
 }
 
 @MainActor
@@ -100,13 +105,28 @@ final class AgentController: ObservableObject {
     let consent: ConsentStore
     /// Rolling, locally-observed earnings series for the trust sparkline.
     let earningsHistory: EarningsHistory
+    /// Supplier-machine enrollment. Its Keychain token + verified receipt are a
+    /// second hard launch gate, independent of the consent gate above.
+    let enrollment: EnrollmentStore
 
-    init(consent: ConsentStore? = nil, earningsHistory: EarningsHistory? = nil) {
+    var canStart: Bool {
+        consent.granted && enrollment.isReady && launchedPID == nil
+    }
+
+    init(
+        consent: ConsentStore? = nil,
+        earningsHistory: EarningsHistory? = nil,
+        enrollment: EnrollmentStore? = nil
+    ) {
         // Build the stores inside the (main-actor) init body. They are @MainActor
         // types, so their initializers can only run here, not as default arguments
         // (which Swift evaluates in a nonisolated context).
         self.consent = consent ?? ConsentStore()
         self.earningsHistory = earningsHistory ?? EarningsHistory()
+        self.enrollment = enrollment ?? EnrollmentStore.live(
+            dataDirectory: AgentPaths.dataDir,
+            configFile: AgentPaths.configFile
+        )
         loadPrefs()
         refresh()
         // Poll the status file. A file-presence/heartbeat check every 3s is cheap
@@ -167,6 +187,17 @@ final class AgentController: ObservableObject {
             lastLaunchError = "Consent required: review and accept the terms before the agent can start."
             return
         }
+        guard enrollment.isReady else {
+            lastLaunchError = "Enrollment required: verify this Mac with a worker token before starting the agent."
+            return
+        }
+        let credentials: EnrollmentCredentials
+        do {
+            credentials = try enrollment.launchCredentials()
+        } catch {
+            lastLaunchError = "Enrollment is incomplete or the Keychain credential is unavailable. Open Enrollment and retry or reset."
+            return
+        }
         guard let bin = AgentPaths.bundledBinary else {
             lastLaunchError = "cx-agent binary not found in the app bundle. In dev, run the Rust agent directly (cargo run -p cx-agent)."
             return
@@ -186,8 +217,9 @@ final class AgentController: ObservableObject {
         // (cx-agent.sb) when it's available — the Security Posture 8->9 boundary that
         // contains a malicious buyer payload's filesystem blast radius (proven by
         // macapp/ComputeExchangeAgent/sandbox-profile-test.sh). When the profile can't
-        // be resolved (a bare dev build with no assembled bundle), we launch the agent
-        // DIRECTLY and record sandboxActive=false, never pretending it's protected.
+        // be resolved, we launch the child directly only so its own self-wrapper gets
+        // one final chance. CX_REQUIRE_SANDBOX=1 below makes that child fail closed if
+        // it still cannot apply the profile; it can never process buyer work unwrapped.
         if let argv = sandboxWrappedLaunch(binary: bin, agentArgs: agentArgs) {
             p.executableURL = URL(fileURLWithPath: AgentPaths.sandboxExec)
             p.arguments = argv
@@ -203,6 +235,13 @@ final class AgentController: ObservableObject {
         // path next to the config; setting the env var makes the contract explicit.)
         var env = ProcessInfo.processInfo.environment
         env["CX_AGENT_PREFS"] = AgentPaths.prefsFile.path
+        env["CX_STATUS_PATH"] = AgentPaths.statusFile.path
+        env["CX_CONTROL_URL"] = credentials.controlURL.absoluteString
+        env[AgentPaths.requireSandboxEnvKey] = "1"
+        // The raw secret exists at rest only in Keychain. The Rust agent already
+        // supports this environment override, so it never appears in agent.toml,
+        // argv, UserDefaults, UI text, or app logs.
+        env["CX_WORKER_TOKEN"] = credentials.workerToken
         // When WE applied the seatbelt profile (via sandbox-exec above), tell the agent
         // it is already sandboxed so its own startup self-re-exec
         // (agent/src/main.rs, reexec_under_sandbox_if_needed) is a no-op instead of
@@ -227,9 +266,16 @@ final class AgentController: ObservableObject {
         }
         do {
             try p.run()
+            // Process has copied the environment into the launched child. Drop the
+            // app-side copy immediately rather than retaining the raw token for the
+            // full child lifetime.
+            p.environment = nil
+            env["CX_WORKER_TOKEN"] = nil
             process = p
             launchedPID = p.processIdentifier
         } catch {
+            p.environment = nil
+            env["CX_WORKER_TOKEN"] = nil
             lastLaunchError = "Failed to launch agent: \(error.localizedDescription)"
         }
     }
@@ -273,6 +319,18 @@ final class AgentController: ObservableObject {
         launchedPID = nil
         sandboxActive = false
         refresh()
+    }
+
+    /// Stop first, then remove the Keychain credential, app-managed base config,
+    /// and non-secret enrollment receipt. This is local removal, not server-side
+    /// revocation; the enrollment UI states that boundary explicitly.
+    func resetEnrollment() {
+        stopAgent()
+        if !enrollment.reset() {
+            lastLaunchError = enrollment.message
+        } else {
+            lastLaunchError = nil
+        }
     }
 
     func openDataDir() {

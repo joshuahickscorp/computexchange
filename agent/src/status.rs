@@ -86,7 +86,10 @@ const HOURS_ONLINE_PER_DAY: f64 = 24.0;
 /// nonzero measured throughput and a catalogue price (e.g. a fresh worker that
 /// hasn't benchmarked yet, or one whose only models aren't in the catalogue) —
 /// the caller must never fabricate a number in that case.
-pub fn projected_daily_usd(benchmarks: &[BenchResult], hw_class: crate::types::HardwareClass) -> Option<f64> {
+pub fn projected_daily_usd(
+    benchmarks: &[BenchResult],
+    hw_class: crate::types::HardwareClass,
+) -> Option<f64> {
     let share_rate = 1.0 - (DEFAULT_PLATFORM_TAKE_PCT.clamp(1.0, 5.0) / 100.0);
     let watts = estimated_sustained_watts(hw_class);
     let elec_usd_hr = watts / 1000.0 * DEFAULT_ELECTRICITY_USD_PER_KWH;
@@ -847,8 +850,13 @@ mod tests {
         // Supplier Earnings Economics 4→5: a live per-worker projection, computed
         // from THIS worker's own measured benchmarks — must be present and positive
         // for a worker with a real, priced, nonzero-throughput benchmark line.
-        let projected = v["projected_daily_usd"].as_f64().expect("projected_daily_usd must be a number");
-        assert!(projected > 0.0, "expected a positive projection, got {projected}");
+        let projected = v["projected_daily_usd"]
+            .as_f64()
+            .expect("projected_daily_usd must be a number");
+        assert!(
+            projected > 0.0,
+            "expected a positive projection, got {projected}"
+        );
 
         // Supplier onboarding & safety 7->8: the trust panel actually carries the
         // real control-plane-sourced data passed into this heartbeat, not nulls.
@@ -870,7 +878,12 @@ mod tests {
     /// already gets. A absent-from-the-start worker legitimately stays `None`.
     #[test]
     fn trust_surface_survives_a_failed_poll() {
-        let w = StatusWriter::new("9.9.9", Uuid::nil(), &[], crate::types::HardwareClass::AppleSiliconPro);
+        let w = StatusWriter::new(
+            "9.9.9",
+            Uuid::nil(),
+            &[],
+            crate::types::HardwareClass::AppleSiliconPro,
+        );
         w.heartbeat(
             0.0,
             None,
@@ -899,10 +912,28 @@ mod tests {
         }
         // Next heartbeat's connect/verification calls failed (None) — real values
         // must survive, not reset to None.
-        w.heartbeat(0.0, None, None, true, 200, None, &ample(64.0, 40.0, 8.0), None, None);
+        w.heartbeat(
+            0.0,
+            None,
+            None,
+            true,
+            200,
+            None,
+            &ample(64.0, 40.0, 8.0),
+            None,
+            None,
+        );
         let i = w.inner.lock().unwrap();
-        assert_eq!(i.payouts_enabled, Some(true), "payout readiness must survive a failed poll");
-        assert_eq!(i.honeypots_passed, Some(2), "verification counts must survive a failed poll");
+        assert_eq!(
+            i.payouts_enabled,
+            Some(true),
+            "payout readiness must survive a failed poll"
+        );
+        assert_eq!(
+            i.honeypots_passed,
+            Some(2),
+            "verification counts must survive a failed poll"
+        );
         assert_eq!(i.honeypots_failed, Some(1));
         assert_eq!(i.verification_label.as_deref(), Some("honeypot-checked"));
     }
@@ -911,8 +942,23 @@ mod tests {
     /// honestly absent (`None`) — never a fabricated default like `false`/`0`.
     #[test]
     fn trust_surface_absent_until_first_real_report() {
-        let w = StatusWriter::new("9.9.9", Uuid::nil(), &[], crate::types::HardwareClass::AppleSiliconPro);
-        w.heartbeat(0.0, None, None, true, 100, None, &ample(64.0, 40.0, 8.0), None, None);
+        let w = StatusWriter::new(
+            "9.9.9",
+            Uuid::nil(),
+            &[],
+            crate::types::HardwareClass::AppleSiliconPro,
+        );
+        w.heartbeat(
+            0.0,
+            None,
+            None,
+            true,
+            100,
+            None,
+            &ample(64.0, 40.0, 8.0),
+            None,
+            None,
+        );
         let i = w.inner.lock().unwrap();
         assert_eq!(i.payouts_configured, None);
         assert_eq!(i.payouts_connected, None);
@@ -925,7 +971,12 @@ mod tests {
     /// A throttled heartbeat flips state to `paused` and surfaces the reason.
     #[test]
     fn throttled_state_is_paused_with_reason() {
-        let w = StatusWriter::new("9.9.9", Uuid::nil(), &[], crate::types::HardwareClass::AppleSiliconPro);
+        let w = StatusWriter::new(
+            "9.9.9",
+            Uuid::nil(),
+            &[],
+            crate::types::HardwareClass::AppleSiliconPro,
+        );
         let throttled = ThrottleDecision {
             throttled: true,
             reason: Some("reserved headroom: 6.0 GB available ≤ 8.0 GB headroom".into()),
@@ -960,8 +1011,13 @@ mod tests {
                 load_ms: 0,
             }]
         };
-        let slow = projected_daily_usd(&bench(20.0), crate::types::HardwareClass::AppleSiliconPro).unwrap();
-        let fast = projected_daily_usd(&bench(85.64071), crate::types::HardwareClass::AppleSiliconPro).unwrap();
+        let slow = projected_daily_usd(&bench(20.0), crate::types::HardwareClass::AppleSiliconPro)
+            .unwrap();
+        let fast = projected_daily_usd(
+            &bench(85.64071),
+            crate::types::HardwareClass::AppleSiliconPro,
+        )
+        .unwrap();
         assert!(
             fast > slow,
             "higher measured tok/s must yield a higher projection (fast={fast}, slow={slow}), never a fleet-average constant"
@@ -1012,7 +1068,10 @@ mod tests {
             load_ms: 0,
         }];
         assert_eq!(
-            projected_daily_usd(&unpriced_model, crate::types::HardwareClass::AppleSiliconPro),
+            projected_daily_usd(
+                &unpriced_model,
+                crate::types::HardwareClass::AppleSiliconPro
+            ),
             None
         );
     }
@@ -1041,7 +1100,8 @@ mod tests {
                 load_ms: 0,
             },
         ];
-        let combined = projected_daily_usd(&bench, crate::types::HardwareClass::AppleSiliconPro).unwrap();
+        let combined =
+            projected_daily_usd(&bench, crate::types::HardwareClass::AppleSiliconPro).unwrap();
         let embed_only = projected_daily_usd(
             &[bench[0].clone()],
             crate::types::HardwareClass::AppleSiliconPro,
@@ -1084,13 +1144,38 @@ mod tests {
     /// not eligible (quiet hours / battery) → paused.
     #[test]
     fn state_idle_vs_paused_when_no_job() {
-        let w = StatusWriter::new("9.9.9", Uuid::nil(), &[], crate::types::HardwareClass::AppleSiliconPro);
-        w.heartbeat(0.0, None, None, true, 100, None, &ample(64.0, 40.0, 8.0), None, None);
+        let w = StatusWriter::new(
+            "9.9.9",
+            Uuid::nil(),
+            &[],
+            crate::types::HardwareClass::AppleSiliconPro,
+        );
+        w.heartbeat(
+            0.0,
+            None,
+            None,
+            true,
+            100,
+            None,
+            &ample(64.0, 40.0, 8.0),
+            None,
+            None,
+        );
         {
             let i = w.inner.lock().unwrap();
             assert!(i.inflight.is_empty() && i.eligible_now && !i.throttled);
         }
-        w.heartbeat(0.0, None, None, false, 200, None, &ample(64.0, 40.0, 8.0), None, None);
+        w.heartbeat(
+            0.0,
+            None,
+            None,
+            false,
+            200,
+            None,
+            &ample(64.0, 40.0, 8.0),
+            None,
+            None,
+        );
         {
             let i = w.inner.lock().unwrap();
             assert!(!i.eligible_now);

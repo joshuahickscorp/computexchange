@@ -3,22 +3,19 @@ package main
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"io"
 	"os"
 	"strings"
-
-	"github.com/google/uuid"
 )
 
-// crypto.go — at-rest token sealing (AES-256-GCM) and OAuth-state signing (HMAC).
-// Both degrade HONESTLY: with no env secret they pass values through with an
-// explicit marker (so dev behavior is unchanged and "this is unencrypted" is
-// visible in the DB), and they harden the instant the secret is set. No silent
-// half-security (BLACKHOLE: surface every failure).
+// crypto.go — at-rest token sealing (AES-256-GCM) and random credential minting.
+// Token sealing degrades HONESTLY: with no env secret it passes values through
+// with an explicit marker (so dev behavior is unchanged and "this is unencrypted"
+// is visible in the DB). OAuth state is deliberately not signed here: the connector
+// uses random, hashed, expiring, single-use database records instead (intake.go).
 
 // tokenKey derives a 32-byte AES key from CX_TOKEN_KEY (any length), or nil.
 func tokenKey() []byte {
@@ -31,24 +28,29 @@ func tokenKey() []byte {
 }
 
 // sealToken AES-256-GCM-encrypts a secret for storage. With no key it returns the
-// value tagged `plain:` so reads still work and the unencrypted state is visible
-// (a KMS-backed key is the production step).
+// value tagged `plain:` so local development remains explicit. Once a key is
+// configured, any cipher or entropy failure returns an empty value: encryption
+// failures must never downgrade a production secret back to plaintext.
 func sealToken(plaintext string) string {
 	key := tokenKey()
 	if key == nil {
 		return "plain:" + plaintext
 	}
+	return sealTokenWithReader(plaintext, key, rand.Reader)
+}
+
+func sealTokenWithReader(plaintext string, key []byte, random io.Reader) string {
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return "plain:" + plaintext
+		return ""
 	}
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return "plain:" + plaintext
+		return ""
 	}
 	nonce := make([]byte, gcm.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return "plain:" + plaintext
+	if _, err := io.ReadFull(random, nonce); err != nil {
+		return ""
 	}
 	ct := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
 	return "enc:" + base64.RawStdEncoding.EncodeToString(ct)
@@ -97,42 +99,4 @@ func newSecret(prefix string) string {
 		return ""
 	}
 	return prefix + base64.RawURLEncoding.EncodeToString(b)
-}
-
-// signState binds a buyer id into an OAuth state value. With CX_STATE_SECRET it is
-// HMAC-signed (CSRF-resistant); without, it is the bare id (unchanged dev behavior)
-// so connect still works before the secret is set.
-func signState(buyerID uuid.UUID) string {
-	secret := os.Getenv("CX_STATE_SECRET")
-	if secret == "" {
-		return buyerID.String()
-	}
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(buyerID.String()))
-	return buyerID.String() + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-}
-
-// verifyState recovers the buyer id from a state value, checking the HMAC when
-// CX_STATE_SECRET is set. ok=false on tamper or format error.
-func verifyState(state string) (uuid.UUID, bool) {
-	secret := os.Getenv("CX_STATE_SECRET")
-	if secret == "" {
-		id, err := uuid.Parse(state)
-		return id, err == nil
-	}
-	parts := strings.SplitN(state, ".", 2)
-	if len(parts) != 2 {
-		return uuid.UUID{}, false
-	}
-	id, err := uuid.Parse(parts[0])
-	if err != nil {
-		return uuid.UUID{}, false
-	}
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(parts[0]))
-	want := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-	if !hmac.Equal([]byte(want), []byte(parts[1])) {
-		return uuid.UUID{}, false
-	}
-	return id, true
 }

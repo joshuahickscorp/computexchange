@@ -186,9 +186,10 @@ This is the honest line (mirroring `RELEASE_CANDIDATE.md`'s discipline).
 
 ## 6. Build order (when Plane A is profitable)
 
-1. Land the `apple_silicon_cluster` horizon change (contract + validation) and the
-   summed-memory routing **proof** via the single-host sim — this is the cheap,
-   provable seam, and it unblocks everything else without any new hardware.
+1. Land the `apple_silicon_cluster` horizon change (contract + validation) and a
+   fail-closed admission proof: self-declared summed memory must not grant dispatch
+   authority before a real cluster runtime cell is promoted. The successful 200GB
+   route remains a hardware/runtime promotion result, not a simulated production claim.
 2. Build the topology-discovery + re-shard logic as testable pure units.
 3. Wire a `ClusterRunner` around Exo (or MLX-distributed/JACCL) behind the same
    `JobRunner` interface, validated on the multi-process sim.
@@ -199,7 +200,7 @@ This is the honest line (mirroring `RELEASE_CANDIDATE.md`'s discipline).
 Steps 1–3 are this codebase. Step 4 is the field — and this document is the design
 that step 4 executes against, not a claim that step 4 is done.
 
-## 7. Status — the buildable seam is LANDED (steps 1–3)
+## 7. Status — contracts are landed; cluster dispatch remains closed
 
 The cheap, provable, hardware-free seam now exists in the codebase. What is real:
 
@@ -207,12 +208,13 @@ The cheap, provable, hardware-free seam now exists in the codebase. What is real
   all three contract files in lockstep — `agent/src/types.rs` (`HardwareClass`),
   `control/types.go` (`validHWClasses`), `proto/manifest.schema.json` (`hw_class`) —
   with round-trip tests (`hardware_class_cluster_roundtrips`, `TestClusterHWClassValid`).
-- **Summed-memory routing proof (step 1).** `TestClusterSummedMemoryRouting`
-  (control integration matrix) seeds a cluster worker advertising ~1800 GB summed
-  memory and proves a `min_memory_gb=200` job routes ONLY to it (never to a 64 GB
-  single Mac), while a small job still routes to the single Mac — against the
-  **unchanged** `ClaimTask` filter. The summed-memory abstraction needs no
-  scheduler change, exactly as designed (§1).
+- **Fail-closed summed-memory seam (step 1).** `TestClusterSummedMemoryRouting`
+  (control integration matrix) seeds a legacy cluster row advertising ~1800 GB,
+  proves neither that declaration nor the memory predicate can manufacture exact
+  runtime authority, and retains a registered single-Mac production cell as the
+  positive control. The successful `min_memory_gb=200` cluster route is deliberately
+  open until `ClusterRunner` executes real work and the generated matrix promotes
+  an `apple_silicon_cluster` cell to advertised production status.
 - **Topology + re-shard logic (step 2).** `agent/src/cluster.rs` — pure, fully
   unit-tested: summed usable memory (minus real per-node margin), bottleneck-link
   bandwidth, contiguous proportional shard assignment, and the drop-a-node →

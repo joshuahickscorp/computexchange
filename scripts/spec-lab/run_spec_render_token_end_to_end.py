@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
 from collections import Counter
@@ -26,6 +27,11 @@ import run_cx_native_speculation_ladder as ladder  # noqa: E402
 
 LEDGER = REPO / "docs/speed-lane-reports/spec-lab/integrated_spec_render_token_ledger.jsonl"
 REPORT = REPO / "docs/speed-lane-reports/spec-lab/INTEGRATED_SPEC_RENDER_TOKEN_BENCHMARK_2026-07-09.md"
+MAX_MANIFEST_EVENTS = 100_000
+MAX_MANIFEST_BYTES = 16 << 20
+MAX_PROPOSAL_WIDTH = 65_536
+MAX_WIDTH_CHOICES = 64
+MAX_RENDER_RECEIPT_BYTES = 1 << 20
 
 
 def now() -> str:
@@ -40,6 +46,11 @@ def append_jsonl(path: Path, record: dict[str, Any]) -> None:
 
 def manifest_stream(job: integrated.RenderSpecJob, events: int) -> list[int]:
     """Actual structured stream emitted around tile/frame dispatch and completion."""
+    if not isinstance(job, integrated.RenderSpecJob):
+        raise TypeError("job must be a RenderSpecJob")
+    if (not isinstance(events, int) or isinstance(events, bool)
+            or not 1 <= events <= MAX_MANIFEST_EVENTS):
+        raise ValueError(f"events must be an integer in [1,{MAX_MANIFEST_EVENTS}]")
     statuses = ("queued", "drafted", "verified", "accepted", "refined", "delivered")
     rows = []
     for event_id in range(events):
@@ -51,6 +62,19 @@ def manifest_stream(job: integrated.RenderSpecJob, events: int) -> list[int]:
 
 def run_manifest_speculation(stream: list[int], prefix_rows: int, widths: list[int]) -> dict[str, Any]:
     """Exact prefix acceptance for a real job event stream, with byte verification."""
+    if not isinstance(stream, list) or not 2 <= len(stream) <= MAX_MANIFEST_BYTES:
+        raise ValueError(f"stream must be a list of 2..{MAX_MANIFEST_BYTES} bytes")
+    if any(not isinstance(token, int) or isinstance(token, bool) or not 0 <= token <= 255
+           for token in stream):
+        raise ValueError("stream values must be integer bytes in [0,255]")
+    if (not isinstance(prefix_rows, int) or isinstance(prefix_rows, bool)
+            or not 0 <= prefix_rows <= MAX_MANIFEST_EVENTS):
+        raise ValueError(f"prefix_rows must be an integer in [0,{MAX_MANIFEST_EVENTS}]")
+    if not isinstance(widths, list) or not 1 <= len(widths) <= MAX_WIDTH_CHOICES:
+        raise ValueError(f"widths must contain 1..{MAX_WIDTH_CHOICES} choices")
+    if any(not isinstance(width, int) or isinstance(width, bool)
+           or not 1 <= width <= MAX_PROPOSAL_WIDTH for width in widths):
+        raise ValueError(f"each width must be an integer in [1,{MAX_PROPOSAL_WIDTH}]")
     prefix_end = 0
     for _ in range(prefix_rows):
         try:
@@ -76,7 +100,7 @@ def run_manifest_speculation(stream: list[int], prefix_rows: int, widths: list[i
     accepted = 0
     sources: Counter[str] = Counter()
     start = time.perf_counter()
-    widths = sorted({width for width in widths if width > 0}, reverse=True)
+    widths = sorted(set(widths), reverse=True)
     while pos < len(stream):
         remaining = len(stream) - pos
         width, _confidence, proposal, source_meta = ladder.choose_json_template_width_with_sources(
@@ -118,7 +142,25 @@ def run_manifest_speculation(stream: list[int], prefix_rows: int, widths: list[i
 
 
 def load_render_receipt(path: Path) -> dict[str, Any]:
-    data = json.loads(path.read_text())
+    if not isinstance(path, Path):
+        raise TypeError("render receipt path must be a pathlib.Path")
+    size = path.stat().st_size
+    if size > MAX_RENDER_RECEIPT_BYTES:
+        raise ValueError(
+            f"render receipt is {size} bytes; maximum is {MAX_RENDER_RECEIPT_BYTES}"
+        )
+
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in out:
+                raise ValueError(f"duplicate render receipt key {key!r}")
+            out[key] = value
+        return out
+
+    data = json.loads(path.read_text(), object_pairs_hook=reject_duplicates)
+    if not isinstance(data, dict):
+        raise ValueError("render receipt root must be an object")
     if "render" in data and isinstance(data["render"], dict):
         data = data["render"]
     required = ("render_baseline_s", "render_spec_s")
@@ -130,21 +172,58 @@ def load_render_receipt(path: Path) -> dict[str, Any]:
 
 def normalize_stack_metrics(metrics: dict[str, Any], source: str) -> dict[str, Any]:
     """Map the production Cycles stack runner's final JSON into this receipt API."""
+    if not isinstance(metrics, dict):
+        raise TypeError("stack metrics must be an object")
+    if (not isinstance(source, str) or not source.strip()
+            or len(source.encode("utf-8")) > 1024):
+        raise ValueError("source must be non-empty and <= 1024 UTF-8 bytes")
     if metrics.get("error"):
         raise ValueError(f"render runner failed: {metrics['error']}")
     required = ("T_ref_s", "T_stack_s", "quality", "worst_tile_ssim", "modeled")
     missing = [key for key in required if key not in metrics]
     if missing:
         raise ValueError(f"stack metrics missing {', '.join(missing)}")
+    def finite(name: str, *, score: bool = False, positive: bool = False) -> float:
+        raw = metrics[name]
+        if not isinstance(raw, (int, float)) or isinstance(raw, bool):
+            raise TypeError(f"stack metric {name!r} must be a real number")
+        value = float(raw)
+        if not math.isfinite(value):
+            raise ValueError(f"stack metric {name!r} must be finite")
+        if positive and value <= 0:
+            raise ValueError(f"stack metric {name!r} must be > 0")
+        if score and not 0.0 <= value <= 1.0:
+            raise ValueError(f"stack metric {name!r} must be in [0,1]")
+        return value
+
+    if not isinstance(metrics["modeled"], bool):
+        raise TypeError("stack metric 'modeled' must be a bool")
     return {
-        "render_baseline_s": float(metrics["T_ref_s"]),
-        "render_spec_s": float(metrics["T_stack_s"]),
-        "global_ssim": float(metrics["quality"]),
-        "worst_tile_ssim": float(metrics["worst_tile_ssim"]),
-        "render_modeled": bool(metrics["modeled"]),
+        "render_baseline_s": finite("T_ref_s", positive=True),
+        "render_spec_s": finite("T_stack_s", positive=True),
+        "global_ssim": finite("quality", score=True),
+        "worst_tile_ssim": finite("worst_tile_ssim", score=True),
+        "render_modeled": metrics["modeled"],
         "evidence_type": "same_gpu_production_cycles_stack",
         "source": source,
     }
+
+
+def render_provenance(render: dict[str, Any]) -> tuple[bool, str]:
+    """Read external provenance conservatively: missing means modeled/unattested."""
+    if not isinstance(render, dict):
+        raise TypeError("render receipt must be an object")
+    if "render_modeled" not in render:
+        modeled = True
+    else:
+        modeled = render["render_modeled"]
+        if not isinstance(modeled, bool):
+            raise TypeError("render_modeled must be a bool")
+    evidence = render.get("evidence_type", "unknown")
+    if (not isinstance(evidence, str) or not evidence.strip()
+            or len(evidence.encode("utf-8")) > 128):
+        raise ValueError("evidence_type must be non-empty and <= 128 UTF-8 bytes")
+    return modeled, evidence
 
 
 def write_report(receipt: dict[str, Any]) -> None:
@@ -185,24 +264,20 @@ def main() -> None:
         [int(value) for value in args.widths.split(",") if value.strip()],
     )
     render = load_render_receipt(args.render_receipt)
-    decision = integrated.RenderVerifier.decide(
-        token_exact=bool(token["exact"]),
-        global_ssim=render.get("global_ssim"),
-        worst_tile_ssim=render.get("worst_tile_ssim"),
-        render_modeled=bool(render.get("render_modeled", False)),
-    )
+    if not isinstance(token["exact"], bool):
+        raise TypeError("token exactness proof must be a bool")
+    render_modeled, evidence_type = render_provenance(render)
     receipt = integrated.RenderSpecReceipt(
         job=job,
         token_baseline_s=float(token["baseline_s"]),
         token_spec_s=float(token["spec_s"]),
-        render_baseline_s=float(render["render_baseline_s"]),
-        render_spec_s=float(render["render_spec_s"]),
+        render_baseline_s=render["render_baseline_s"],
+        render_spec_s=render["render_spec_s"],
         global_ssim=render.get("global_ssim"),
         worst_tile_ssim=render.get("worst_tile_ssim"),
-        token_exact=bool(token["exact"]),
-        render_modeled=bool(render.get("render_modeled", False)),
-        evidence_type=str(render.get("evidence_type", "unknown")),
-        decision=decision,
+        token_exact=token["exact"],
+        render_modeled=render_modeled,
+        evidence_type=evidence_type,
     ).to_dict()
     receipt["token"] = {key: round(value, 6) if isinstance(value, float) else value for key, value in token.items()}
     receipt["render_source"] = render.get("source")

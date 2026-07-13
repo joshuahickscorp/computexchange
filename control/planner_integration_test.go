@@ -226,11 +226,23 @@ func runSimWorker(ctx context.Context, t *testing.T, w *raceWorker, wg *sync.Wai
 			return
 		case <-time.After(w.perChunk):
 		}
-		comps := make([]string, lines)
-		for i := range comps {
-			comps[i] = fmt.Sprintf("completion by %s", w.name)
+		// Match agent/src/runners.rs BatchInferResult exactly. In particular,
+		// completions are indexed records (not strings) and model is mandatory.
+		type completion struct {
+			Index  int    `json:"index"`
+			Text   string `json:"text"`
+			Tokens uint64 `json:"tokens"`
 		}
-		res, _ := json.Marshal(map[string]any{"job_type": raceJobType, "completions": comps})
+		comps := make([]completion, lines)
+		for i := range comps {
+			comps[i] = completion{Index: i, Text: fmt.Sprintf("completion by %s", w.name), Tokens: 1}
+		}
+		result := struct {
+			JobType     string       `json:"job_type"`
+			Model       string       `json:"model"`
+			Completions []completion `json:"completions"`
+		}{JobType: raceJobType, Model: raceModel, Completions: comps}
+		res, _ := json.Marshal(result)
 		if err := itStorage.PutObject(ctx, disp.ResultKey, res, "application/json"); err != nil {
 			if ctx.Err() == nil {
 				t.Errorf("%s: put result: %v", w.name, err)
@@ -238,7 +250,7 @@ func runSimWorker(ctx context.Context, t *testing.T, w *raceWorker, wg *sync.Wai
 			return
 		}
 		commit := TaskCommit{TaskID: disp.TaskID, ResultKey: disp.ResultKey,
-			DurationMS: uint64(w.perChunk.Milliseconds()), TokensUsed: 8}
+			DurationMS: uint64(w.perChunk.Milliseconds()), TokensUsed: uint64(lines)}
 		if code, b := do("POST", "/v1/worker/task/"+disp.TaskID.String()+"/commit", commit); code != 204 && code != 409 && ctx.Err() == nil {
 			// 204 = committed; 409 = lost first-commit-wins (raced straggler) — both real contracts.
 			t.Errorf("%s: commit: %d %s", w.name, code, b)

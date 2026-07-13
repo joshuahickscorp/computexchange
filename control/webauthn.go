@@ -31,14 +31,15 @@ import (
 	"time"
 
 	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
 const (
-	adminSessionCookie   = "cx_admin"       // holds the raw cx_admin_ session token (httpOnly)
-	adminChallengeCookie = "cx_admin_chal"  // holds the in-flight WebAuthn SessionData (httpOnly, short-lived)
-	adminSessionTTL      = 12 * time.Hour   // a browser admin session; re-auth with the passkey after
-	adminChallengeTTL    = 5 * time.Minute  // a ceremony must finish quickly
+	adminSessionCookie   = "cx_admin"      // holds the raw cx_admin_ session token (httpOnly)
+	adminChallengeCookie = "cx_admin_chal" // holds the in-flight WebAuthn SessionData (httpOnly, short-lived)
+	adminSessionTTL      = 12 * time.Hour  // a browser admin session; re-auth with the passkey after
+	adminChallengeTTL    = 5 * time.Minute // a ceremony must finish quickly
 )
 
 // adminUser is the single operator, as the go-webauthn User. A fixed, stable handle
@@ -88,9 +89,9 @@ func firstNonEmpty(vs ...string) string {
 
 // --- Store helpers (admin_credentials + admin_sessions) ----------------------
 
-// loadAdminCredentials returns every registered operator passkey.
-func (st *Store) loadAdminCredentials(ctx context.Context) ([]webauthn.Credential, error) {
-	rows, err := st.pool.Query(ctx, `SELECT credential FROM admin_credentials`)
+// loadAdminCredentials returns every non-revoked operator passkey.
+func (s *Store) loadAdminCredentials(ctx context.Context) ([]webauthn.Credential, error) {
+	rows, err := s.pool.Query(ctx, `SELECT credential FROM admin_credentials WHERE revoked = false`)
 	if err != nil {
 		return nil, err
 	}
@@ -110,67 +111,115 @@ func (st *Store) loadAdminCredentials(ctx context.Context) ([]webauthn.Credentia
 	return creds, rows.Err()
 }
 
-// countAdminCredentials reports how many passkeys are registered (drives the UI:
-// show "register" when 0, "sign in" when ≥1).
-func (st *Store) countAdminCredentials(ctx context.Context) (int, error) {
+// countAdminCredentials reports how many non-revoked passkeys are registered
+// (drives the UI: show "register" when 0, "sign in" when ≥1).
+func (s *Store) countAdminCredentials(ctx context.Context) (int, error) {
 	var n int
-	err := st.pool.QueryRow(ctx, `SELECT count(*) FROM admin_credentials`).Scan(&n)
+	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM admin_credentials WHERE revoked = false`).Scan(&n)
 	return n, err
 }
 
 // saveAdminCredential persists a freshly registered passkey.
-func (st *Store) saveAdminCredential(ctx context.Context, c *webauthn.Credential, label string) error {
+func (s *Store) saveAdminCredential(ctx context.Context, c *webauthn.Credential, label string) error {
 	raw, err := json.Marshal(c)
 	if err != nil {
 		return err
 	}
-	_, err = st.pool.Exec(ctx,
+	tag, err := s.pool.Exec(ctx,
 		`INSERT INTO admin_credentials (credential_id, credential, label)
 		 VALUES ($1, $2, $3)
-		 ON CONFLICT (credential_id) DO UPDATE SET credential = EXCLUDED.credential`,
+		 ON CONFLICT (credential_id) DO UPDATE SET credential = EXCLUDED.credential
+		 WHERE admin_credentials.revoked = false`,
 		c.ID, raw, label)
-	return err
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return errors.New("admin credential was revoked and cannot be re-registered")
+	}
+	return nil
 }
 
 // updateAdminCredential re-persists a credential after a login (its sign_count
 // advanced) and stamps last_used_at.
-func (st *Store) updateAdminCredential(ctx context.Context, c *webauthn.Credential) error {
+func (s *Store) updateAdminCredential(ctx context.Context, c *webauthn.Credential) error {
 	raw, err := json.Marshal(c)
 	if err != nil {
 		return err
 	}
-	_, err = st.pool.Exec(ctx,
-		`UPDATE admin_credentials SET credential = $2, last_used_at = now() WHERE credential_id = $1`,
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE admin_credentials SET credential = $2, last_used_at = now()
+		  WHERE credential_id = $1 AND revoked = false`,
 		c.ID, raw)
-	return err
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return errors.New("admin credential is missing or revoked")
+	}
+	return nil
 }
 
-// createAdminSession mints an opaque cx_admin_ token, storing only its hash.
-func (st *Store) createAdminSession(ctx context.Context, ttl time.Duration) (string, error) {
+// createAdminSession mints an opaque cx_admin_ token, storing only its hash. The
+// session is linked to the exact passkey row that authenticated this login, so a
+// later admin action can name a stable, non-secret credential and session id.
+func (s *Store) createAdminSession(ctx context.Context, credentialID []byte, ttl time.Duration) (string, error) {
 	raw := newSecret("cx_admin_")
 	if raw == "" {
 		return "", errors.New("admin session: entropy failure")
 	}
-	_, err := st.pool.Exec(ctx,
-		`INSERT INTO admin_sessions (token_hash, expires_at, revoked) VALUES ($1, $2, false)`,
-		hashKey(raw), time.Now().Add(ttl))
+	var inserted bool
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO admin_sessions (token_hash, expires_at, revoked, admin_credential_id)
+		SELECT $1, $2, false, cred.id
+		  FROM admin_credentials cred
+		 WHERE cred.credential_id = $3
+		   AND cred.revoked = false
+		RETURNING true`, hashKey(raw), time.Now().Add(ttl), credentialID).Scan(&inserted)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", errors.New("admin session: authenticated credential no longer exists")
+	}
 	if err != nil {
 		return "", err
 	}
 	return raw, nil
 }
 
+// LookupAdminSession resolves a live raw session token to its secret-free actor.
+// The raw token and its hash never leave this lookup boundary.
+func (s *Store) LookupAdminSession(ctx context.Context, raw string) (AdminActor, error) {
+	var actor AdminActor
+	var sessionID uuid.UUID
+	err := s.pool.QueryRow(ctx, `
+		SELECT sesh.id, cred.id, COALESCE(NULLIF(cred.label,''), 'passkey')
+		  FROM admin_sessions sesh
+		  JOIN admin_credentials cred
+		    ON cred.id = sesh.admin_credential_id
+		 WHERE sesh.token_hash = $1
+		   AND cred.revoked = false
+		   AND sesh.revoked = false
+		   AND sesh.expires_at > now()`, hashKey(raw)).Scan(
+		&sessionID, &actor.PrincipalID, &actor.Label)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AdminActor{}, errNotFound
+	}
+	if err != nil {
+		return AdminActor{}, err
+	}
+	actor.Mode = AdminAuthPasskeySession
+	actor.SessionID = &sessionID
+	actor.AttributionScope = AdminAttributionCredentialOnly
+	return actor, nil
+}
+
 // adminSessionValid reports whether a raw cx_admin_ token is a live admin session.
-func (st *Store) adminSessionValid(ctx context.Context, raw string) bool {
-	var one int
-	err := st.pool.QueryRow(ctx,
-		`SELECT 1 FROM admin_sessions WHERE token_hash = $1 AND revoked = false AND expires_at > now()`,
-		hashKey(raw)).Scan(&one)
+func (s *Store) adminSessionValid(ctx context.Context, raw string) bool {
+	_, err := s.LookupAdminSession(ctx, raw)
 	return err == nil
 }
 
-func (st *Store) revokeAdminSession(ctx context.Context, raw string) error {
-	_, err := st.pool.Exec(ctx, `UPDATE admin_sessions SET revoked = true WHERE token_hash = $1`, hashKey(raw))
+func (s *Store) revokeAdminSession(ctx context.Context, raw string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE admin_sessions SET revoked = true WHERE token_hash = $1`, hashKey(raw))
 	return err
 }
 
@@ -216,11 +265,14 @@ func clearCookie(w http.ResponseWriter, r *http.Request, name string) {
 	})
 }
 
-// isSecure reports whether the request arrived over HTTPS (directly or via the
-// TLS-terminating proxy). In prod Caddy sets X-Forwarded-Proto=https; on localhost
-// it is http, so the Secure flag is dropped there (a browser rejects a Secure cookie
-// over http, which would silently break the local dev flow).
+// isSecure reports whether a cookie must be HTTPS-only. Production forces Secure
+// even if a proxy header is missing, so an ingress misconfiguration fails closed;
+// local development can still use plain HTTP unless TLS or its proxy header is
+// present.
 func isSecure(r *http.Request) bool {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("CX_ENV")), "production") {
+		return true
+	}
 	if r.TLS != nil {
 		return true
 	}
@@ -378,7 +430,7 @@ func (s *Server) handleAdminLoginFinish(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusInternalServerError, "updating credential: "+err.Error())
 		return
 	}
-	token, err := s.store.createAdminSession(r.Context(), adminSessionTTL)
+	token, err := s.store.createAdminSession(r.Context(), cred.ID, adminSessionTTL)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "issuing session: "+err.Error())
 		return
@@ -408,18 +460,21 @@ func (s *Server) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// hasValidAdminSession is the cookie path authAdmin consults before the bearer key.
-func (s *Server) hasValidAdminSession(r *http.Request) bool {
+// lookupAdminSessionActor is the cookie path authAdmin consults before the bearer
+// key. Returning the actor together with validity prevents a second lookup and
+// preserves passkey-first attribution when a request carries both credentials.
+func (s *Server) lookupAdminSessionActor(r *http.Request) (AdminActor, bool) {
 	c, err := r.Cookie(adminSessionCookie)
 	if err != nil || c.Value == "" {
-		return false
+		return AdminActor{}, false
 	}
-	return s.store.adminSessionValid(r.Context(), c.Value)
+	actor, err := s.store.LookupAdminSession(r.Context(), c.Value)
+	return actor, err == nil
 }
 
 // adminSessionSweep deletes expired/revoked admin sessions (called off the ticker).
-func (st *Store) adminSessionSweep(ctx context.Context) error {
-	_, err := st.pool.Exec(ctx,
+func (s *Store) adminSessionSweep(ctx context.Context) error {
+	_, err := s.pool.Exec(ctx,
 		`DELETE FROM admin_sessions WHERE revoked = true OR expires_at < now()`)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("admin session sweep: %w", err)

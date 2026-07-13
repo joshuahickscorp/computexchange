@@ -772,7 +772,7 @@ This facet is a 10 when a real buyer, given no special treatment, submits a real
 
 ### Project detection & quotation — currently 6/10
 
-**Where we stand.** The estimate-to-quote-to-bind-to-invoice loop is fully wired and locally proven: `POST /v1/quote` scans real input, prices a cost/ETA band from live supply and the model catalogue, persists its assumptions, binds to submission with expiry/sha/shape checks, and the invoice shows quoted-vs-charged — genuinely exercised live by `prove-local`, including the drift rollup against a running stack. Project *detection*, though, is an honest but shallow file-extension pattern catalogue (the intake "Concierge") over roughly four repo shapes, with no content-based field mapping (`DetectedFields` is computed and then dropped on the floor). The cost model is crude — a bytes-divided-by-4 token heuristic with zero modeling of output-token length for generation jobs, so `batch_infer`/`json_extraction` cost estimates ignore completion length entirely. Quotes are advisory, not commitments: binding only echoes the quoted figure onto the invoice, so a buyer still pays actuals — the quote is not yet a sellable promise. And the quoted-vs-charged learning loop is ETA-only: the drift data lands in Postgres but is never rolled up or fed back into prices, and the specced `GET /admin/quotes` surface doesn't exist.
+**Where we stand.** The estimate-to-quote-to-bind-to-invoice loop is fully wired and locally proven: `POST /v1/quote` scans real input, prices a cost/ETA band from live supply and the model catalogue, persists its assumptions, binds to submission with expiry/sha/shape checks, and the invoice shows quoted-vs-charged. Project *detection*, though, is an honest but shallow file-extension pattern catalogue (the intake "Concierge") over roughly four repo shapes, with no content-based field mapping (`DetectedFields` is computed and then dropped on the floor). The cost model is crude — a bytes-divided-by-4 token heuristic with zero modeling of output-token length for generation jobs, so `batch_infer`/`json_extraction` cost estimates ignore completion length entirely. `GET /admin/quotes` now exposes quote-to-settlement charge realization, but that is not independent cost telemetry: `jobs.actual_usd` is the sum of per-task buyer charges derived from `jobs.estimated_usd`. Every row labels that basis and is ineligible for tuning; `AutoTunePrices` returns a typed refusal until measured execution economics exist.
 
 #### 6 → 6.5: Price generation jobs with real tokens and real expected output length
 - Replace the bytes/4 heuristic with a real tokenizer pass over sampled records (the agent already tokenizes; expose a count path or vendor a small Go BPE implementation), and model expected output cost for `batch_infer`/`json_extraction` instead of ignoring completion length.
@@ -780,8 +780,9 @@ This facet is a 10 when a real buyer, given no special treatment, submits a real
 - Effort: medium.
 
 #### 6.5 → 7: Close the cost-drift loop and start auto-tuning prices
-- All the needed data already lands in Postgres (`quotes.cost_expected_usd`, `jobs.actual_usd`, the invoice's `quoted_usd`); build the missing `GET /admin/quotes` drift rollup per `(job_type, model)`, and use it to auto-adjust catalogue prices instead of leaving them static.
-- Proof artifact: a real, non-zero quoted-vs-charged drift report exists and has been used at least once to correct a catalogue price.
+- Land independent per-task economic telemetry (measured runtime and energy, hardware amortization, and platform/rail costs). `jobs.actual_usd` cannot serve: it is quote-derived settlement arithmetic and would create a circular self-validation loop.
+- Feed that independent source into a separate cost rollup, then permit catalogue auto-tuning with bounded adjustments and explicit provenance. Keep quote-to-settlement realization as a buyer-charge diagnostic only.
+- Proof artifact: a real, non-zero measured-cost-vs-price report changes a catalogue price, while a test proves quote-derived `actual_usd` alone can never enable tuning.
 - Effort: medium.
 
 #### 7 → 8: Ship a firm-quote tier: a real commitment, not just an estimate
@@ -1191,7 +1192,7 @@ The day after this plan was written, a first pass actually climbed thirteen of t
 ### What was actually done and verified
 
 1. **Honeypot URL leak closed** (Verification & Result Trust 5→5.5). `control/api.go`: every task's `result_key` is now `jobs/{job}/tasks/{taskID}/result.json` keyed by that task's own opaque UUID — no `honeypots/` or `redundancy/` path segment, no revealing sequential index; primary, redundancy, and honeypot tasks are byte-for-byte indistinguishable in their storage addressing. **Proof:** `go build`/`go vet` clean; confirmed live in the end-to-end test below (the dispatched task's `result_key` carries the new opaque shape).
-2. **Whisper decoder O(n²) fixed** (Inference Hot Path 6.5→7). New vendored module `agent/src/whisper_decoder_kv.rs` adds a real incremental self-attention KV cache (the upstream crate's whisper decoder has none) — prefill once, then one token per step, instead of re-forwarding the whole growing sequence every step. **Proof:** a synthetic bit-for-bit equivalence test (`incremental_matches_full_recompute`) against the old full-recompute pattern, `cargo test` green (102 passed), AND the real, `#[ignore]`d, network-fetching `whisper_runs_real` test passed against actually-downloaded whisper-tiny weights.
+2. **Whisper decoder O(n²) fixed** (Inference Hot Path 6.5→7). New vendored module `agent/src/whisper_decoder_kv.rs` adds a real incremental self-attention KV cache (the upstream crate's whisper decoder has none) — prefill once, then one token per step, instead of re-forwarding the whole growing sequence every step. **Proof:** the synthetic `incremental_matches_full_recompute` test keeps logits within `1e-4` of the old full-recompute pattern and selects the identical greedy argmax token at every checked step (not bit-exact float-logit evidence), `cargo test` green, and the real ignored `whisper_runs_real` test passed a 16.1-second fixture against downloaded Whisper-tiny weights. `hardware::infer_content_id()` now also includes `whisper_decoder_kv.rs`, so any future decoder edit moves the byte-exact worker verification class.
 3. **Startup benchmark cached** (Agent Idle Footprint 4.5→5). `agent/src/hardware.rs`: a `BenchCache` keyed by `(agent_version, build_hash, hardware fingerprint)`, 7-day TTL, persisted to `~/.compute-exchange/bench_cache.json`. A warm relaunch skips the ~45-60s benchmark entirely. **Proof:** a dedicated test (`bench_cache_hit_miss_and_staleness`) exercising all four states (cold miss, matching-key hit, build/hardware-mismatch miss, stale->miss); full agent suite green.
 4. **KV preallocation right-sized** (Inference Hot Path / Memory Management / Batching Efficiency, shared rung). `agent/src/quantized_llama_batched.rs`: `KvCacheSlot` now takes a `reset_with_cap` capacity instead of always allocating the `MAX_SEQ_LEN=4096` worst case, wired into `generate_batch` via `(prompt_len + max_tokens).min(MAX_SEQ_LEN)`. **Proof:** a new synthetic test proving the buffer actually shrinks to the given cap AND still matches the `Tensor::cat` reference bit-for-bit even growing past the original estimate; and — the strongest evidence — the REAL, `#[ignore]`d `batch_active_shrink_equals_serial_mixed_lengths` determinism gate passed against real downloaded weights on the `--release` build.
 5. **Untrusted byte streams capped** (Security Posture 6→6.5). `control/api.go`: a `capBody` middleware wraps the whole mux with `http.MaxBytesReader` at 256 MiB. `agent/src/main.rs`: `s3_get` now checks `Content-Length` before reading and the actual body size after, both bounded by 512 MiB. **Proof:** `go build`/`go test` and `cargo test` both green; no behavior change for any request under the cap.
@@ -1802,28 +1803,18 @@ from any other concurrent session's infra), each fully verified before the next 
     tests (`pricing_test.go`) cover the arithmetic, the throughput-vs-price direction,
     the conservative hw_class fallback, and the never-invent-a-number guarantee.
 
-48. **`GET /admin/quotes` cost-drift rollup + auto-tuning built** (Project Detection &
-    Quotation 6.5→7). The pre-existing `GET /admin/drift` is ETA-only (observed p90
-    duration vs. quoted `eta_secs`) and never once touches money — the rung's own
-    "Where we stand" names this exactly. New `Store.CostDriftRollup` (in `pricing.go`)
-    groups real quote-bound, terminal (`complete`/`failed`) jobs by `(job_type,
-    model_ref)` and compares `quotes.cost_expected_usd` to the real settled
-    `jobs.actual_usd`, gated on the same `driftMinSamples` floor the ETA rollup already
-    uses. `Store.AutoTunePrices` reads that rollup and nudges `models.price_per_1k`
-    toward the drift-corrected value, clamped to ±15% per pass (`clampAutoTuneAdjustment`)
-    so one noisy sample can't swing a price wildly, stamping `price_source =
-    'drift_auto_tuned'`. New routes `GET /admin/quotes` (the rollup) and `POST
-    /admin/quotes/auto-tune` (an explicit admin action, not a silent cron — a price
-    change this consequential gets a deliberate act and a real response body naming
-    what changed). **Proof:** real Postgres integration test
-    (`TestAdminQuoteCostDriftAndAutoTune`) seeds five real quote-bound jobs at a
-    deliberate, consistent 20% underquote, confirms `GET /admin/quotes` reports the
-    exact `drift_ratio=1.2`/`drift_pct=20`, then confirms `POST /admin/quotes/auto-tune`
-    actually raises `qwen2.5-7b-instruct-q4`'s real catalogue price from `0.008` to the
-    CLAMPED `0.008×1.15` (not the raw 1.2 — proving the damping actually engages) and
-    that the change lands in the real `models` table with `price_source =
-    'drift_auto_tuned'` — the rung's own proof artifact ("used at least once to correct
-    a catalogue price"), not just a number computed and left on a dashboard.
+48. **`GET /admin/quotes` settlement rollup retained; circular auto-tuning disabled**
+    (economics-truth correction). `Store.CostDriftRollup` groups quote-bound terminal
+    jobs by `(job_type, model_ref)`, but `jobs.actual_usd` is not observed execution
+    cost: it sums `buyer_charge` rows whose per-task amount came from
+    `jobs.estimated_usd/task_count`. The admin row now emits
+    `actual_usd_basis=quote_derived_per_task_buyer_charge_settlement`, permanently
+    sets `using_for_tuning=false`, and names the machine-readable block reason.
+    `Store.AutoTunePrices` refuses before any database read/write with a typed
+    `PriceTuningUnavailableError` until independent economic telemetry is available.
+    Measured-throughput supplier repricing remains active and separate. Pure unit
+    tests prove a 1,000-sample settlement row still fails closed and auto-tuning
+    refuses even when called with a store that has no database pool.
 
 49. **Firm-quote tier shipped: a real commitment, not just an estimate** (Project
     Detection & Quotation 7→8). New `jobs.firm_quote` / `firm_quote_max_usd` /
@@ -2284,7 +2275,7 @@ Metal hardware, 0/120 corrupted each.
     overall proof bar is not met because of this separate, un-named, pre-existing cost —
     left as an explicit open item rather than silently claimed closed. **Proof:** new
     tests `TestWorkerTpsCacheMaintainedAndReadByClaim`, `TestCreateJobWithTasksCopyFromCorrectness`,
-    `TestCreateJobWithTasksCopyFromScalesLinearly`, `TestHashTrustedRedundancySkipsPeerFetch`
+    `TestCreateJobWithTasksCopyFromScalesLinearly`, `TestWorkerReportedHashNeverSkipsPeerFetch`
     all pass; `TestBudgetCapPausesDispatch` updated for the new ticker-based timing and
     re-verified; full real integration suite (117 unit + 210 integration) green; Rust
     agent unchanged test count/clippy baseline on both configs.

@@ -83,8 +83,10 @@ action took effect, no `psql` required.
 ## 3. Payout failure
 
 **Symptom.** Owed credits not settling. Inspect: `GET /admin/payouts` (per-supplier
-rollup by state: `pending`/`held`/`released`/`clawed_back`; `ready` also appears —
-see below).
+rollup across `pending`, `held`, `awaiting_funding`, `ready`, `sending`,
+`outcome_unknown`, `carried`, `released`, `exported`, `clawed_back`, and
+`reversal_required`). Cash sent, durable carry, unknown outcomes, and suspicious
+released-without-cash rows are separate fields; status alone is not cash proof.
 
 **Expected by rail.**
 - **No rail configured** (default): credits reach `ready`/owed and stay there — the
@@ -94,19 +96,26 @@ see below).
   passed — a `ready` row is never automatically revisited by anything in this
   codebase, even after a payout rail is later configured. It stays `ready`
   permanently until an operator moves it back to `held` (see Fix below).
-- **Manual export** (`CX_PAYOUT_EXPORT=/path/payouts.csv`): owed credits are appended
-  to the CSV for out-of-band settlement; reconcile the CSV against `/admin/payouts`.
-- **Stripe** (`STRIPE_SECRET_KEY` set): a non-2xx transfer surfaces loudly and the
-  credit stays owed (never faked released). Re-running the release worker retries
-  idempotently (idempotency key per supplier+amount) — but only for rows already
-  `held` with a due `release_at`, same as above.
+- **No exact cash reservation**: an elapsed liability becomes
+  `awaiting_funding`, leaves the bounded send queue, and remains owed. A canonical
+  succeeded PaymentIntent fact or explicit capped subsidy authorization re-arms it;
+  an admin release cannot manufacture funding.
+- **Manual export** (`CX_PAYOUT_EXPORT=/path/payouts.csv`): each payout key is synced
+  to the CSV at most once for out-of-band settlement, the ledger becomes `exported`,
+  and the operation records `cash_moved=false`. Reconcile that key against the
+  external settlement; export is not evidence that cash moved.
+- **Stripe** (`STRIPE_SECRET_KEY` set): a definitive pre-cash failure becomes
+  `ready`. A transport error, 5xx, unreadable/malformed success, stale sending lease,
+  or other ambiguous result becomes `outcome_unknown`, never `ready`. It retries
+  only with the same ledger-entry payout key inside the conservative idempotency
+  window; older unknowns require provider/read-only evidence.
 
 **Fix.** To make the release worker genuinely retry a credit — whether it is
 currently `held` with a not-yet-due `release_at`, or sitting `ready` with nothing
 retrying it: `POST /admin/payouts/{entry_id}/release` (optional JSON body
 `{"reason": "..."}`, recorded to the audit log at `GET /admin/actions`). This
-accepts an entry that is CURRENTLY `held` OR `ready` (409 for any other status —
-`pending`/`released`/`clawed_back`) and always leaves it `held` with `release_at`
+accepts an entry that is CURRENTLY `held` OR `ready` (409 for every other status)
+and always leaves it `held` with `release_at`
 pulled forward to now(), so the existing release-worker sweep (`DuePayouts`)
 picks it up on its very next cycle — it never marks the entry `released` itself
 (that still requires a real transfer reference, enforced structurally by the
@@ -116,15 +125,17 @@ picks it up on its very next cycle — it never marks the entry `released` itsel
 silently left the credit permanently stuck: `DuePayouts` (the real release-worker
 sweep query) only ever selects `payout_status='held'` rows, so a row moved to
 `ready` is never automatically revisited by anything in this codebase. The
-endpoint above is the correct fix for both directions (a `ready` stub that needs
-a real retry, and a `held`-but-not-yet-due credit that needs releasing early); if
-it is ever unavailable, the equivalent raw SQL is
-`psql "$DATABASE_URL" -c "UPDATE ledger_entries SET payout_status='held', release_at=now() WHERE id='<entry_id>' AND payout_status IN ('held','ready')"`
-— note `held`, never `ready`, as the target status. To reverse a credit that was
-released BY ERROR (a real transfer did NOT happen but the row says `released`),
-the same target applies: set it back to `held` (never to `ready`), which also
-correctly excludes it from `reconcileLedger`'s "already transferred" accounting
-until it is legitimately released again.
+endpoint above is the correct fix for both directions (a definitely-unsent `ready`
+attempt that needs a retry, and a `held`-but-not-yet-due credit that needs releasing
+early). Do not bypass it with raw SQL: that omits the authenticated action and can
+contradict the immutable funding and payout-operation records.
+
+Never rewrite a supposedly false `released`, `outcome_unknown`, or
+`reversal_required` ledger row. Durable `cash_moved` and `outcome_unknown` operation
+facts remain reconciliation authority through later status changes. Preserve the
+provider/key/reference evidence, stop manual release attempts, and treat the case
+as an incident. The automated provider lookup/reversal workflow remains an open 5/5
+gate; a status edit is not recovery.
 
 ## 4. Storage failure (object store unreachable / object missing)
 
@@ -161,9 +172,8 @@ deploy over a broken stack. Re-run it to ship a new build (`--pull` to
 
 `docker-compose.prod.yml` runs **`control` + `control-2`**, both behind the
 **Caddy** reverse-proxy as a round-robin, health-checked load balancer
-(`reverse_proxy control:8080 control-2:8080`, active probe of `/healthz`). One
-instance can die · Caddy stops routing to it and serves from the other · with no
-edge downtime.
+(`reverse_proxy control:8080 control-2:8080`, active probe of `/readyz`). One
+control process can die; Caddy stops routing to it and serves from the other.
 
 **Why this is safe (and the honest caveats).**
 - **Dispatch/poll is multi-instance-safe.** The task queue claims rows with
@@ -173,22 +183,30 @@ edge downtime.
 - **The Stripe webhook is safe to load-balance.** `POST /v1/stripe/webhook` is
   stateless, signature-verified, and idempotent on the event id, so it does not
   matter which instance Caddy routes a given webhook to.
-- **The background sweep loop (`workers.Run`: payout release, stale-task
-  requeue, webhook delivery, reconcile, hedge, dispute) runs on `control` ONLY.**
-  `control-2` sets `CX_RUN_WORKERS=false` (`docker-compose.prod.yml`), which
-  `control/main.go` checks before starting `workers.Run` — landed and confirmed
-  live (both instances healthy with this env split since 2026-07-01, per the
-  deploy log). This was previously a documented "follow-up, requires a
-  control-code change" gap; it is not anymore, so there is no redundant sweep
-  work to account for today. If `control-2` ever becomes the leader (e.g. during
-  a manual failover that flips the env), it would need `CX_RUN_WORKERS` unset so
-  the sweeps have a home — don't run both instances leaderless.
+- **Background sweeps have one automatically elected owner.** Both replicas run
+  the same `CX_RUN_WORKERS=true` path. `control/worker_leader.go` holds a
+  PostgreSQL **session advisory lock** for the lifetime of `workers.Run`, so only
+  one replica can run payout release, charge collection, stale-task rescue,
+  webhook delivery, reconcile, hedge, dispute, and the other sweeps. The other
+  replica polls as a standby. Process exit, connection loss, or an owned sweep
+  missing its liveness budget releases/discards the lock-bearing session; the
+  standby then acquires it without an operator flipping environment variables.
+- **Readiness covers the elected-worker path.** `/readyz` checks database
+  reachability, recent progress of an enabled election loop, and every ticker
+  owned by the current leader. A follower has no local sweep tickers, but it must
+  continue observing the election. Caddy and the container healthchecks therefore
+  drain a replica whose DB, election loop, or owned sweeps stop progressing.
 - **The wake-on-work LISTEN/NOTIFY listener (`notify.go`) runs on EVERY
   instance regardless of `CX_RUN_WORKERS`** — it only relays a Postgres
   notification to that instance's own local long-poll waiters, so there is
   nothing to double-run or leader-gate there; each instance simply wakes its own
-  callers. The **WedgedTicker** alert covers the case where the sweep loop
-  stalls on `control`.
+  callers. The **WedgedTicker** alert covers an owned sweep that stalls.
+- **This is process HA, not failure-domain HA.** In this Compose topology both
+  controls, Caddy, PostgreSQL, and MinIO still run on one host. Losing that host,
+  PostgreSQL, its volume, or MinIO interrupts the service regardless of the
+  second control process. Multi-host/database/object-store replication and a
+  tested cross-host failover are separate deployment work; this file does not
+  claim them.
 
 ## Backups & disaster recovery
 
@@ -325,8 +343,13 @@ All secrets live in `.env` on the droplet (mode `600`, never committed).
 
 - **Stripe / GitHub / CX_* app secrets, Grafana, alert channels:** edit `.env`,
   then `docker compose -f docker-compose.prod.yml up -d` (recreates only the
-  services whose env changed). `CX_TOKEN_KEY` rotation re-encrypts GitHub tokens
-  lazily on next use; old `plain:`/old-key values still decrypt during overlap.
+  services whose env changed). Do **not** replace `CX_TOKEN_KEY` in place: there
+  is no old-key overlap or lazy re-encryption path. Losing that key deliberately
+  makes existing sealed GitHub tokens and buyer webhook secrets unreadable. A
+  planned key rotation needs an explicit decrypt-and-reseal migration while the
+  old key remains available; until that migration exists, reconnect each GitHub
+  source and have each owning buyer exactly re-register its webhook, then verify
+  delivery before retiring the old deployment/key backup.
 - **POSTGRES_PASSWORD:** change it in Postgres first, then `.env`, then recreate:
   `docker compose -f docker-compose.prod.yml exec postgres psql -U cx -d cx -c "ALTER USER cx WITH PASSWORD '<new>';"`,
   update `POSTGRES_PASSWORD` in `.env`, then `… up -d postgres control control-2`

@@ -12,12 +12,16 @@ struct MenuContentView: View {
     /// Drives the first-run consent sheet. Opened automatically when consent is not
     /// yet granted, and re-openable from the trust footer.
     @State private var showingConsent = false
+    /// Separate supplier-machine enrollment. Consent and authentication are
+    /// independent hard gates; neither can substitute for the other.
+    @State private var showingEnrollment = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
             Divider()
             consentGateBanner
+            enrollmentGateBanner
             statusGrid
             throttleBanner
             if let job = controller.status.currentJob {
@@ -48,11 +52,29 @@ struct MenuContentView: View {
         // first appearance when consent has not been granted.
         .sheet(isPresented: $showingConsent) {
             ConsentView(consent: controller.consent,
-                        onAccept: { showingConsent = false },
+                        onAccept: {
+                            showingConsent = false
+                            if !controller.enrollment.isReady {
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                                    showingEnrollment = true
+                                }
+                            }
+                        },
                         onDecline: { showingConsent = false })
         }
+        .sheet(isPresented: $showingEnrollment) {
+            EnrollmentView(
+                enrollment: controller.enrollment,
+                onReset: { controller.resetEnrollment() }
+            )
+        }
         .onAppear {
-            if !controller.consent.granted { showingConsent = true }
+            controller.enrollment.reload()
+            if !controller.consent.granted {
+                showingConsent = true
+            } else if !controller.enrollment.isReady {
+                showingEnrollment = true
+            }
         }
     }
 
@@ -65,6 +87,23 @@ struct MenuContentView: View {
                 Label("Review terms before earning", systemImage: "hand.raised.fill")
                     .font(.caption)
                     .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.bordered)
+            .tint(.orange)
+        }
+    }
+
+    @ViewBuilder private var enrollmentGateBanner: some View {
+        if controller.consent.granted && !controller.enrollment.isReady {
+            Button { showingEnrollment = true } label: {
+                Label(
+                    controller.enrollment.needsRepair
+                        ? "Repair incomplete enrollment"
+                        : "Connect this Mac before earning",
+                    systemImage: "key.fill"
+                )
+                .font(.caption)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(.bordered)
             .tint(.orange)
@@ -204,7 +243,15 @@ struct MenuContentView: View {
                     Button { controller.startAgent() } label: {
                         Label("Start agent", systemImage: "play.fill").frame(maxWidth: .infinity)
                     }
+                    .disabled(!controller.canStart)
                 }
+            }
+            Button { showingEnrollment = true } label: {
+                Label(
+                    controller.enrollment.isReady ? "Enrollment" : "Connect this Mac",
+                    systemImage: "key"
+                )
+                .frame(maxWidth: .infinity)
             }
             Button { controller.openDataDir() } label: {
                 Label("Open data dir", systemImage: "folder").frame(maxWidth: .infinity)

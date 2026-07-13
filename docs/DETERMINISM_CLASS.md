@@ -1,3 +1,4 @@
+<!-- CLAIM-SCOPE: internal-engineering-non-authoritative -->
 # Determinism class: the verification-class boundary
 
 > **Update (feat/perf-wave pass 1):** `engine_build_hash` now folds

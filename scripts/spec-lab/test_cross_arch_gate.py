@@ -31,6 +31,7 @@ On synthetic configs/matrices/images it proves:
 import json
 import math
 import os
+import subprocess
 import sys
 import unittest
 
@@ -414,10 +415,22 @@ class TestDriverPlumbing(unittest.TestCase):
         # importing the driver (already imported at the top of this test module)
         # must not have pulled in runpod. Also assert the source only imports it
         # inside cmd_cuda.
-        self.assertNotIn("runpod", sys.modules,
-                         "importing run_cross_arch_gate imported runpod — the "
-                         "local-only guarantee is broken")
-        src = open(os.path.join(HERE, "run_cross_arch_gate.py")).read()
+        # Run this assertion in a fresh interpreter. The full spec-lab suite also
+        # tests cloud drivers, so its shared sys.modules may legitimately contain
+        # runpod before this test executes; that must not create an order-dependent
+        # false failure.
+        code = (
+            "import sys; "
+            f"sys.path[:0] = [{HERE!r}, {POD!r}]; "
+            "import run_cross_arch_gate; "
+            "assert 'runpod' not in sys.modules"
+        )
+        proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0,
+                         "fresh import of run_cross_arch_gate imported runpod: "
+                         + proc.stderr[-1000:])
+        with open(os.path.join(HERE, "run_cross_arch_gate.py"), encoding="utf-8") as fh:
+            src = fh.read()
         for line in src.splitlines():
             stripped = line.strip()
             if stripped.startswith(("import runpod", "from runpod")):

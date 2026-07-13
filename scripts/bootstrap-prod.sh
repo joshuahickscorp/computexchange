@@ -53,8 +53,10 @@ docker compose version >/dev/null 2>&1 || die "the Docker Compose v2 plugin is m
 [ -f docker-compose.prod.yml ] || die "docker-compose.prod.yml not found · are you in the repo root?"
 
 # ── 1. preflight: required secrets must be set (and not the dev defaults) ─────
+set -a
 # shellcheck disable=SC1091
-set -a ; . ./.env ; set +a
+. ./.env
+set +a
 
 req() { # req VAR "human reason"
   local v="${!1:-}"
@@ -64,19 +66,43 @@ forbid_default() { # forbid_default VAR baddefault
   [ "${!1:-}" != "$2" ] || die "$1 is still the insecure dev default ($2) · set a real value."
 }
 
-req POSTGRES_PASSWORD     "prod Postgres password"
-req MINIO_ROOT_PASSWORD   "prod object-store password"
-req ACME_EMAIL            "Caddy refuses to start without an ACME account email"
+req POSTGRES_PASSWORD                 "prod Postgres password"
+req MINIO_ROOT_USER                  "prod object-store user"
+req MINIO_ROOT_PASSWORD              "prod object-store password"
+req ACME_EMAIL                       "Caddy refuses to start without an ACME account email"
+req SITE_HOST                       "canonical production hostname"
+req CX_PUBLIC_CONTROL_ORIGIN        "canonical public HTTPS control-plane origin"
+req STRIPE_SECRET_KEY               "live buyer-charge and supplier-payout rail"
+req STRIPE_WEBHOOK_SECRET           "buyer billing/cash-event webhook verification"
+req CX_CONNECT_WEBHOOK_SECRET       "connected-account webhook verification"
+req CX_CONNECT_RETURN_URL           "Stripe Connect onboarding return URL"
+req CX_CONNECT_REFRESH_URL          "Stripe Connect onboarding refresh URL"
+req CX_TOKEN_KEY                    "OAuth token and customer-webhook secret encryption"
+req CX_VERIFICATION_SAMPLE_SECRET   "unpredictable verification sampling"
+req CX_ECON_SCHEDULE_VERSION        "versioned production economics"
+req CX_PROCESSOR_PERCENT_BPS        "processor variable fee input"
+req CX_PROCESSOR_FIXED_USD          "processor fixed fee input"
+req CX_CONTROL_PLANE_PER_TASK_USD   "control-plane task cost input"
+req CX_TARGET_MARGIN_BPS            "minimum target margin input"
 forbid_default POSTGRES_PASSWORD   "cx"
+forbid_default MINIO_ROOT_USER     "minioadmin"
 forbid_default MINIO_ROOT_PASSWORD "minioadmin"
+
+case "$STRIPE_SECRET_KEY" in
+  sk_live_*) ;;
+  *) die "STRIPE_SECRET_KEY must be an sk_live_ key for this LIVE production bootstrap." ;;
+esac
+case "$STRIPE_WEBHOOK_SECRET" in whsec_*) ;; *) die "STRIPE_WEBHOOK_SECRET must look like whsec_…." ;; esac
+case "$CX_CONNECT_WEBHOOK_SECRET" in whsec_*) ;; *) die "CX_CONNECT_WEBHOOK_SECRET must look like whsec_…." ;; esac
+[ "$STRIPE_WEBHOOK_SECRET" != "$CX_CONNECT_WEBHOOK_SECRET" ] || die "billing and Connect webhook secrets must be distinct endpoint secrets."
+[ "${#CX_TOKEN_KEY}" -ge 32 ] || die "CX_TOKEN_KEY must contain at least 32 unpredictable bytes."
+[ "${#CX_VERIFICATION_SAMPLE_SECRET}" -ge 32 ] || die "CX_VERIFICATION_SAMPLE_SECRET must contain at least 32 unpredictable bytes."
 
 [ "$MONITORING" -eq 1 ] && req GRAFANA_ADMIN_PASSWORD "Grafana refuses to start without an admin password"
 
 # Soft warnings · deploy proceeds, but say plainly what will be inert.
 warn() { printf '\033[33m! %s\033[0m\n' "$*"; }
-[ -n "${STRIPE_SECRET_KEY:-}" ] || warn "STRIPE_SECRET_KEY unset · buyer charging + supplier payouts will honestly 503 until set."
 [ -n "${SLACK_WEBHOOK_URL:-}${PAGERDUTY_ROUTING_KEY:-}" ] || warn "no alert channel (SLACK_WEBHOOK_URL / PAGERDUTY_ROUTING_KEY) · Alertmanager will log delivery errors."
-[ -n "${SITE_HOST:-}" ] || warn "SITE_HOST unset · Caddy will use the repo default host."
 
 # ── 2. confirm (LIVE prod) ───────────────────────────────────────────────────
 HOST="${SITE_HOST:-computexchange.net}"
@@ -97,6 +123,13 @@ if [ "$PULL" -eq 1 ]; then
   log "git pull --ff-only"
   git pull --ff-only || die "git pull failed · resolve before deploying."
 fi
+
+# Validate the fully interpolated production graph before touching backups or
+# migrations. Re-run after an optional pull so newly-required variables fail here,
+# not halfway through a deployment.
+log "validate production compose configuration"
+docker compose -f docker-compose.prod.yml config -q \
+  || die "production compose configuration is incomplete or invalid · no backup/migration was attempted."
 
 # ── 4. backup BEFORE migrating (recoverable rollout) ─────────────────────────
 if [ "$SKIP_BACKUP" -eq 0 ]; then
@@ -134,9 +167,10 @@ done
 
 log "done"
 cat <<NEXT
-Next, one-time, in the Stripe dashboard (live mode):
-  • point a webhook at  https://$HOST/v1/stripe/webhook          (setup_intent.succeeded, payment_method.attached) → STRIPE_WEBHOOK_SECRET
-  • point a webhook at  https://$HOST/v1/stripe/connect-webhook  (account.updated)                              → CX_CONNECT_WEBHOOK_SECRET
+Stripe endpoints and their distinct secrets were required before this deploy.
+Verify them now with live-mode test deliveries (no money movement):
+  • https://$HOST/v1/stripe/webhook          → saved-card, collection, refund, and dispute events
+  • https://$HOST/v1/stripe/connect-webhook  → account.updated, Connect scope enabled
 And once:
   • add the daily backup cron:   0 3 * * *  cd $ROOT && ./scripts/backup.sh >> /var/log/cx-backup.log 2>&1
   • run the restore drill:        scripts/restore.sh --latest --to cx_restore   (prove the backup restores)

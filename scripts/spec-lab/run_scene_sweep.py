@@ -321,17 +321,15 @@ def write_scene_receipt(
         [4096, 2048, 1536, 1024, 768, 512, 384, 256, 128, 64, 32, 16, 8, 4, 2],
     )
     render = end_to_end.normalize_stack_metrics(metrics, f"runpod:{pod['id']}")
-    decision = integrated.RenderVerifier.decide(
-        token_exact=bool(token["exact"]), global_ssim=render["global_ssim"],
-        worst_tile_ssim=render["worst_tile_ssim"], render_modeled=render["render_modeled"],
-    )
+    if not isinstance(token["exact"], bool):
+        raise TypeError("token exactness proof must be a bool")
     receipt = integrated.RenderSpecReceipt(
         job=job,
         token_baseline_s=float(token["baseline_s"]), token_spec_s=float(token["spec_s"]),
         render_baseline_s=render["render_baseline_s"], render_spec_s=render["render_spec_s"],
         global_ssim=render["global_ssim"], worst_tile_ssim=render["worst_tile_ssim"],
-        token_exact=bool(token["exact"]), render_modeled=render["render_modeled"],
-        evidence_type=render["evidence_type"], decision=decision,
+        token_exact=token["exact"], render_modeled=render["render_modeled"],
+        evidence_type=render["evidence_type"],
     ).to_dict()
     receipt["token"] = token
     receipt["render_metrics"] = metrics

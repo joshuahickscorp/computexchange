@@ -1,6 +1,13 @@
 # Computexchange
 
-A task-priced, verified spot market for batch AI inference on idle Apple Silicon Macs. Buyers pay per job completed rather than per GPU-hour held; suppliers earn on idle Macs, including ones with the unified memory to run 30B to 70B models; output is verified (honeypots, within-class redundancy, and payout holds) so results can be trusted without re-running. Two binaries: a **Rust supplier agent** (`agent/`) and a **Go control plane** (`control/`), over **Postgres and S3**.
+A development-stage, centrally coordinated exchange implementation for task-priced
+batch inference on Apple Silicon. The Go control plane prices and settles accepted
+tasks; the Rust supplier agent executes supported jobs; Postgres and S3 hold the
+queue, facts, and artifacts. Verification is coverage-labeled (secret sampling,
+honeypots, within-class redundancy, and payout holds), not a blanket guarantee that
+unchecked output or colluding model substitution is correct. Real supplier earnings,
+production money movement, market liquidity, and a competitive buyer-price win are
+separate unproven gates in [`proof/5x5-gates.json`](proof/5x5-gates.json).
 
 ## Architecture
 
@@ -23,7 +30,7 @@ A task-priced, verified spot market for batch AI inference on idle Apple Silicon
 
 The control plane is a single Go binary; the supplier agent a single Rust binary. The job queue is a **Postgres table** (`tasks`), claimed with `FOR UPDATE SKIP LOCKED` gated on `(status, visible_at)`, retries just push `visible_at` forward. No message broker.
 
-**Inference is real.** The agent runs models on-device with [Candle](https://github.com/huggingface/candle): sentence embeddings (all-MiniLM-L6-v2, 384-dim), Whisper transcription, and quantized Llama generation, on **Metal** on Apple Silicon (CPU fallback elsewhere). Weights are pulled from HuggingFace on first use and cached (never re-fetched, never deleted).
+**Inference is real.** The agent runs models on-device with [Candle](https://github.com/huggingface/candle): sentence embeddings (all-MiniLM-L6-v2, 384-dim), fixed-English/no-timestamps Whisper transcription, and quantized Llama generation, on **Metal** on Apple Silicon (CPU fallback elsewhere). Weights are pulled from HuggingFace on first use and cached (never re-fetched, never deleted).
 
 **The result flow is presigned S3.** The control plane mints a presigned **GET** for each task's input and a presigned **PUT** for its result, signed against `S3_PUBLIC_ENDPOINT` (the address the *agent* reaches), while control-side reads/writes go through the internal `S3_ENDPOINT`. The agent uses the URLs verbatim, no S3 credentials ever leave the control plane.
 
@@ -38,7 +45,7 @@ control/           Go, control plane, single binary (one flat package main)
 db/schema.sql      Single authoritative PostgreSQL schema (applied via `make migrate`)
 proto/manifest.schema.json   Canonical wire contract (JSON Schema, draft 2020-12)
 cli/               `cx`, standalone Go CLI (submit / status / results / cancel / estimate)
-                   control/openai.go, OpenAI-compatible Batch API (files + batches)
+                   control/openai.go, OpenAI-shaped Batch API subset (files + batches)
 sdk/python/        dep-free Python client (urllib) + OpenAI-shaped `embeddings()`
 web/admin.html     Operator Control Room · passkey-gated console (served at `/admin`; `/` redirects here)
 macapp/            SwiftUI menu-bar app, `swift build` via Package.swift (signing external)
@@ -47,21 +54,27 @@ docs/TURBO.md · docs/RUNBOOKS.md · docs/ALPHA_READINESS.md
 scripts/prove-local.sh       the one-command local proof (native PG+MinIO, live Metal)
 scripts/{install,uninstall,backup}.sh   one-command agent install/uninstall · DB + object-store backup
 .github/workflows/ci.yml     CI: Go build/vet/fmt/unit+integration, Rust fmt/clippy/build/test, schema apply
-RELEASE_CANDIDATE.md         what's proven locally vs what's left (external only)
+RELEASE_CANDIDATE.md         historical capability inventory; canonical status is the 5/5 registry
 Dockerfile.control · docker-compose.yml · Makefile · .env.example · .gitignore
 ```
 
-**Turbo** (second pass): a hard-filter scheduler (a worker can never claim a task
-it can't run), warm model pool + bounded concurrency, three new workloads
+**Turbo** (second pass): a hard-filter scheduler (a claim must pass the admitted
+runtime tuple plus the worker's declared capability/resource filters; declarations
+are not independent execution attestation), warm model pool + bounded concurrency, three new workloads
 (`batch_classification` / `json_extraction` / `rerank`), 3-way verification
 tiebreak, auto-quarantine, straggler hedging, one merged buyer-ready artifact per
-job, an **OpenAI-compatible Batch API**, and a menu-bar **status surface**, all
-proven by `make prove-local` (**82/82**). See [docs/TURBO.md](docs/TURBO.md).
+job, an **OpenAI-shaped Batch API**, and a menu-bar **status surface**. These are
+implementation capabilities, not proof of public distribution, full OpenAI sync or
+streaming compatibility, physical fleet scale, or market outcomes. See
+[docs/TURBO.md](docs/TURBO.md) and the canonical gate registry.
 
-**Apple Silicon only.** Metal on Apple Silicon is the one supported supply target
-(a CPU fallback exists for Linux CI but is never advertised as a supply class).
-There is **no CUDA or external-cloud rail**, the whole exchange runs on one Mac, a
-LAN, offline, or air-gapped, with zero mandatory third-party SaaS.
+**Current advertised runtime projection: Candle/Metal on Apple Silicon only.** A
+CPU fallback exists for CI but is not a supplier lane. CUDA, vLLM, Hawking, MLX,
+container, and clustered cells are hardware-pending, soak-only, stub, or wire-only
+as recorded in [`docs/RUNTIME_MATRIX.md`](docs/RUNTIME_MATRIX.md); none may be
+presented as production supply. A local free-lane stack can run on one host after
+dependencies and model weights are present, but that is not a TEE, operator-blind,
+confidential-compute, data-sovereignty, or paid-market air-gap guarantee.
 
 **Closed-alpha pass:** **dynamic supplier throttling** (the agent reads real
 available memory and pauses claiming work before it would breach the operator's
@@ -96,7 +109,13 @@ make agent-bench              # (other shell) benchmark local hardware
 make agent-run                # (other shell) start the supplier polling loop
 ```
 
-> **Verified live.** This full loop has been run end-to-end on Apple Silicon (M3 Pro, Metal): a 3-line embed job submitted over the REST API splits into a task, the Rust agent claims it, runs **real all-MiniLM-L6-v2 inference** (384-d, L2-normalized), uploads the result to MinIO via a presigned URL, commits, and the control plane verifies it, marks the job complete, writes the 90/10 ledger split, and the payout-release worker moves the held credit to `ready`. The only Phase-3 stub is the actual Stripe/Trolley transfer.
+> **Evidence boundary.** The repository contains a real Candle/Metal execution path
+> and a live-agent proof mode. Cite a live result only when the terminal
+> `.artifacts/prove-local/proof-ledger.txt` passes
+> `scripts/verify_proof_ledger.py` for the current source and required `full_local`
+> rows. Contract-only integration tests do not prove physical inference. The Stripe
+> Connect transfer code also does not prove a real charge, payout, reversal, fee, or
+> reconciliation; those remain external money gates.
 
 Auth is **not bypassable**: `make seed` inserts a *hashed* api_key into `api_keys` and a token into `worker_tokens`. The api_key is the buyer's `Authorization: Bearer` for `POST /v1/jobs`; the worker_token is the agent's `CX_WORKER_TOKEN`. Without seeded rows, every request is rejected.
 
@@ -116,17 +135,33 @@ Then run the agent natively against it: `CX_CONTROL_URL=http://localhost:8080 CX
 
 `make seed` (or `cd control && go run . seed`) runs the control plane's `seed` subcommand: idempotent (stable demo UUIDs + `ON CONFLICT DO NOTHING`), it prints a buyer `api_key` and a `worker_token` and exits without starting the server. Re-running is a no-op.
 
-## Prove everything locally
+## Run the local proof harness
 
-`make prove-local` (→ `scripts/prove-local.sh`) is the one command that proves the whole stack. It provisions a **throwaway native Postgres + MinIO** (no Docker image pulls, reliable; `USE_DOCKER=1` to use compose instead), applies the schema, runs the **deterministic proof matrix** (the Go `-tags integration` suite, auth, verification, honeypot/fraud, idempotency, requeue, payout hold→ready, webhooks, malformed input, metrics), then drives the **real** Rust agent through **live Metal inference** for all three job types, and prints a **PROOF LEDGER**. It fails loudly and exits non-zero on any gap; artifacts land in `.artifacts/prove-local/`.
+`make prove-local` (→ `scripts/prove-local.sh`) provisions throwaway Postgres and
+MinIO, applies the schema, runs the integration/unit suites, and in `full_local`
+mode drives the Rust agent through physical Metal paths. `SKIP_LIVE=1` is explicitly
+`contract_only`. The harness writes a terminal source-bound ledger and exits nonzero
+on a failed check or source mutation. It proves only its named rows, never product
+5/5, launch readiness, public distribution, real money, multiple physical machines,
+or demand.
 
 ```bash
-make prove-local            # ~3–5 min; last run: 82/82 pass
+make prove-local            # physical local mode; models/toolchains may make this slow
 #   SKIP_LIVE=1   matrix only (no model run)     KEEP=1   leave the stack up to inspect
 #   PROVE_WHISPER=1   make whisper a required check (default best-effort)
 ```
 
-A passing run proves, among the 82 checks: infra boot · migrate · seed · `/healthz` · MinIO object flow · worker registration · **live embed (dim=384)** · **live Llama-3.2-1B infer** · **live whisper transcription** · redundancy + honeypot verification · mismatch/fraud clawback · duplicate-commit idempotency · stale + failed-job requeue · webhook retries · payout hold→ready · payout transfer **honestly blocked** · invalid-auth 401/403 · malformed-manifest 4xx · metrics counters · **menu-bar status file** · **OpenAI batch API** · **admin panel** · **multi-supplier (2 agents, one job)** · **manual-export payout** · **load test** · **disaster-recovery** · **install + menu-bar build** · structured logs · `go test` + `cargo test`. See **[RELEASE_CANDIDATE.md](RELEASE_CANDIDATE.md)** for the full local-vs-external breakdown.
+Validate rather than trusting a pasted count:
+
+```bash
+python3 scripts/verify_proof_ledger.py \
+  --ledger .artifacts/prove-local/proof-ledger.txt \
+  --current-source --mode full_local
+python3 scripts/five-by-five.py
+```
+
+The second command prints prerequisites separately from outcomes and gives the
+concrete next action for every unproven gate.
 
 This is a macOS step (the agent needs Metal); the models (MiniLM, Llama-3.2-1B, whisper-tiny) are cached after first use. Needs `go`, `cargo`, `psql`, native `postgres`/`minio` (or `USE_DOCKER=1`), `curl`, `python3` on PATH.
 
@@ -134,13 +169,13 @@ This is a macOS step (the agent needs Metal); the models (MiniLM, Llama-3.2-1B, 
 
 - **`GET /healthz`**, liveness; the control plane fatals at startup if Postgres or the object store is unreachable, so a 200 here means the deps are wired.
 - **`GET /metrics`**, Prometheus exposition (`make metrics` to scrape). Job/task counters, queue depth, payout state.
-- **Background workers** run for the life of the process: **payout-release** (held credits → released once `release_at` passes), **stale-task requeue** (claims that outlive their deadline get `visible_at` pushed forward and are re-dispatched), and **webhook delivery / job sweep**.
+- **Background workers** run for the life of the process: **payout-release** (held credits → released once `release_at` passes), **stale-task requeue** (claims that outlive their deadline get `visible_at` pushed forward and are re-dispatched), plus independent **job-finalization** and leased, per-registration-signed **webhook delivery** loops.
 
 ## Deliberate simplifications
 
-Two deliberate simplifications, documented here so they can be reverted if you disagree.
+Two service-architecture simplifications, documented here so they can be revisited:
 
-1. **No Python, Go + Rust only.** The plan's standalone `bench/bench.py` is folded into the Rust agent as a `bench` subcommand (`make agent-bench` → `cargo run -- bench`). The agent already detects and benchmarks hardware on startup, so a separate Python tool and a third language toolchain are pure overhead. *Revert:* re-add `bench/bench.py` and have it write `benchmark_results` rows directly.
+1. **Core services are Go + Rust.** The control plane and CLI are Go; the agent is Rust. Python is used for SDK and proof/benchmark tooling, not as a third long-running service.
 2. **No NATS, Postgres queue.** The plan names NATS for the job queue; we use a Postgres queue instead (`SELECT ... FOR UPDATE SKIP LOCKED` on `tasks`, with `claimed_by`/`claimed_at`/`visible_at` columns and a `(status, visible_at)` index). This removes a dependency and a dev container, the dev stack is just Postgres + MinIO. At V1 scale Postgres is more than enough and keeps everything in one transactional store. *Revert:* introduce NATS, move dispatch off the `tasks` table, drop the queue columns/index.
 
 ## Why no agent image
@@ -149,7 +184,10 @@ There is deliberately **no Dockerfile for the agent**. It uses Candle + **Metal*
 
 ## Status
 
-**V1 is real, not scaffolding.** Execution, verification, storage, the queue, and the background workers all work end to end (`make prove-local` proves it, 82/82 local checks, including live Metal inference, a two-agent multi-supplier run, a load burst, and a real backup→restore). The one Phase-3 stub is the *licensed* payout rail (the alpha manual-export rail is built).
+This is a substantial implementation with real local code paths and many proven
+contracts, but it is not yet a 5/5 product or a demonstrated market. The canonical
+status is generated from [`proof/5x5-gates.json`](proof/5x5-gates.json); harnesses,
+generators, packages, and mock fleets are prerequisites rather than outcome credit.
 
 **Real now**
 - **Execution**, Candle inference on Metal: MiniLM embeddings (384-dim), Whisper transcription, quantized Llama generation.
@@ -161,8 +199,12 @@ There is deliberately **no Dockerfile for the agent**. It uses Candle + **Metal*
 - `db/schema.sql`, complete schema (domain, queue columns/index, auth/honeypot, webhooks, models catalogue).
 - `proto/manifest.schema.json`, the full wire contract, matching `agent/src/types.rs` and `control/types.go`.
 
-**Phase-3 stub (explicit, not faked)**
-- **Payout transfer rail**, Stripe Connect / Trolley money movement. The ledger and the hold→release lifecycle are real; only the final external transfer call is stubbed (`stubPayout`). It surfaces an explicit boundary, never a fake success.
+**Still unproven as product outcomes**
+- Real buyer charge, Connect payout, reversal/refund, provider fee, and exact reconciliation.
+- All-attempt margin safety for losing/retried/disputed work and a 30-day paid corpus.
+- Collusion-resistant execution identity and quantified long-con detection bounds.
+- Two physical Macs, production CUDA/container supply, lane promotion, and soak.
+- Signed app/package distribution, stranger activation, liquidity, and repeat use.
 
 ## Build / verify
 
@@ -178,31 +220,24 @@ CI (`.github/workflows/ci.yml`) gates every push/PR: the **control** job builds,
 
 ## Roadmap
 
-Computexchange is a task-priced, verified spot market for batch AI inference on
-idle Apple Silicon Macs. The core engine (queue, scheduling, on-device
-inference, verification, ledger) works end to end today. The work ahead is the
-buyer-facing product, real multi-machine supply, and the licensed payout rail.
+Computexchange is pursuing a task-priced, coverage-labeled batch-compute exchange.
+The work is sequenced by the canonical 5/5 registry, not by the historical labels
+below.
 
-### Now (works today)
+### Current local implementation
 - The full job lifecycle: submit, queue (Postgres FOR UPDATE SKIP LOCKED),
   claim, run real on-device inference on Metal, verify, and settle the ledger.
 - Verification: honeypots, within-class redundancy, 3-way majority vote,
   reputation, and payout holds.
-- An OpenAI-compatible Batch API, a CLI, a Python SDK, and a menu-bar agent.
+- An OpenAI-shaped Batch API, locally buildable CLI/Python package, and menu-bar app core; public distribution and sync/stream parity are not claimed.
 
 ### Next
-- A real buyer console and the Compute Autopilot pipeline builder (the backend
-  seams exist; the visual product is a build).
-- A routing-intelligence dashboard that surfaces the per-job-type timing data
-  the control plane already collects.
+- Attempt-complete margin safety and Stripe-test recovery.
+- Runtime-matrix enforcement, one-time app enrollment exchange/revocation, and claim conformance.
 - Cross-machine validation on a real Mac Studio and a second physical Mac
   (byte-identical output rates, sustained thermal load).
 
 ### Later
-- The licensed payout transfer rail (Stripe Connect or Trolley). The ledger and
-  the hold-to-release lifecycle are real today; only the final transfer call is
-  stubbed.
-- A co-located Mac Studio cluster for large-model inference, offered as a
-  reserved tier.
-- The enterprise and privacy tier (private-pool routing already exists; the
-  compliance attestations are external work).
+- Capped live-money canary and paid margin/supplier-value cohorts.
+- A buyer-demanded CUDA/PyTorch-or-container lane promoted through physical fault and soak gates.
+- Any multi-Mac clustered runner only after a real distributed forward pass and physical proof; two independent workers do not imply clustering.

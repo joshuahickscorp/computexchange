@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "cxer2": "cxer2_eyJhdWRpZW5jZSI6ImN4LW1hY29zLWFnZW50LXYyIiwiY29udHJvbF9vcmlnaW4iOiJodHRwczpcL1wvY29udHJvbC5leGFtcGxlLnRlc3QiLCJkZXZpY2Vfa2V5X2FsZ29yaXRobSI6InAyNTYiLCJkZXZpY2VfcHVibGljX2tleSI6IkJHc1gwZkxoTEVKSC1Mem01V09rUVBKM0EzMkJMZXN6b1BTaE9VWFltTUtXVC1OQzR2NGFmNXVPNS10S2ZBLWVGaXZPTTFkck1WN095N1pBYURlX1VmVSIsInJlcXVlc3RfaWQiOiJwdFR0bUZPcHdWc0lsTHlTMFZCY25RIiwidiI6Mn0",
+  "cxeb2": "cxeb2_eyJhY2NvdW50X2lkIjoiMTIzNDU2NzgtMTIzNC00YWJjLThkZWYtMTIzNDU2Nzg5MGFiIiwiYXVkaWVuY2UiOiJjeC1tYWNvcy1hZ2VudC12MiIsImNvbnRyb2xfb3JpZ2luIjoiaHR0cHM6Ly9jb250cm9sLmV4YW1wbGUudGVzdCIsImRldmljZV9maW5nZXJwcmludCI6InAyNTY6c2hhMjU2OjgwMmQ2Zjc5ZGRmZDdmNTNjNTkzM2Y5MWQ0MWVmNDFiNDY2ZjY4YzBiMDNlZWUxMGFjYTVkZDAwYTE5NzkxZGQiLCJlbnJvbGxtZW50X2NvZGUiOiJjeGVfV2xwYVdscGFXbHBhV2xwYVdscGFXbHBhV2xwYVdscGFXbHBhV2xwYVdsbyIsInJlcXVlc3RfaWQiOiJwdFR0bUZPcHdWc0lsTHlTMFZCY25RIiwidiI6Mn0",
+  "control_origin": "https://control.example.test",
+  "account_id": "12345678-1234-4abc-8def-1234567890ab",
+  "audience": "cx-macos-agent-v2",
+  "device_key_algorithm": "p256",
+  "device_public_key": "BGsX0fLhLEJH-Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU",
+  "request_id": "ptTtmFOpwVsIlLyS0VBcnQ",
+  "device_fingerprint": "p256:sha256:802d6f79ddfd7f53c5933f91d41ef41b466f68c0b03eee10aca5dd00a19791dd",
+  "enrollment_code": "cxe_WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo",
+  "exchange_transcript": "cx-worker-enrollment-exchange-v2\ncx-macos-agent-v2\n12345678-1234-4abc-8def-1234567890ab\nhttps://control.example.test\nptTtmFOpwVsIlLyS0VBcnQ\ncxe_WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo"
+}

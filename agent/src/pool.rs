@@ -139,11 +139,15 @@ fn residency_table() -> &'static std::sync::Mutex<HashMap<String, ResidencyMeasu
 /// key is measured — see the doc comment on `ResidencyMeasurement` for why a
 /// re-load doesn't overwrite. Called by each pool getter around its real load.
 fn record_residency(key: &str, rss_delta_bytes: i64, load_ms: u64) {
-    let mut table = residency_table().lock().expect("residency table mutex poisoned");
-    table.entry(key.to_string()).or_insert(ResidencyMeasurement {
-        rss_delta_bytes,
-        load_ms,
-    });
+    let mut table = residency_table()
+        .lock()
+        .expect("residency table mutex poisoned");
+    table
+        .entry(key.to_string())
+        .or_insert(ResidencyMeasurement {
+            rss_delta_bytes,
+            load_ms,
+        });
 }
 
 /// Snapshot of every real measured residency entry so far this process, keyed by
@@ -230,11 +234,7 @@ impl ModelPool {
                     let loaded = Embedder::load(&model_ref);
                     let load_ms = started.elapsed().as_millis() as u64;
                     let rss_after = read_own_rss_bytes();
-                    record_residency(
-                        &measure_key,
-                        rss_after as i64 - rss_before as i64,
-                        load_ms,
-                    );
+                    record_residency(&measure_key, rss_after as i64 - rss_before as i64, load_ms);
                     loaded
                 })
                 .await
@@ -263,11 +263,7 @@ impl ModelPool {
                     let loaded = LlamaBackend::load(&model_ref);
                     let load_ms = started.elapsed().as_millis() as u64;
                     let rss_after = read_own_rss_bytes();
-                    record_residency(
-                        &measure_key,
-                        rss_after as i64 - rss_before as i64,
-                        load_ms,
-                    );
+                    record_residency(&measure_key, rss_after as i64 - rss_before as i64, load_ms);
                     loaded
                 })
                 .await
@@ -326,11 +322,7 @@ impl ModelPool {
                     let loaded = WhisperBackend::load(&model_ref);
                     let load_ms = started.elapsed().as_millis() as u64;
                     let rss_after = read_own_rss_bytes();
-                    record_residency(
-                        &measure_key,
-                        rss_after as i64 - rss_before as i64,
-                        load_ms,
-                    );
+                    record_residency(&measure_key, rss_after as i64 - rss_before as i64, load_ms);
                     loaded
                 })
                 .await
@@ -738,7 +730,8 @@ mod tests {
         let mut handles = Vec::with_capacity(PAIRS * 2);
         for pair in 0..PAIRS {
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-            let text_a = format!("primary task {pair}: the quick brown fox jumps over the lazy dog");
+            let text_a =
+                format!("primary task {pair}: the quick brown fox jumps over the lazy dog");
             let text_b =
                 format!("honeypot task {pair}: machine learning embeddings map text to vectors");
             for text in [text_a, text_b] {

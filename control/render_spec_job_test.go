@@ -12,6 +12,7 @@ package main
 // float helper defined there is reused here.
 
 import (
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -55,10 +56,8 @@ func TestRenderSpecQuoteDeterministic(t *testing.T) {
 }
 
 // TestRenderSpecQuoteNeverStrict is the load-bearing honesty invariant: over a
-// broad matrix of shapes AND explicit delivery-tier requests, the quote NEVER
-// promises the strict-delivery tier — QuotedTier is always "preview",
-// StrictDeliveryPromised is always false, the reason never reads as a delivery
-// guarantee, and any quoted band stays inside the MEASURED [3.87x, 7.87x] band.
+// broad matrix of shapes and tier asks, an unbound quote never promises strict
+// delivery or projects a speedup from unrelated scene receipts.
 func TestRenderSpecQuoteNeverStrict(t *testing.T) {
 	widths := []int{640, 1920, 3840, 7680}
 	frames := []int{1, 4, 8, 240}
@@ -96,17 +95,9 @@ func TestRenderSpecQuoteNeverStrict(t *testing.T) {
 								t.Errorf("reason promises strict delivery (%q) for %+v: %s", banned, p, q.Reason)
 							}
 						}
-						// A band, when present, is exactly the MEASURED band — never
-						// extrapolated past it.
-						if q.SpeedupBandHighX != nil && *q.SpeedupBandHighX > renderSpecBandHighX {
-							t.Errorf("band high %.4f exceeds measured max %.4f for %+v", *q.SpeedupBandHighX, renderSpecBandHighX, p)
-						}
-						if q.SpeedupBandLowX != nil && *q.SpeedupBandLowX < renderSpecBandLowX {
-							t.Errorf("band low %.4f below measured min %.4f for %+v", *q.SpeedupBandLowX, renderSpecBandLowX, p)
-						}
-						// In envelope <=> band present; out of envelope <=> no band.
-						if q.InEnvelope != (q.SpeedupBandLowX != nil) {
-							t.Errorf("InEnvelope=%v but band-present=%v for %+v", q.InEnvelope, q.SpeedupBandLowX != nil, p)
+						if q.InEnvelope || q.SpeedupBandLowX != nil ||
+							q.SpeedupBandHighX != nil || q.Anchor4KSpeedupX != nil {
+							t.Errorf("unbound shape-only quote leaked a speed forecast for %+v: %+v", p, q)
 						}
 					}
 				}
@@ -115,24 +106,25 @@ func TestRenderSpecQuoteNeverStrict(t *testing.T) {
 	}
 }
 
-// TestRenderSpecQuoteEnvelope pins the envelope decision: the exact 4K RUN 3
-// shape carries the banked band + anchor; each out-of-envelope lever drops the
-// band while still quoting the preview tier (never an error, never a band).
+// TestRenderSpecQuoteEnvelope pins the hardened evidence boundary: even the
+// exact RUN-3 shape has no band because scene/policy digests are absent; the
+// older shape gates still produce useful diagnostics and never invent a band.
 func TestRenderSpecQuoteEnvelope(t *testing.T) {
-	// In envelope: the banked 4K config.
+	// Same shape as the banked 4K config, but not evidence-bound.
 	q, err := QuoteRenderSpec(run3Params())
 	if err != nil {
 		t.Fatalf("QuoteRenderSpec(run3): %v", err)
 	}
-	if !q.InEnvelope {
-		t.Fatalf("run3 config must be in envelope")
+	if q.InEnvelope {
+		t.Fatalf("shape alone must not be treated as an evidence-bound envelope")
 	}
-	if q.SpeedupBandLowX == nil || q.SpeedupBandHighX == nil || q.Anchor4KSpeedupX == nil {
-		t.Fatalf("in-envelope quote must carry the band + anchor, got %+v", q)
+	if q.SpeedupBandLowX != nil || q.SpeedupBandHighX != nil || q.Anchor4KSpeedupX != nil {
+		t.Fatalf("unbound quote must carry no speed forecast, got %+v", q)
 	}
-	specClose(t, "band low", *q.SpeedupBandLowX, renderSpecBandLowX)
-	specClose(t, "band high", *q.SpeedupBandHighX, renderSpecBandHighX)
-	specClose(t, "4k anchor", *q.Anchor4KSpeedupX, renderSpec4KAnchorX)
+	lowReason := strings.ToLower(q.Reason + " " + q.Basis)
+	if !strings.Contains(lowReason, "unbound") || !strings.Contains(lowReason, "2.450894x") {
+		t.Fatalf("quote must explain binding and cite the real strict anchor: %s", lowReason)
+	}
 
 	// Each lever pushes the SAME base shape out of envelope; the band must drop.
 	out := []struct {
@@ -154,7 +146,7 @@ func TestRenderSpecQuoteEnvelope(t *testing.T) {
 				t.Fatalf("QuoteRenderSpec: %v (out-of-envelope must not be an error)", err)
 			}
 			if q.InEnvelope {
-				t.Errorf("%s must be out of envelope", tc.name)
+				t.Errorf("%s must remain unbound", tc.name)
 			}
 			if q.SpeedupBandLowX != nil || q.SpeedupBandHighX != nil || q.Anchor4KSpeedupX != nil {
 				t.Errorf("%s: out-of-envelope quote must carry NO band, got %+v", tc.name, q)
@@ -216,7 +208,10 @@ func TestReceiptRenderSpecRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParseSpecReceipt(run3): %v", err)
 		}
-		got := receiptRenderSpec(&r)
+		got, err := receiptRenderSpec(&r)
+		if err != nil {
+			t.Fatalf("receiptRenderSpec(run3): %v", err)
+		}
 		if got == nil {
 			t.Fatalf("render receipt must project, got nil")
 		}
@@ -272,15 +267,18 @@ func TestReceiptRenderSpecRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParseSpecReceipt(lane2): %v", err)
 		}
-		got := receiptRenderSpec(&r)
+		got, err := receiptRenderSpec(&r)
+		if err != nil {
+			t.Fatalf("receiptRenderSpec(lane2): %v", err)
+		}
 		if got == nil {
 			t.Fatalf("render receipt must project, got nil")
 		}
 		if got.QualityTier != SpecTierDelivery {
 			t.Errorf("quality_tier: got %q, want delivery", got.QualityTier)
 		}
-		if !got.Delivered {
-			t.Errorf("a delivery-tier receipt must read as Delivered")
+		if got.Delivered || got.DeliveryEligible || !got.Parked {
+			t.Errorf("a synthetic delivery-tier receipt must park, got %+v", got)
 		}
 		if got.SelfPruned {
 			t.Errorf("a delivery-tier receipt must not read as SelfPruned")
@@ -295,11 +293,79 @@ func TestReceiptRenderSpecRoundTrip(t *testing.T) {
 	})
 }
 
+func TestReceiptRenderSpecDetailsAreBoundedDeepClone(t *testing.T) {
+	r, err := ParseSpecReceipt([]byte(specLane2Render))
+	if err != nil {
+		t.Fatalf("ParseSpecReceipt(lane2): %v", err)
+	}
+	r.Details = map[string]any{
+		"nested": map[string]any{
+			"items": []any{
+				map[string]any{"value": "authoritative"},
+				[]any{"kept", float64(7)},
+			},
+		},
+	}
+	got, err := receiptRenderSpec(&r)
+	if err != nil {
+		t.Fatalf("receiptRenderSpec(nested details): %v", err)
+	}
+	buyerNested := got.Details["nested"].(map[string]any)
+	buyerItems := buyerNested["items"].([]any)
+	buyerItems[0].(map[string]any)["value"] = "buyer-mutated"
+	buyerItems[1].([]any)[0] = "buyer-mutated"
+	buyerNested["added"] = true
+
+	authoritativeNested := r.Details["nested"].(map[string]any)
+	authoritativeItems := authoritativeNested["items"].([]any)
+	if authoritativeItems[0].(map[string]any)["value"] != "authoritative" {
+		t.Fatal("nested buyer map mutation leaked into authoritative receipt")
+	}
+	if authoritativeItems[1].([]any)[0] != "kept" {
+		t.Fatal("nested buyer slice mutation leaked into authoritative receipt")
+	}
+	if _, exists := authoritativeNested["added"]; exists {
+		t.Fatal("buyer map insertion leaked into authoritative receipt")
+	}
+	if r.SpeedupVsBaseline == nil || got.SpeedupVsBaseline == nil {
+		t.Fatal("precondition: both source and projection need a speedup")
+	}
+	originalSpeedup := *r.SpeedupVsBaseline
+	*got.SpeedupVsBaseline = 99
+	if *r.SpeedupVsBaseline != originalSpeedup {
+		t.Fatal("buyer speedup pointer mutation leaked into authoritative receipt")
+	}
+	*r.SpeedupVsBaseline = 77
+	if *got.SpeedupVsBaseline != 99 {
+		t.Fatal("authoritative speedup pointer mutation leaked into buyer projection")
+	}
+
+	tooDeep := any("leaf")
+	for range maxSpecReceiptJSONDepth + 1 {
+		tooDeep = map[string]any{"child": tooDeep}
+	}
+	for name, details := range map[string]map[string]any{
+		"non-finite":  {"value": math.NaN()},
+		"unsupported": {"value": make(chan int)},
+		"oversized":   {"value": strings.Repeat("x", maxSpecReceiptBytes)},
+		"too deep":    {"value": tooDeep},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bad := r
+			bad.Details = details
+			projected, err := receiptRenderSpec(&bad)
+			if err == nil || projected != nil {
+				t.Fatalf("unsafe details must fail closed, got=%+v err=%v", projected, err)
+			}
+		})
+	}
+}
+
 // TestReceiptRenderSpecHonestyBoundary: nil at the boundary — a nil receipt and
 // a NON-render (token) receipt both project to nil, exactly as receiptRouting
 // returns nil for a job that carried no routing block.
 func TestReceiptRenderSpecHonestyBoundary(t *testing.T) {
-	if got := receiptRenderSpec(nil); got != nil {
+	if got, err := receiptRenderSpec(nil); err != nil || got != nil {
 		t.Errorf("nil receipt must project to nil, got %+v", got)
 	}
 	tok, err := ParseSpecReceipt([]byte(specLane3Token))
@@ -309,8 +375,12 @@ func TestReceiptRenderSpecHonestyBoundary(t *testing.T) {
 	if tok.Modality != "token" {
 		t.Fatalf("precondition: lane3 must be a token receipt, got %q", tok.Modality)
 	}
-	if got := receiptRenderSpec(&tok); got != nil {
+	if got, err := receiptRenderSpec(&tok); err != nil || got != nil {
 		t.Errorf("a token receipt must not project onto the render block, got %+v", got)
+	}
+	bad := SpecReceipt{Modality: "render"}
+	if got, err := receiptRenderSpec(&bad); err == nil || got != nil {
+		t.Errorf("a malformed render row must fail loudly, got=%+v err=%v", got, err)
 	}
 }
 
@@ -319,18 +389,23 @@ func TestReceiptRenderSpecHonestyBoundary(t *testing.T) {
 // says no speedup is claimed — a speedup is never invented.
 func TestReceiptRenderSpecAbsentBaseline(t *testing.T) {
 	r := SpecReceipt{
-		BranchID: "render", Modality: "render",
+		SchemaVersion: specReceiptSchemaVersion,
+		BranchID:      "render", Modality: "render",
 		DraftCostS: 100, VerifyCostS: 1, RepairCostS: 0, TotalProductTimeS: 101,
 		BaselineTotalTimeS: 0, BaselineSource: SpecBaselineAbsent,
 		Units: 1, AcceptedFraction: 1, RepairedFraction: 0,
 		Exact: false, QualityTier: SpecTierPreview,
+		ArtifactVerified:  true,
 		SpeedupVsBaseline: nil, Evidence: SpecEvidenceMeasured,
 		Details: map[string]any{},
 	}
 	if err := r.Validate(); err != nil {
 		t.Fatalf("precondition: absent-baseline receipt must validate, got %v", err)
 	}
-	got := receiptRenderSpec(&r)
+	got, err := receiptRenderSpec(&r)
+	if err != nil {
+		t.Fatalf("receiptRenderSpec(absent baseline): %v", err)
+	}
 	if got == nil {
 		t.Fatalf("render receipt must project")
 	}
@@ -340,7 +415,10 @@ func TestReceiptRenderSpecAbsentBaseline(t *testing.T) {
 	if !strings.Contains(strings.ToLower(got.Basis), "no speedup is claimed") {
 		t.Errorf("basis must state no speedup is claimed: %s", got.Basis)
 	}
-	if !got.Delivered {
-		t.Errorf("a preview-tier receipt must read as Delivered")
+	if got.Delivered || !got.Parked {
+		t.Errorf("a naked emitter-verified preview receipt must park pending attestation")
+	}
+	if !strings.Contains(strings.ToLower(got.Basis), "server attestation") {
+		t.Errorf("basis must name the missing authoritative binding: %s", got.Basis)
 	}
 }

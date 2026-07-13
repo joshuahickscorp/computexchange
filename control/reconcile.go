@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"sort"
 	"time"
 
 	"github.com/google/uuid"
@@ -12,13 +13,13 @@ import (
 
 // reconcile.go — the ledger↔Stripe reconciliation loop (ACCRETION Wave 4:
 // "Ledger↔Stripe reconciliation job + payout retry/alerting"). It is a read-only
-// audit: it compares what our ledger says we have RELEASED to each supplier
-// (supplier_credit rows the payout loop marked 'released' against a real transfer)
-// to what Stripe says we have actually TRANSFERRED to that supplier's connected
-// account, and LOGS any drift. It NEVER moves money, marks a row, or "fixes" a
-// discrepancy — surfacing drift honestly is the whole job; the operator resolves it
-// (BLACKHOLE: surface every failure, never auto-act on money). Wired into the same
-// Workers.Run ticker loop as the payout/stale/webhook sweeps.
+// audit: it compares every durable cash_moved payout operation to what Stripe says
+// it actually TRANSFERRED to that supplier's connected account, including cash
+// whose ledger row later became reversal_required. It also flags every unresolved
+// provider outcome and released row without cash proof. It NEVER moves money,
+// marks a row, or "fixes" a discrepancy — surfacing drift honestly is the whole
+// job. Wired into the same Workers.Run ticker loop as the payout/stale/webhook
+// sweeps.
 
 // reconcileInterval is how often the ledger↔Stripe audit runs. Deliberately slow —
 // this is an audit, not a hot path, and each cycle makes one Stripe list call per
@@ -31,8 +32,8 @@ const reconcileInterval = 15 * time.Minute
 // a real discrepancy worth flagging.
 const reconcileEpsilonUSD = 0.01
 
-// reconcileLedger audits released supplier credits against actual Stripe transfers
-// and logs any drift. It is honest about its own limits: with no Stripe key it
+// reconcileLedger audits durable supplier payout operations against actual Stripe
+// transfers and logs any drift. It is honest about its own limits: with no Stripe key it
 // cannot see real transfers, so it logs that it is skipping rather than inventing a
 // "reconciled" result (the stub/manual-export rails never produce Stripe transfers,
 // so there is nothing to reconcile against). A per-supplier lookup error is logged
@@ -45,53 +46,90 @@ func (wk *Workers) reconcileLedger(ctx context.Context) error {
 		return nil
 	}
 
-	// Per-supplier released totals straight from the ledger audit rollup (the same
-	// read /admin/payouts uses). Only 'released' supplier_credit rows count: those
-	// are the credits the payout loop sent against a real transfer ref. 'held',
-	// 'ready', 'pending', and 'clawed_back' are deliberately excluded — they were
-	// never transferred, so Stripe should show nothing for them.
+	// Per-supplier cash and anomaly totals come from the same operation-backed
+	// rollup as /admin/payouts. Current ledger status never erases cash_moved.
 	rollups, err := wk.store.ListPayoutsAdmin(ctx)
 	if err != nil {
 		return err
 	}
 
-	var checked, drifted int
+	type supplierCashExpectation struct {
+		cashSentUSD         float64
+		liabilityUSD        float64
+		carriedUSD          float64
+		releasedWithoutCash int
+		outcomeUnknown      int
+	}
+	expected := make(map[uuid.UUID]*supplierCashExpectation)
 	for _, r := range rollups {
-		if r.PayoutStatus != PayoutReleased || r.AmountUSD <= 0 {
-			continue
-		}
 		if r.SupplierID == (uuid.UUID{}) {
-			// A platform_take or orphaned row with no supplier cannot map to a
-			// Connect destination; nothing to reconcile.
 			continue
 		}
-		acct, aerr := wk.store.SupplierStripeAcct(ctx, r.SupplierID)
+		e := expected[r.SupplierID]
+		if e == nil {
+			e = &supplierCashExpectation{}
+			expected[r.SupplierID] = e
+		}
+		e.cashSentUSD += r.CashSentUSD
+		e.liabilityUSD += r.AmountUSD
+		e.carriedUSD += r.CarriedRemainderUSD
+		e.releasedWithoutCash += r.ReleasedWithoutCashCount
+		e.outcomeUnknown += r.OutcomeUnknownCount
+	}
+	suppliers := make([]uuid.UUID, 0, len(expected))
+	for supplierID, e := range expected {
+		if e.cashSentUSD > 0 || e.releasedWithoutCash > 0 || e.outcomeUnknown > 0 {
+			suppliers = append(suppliers, supplierID)
+		}
+	}
+	sort.Slice(suppliers, func(i, j int) bool { return suppliers[i].String() < suppliers[j].String() })
+
+	var checked, drifted int
+	for _, supplierID := range suppliers {
+		e := expected[supplierID]
+		acct, aerr := wk.store.SupplierStripeAcct(ctx, supplierID)
 		if aerr != nil {
-			log.Printf("workers: reconcile: supplier %s stripe account lookup: %v", r.SupplierID, aerr)
+			log.Printf("workers: reconcile: supplier %s stripe account lookup: %v", supplierID, aerr)
 			continue
 		}
 		if acct == "" {
 			// Ledger says we released money to a supplier that has no connected
 			// account: a real anomaly (a transfer could not have succeeded), so flag
 			// it rather than silently skipping.
-			log.Printf("workers: reconcile DRIFT: supplier %s shows $%.2f released but has no connected Stripe account", r.SupplierID, r.AmountUSD)
+			log.Printf("workers: reconcile DRIFT: supplier %s shows $%.2f cash sent ($%.6f liability, $%.6f carried) but has no connected Stripe account",
+				supplierID, e.cashSentUSD, e.liabilityUSD, e.carriedUSD)
 			drifted++
 			metrics.reconcileDrift.Add(1)
 			continue
 		}
+		if e.releasedWithoutCash > 0 {
+			log.Printf("workers: reconcile DRIFT: supplier %s (%s) has %d released liability row(s) without a cash-moved payout operation (rollup liability $%.6f)",
+				supplierID, acct, e.releasedWithoutCash, e.liabilityUSD)
+			drifted++
+			metrics.reconcileDrift.Add(1)
+		}
+		if e.outcomeUnknown > 0 {
+			log.Printf("workers: reconcile DRIFT: supplier %s (%s) has %d unresolved provider outcome(s); possible cash must be resolved by exact payout key",
+				supplierID, acct, e.outcomeUnknown)
+			drifted++
+			metrics.reconcileDrift.Add(1)
+		}
+		if e.cashSentUSD <= 0 {
+			continue
+		}
 		transferred, terr := stripeTransferredUSD(ctx, acct)
 		if terr != nil {
-			log.Printf("workers: reconcile: supplier %s (%s) stripe transfers: %v", r.SupplierID, acct, terr)
+			log.Printf("workers: reconcile: supplier %s (%s) stripe transfers: %v", supplierID, acct, terr)
 			continue
 		}
 		checked++
-		if delta := r.AmountUSD - transferred; math.Abs(delta) >= reconcileEpsilonUSD {
+		if delta := e.cashSentUSD - transferred; math.Abs(delta) >= reconcileEpsilonUSD {
 			// Honest flag only. A positive delta = ledger says we paid more than
 			// Stripe shows (under-transfer / missing transfer); negative = Stripe
 			// transferred more than the ledger released (an out-of-band or duplicate
 			// transfer). Either way the operator investigates — we never move money.
-			log.Printf("workers: reconcile DRIFT: supplier %s (%s): ledger released $%.2f vs stripe transferred $%.2f (delta $%.2f)",
-				r.SupplierID, acct, r.AmountUSD, transferred, delta)
+			log.Printf("workers: reconcile DRIFT: supplier %s (%s): ledger cash sent $%.2f vs stripe transferred $%.2f (delta $%.2f; liability $%.6f, carried $%.6f)",
+				supplierID, acct, e.cashSentUSD, transferred, delta, e.liabilityUSD, e.carriedUSD)
 			drifted++
 			metrics.reconcileDrift.Add(1)
 		}

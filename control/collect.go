@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // collect.go — the charge-collect sweep: the MONEY-TRUTH layer that turns "owed
@@ -139,6 +141,88 @@ type ChargeBatch struct {
 	AmountUSD float64
 }
 
+// recordBuyerCashCollection writes the canonical, cross-source cash fact for one
+// terminal PaymentIntent. The PI is the primary key across BOTH standalone jobs
+// and batches, so the same external receipt cannot fund two independent pools.
+// Replaying the identical fact is idempotent; any different binding or amount is
+// rejected and the surrounding charge-state transaction rolls back.
+func recordBuyerCashCollection(
+	ctx context.Context,
+	tx pgx.Tx,
+	buyerID uuid.UUID,
+	sourceKind string,
+	sourceID uuid.UUID,
+	charge ChargeResult,
+) error {
+	var jobID, batchID *uuid.UUID
+	switch sourceKind {
+	case "job":
+		jobID = &sourceID
+	case "batch":
+		batchID = &sourceID
+	default:
+		return fmt.Errorf("invalid buyer cash source kind %q", sourceKind)
+	}
+	var recorded string
+	err := tx.QueryRow(ctx, `
+		INSERT INTO buyer_cash_collections
+		  (payment_intent,charge_id,buyer_id,source_kind,job_id,charge_batch_id,
+		   requested_cents,received_cents,currency)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+		ON CONFLICT (payment_intent) DO UPDATE SET
+		  payment_intent=EXCLUDED.payment_intent
+		WHERE buyer_cash_collections.charge_id=EXCLUDED.charge_id
+		  AND buyer_cash_collections.buyer_id=EXCLUDED.buyer_id
+		  AND buyer_cash_collections.source_kind=EXCLUDED.source_kind
+		  AND buyer_cash_collections.job_id IS NOT DISTINCT FROM EXCLUDED.job_id
+		  AND buyer_cash_collections.charge_batch_id IS NOT DISTINCT FROM EXCLUDED.charge_batch_id
+		  AND buyer_cash_collections.requested_cents=EXCLUDED.requested_cents
+		  AND buyer_cash_collections.received_cents=EXCLUDED.received_cents
+		  AND buyer_cash_collections.currency=EXCLUDED.currency
+		RETURNING payment_intent`,
+		charge.PaymentIntentID, charge.ChargeID, buyerID, sourceKind, jobID, batchID,
+		charge.RequestedCents, charge.ReceivedCents, charge.Currency,
+	).Scan(&recorded)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("payment intent %s is already bound to a different cash source or amount", charge.PaymentIntentID)
+	}
+	if err != nil {
+		return fmt.Errorf("recording canonical buyer cash %s: %w", charge.PaymentIntentID, err)
+	}
+	// A dispute webhook can precede this confirmation and Stripe may omit its
+	// payment_intent. The independently returned Charge id closes that ordering
+	// gap: bind already-recorded object state before this cash becomes fundable.
+	var conflictingState bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS(
+		  SELECT 1 FROM stripe_charge_cash_state
+		   WHERE charge_id=$1 AND (
+		     (payment_intent IS NOT NULL AND payment_intent<>$2)
+		     OR amount_cents<>$3 OR currency<>$4)
+		  UNION ALL
+		  SELECT 1 FROM stripe_dispute_cash_state
+		   WHERE charge_id=$1 AND (
+		     (payment_intent IS NOT NULL AND payment_intent<>$2)
+		     OR amount_cents>$3 OR currency<>$4)
+		)`, charge.ChargeID, charge.PaymentIntentID, charge.ReceivedCents, charge.Currency).Scan(&conflictingState); err != nil {
+		return err
+	}
+	if conflictingState {
+		return fmt.Errorf("charge %s webhook state is bound to a different PaymentIntent", charge.ChargeID)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE stripe_charge_cash_state SET payment_intent=$2,updated_at=now()
+		 WHERE charge_id=$1 AND payment_intent IS NULL`, charge.ChargeID, charge.PaymentIntentID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE stripe_dispute_cash_state SET payment_intent=$2,updated_at=now()
+		 WHERE charge_id=$1 AND payment_intent IS NULL`, charge.ChargeID, charge.PaymentIntentID); err != nil {
+		return err
+	}
+	return nil
+}
+
 // AttemptingChargeBatches lists batches not yet confirmed charged, oldest first.
 func (s *Store) AttemptingChargeBatches(ctx context.Context, limit int) ([]ChargeBatch, error) {
 	rows, err := s.pool.Query(ctx,
@@ -164,19 +248,77 @@ func (s *Store) AttemptingChargeBatches(ctx context.Context, limit int) ([]Charg
 // the batch row flips to 'charged' (stripe_pi + charged_at) and every member job
 // flips to charge_status='charged'. Guarded on status='attempting' so a replayed
 // confirmation is a no-op.
-func (s *Store) MarkChargeBatchCharged(ctx context.Context, batchID uuid.UUID, pi string) error {
+func (s *Store) MarkChargeBatchCharged(ctx context.Context, batchID uuid.UUID, charge ChargeResult) error {
+	if charge.PaymentIntentID == "" || charge.ChargeID == "" || charge.RequestedCents <= 0 ||
+		charge.ReceivedCents != charge.RequestedCents || charge.Currency != "usd" {
+		return fmt.Errorf("refusing invalid batch charge confirmation: %+v", charge)
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx,
-		`UPDATE charge_batches SET status = 'charged', stripe_pi = $2, charged_at = now()
-		 WHERE id = $1 AND status = 'attempting'`, batchID, pi); err != nil {
+	var (
+		buyerID                      uuid.UUID
+		status, existingPI, currency string
+		requested, received          int64
+	)
+	if err := tx.QueryRow(ctx, `
+		SELECT buyer_id,status,COALESCE(stripe_pi,''),
+		       COALESCE(charge_requested_cents,0),COALESCE(charge_received_cents,0),
+		       COALESCE(charge_currency,'')
+		  FROM charge_batches WHERE id=$1 FOR UPDATE`, batchID,
+	).Scan(&buyerID, &status, &existingPI, &requested, &received, &currency); err != nil {
 		return err
+	}
+	if status == "charged" {
+		if existingPI != charge.PaymentIntentID || requested != charge.RequestedCents ||
+			received != charge.ReceivedCents || currency != charge.Currency {
+			return fmt.Errorf("charge batch %s is already bound to different cash: pi=%s requested=%d received=%d %s",
+				batchID, existingPI, requested, received, currency)
+		}
+		if err := recordBuyerCashCollection(ctx, tx, buyerID, "batch", batchID, charge); err != nil {
+			return err
+		}
+		if err := finalizeBuyerChargeOperation(ctx, tx, "cxbatch-"+batchID.String(), "batch", batchID, charge); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+	if status != "attempting" && status != "outcome_unknown" {
+		return fmt.Errorf("charge batch %s cannot confirm cash from status %q", batchID, status)
+	}
+	if err := recordBuyerCashCollection(ctx, tx, buyerID, "batch", batchID, charge); err != nil {
+		return err
+	}
+	if err := finalizeBuyerChargeOperation(ctx, tx, "cxbatch-"+batchID.String(), "batch", batchID, charge); err != nil {
+		return err
+	}
+	ct, err := tx.Exec(ctx,
+		`UPDATE charge_batches
+		    SET status='charged',stripe_pi=$2,charged_at=now(),
+		        charge_requested_cents=$3,charge_received_cents=$4,charge_currency=$5
+		  WHERE id=$1 AND status=$6`,
+		batchID, charge.PaymentIntentID, charge.RequestedCents, charge.ReceivedCents, charge.Currency, status)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() != 1 {
+		return fmt.Errorf("charge batch %s lost its attempting-state confirmation CAS", batchID)
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE jobs SET charge_status = 'charged' WHERE charge_batch_id = $1`, batchID); err != nil {
+		return err
+	}
+	// A payout sweep may have observed these liabilities before collection and
+	// moved them out of the bounded due queue. The new exact cash fact re-arms
+	// them atomically; ClaimPayout still locks and allocates the shared pool.
+	if _, err := tx.Exec(ctx, `
+		UPDATE ledger_entries le SET payout_status=$2
+		  FROM tasks t JOIN jobs j ON j.id=t.job_id
+		 WHERE le.task_id=t.id AND j.charge_batch_id=$1
+		   AND le.kind='supplier_credit' AND le.payout_status=$3`,
+		batchID, PayoutHeld, PayoutAwaitingFunding); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -398,8 +540,6 @@ func (s *Store) SetChargeNextAt(ctx context.Context, jobID uuid.UUID, at time.Ti
 	return err
 }
 
-// SetJobCharged records a confirmed single-job charge: charge_status='charged'
-// plus the PaymentIntent id the stripe_fee backfill scan keys on.
 // JobChargeStatus reads a job's current charge_status — the double-charge guard's
 // input (a re-finalize may only decide a 'not_attempted' job).
 func (s *Store) JobChargeStatus(ctx context.Context, jobID uuid.UUID) (string, error) {
@@ -464,10 +604,72 @@ func (s *Store) BumpChargeBatchRetry(ctx context.Context, batchID uuid.UUID, bac
 	return attempts, err
 }
 
-func (s *Store) SetJobCharged(ctx context.Context, jobID uuid.UUID, pi string) error {
-	_, err := s.pool.Exec(ctx,
-		`UPDATE jobs SET charge_status = 'charged', stripe_pi = $2 WHERE id = $1`, jobID, pi)
-	return err
+// SetJobCharged records an exact, fully settled provider charge for one job.
+func (s *Store) SetJobCharged(ctx context.Context, jobID uuid.UUID, charge ChargeResult) error {
+	if charge.PaymentIntentID == "" || charge.ChargeID == "" || charge.RequestedCents <= 0 ||
+		charge.ReceivedCents != charge.RequestedCents || charge.Currency != "usd" {
+		return fmt.Errorf("refusing invalid job charge confirmation: %+v", charge)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var (
+		buyerID                      uuid.UUID
+		status, existingPI, currency string
+		requested, received          int64
+	)
+	if err := tx.QueryRow(ctx, `
+		SELECT buyer_id,charge_status,COALESCE(stripe_pi,''),
+		       COALESCE(charge_requested_cents,0),COALESCE(charge_received_cents,0),
+		       COALESCE(charge_currency,'')
+		  FROM jobs WHERE id=$1 FOR UPDATE`, jobID,
+	).Scan(&buyerID, &status, &existingPI, &requested, &received, &currency); err != nil {
+		return err
+	}
+	if status == "charged" {
+		if existingPI != charge.PaymentIntentID || requested != charge.RequestedCents ||
+			received != charge.ReceivedCents || currency != charge.Currency {
+			return fmt.Errorf("job %s is already bound to different cash: pi=%s requested=%d received=%d %s",
+				jobID, existingPI, requested, received, currency)
+		}
+		if err := recordBuyerCashCollection(ctx, tx, buyerID, "job", jobID, charge); err != nil {
+			return err
+		}
+		if err := finalizeBuyerChargeOperation(ctx, tx, "job-"+jobID.String(), "job", jobID, charge); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+	if err := recordBuyerCashCollection(ctx, tx, buyerID, "job", jobID, charge); err != nil {
+		return err
+	}
+	if err := finalizeBuyerChargeOperation(ctx, tx, "job-"+jobID.String(), "job", jobID, charge); err != nil {
+		return err
+	}
+	ct, err := tx.Exec(ctx,
+		`UPDATE jobs
+		    SET charge_status='charged',stripe_pi=$2,
+		        charge_requested_cents=$3,charge_received_cents=$4,charge_currency=$5
+		  WHERE id=$1 AND charge_status=$6`,
+		jobID, charge.PaymentIntentID, charge.RequestedCents, charge.ReceivedCents, charge.Currency, status)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() != 1 {
+		return fmt.Errorf("job %s lost its charge-state confirmation CAS", jobID)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE ledger_entries le SET payout_status=$2
+		  FROM tasks t
+		 WHERE le.task_id=t.id AND t.job_id=$1
+		   AND le.kind='supplier_credit' AND le.payout_status=$3`,
+		jobID, PayoutHeld, PayoutAwaitingFunding); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // InsertStripeFee writes the one negative 'stripe_fee' ledger row for a
@@ -672,7 +874,7 @@ func (s *Store) SettleJobSLA(ctx context.Context, jobID uuid.UUID) (SLASettleRes
 // SLAUndecidedCompleteJobs lists completed, merged jobs whose bound speed-SLA
 // outcome has not been decided yet — the sweep's work items. This is the
 // backstop for jobs finalized by the background completion sweep
-// (workers.go sweepAndDeliver), which does not run the commit-path finalize.
+// (workers.go finalizeJobs), which does not run the commit-path finalize.
 func (s *Store) SLAUndecidedCompleteJobs(ctx context.Context, limit int) ([]uuid.UUID, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id FROM jobs
@@ -769,8 +971,9 @@ func (wk *Workers) collectCharges(ctx context.Context) error {
 		return nil
 	}
 
-	// 1. Retry attempting batches: same idempotency key + frozen amount, so an
-	// ambiguous prior attempt is replayed by Stripe, never charged twice.
+	// 1. Attempt newly formed/legacy-attempting batches. The durable operation
+	// boundary moves each to outcome_unknown before Stripe, so ambiguous work is
+	// excluded from this query on later ticks and reconciled instead of re-sent.
 	batches, err := wk.store.AttemptingChargeBatches(ctx, sweepBatch)
 	if err != nil {
 		return err
@@ -849,18 +1052,36 @@ func (wk *Workers) collectCharges(ctx context.Context) error {
 			log.Printf("workers: charge-collect: fee backfill for pi %s: %v (retried next tick)", u.PI, ferr)
 		}
 	}
+
+	// 6. Allocation backfill: a real batch fee can exist while the immediately
+	// following allocation write transiently failed (or predated the allocation
+	// table). Retry from persisted fee + frozen billed_usd only; no Stripe call and
+	// no guessed share. AllocateBatchStripeFee is transactionally idempotent.
+	pendingAllocations, err := wk.store.BatchStripeFeesMissingAllocations(ctx, sweepBatch)
+	if err != nil {
+		return err
+	}
+	for _, pi := range pendingAllocations {
+		if _, aerr := wk.store.AllocateBatchStripeFee(ctx, pi); aerr != nil {
+			log.Printf("workers: charge-collect: batch fee allocation for pi %s: %v (retried next tick)", pi, aerr)
+		}
+	}
 	return nil
 }
 
-// chargeBatch attempts one batch's PaymentIntent: the FROZEN row amount under
-// the stable "cxbatch-"+id idempotency key. Success confirms the batch + flips
-// its member jobs to charged and records the real Stripe fee; failure is logged
-// and the batch stays 'attempting' for the next tick (the same key makes that
-// retry safe even if THIS attempt was ambiguous).
+// chargeBatch attempts one batch's PaymentIntent after durably moving the batch
+// to outcome_unknown. Success confirms the batch and records the real fee; any
+// post-boundary failure is reconciled from signed Stripe evidence, never re-sent.
 func (wk *Workers) chargeBatch(ctx context.Context, b ChargeBatch) {
-	pi, err := chargeBuyer(ctx, wk.store, b.BuyerID, b.AmountUSD, "cxbatch-"+b.ID.String())
+	charge, err := chargeBuyer(ctx, wk.store, b.BuyerID, b.AmountUSD,
+		"cxbatch-"+b.ID.String(), "batch", b.ID)
 	if err != nil {
-		// Backoff mirrors the failed-singles schedule (30min x attempts, <= 6h): a
+		if errors.Is(err, errBuyerChargeOutcomeUnknown) {
+			log.Printf("workers: charge-collect: batch %s outcome unknown; automatic re-charge is blocked pending Stripe reconciliation: %v", b.ID, err)
+			return
+		}
+		// Only a failure before the durable external request is armed reaches this
+		// branch. Backoff mirrors failed singles (30min x attempts, <= 6h): a
 		// hard-declined card must not be hammered once a minute forever — that is
 		// card-network excessive-reattempt territory. The frozen amount + stable
 		// idempotency key make every retry a replay, never a second charge.
@@ -872,35 +1093,38 @@ func (wk *Workers) chargeBatch(ctx context.Context, b ChargeBatch) {
 			b.ID, b.AmountUSD, b.BuyerID, attempts, err)
 		return
 	}
-	if merr := wk.store.MarkChargeBatchCharged(ctx, b.ID, pi); merr != nil {
+	if merr := wk.store.MarkChargeBatchCharged(ctx, b.ID, charge); merr != nil {
 		// The charge went through but the confirmation write failed: the next tick
 		// retries with the same idempotency key (a Stripe replay, not a re-charge)
 		// and confirms then. Money-safe, just late.
-		log.Printf("workers: charge-collect: batch %s charged (pi %s) but confirmation write failed: %v (reconfirmed next tick)", b.ID, pi, merr)
+		log.Printf("workers: charge-collect: batch %s charged (pi %s) but confirmation write failed: %v (reconfirmed next tick)", b.ID, charge.PaymentIntentID, merr)
 		return
 	}
-	log.Printf("workers: charge-collect: batch %s charged ($%.6f, buyer %s, pi %s)", b.ID, b.AmountUSD, b.BuyerID, pi)
-	if ferr := recordStripeFee(ctx, wk.store, b.BuyerID, pi); ferr != nil {
-		log.Printf("workers: charge-collect: stripe fee for batch %s (pi %s) not recorded yet: %v (backfilled next tick)", b.ID, pi, ferr)
+	log.Printf("workers: charge-collect: batch %s charged ($%.2f received, buyer %s, pi %s)",
+		b.ID, float64(charge.ReceivedCents)/100, b.BuyerID, charge.PaymentIntentID)
+	if ferr := recordStripeFee(ctx, wk.store, b.BuyerID, charge.PaymentIntentID); ferr != nil {
+		log.Printf("workers: charge-collect: stripe fee for batch %s (pi %s) not recorded yet: %v (backfilled next tick)", b.ID, charge.PaymentIntentID, ferr)
 	}
 }
 
-// retryFailedSingle retries one failed single-job charge with its ORIGINAL
-// "job-"+jobID idempotency key (an ambiguous prior attempt is replayed, never
-// doubled). On failure the attempt counter and the 30min×attempts (≤6h) backoff
-// are advanced; the job is never written off — the ledger keeps it owed and the
-// failure is logged every time.
+// retryFailedSingle gives a legacy/pre-request failed job one durable request
+// boundary. Once armed it becomes outcome_unknown and is never automatically
+// re-sent; only failures that occur before arming retain the bounded backoff path.
 func (wk *Workers) retryFailedSingle(ctx context.Context, jobID uuid.UUID) {
 	// Retry the FROZEN attempt amount (charge_attempt_usd), never the current
-	// actual_usd: the original attempt recorded its params under the "job-"+id
-	// idempotency key, and replaying that key with a drifted amount is a permanent
-	// idempotency_error loop — then a double charge once the key expires.
+	// actual_usd. The operation freezes the exact amount and permanently blocks a
+	// later external re-send after the first durable boundary crossing.
 	buyerID, usd, err := wk.store.JobFrozenChargeInfo(ctx, jobID)
 	if err != nil || usd <= 0 {
 		return
 	}
-	pi, err := chargeBuyer(ctx, wk.store, buyerID, usd, "job-"+jobID.String())
+	charge, err := chargeBuyer(ctx, wk.store, buyerID, usd,
+		"job-"+jobID.String(), "job", jobID)
 	if err != nil {
+		if errors.Is(err, errBuyerChargeOutcomeUnknown) {
+			log.Printf("workers: charge-collect: job %s outcome unknown; automatic re-charge is blocked pending Stripe reconciliation: %v", jobID, err)
+			return
+		}
 		attempts, aerr := wk.store.IncrementChargeAttempts(ctx, jobID)
 		if aerr != nil {
 			log.Printf("workers: charge-collect: bumping charge attempts for job %s: %v", jobID, aerr)
@@ -914,12 +1138,13 @@ func (wk *Workers) retryFailedSingle(ctx context.Context, jobID uuid.UUID) {
 			attempts, jobID, usd, next.UTC().Format(time.RFC3339), err)
 		return
 	}
-	if serr := wk.store.SetJobCharged(ctx, jobID, pi); serr != nil {
-		log.Printf("workers: charge-collect: marking job %s charged (pi %s): %v", jobID, pi, serr)
+	if serr := wk.store.SetJobCharged(ctx, jobID, charge); serr != nil {
+		log.Printf("workers: charge-collect: marking job %s charged (pi %s): %v", jobID, charge.PaymentIntentID, serr)
 		return
 	}
-	log.Printf("workers: charge-collect: job %s charged on retry ($%.6f, pi %s)", jobID, usd, pi)
-	if ferr := recordStripeFee(ctx, wk.store, buyerID, pi); ferr != nil {
-		log.Printf("workers: charge-collect: stripe fee for job %s (pi %s) not recorded yet: %v (backfilled next tick)", jobID, pi, ferr)
+	log.Printf("workers: charge-collect: job %s charged on retry ($%.2f received, pi %s)",
+		jobID, float64(charge.ReceivedCents)/100, charge.PaymentIntentID)
+	if ferr := recordStripeFee(ctx, wk.store, buyerID, charge.PaymentIntentID); ferr != nil {
+		log.Printf("workers: charge-collect: stripe fee for job %s (pi %s) not recorded yet: %v (backfilled next tick)", jobID, charge.PaymentIntentID, ferr)
 	}
 }

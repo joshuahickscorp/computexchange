@@ -28,10 +28,12 @@ type AdminMoney struct {
 	RefundedUSD float64 `json:"refunded_usd"`
 	// ClawedBackUSD is supplier credit reversed on confirmed-bad results.
 	ClawedBackUSD float64 `json:"clawed_back_usd"`
-	// FlowOwedUSD is supplier credit not yet released (held + pending): money in
-	// stasis BETWEEN users. Not a platform liability — the users owe each other;
-	// the exchange holds and routes it.
+	// FlowOwedUSD is supplier credit not yet sent, plus every durable sub-cent
+	// remainder after a released cash payout. It is never reduced by rail rounding.
 	FlowOwedUSD float64 `json:"flow_owed_usd"`
+	// CarriedRemainderUSD is the exact subset of FlowOwedUSD preserved by the
+	// floor-cent settlement policy, including zero-cent carried liabilities.
+	CarriedRemainderUSD float64 `json:"carried_remainder_usd"`
 	// CollectedUSD is what was actually PULLED from buyers' cards (jobs with
 	// charge_status='charged') — real external money-in, not ledger bookkeeping.
 	CollectedUSD float64 `json:"collected_usd"`
@@ -44,8 +46,8 @@ type AdminMoney struct {
 	StripeFeesUSD float64 `json:"stripe_fees_usd"`
 	// TakeNetUSD is the platform take after real Stripe fees.
 	TakeNetUSD float64 `json:"take_net_usd"`
-	// TransferredUSD is supplier credit actually SENT onward (payout_status
-	// 'released' — each such row carries a real rail reference by constraint).
+	// TransferredUSD is exact integer-cent supplier cash actually sent onward,
+	// sourced from durable cash_moved payout operations rather than rounded ledger.
 	TransferredUSD float64 `json:"transferred_usd"`
 }
 
@@ -60,8 +62,9 @@ type AdminAccessible struct {
 	FeesUSD float64 `json:"fees_usd"`
 	// YoursNetUSD is TakeCollectedUSD minus FeesUSD: the operator's own money.
 	YoursNetUSD float64 `json:"yours_net_usd"`
-	// TheirsPendingTransferUSD is supplier credit (held|pending) on collected
-	// jobs: money physically in the operator's balance but owed onward.
+	// TheirsPendingTransferUSD is every supplier-credit balance still owed on
+	// collected jobs, including held/awaiting/ready/sending/unknown/carried value
+	// and the durable remainder after a proved cash payout.
 	TheirsPendingTransferUSD float64 `json:"theirs_pending_transfer_usd"`
 	// SpendableEstimateUSD is stripe.available_usd minus money.flow_owed_usd,
 	// floored at 0 — nil when the live Stripe balance is unavailable (never a
@@ -114,34 +117,41 @@ func (s *Store) AdminSummaryData(ctx context.Context) (AdminSummary, error) {
 	// Money: one pass over the ledger, sign-normalized per kind.
 	if err := s.pool.QueryRow(ctx,
 		`SELECT
-		   COALESCE(SUM(CASE WHEN kind = 'buyer_charge'    THEN -amount_usd END),0)::float8,
-		   COALESCE(SUM(CASE WHEN kind = 'supplier_credit' THEN  amount_usd END),0)::float8,
-		   COALESCE(SUM(CASE WHEN kind = 'platform_take'   THEN  amount_usd END),0)::float8,
-		   COALESCE(SUM(CASE WHEN kind = 'refund'          THEN  amount_usd END),0)::float8,
-		   COALESCE(SUM(CASE WHEN kind = 'clawback'        THEN -amount_usd END),0)::float8,
-		   COALESCE(SUM(CASE WHEN kind = 'supplier_credit'
-		                     AND payout_status IN ('held','pending') THEN amount_usd END),0)::float8,
-		   COALESCE(SUM(CASE WHEN kind = 'stripe_fee'      THEN -amount_usd END),0)::float8,
-		   COALESCE(SUM(CASE WHEN kind = 'supplier_credit'
-		                     AND payout_status = 'released' THEN amount_usd END),0)::float8
-		 FROM ledger_entries`,
+		   COALESCE(SUM(CASE WHEN le.kind = 'buyer_charge'    THEN -le.amount_usd END),0)::float8,
+		   COALESCE(SUM(CASE WHEN le.kind = 'supplier_credit' THEN  le.amount_usd END),0)::float8,
+		   COALESCE(SUM(CASE WHEN le.kind = 'platform_take'   THEN  le.amount_usd END),0)::float8,
+		   COALESCE(SUM(CASE WHEN le.kind = 'refund'          THEN  le.amount_usd END),0)::float8,
+		   COALESCE(SUM(CASE WHEN le.kind = 'clawback'        THEN -le.amount_usd END),0)::float8,
+		   COALESCE(SUM(CASE
+		     WHEN le.kind <> 'supplier_credit' THEN 0
+		     WHEN le.payout_status = 'released' AND COALESCE(op.cash_moved,false)
+		       THEN COALESCE(mu.remainder_microusd,0)::numeric / 1000000
+		     WHEN le.payout_status IN ('clawed_back','reversal_required') THEN 0
+		     ELSE le.amount_usd END),0)::float8,
+		   COALESCE(SUM(CASE WHEN le.kind = 'stripe_fee' THEN -le.amount_usd END),0)::float8,
+		   COALESCE(SUM(CASE WHEN op.cash_moved THEN op.sent_cents ELSE 0 END),0)::float8 / 100.0,
+		   COALESCE(SUM(CASE WHEN le.kind='supplier_credit'
+		     AND le.payout_status NOT IN ('clawed_back','reversal_required')
+		     THEN COALESCE(mu.remainder_microusd,0) ELSE 0 END),0)::float8 / 1000000.0
+		 FROM ledger_entries le
+		 LEFT JOIN supplier_payout_operations op ON op.ledger_entry_id=le.id
+		 LEFT JOIN supplier_minor_unit_settlements mu ON mu.ledger_entry_id=le.id`,
 	).Scan(&out.Money.ChargedUSD, &out.Money.SupplierCreditUSD, &out.Money.PlatformTakeUSD,
 		&out.Money.RefundedUSD, &out.Money.ClawedBackUSD, &out.Money.FlowOwedUSD,
-		&out.Money.StripeFeesUSD, &out.Money.TransferredUSD); err != nil {
+		&out.Money.StripeFeesUSD, &out.Money.TransferredUSD, &out.Money.CarriedRemainderUSD); err != nil {
 		return out, err
 	}
 	out.Money.TakeNetUSD = out.Money.PlatformTakeUSD - out.Money.StripeFeesUSD
 
-	// Collection truth: what was actually pulled from buyers' cards vs the
-	// settled terminal work still uncollected (both over jobs.actual_usd, the
-	// real settled cost, not the estimate).
+	// Collection truth: exact canonical card cents received vs settled terminal
+	// work still uncollected. Never substitute quote/settlement revenue for cash.
 	if err := s.pool.QueryRow(ctx,
 		`SELECT
-		   COALESCE(SUM(CASE WHEN charge_status = 'charged' THEN actual_usd END),0)::float8,
-		   COALESCE(SUM(CASE WHEN status IN ('complete','failed','cancelled')
+		   COALESCE((SELECT SUM(received_cents) FROM buyer_cash_collections),0)::float8 / 100.0,
+		   COALESCE((SELECT SUM(CASE WHEN status IN ('complete','failed','cancelled')
 		                     AND COALESCE(actual_usd,0) > 0
-		                     AND charge_status <> 'charged' THEN actual_usd END),0)::float8
-		 FROM jobs`,
+		                     AND charge_status <> 'charged' THEN actual_usd END)
+		               FROM jobs),0)::float8`,
 	).Scan(&out.Money.CollectedUSD, &out.Money.UncollectedUSD); err != nil {
 		return out, err
 	}
@@ -154,9 +164,15 @@ func (s *Store) AdminSummaryData(ctx context.Context) (AdminSummary, error) {
 	if err := s.pool.QueryRow(ctx,
 		`SELECT
 		   COALESCE(SUM(CASE WHEN le.kind = 'platform_take' THEN le.amount_usd END),0)::float8,
-		   COALESCE(SUM(CASE WHEN le.kind = 'supplier_credit'
-		                     AND le.payout_status IN ('held','pending') THEN le.amount_usd END),0)::float8
+		   COALESCE(SUM(CASE
+		     WHEN le.kind <> 'supplier_credit' THEN 0
+		     WHEN le.payout_status='released' AND COALESCE(op.cash_moved,false)
+		       THEN COALESCE(mu.remainder_microusd,0)::numeric / 1000000
+		     WHEN le.payout_status IN ('clawed_back','reversal_required') THEN 0
+		     ELSE le.amount_usd END),0)::float8
 		 FROM ledger_entries le
+		 LEFT JOIN supplier_payout_operations op ON op.ledger_entry_id=le.id
+		 LEFT JOIN supplier_minor_unit_settlements mu ON mu.ledger_entry_id=le.id
 		 JOIN tasks t ON t.id = le.task_id
 		 JOIN jobs  j ON j.id = t.job_id
 		 WHERE j.charge_status = 'charged'`,

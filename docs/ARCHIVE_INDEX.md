@@ -1,3 +1,5 @@
+<!-- CLAIM-SCOPE: archival-index-non-authoritative -->
+<!-- This index points to historical records; it is not current product evidence. -->
 # Archive Index
 
 This index tracks markdown files removed from the working tree during documentation

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -11,6 +12,24 @@ import (
 // Plane C quote — pure unit tests for the JSONL preflight scanner and the
 // risk/confidence assessor (no DB). The endpoint + persistence are covered by the
 // integration suite (TestQuoteEndpointPersistsAssumptions).
+
+func TestServiceTierSemanticsDoNotPromiseCapacity(t *testing.T) {
+	for _, tier := range []string{"batch", "priority", "trusted"} {
+		got := serviceTierSemantics(tier)
+		if got == "" {
+			t.Fatalf("%s semantics are empty", tier)
+		}
+		for _, forbidden := range []string{"guaranteed fan-out", "reserved devices"} {
+			if strings.Contains(strings.ToLower(got), forbidden) {
+				t.Fatalf("%s semantics imply unimplemented capacity: %q", tier, got)
+			}
+		}
+	}
+	priority := serviceTierSemantics("priority")
+	if !strings.Contains(priority, "three") || !strings.Contains(priority, "no device reservation") {
+		t.Fatalf("priority semantics do not disclose bounded preference: %q", priority)
+	}
+}
 
 func TestScanJSONLCountsAndFields(t *testing.T) {
 	input := []byte(`{"id":"a","text":"hello world"}

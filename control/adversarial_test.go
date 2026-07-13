@@ -84,6 +84,11 @@ func newAdversarialWorker(t *testing.T, ctx context.Context, label string) adver
 		  WHERE id=$1`, workerID); err != nil {
 		t.Fatalf("configure adversarial worker: %v", err)
 	}
+	// CreateWorkerToken intentionally creates an inert placeholder. Mirror real
+	// registration by granting only the current generated production cell this
+	// harness exercises; legacy arrays are never dispatch authority.
+	replaceWorkerAuthorizationsForTest(t, ctx, workerID,
+		[2]string{"embed", "all-minilm-l6-v2"})
 	return adversarialIdentity{supplierID: supplierID, workerID: workerID, token: tok}
 }
 
@@ -225,7 +230,7 @@ func submitAdversarialEmbedJob(t *testing.T, recordID string, redFrac, honeyFrac
 	}
 	body := map[string]any{
 		"job_type":     map[string]any{"type": "embed"},
-		"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"model":        map[string]any{"kind": "hf", "ref": "all-minilm-l6-v2"},
 		"params":       map[string]any{"split_size": 1000},
 		"constraints":  map[string]any{"min_memory_gb": 2},
 		"verification": verification,
@@ -330,7 +335,11 @@ func driveAdversarialJob(t *testing.T, ctx context.Context, adversary, honest, h
 		// probe and confound the scenario's quarantine count.
 		result := embedResultJSON(1)
 		if isHoneypotDispatch(t, ctx, disp) {
-			result = []byte(demoHoneypotEmbedKnownAnswer)
+			// The honeypot seed stores only the semantic vectors used for
+			// comparison. A real agent uploads the full EmbedResult envelope,
+			// and strict pre-settlement validation intentionally rejects the
+			// legacy vectors-only shape as a payable task artifact.
+			result = demoHoneypotEmbedResultJSON(t)
 		}
 		commitAsWorker(t, ctx, token, disp, result)
 	}
@@ -507,7 +516,7 @@ func runHoneypotSkimScenario(t *testing.T, ctx context.Context, honest, honest2 
 			fmt.Sprintf("%s-honeyskim-%d", runLabel, jobN),
 			func(disp TaskDispatch) []byte {
 				if isHoneypotDispatch(t, ctx, disp) {
-					return []byte(demoHoneypotEmbedKnownAnswer)
+					return demoHoneypotEmbedResultJSON(t)
 				}
 				return garbageBytes()
 			})

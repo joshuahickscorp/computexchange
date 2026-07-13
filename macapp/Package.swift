@@ -21,9 +21,14 @@ let package = Package(
         .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.5.0"),
     ],
     targets: [
+        .target(
+            name: "EnrollmentCore",
+            path: "EnrollmentCore"
+        ),
         .executableTarget(
             name: "ComputeExchangeAgent",
             dependencies: [
+                "EnrollmentCore",
                 .product(name: "Sparkle", package: "Sparkle"),
             ],
             path: "ComputeExchangeAgent",
@@ -38,6 +43,11 @@ let package = Package(
                 "cx-agent.sb",
                 "sandbox-profile-test.sh",
             ]
+        ),
+        .testTarget(
+            name: "EnrollmentCoreTests",
+            dependencies: ["EnrollmentCore"],
+            path: "Tests/EnrollmentCoreTests"
         )
     ]
 )

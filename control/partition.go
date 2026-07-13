@@ -115,7 +115,8 @@ func telemetryPartitionSpecs() []telemetryPartitionSpec {
 			 duration_ms BIGINT,
 			 worker_id   UUID,
 			 engine      TEXT,
-			 build_hash  TEXT`,
+			 build_hash  TEXT,
+			 task_id     UUID`,
 			secondaryIndexName: "task_durations_type_model_idx",
 			secondaryIndexBody: "(job_type, model_ref)",
 			autovacuum: `autovacuum_vacuum_scale_factor  = 0.05,
@@ -201,6 +202,15 @@ type pgxQuerier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
+// pgxPartitionDB is the transaction + query surface shared by a pool and one
+// acquired pool connection. Store.Migrate uses the acquired-connection form so
+// it can hold one session advisory lock across every per-table transaction;
+// ordinary rotation and direct migration tests continue to use the pool.
+type pgxPartitionDB interface {
+	pgxQuerier
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
 // isPartitioned reports whether `table` is already a partitioned parent (relkind 'p'),
 // so the migration is a no-op on a second run (idempotency).
 func isPartitioned(ctx context.Context, q pgxQuerier, table string) (bool, error) {
@@ -227,8 +237,12 @@ func isPartitioned(ctx context.Context, q pgxQuerier, table string) (bool, error
 // The whole conversion of each table runs in its own transaction: either the table is
 // fully partitioned with all rows copied, or it is left exactly as it was.
 func (s *Store) MigrateTelemetryPartitions(ctx context.Context) error {
+	return migrateTelemetryPartitions(ctx, s.pool)
+}
+
+func migrateTelemetryPartitions(ctx context.Context, db pgxPartitionDB) error {
 	for _, spec := range telemetryPartitionSpecs() {
-		if err := s.migrateOneTelemetryPartition(ctx, spec); err != nil {
+		if err := migrateOneTelemetryPartition(ctx, db, spec); err != nil {
 			return fmt.Errorf("partition-migrate %s: %w", spec.table, err)
 		}
 	}
@@ -236,7 +250,11 @@ func (s *Store) MigrateTelemetryPartitions(ctx context.Context) error {
 }
 
 func (s *Store) migrateOneTelemetryPartition(ctx context.Context, spec telemetryPartitionSpec) error {
-	already, err := isPartitioned(ctx, s.pool, spec.table)
+	return migrateOneTelemetryPartition(ctx, s.pool, spec)
+}
+
+func migrateOneTelemetryPartition(ctx context.Context, db pgxPartitionDB, spec telemetryPartitionSpec) error {
+	already, err := isPartitioned(ctx, db, spec.table)
 	if err != nil {
 		return err
 	}
@@ -246,7 +264,7 @@ func (s *Store) migrateOneTelemetryPartition(ctx context.Context, spec telemetry
 		return nil
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := db.Begin(ctx)
 	if err != nil {
 		return err
 	}

@@ -1,3 +1,4 @@
+<!-- CLAIM-SCOPE: internal-engineering-non-authoritative -->
 # cx-render-handoff · start here
 
 Photoreal render effort for three products (RTX 5090 FE rig · Mac Studio · DGX Spark). We are **right at

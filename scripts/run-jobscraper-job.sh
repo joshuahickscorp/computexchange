@@ -3,28 +3,28 @@
 # as a batch_classification job, against the stack prove-local left up (KEEP=1).
 # Measures wall-clock + throughput + estimated-vs-actual. Honest: no faked numbers.
 set -uo pipefail
-ROOT=/Users/scammermike/Downloads/computexchange
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || exit 1
 ART="$ROOT/.artifacts/prove-local"
 URL="http://localhost:18080"
 KEY="dev-api-key-0001"
 INPUT="$ROOT/.artifacts/jobscraper.jsonl"
 AGENT_LOG="$ROOT/.artifacts/agent-jobscraper.log"
-cd "$ROOT"
+cd "$ROOT" || exit 1
 
 [ -f "$INPUT" ] || { echo "missing $INPUT"; exit 1; }
 curl -fsS "$URL/v1/models" -H "Authorization: Bearer $KEY" >/dev/null 2>&1 || { echo "control not up at $URL (run prove-local KEEP=1 first)"; exit 1; }
 
 echo "== submit batch_classification over $(wc -l < "$INPUT") real postings =="
-SUBMIT=$(python3 - <<'PY'
+SUBMIT=$(INPUT_PATH="$INPUT" CONTROL_URL="$URL" API_KEY="$KEY" python3 - <<'PY'
 import json,urllib.request,os
-inp=open(os.path.expanduser('~/Downloads/computexchange/.artifacts/jobscraper.jsonl')).read()
+inp=open(os.environ["INPUT_PATH"]).read()
 body={"job_type":{"type":"batch_classification","labels":["engineering","finance","hybrid","ops","product","strategy","other"]},
  "model":{"kind":"gguf","ref":"llama-3.2-1b-instruct-q4"},"params":{},
  "constraints":{"min_memory_gb":0,"max_duration_secs":0},
  "verification":{"redundancy_frac":0,"honeypot_frac":0,"payout_hold_secs":0},
  "tier":"batch","input":inp}
-req=urllib.request.Request("http://localhost:18080/v1/jobs",data=json.dumps(body).encode(),
- method="POST",headers={"Authorization":"Bearer dev-api-key-0001","Content-Type":"application/json"})
+req=urllib.request.Request(os.environ["CONTROL_URL"]+"/v1/jobs",data=json.dumps(body).encode(),
+ method="POST",headers={"Authorization":"Bearer "+os.environ["API_KEY"],"Content-Type":"application/json"})
 try:
     print(urllib.request.urlopen(req,timeout=60).read().decode())
 except urllib.error.HTTPError as e:

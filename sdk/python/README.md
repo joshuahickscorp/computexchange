@@ -1,8 +1,17 @@
 # computeexchange — Python buyer SDK
 
-A thin, **dependency-free** client for the Computexchange buyer REST API. Stdlib
-`urllib` only — no `requests`, nothing to `pip install`. Drop the package on your
-path (or copy `computeexchange/__init__.py` into your project).
+A thin, **dependency-free** client for the Computexchange buyer REST API. The
+runtime uses only stdlib `urllib`; installing the package adds no third-party
+runtime dependencies.
+
+The package is not published on PyPI yet. Install it from a repository checkout:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install ./sdk/python
+python -c "from computeexchange import Client; print(Client.__module__)"
+```
 
 ```python
 from computeexchange import Client
@@ -27,14 +36,25 @@ print(out["data"][0]["embedding"][:3], out["model"])
 Every non-2xx response raises `APIError` carrying the HTTP status and the
 server's error body — failures are surfaced, never swallowed.
 
-**Try it without a server:**
+**Verify the package from a clean environment:**
 
 ```bash
-python3 -c "import sys; sys.path.insert(0,'.'); import computeexchange; print(computeexchange.__version__)"
-python3 example.py --smoke        # builds + prints the request, no network
+bash scripts/verify-python-sdk-package.sh
+python3 sdk/python/example.py --smoke  # builds + prints a request; no server
 ```
 
-Job types: `embed`, `batch_infer`, `audio_transcribe`, `batch_classification`,
+The verification script installs into a throwaway virtual environment, changes
+out of the checkout, imports the installed wheel, checks its metadata and public
+surface, and removes the environment on exit. It does not use `PYTHONPATH` or an
+editable install.
+
+Generic JSON job types: `embed`, `batch_infer`, `batch_classification`,
 `json_extraction`, `rerank`. Variant params (`labels=`, `schema=`, `top_k=`,
-`max_tokens=`, `temperature=`, `language=`, `timestamps=`) are passed as keyword
-args to `submit_job` and folded into the tagged `job_type` only when given.
+`max_tokens=`, `temperature=`) are passed as keyword args to `submit_job` and
+folded into the tagged `job_type` only when given.
+
+`audio_transcribe` now requires the strict multipart WAV endpoints
+`POST /v1/audio/jobs/quote` and `POST /v1/audio/jobs`; this SDK does not expose
+that development-only surface yet and fails locally instead of sending a generic
+JSON request the server will reject. See `docs/QUICKSTART.md` for the bounded curl
+workflow and its idempotency/retention limitations.

@@ -5,12 +5,15 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,7 +42,8 @@ type PipelineStage struct {
 	// fan-out the current text patterns use — embed AND classify both run on the
 	// text); "previous" chains it onto the prior stage's output (e.g. transcribe →
 	// summarize), submitted by advanceIntake when the predecessor completes.
-	From string `json:"from,omitempty"`
+	From           string          `json:"from,omitempty"`
+	LaunchContract *LaunchContract `json:"launch_contract,omitempty"`
 }
 
 // DetectedPipeline is the result of inspecting a source. Supported=false is honest:
@@ -300,6 +304,18 @@ func newGitHubApp() *GitHubApp {
 // the payout rail's selection). No credentials → an honest, disabled connector.
 var githubApp = newGitHubApp()
 
+const (
+	githubOAuthProvider         = "github"
+	githubOAuthInitiationCookie = "cx_github_oauth_init"
+	githubOAuthStateTTL         = 10 * time.Minute
+	githubOAuthResponseMaxBytes = 64 << 10
+	githubAPIResponseMaxBytes   = 2 << 20
+	// GitHub's recursive tree is the one deliberately larger response. The
+	// product already treats GitHub's truncated flag as incomplete evidence.
+	githubTreeResponseMaxBytes  = 16 << 20
+	githubErrorResponseMaxBytes = 64 << 10
+)
+
 func (g *GitHubApp) Configured() bool { return g.clientID != "" && g.clientSecret != "" }
 
 // AuthURL is the GitHub authorize URL to redirect the buyer to (repo read scope).
@@ -325,7 +341,10 @@ func (g *GitHubApp) Exchange(ctx context.Context, code string) (string, error) {
 		return "", err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, readErr := readBoundedRemoteBody(resp.Body, githubOAuthResponseMaxBytes)
+	if readErr != nil {
+		return "", fmt.Errorf("github token exchange response read: %w", readErr)
+	}
 	var out struct {
 		AccessToken string `json:"access_token"`
 		ErrorDesc   string `json:"error_description"`
@@ -357,7 +376,10 @@ func (g *GitHubApp) Tree(ctx context.Context, token, repoFullName, ref string) (
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		b, readErr := readBoundedRemoteBody(resp.Body, githubErrorResponseMaxBytes)
+		if readErr != nil {
+			return nil, false, fmt.Errorf("github tree (%d) response read: %w", resp.StatusCode, readErr)
+		}
 		return nil, false, fmt.Errorf("github tree (%d): %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 	var out struct {
@@ -368,7 +390,11 @@ func (g *GitHubApp) Tree(ctx context.Context, token, repoFullName, ref string) (
 		} `json:"tree"`
 		Truncated bool `json:"truncated"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	body, readErr := readBoundedRemoteBody(resp.Body, githubTreeResponseMaxBytes)
+	if readErr != nil {
+		return nil, false, fmt.Errorf("github tree response read: %w", readErr)
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
 		return nil, false, err
 	}
 	files := make([]RepoFile, 0, len(out.Tree))
@@ -382,27 +408,89 @@ func (g *GitHubApp) Tree(ctx context.Context, token, repoFullName, ref string) (
 
 // --- handlers ---
 
+// setGitHubOAuthInitiationCookie binds GitHub's public state parameter to the
+// browser that initiated the link. Lax is required for GitHub's top-level GET
+// redirect while still withholding the cookie from ordinary cross-site requests.
+func setGitHubOAuthInitiationCookie(w http.ResponseWriter, r *http.Request, value string, expiresAt time.Time) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     githubOAuthInitiationCookie,
+		Value:    value,
+		Path:     "/v1/connect/github/callback",
+		Expires:  expiresAt,
+		MaxAge:   int(githubOAuthStateTTL / time.Second),
+		HttpOnly: true,
+		Secure:   isSecure(r),
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func clearGitHubOAuthInitiationCookie(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     githubOAuthInitiationCookie,
+		Value:    "",
+		Path:     "/v1/connect/github/callback",
+		Expires:  time.Unix(1, 0),
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   isSecure(r),
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
 // handleGithubConnect starts OAuth: returns the GitHub authorize URL the app
 // redirects the buyer to (503 with an honest reason if no OAuth app is configured).
 func (s *Server) handleGithubConnect(w http.ResponseWriter, r *http.Request) {
 	auth := r.Context().Value(ctxBuyer).(*AuthResult)
-	// state carries the buyer back to the callback. PRODUCTION: this must be a
-	// signed/random nonce bound to the session to stop CSRF — noted, not faked.
-	u, err := githubApp.AuthURL(signState(auth.BuyerID))
+	if !githubApp.Configured() {
+		writeErr(w, http.StatusServiceUnavailable, errGitHubUnconfigured.Error())
+		return
+	}
+	state := newSecret("cx_oauth_state_")
+	initiation := newSecret("cx_oauth_init_")
+	if state == "" || initiation == "" {
+		writeErr(w, http.StatusInternalServerError, "could not create OAuth state")
+		return
+	}
+	expiresAt := time.Now().Add(githubOAuthStateTTL)
+	if err := s.store.CreateOAuthLinkState(r.Context(), auth.BuyerID, githubOAuthProvider, state, initiation, expiresAt); err != nil {
+		log.Printf("github OAuth state create: %v", err)
+		writeErr(w, http.StatusInternalServerError, "could not create OAuth state")
+		return
+	}
+	u, err := githubApp.AuthURL(state)
 	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
+	setGitHubOAuthInitiationCookie(w, r, initiation, expiresAt)
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, map[string]string{"authorize_url": u})
 }
 
 // handleGithubCallback completes OAuth: exchanges the code for a token and stores
 // the connection. Unauthed (GitHub redirects here with no bearer); the buyer is
-// recovered from state. Real only with a configured app; otherwise an honest 503.
+// recovered only by atomically consuming the server-side, browser-bound state.
+// Real only with a configured app; otherwise an honest 503.
 func (s *Server) handleGithubCallback(w http.ResponseWriter, r *http.Request) {
-	buyerID, ok := verifyState(r.URL.Query().Get("state"))
-	if !ok {
+	w.Header().Set("Cache-Control", "no-store")
+	cookie, cookieErr := r.Cookie(githubOAuthInitiationCookie)
+	clearGitHubOAuthInitiationCookie(w, r)
+	if cookieErr != nil || cookie.Value == "" {
 		writeErr(w, http.StatusBadRequest, "bad or missing OAuth state")
+		return
+	}
+	buyerID, err := s.store.ConsumeOAuthLinkState(r.Context(), githubOAuthProvider, r.URL.Query().Get("state"), cookie.Value)
+	if errors.Is(err, errOAuthLinkStateInvalid) {
+		writeErr(w, http.StatusBadRequest, "bad or missing OAuth state")
+		return
+	}
+	if err != nil {
+		log.Printf("github OAuth state consume: %v", err)
+		writeErr(w, http.StatusInternalServerError, "could not verify OAuth state")
+		return
+	}
+	if r.URL.Query().Get("code") == "" {
+		writeErr(w, http.StatusBadRequest, "missing GitHub authorization code")
 		return
 	}
 	token, err := githubApp.Exchange(r.Context(), r.URL.Query().Get("code"))
@@ -521,11 +609,18 @@ func (g *GitHubApp) ListRepos(ctx context.Context, token string) ([]RepoRef, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		b, _ := io.ReadAll(resp.Body)
+		b, readErr := readBoundedRemoteBody(resp.Body, githubErrorResponseMaxBytes)
+		if readErr != nil {
+			return nil, fmt.Errorf("github repos (%d) response read: %w", resp.StatusCode, readErr)
+		}
 		return nil, fmt.Errorf("github repos (%d): %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 	var out []RepoRef
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	body, readErr := readBoundedRemoteBody(resp.Body, githubAPIResponseMaxBytes)
+	if readErr != nil {
+		return nil, fmt.Errorf("github repos response read: %w", readErr)
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -613,6 +708,10 @@ func (s *Server) handleLaunchIntake(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid launch body")
 		return
 	}
+	if math.IsNaN(req.MaxUSD) || math.IsInf(req.MaxUSD, 0) || req.MaxUSD < 0 {
+		writeErr(w, http.StatusBadRequest, "max_usd must be a finite non-negative aggregate intake cap")
+		return
+	}
 	sourceID, ref, _, pipelineJSON, err := s.store.GetIntake(r.Context(), auth.BuyerID, req.IntakeID)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "intake not found")
@@ -661,58 +760,106 @@ func (s *Server) handleLaunchIntake(w http.ResponseWriter, r *http.Request) {
 	}
 	inputJSON, _ := json.Marshal(string(jsonl)) // a JSON string IS the inline JSONL
 	intakeID, _ := uuid.Parse(req.IntakeID)
-	// LaunchContract (items 1-2, 5): stamp the buyer's budget/verification/routing onto
-	// every launched stage so an intake-launched job carries the SAME guarantees as a
-	// direct /v1/jobs submission, instead of silently dropping the spend cap + routing.
-	contract := LaunchContract{
+	if req.QuoteID != "" && len(det.Stages) > 1 {
+		writeErr(w, http.StatusBadRequest, "one quote_id cannot bind multiple intake stages; omit quote_id or submit per-stage jobs")
+		return
+	}
+
+	// Price every stage, then divide one aggregate budget into disjoint stage caps.
+	// A downstream stage persists its own share with the detected pipeline, so a
+	// later completion worker cannot silently recreate it without the buyer's trust,
+	// routing, and budget contract.
+	schedule, err := LoadEconomicScheduleFromEnv()
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "economic schedule unavailable: "+err.Error())
+		return
+	}
+	baseContract := LaunchContract{
 		QuoteID:       req.QuoteID,
-		MaxUSD:        req.MaxUSD,
 		MinReputation: req.MinReputation,
 		PrivatePool:   req.PrivatePool,
 		Verification:  req.Verification,
 	}
-	if contract.MaxUSD <= 0 {
-		// Item 2: an auto-launched intake must carry a BUDGET, never run uncapped. With no
-		// buyer cap, GENERATE a composite quote for the detected stages (priced on the
-		// extracted input) and use its worst-case total as the spend cap (max_usd), which
-		// createJob then persists on every launched job. The launch is no longer a back
-		// door around the budget governor.
-		var stageQuotes []Quote
-		for _, stage := range det.Stages {
-			if stage.From == "previous" {
-				continue
-			}
-			stageQuotes = append(stageQuotes, s.buildQuote(r.Context(), auth.BuyerID, jobSubmit{
-				JobType: JobType{Type: stage.Op},
-				Model:   ModelRef{Kind: "gguf", Ref: stage.Model},
-				Tier:    "batch",
-				Input:   inputJSON,
-			}, jsonl))
+	stageQuotes := make([]Quote, len(det.Stages))
+	weights := make([]float64, len(det.Stages))
+	for i, stage := range det.Stages {
+		if err := validateAdvertisedRuntimeJobModel(stage.Op, stage.Model); err != nil {
+			writeErr(w, http.StatusBadRequest, "stage "+strconv.Itoa(i)+": "+err.Error())
+			return
 		}
-		contract.MaxUSD = composeQuotes(stageQuotes).TotalCost.MaxUSD
+		q := s.buildQuoteWithSchedule(r.Context(), auth.BuyerID, baseContract.applyTo(jobSubmit{
+			JobType: JobType{Type: stage.Op},
+			Model:   generatedRuntimeModelRef(stage.Op, stage.Model),
+			Tier:    "batch",
+			Input:   inputJSON,
+		}), jsonl, schedule)
+		if !q.Economics.Executable {
+			writeErr(w, http.StatusConflict, "stage "+strconv.Itoa(i)+" quote is not executable: "+q.Economics.BlockReason)
+			return
+		}
+		stageQuotes[i] = q
+		weights[i] = q.Cost.MaxUSD
+	}
+	requiredMaxUSD := composeQuotes(stageQuotes).TotalCost.MaxUSD
+	aggregateMaxUSD, err := resolveAggregateMaxUSD(req.MaxUSD, requiredMaxUSD)
+	if err != nil {
+		writeErr(w, http.StatusConflict, "intake budget unavailable: "+err.Error())
+		return
+	}
+	stageCaps, err := allocateAggregateMaxUSD(aggregateMaxUSD, weights)
+	if err != nil {
+		writeErr(w, http.StatusConflict, "intake budget unavailable: "+err.Error())
+		return
+	}
+	for i := range det.Stages {
+		contract := baseContract
+		contract.MaxUSD = stageCaps[i]
+		det.Stages[i].LaunchContract = &contract
+	}
+	plannedPipelineJSON, err := json.Marshal(det)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "could not persist intake launch contract")
+		return
+	}
+	reserved, err := s.store.ReserveIntakeLaunch(r.Context(), auth.BuyerID, intakeID, plannedPipelineJSON)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "reserving intake launch: "+err.Error())
+		return
+	}
+	if !reserved {
+		writeErr(w, http.StatusConflict, "intake is already launching or has been launched")
+		return
 	}
 	var launched []map[string]any
 	for i, stage := range det.Stages {
 		if stage.From == "previous" {
 			continue // chained: advanceIntake submits it when its predecessor completes
 		}
-		resp, herr := s.createJob(r.Context(), auth.BuyerID, contract.applyTo(jobSubmit{
+		resp, herr := s.createJob(r.Context(), auth.BuyerID, stage.LaunchContract.applyTo(jobSubmit{
 			JobType: JobType{Type: stage.Op},
-			Model:   ModelRef{Kind: "gguf", Ref: stage.Model},
+			Model:   generatedRuntimeModelRef(stage.Op, stage.Model),
 			Tier:    "batch",
 			Input:   inputJSON,
 		}))
 		if herr != nil {
+			_ = s.store.FailIntakeLaunch(r.Context(), auth.BuyerID, intakeID)
 			writeErr(w, herr.status, herr.msg)
 			return
 		}
-		_ = s.store.InsertIntakeJobLink(r.Context(), resp.JobID, intakeID, i)
+		if err := s.store.InsertIntakeJobLink(r.Context(), resp.JobID, intakeID, i); err != nil {
+			_ = s.store.FailIntakeLaunch(r.Context(), auth.BuyerID, intakeID)
+			writeErr(w, http.StatusInternalServerError, "linking intake stage: "+err.Error())
+			return
+		}
 		if i == 0 {
 			_ = s.store.UpdateIntakeJob(r.Context(), intakeID, resp.JobID)
 		}
 		launched = append(launched, map[string]any{"stage": stage.Op, "job_id": resp.JobID})
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"intake_id": req.IntakeID, "records": stats.Records, "extraction": stats, "jobs": launched})
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"intake_id": req.IntakeID, "records": stats.Records, "extraction": stats,
+		"jobs": launched, "max_usd": aggregateMaxUSD, "stage_max_usd": stageCaps,
+	})
 }
 
 // advanceIntake chains a multi-stage pipeline: when an intake-linked job completes,
@@ -738,6 +885,14 @@ func (s *Server) advanceIntake(ctx context.Context, jobID uuid.UUID) {
 	if next >= len(det.Stages) || det.Stages[next].From != "previous" {
 		return
 	}
+	unlock, err := s.store.LockWorkflowStage(ctx, intakeStageLockNamespace, intakeID, next)
+	if err != nil {
+		log.Printf("intake %s: locking stage %d: %v", intakeID, next, err)
+		return
+	}
+	defer unlock()
+	// Re-check after taking the cross-replica lock. Completion delivery can race;
+	// only one worker may create the chargeable downstream job.
 	if s.store.IntakeStageSubmitted(ctx, intakeID, next) {
 		return
 	}
@@ -745,8 +900,17 @@ func (s *Server) advanceIntake(ctx context.Context, jobID uuid.UUID) {
 	if err != nil || ref == "" {
 		return
 	}
-	out, err := s.storage.GetObject(ctx, ref)
+	outReader, err := s.storage.GetObjectReader(ctx, ref)
 	if err != nil {
+		return
+	}
+	out, err := readSynchronousInput(outReader)
+	if err != nil {
+		buyerID, berr := s.store.JobBuyerID(ctx, jobID)
+		if berr == nil {
+			_ = s.store.FailIntakeLaunch(ctx, buyerID, intakeID)
+		}
+		log.Printf("intake %s: reading bounded stage %d output %q: %v", intakeID, stageIdx, ref, err)
 		return
 	}
 	buyerID, _, err := s.store.JobChargeInfo(ctx, jobID)
@@ -754,18 +918,27 @@ func (s *Server) advanceIntake(ctx context.Context, jobID uuid.UUID) {
 		return
 	}
 	stage := det.Stages[next]
-	inputJSON, _ := json.Marshal(string(out))
-	resp, herr := s.createJob(ctx, buyerID, jobSubmit{
-		JobType: JobType{Type: stage.Op},
-		Model:   ModelRef{Kind: "gguf", Ref: stage.Model},
-		Tier:    "batch",
-		Input:   inputJSON,
-	})
-	if herr != nil {
-		log.Printf("intake %s: chaining to stage %d (%s) failed: %s", intakeID, next, stage.Op, herr.msg)
+	if stage.LaunchContract == nil || stage.LaunchContract.MaxUSD <= 0 {
+		log.Printf("intake %s: stage %d has no persisted positive launch contract; refusing uncapped chained execution", intakeID, next)
+		_ = s.store.FailIntakeLaunch(ctx, buyerID, intakeID)
 		return
 	}
-	_ = s.store.InsertIntakeJobLink(ctx, resp.JobID, intakeID, next)
+	inputJSON, _ := json.Marshal(string(out))
+	resp, herr := s.createJob(ctx, buyerID, stage.LaunchContract.applyTo(jobSubmit{
+		JobType: JobType{Type: stage.Op},
+		Model:   generatedRuntimeModelRef(stage.Op, stage.Model),
+		Tier:    "batch",
+		Input:   inputJSON,
+	}))
+	if herr != nil {
+		log.Printf("intake %s: chaining to stage %d (%s) failed: %s", intakeID, next, stage.Op, herr.msg)
+		_ = s.store.FailIntakeLaunch(ctx, buyerID, intakeID)
+		return
+	}
+	if err := s.store.InsertIntakeJobLink(ctx, resp.JobID, intakeID, next); err != nil {
+		log.Printf("intake %s: linking stage %d job %s: %v", intakeID, next, resp.JobID, err)
+		_ = s.store.FailIntakeLaunch(ctx, buyerID, intakeID)
+	}
 }
 
 // hasAnySuffix reports whether s (already lowercased) ends in any of suffixes.
@@ -872,7 +1045,10 @@ func (g *GitHubApp) ghJSON(ctx context.Context, method, token, path string, body
 		return nil, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
+	raw, readErr := readBoundedRemoteBody(resp.Body, githubAPIResponseMaxBytes)
+	if readErr != nil {
+		return nil, fmt.Errorf("github %s %s response read: %w", method, path, readErr)
+	}
 	if resp.StatusCode/100 != 2 {
 		return nil, fmt.Errorf("github %s %s (%d): %s", method, path, resp.StatusCode, strings.TrimSpace(string(raw)))
 	}

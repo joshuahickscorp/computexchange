@@ -1,3 +1,4 @@
+<!-- CLAIM-SCOPE: internal-engineering-non-authoritative -->
 # computexchange · public site rebuild · report (2026-07-02)
 
 What changed, why, and where the evidence is. The site is live at https://computexchange.net/.

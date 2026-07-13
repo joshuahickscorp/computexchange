@@ -1,6 +1,7 @@
 package main
 
-// openai.go — an OpenAI-compatible Batch API mapped onto the native job pipeline.
+// openai.go — an OpenAI-shaped Batch workflow subset mapped onto the native job
+// pipeline. It is not a full or drop-in OpenAI API implementation.
 //
 // Buyers can use OpenAI's batch shape end-to-end:
 //
@@ -17,31 +18,263 @@ package main
 // store, so the OpenAI surface stays local-first and self-contained.
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"os"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
 
 // maxUploadBytes caps an uploaded batch file (multipart or raw) to keep a single
-// request from buffering an unbounded body in memory.
+// request from consuming unbounded temporary storage.
 const maxUploadBytes = 64 << 20 // 64 MiB
+
+const (
+	maxOpenAIUploadScalarBytes   = 256
+	maxOpenAIUploadFilenameBytes = 255
+)
+
+var errOpenAIUploadTooLarge = errors.New("openai file upload exceeds the 64 MiB limit")
+
+type stagedOpenAIUpload struct {
+	file     *os.File
+	size     int64
+	filename string
+	purpose  string
+}
+
+func (u *stagedOpenAIUpload) close() {
+	if u == nil || u.file == nil {
+		return
+	}
+	name := u.file.Name()
+	_ = u.file.Close()
+	_ = os.Remove(name)
+	u.file = nil
+}
+
+// spoolBoundedOpenAIUpload stages one request body in a mode-0600 temporary
+// file. Keeping the body disk-backed avoids retaining or duplicating a 64 MiB
+// multipart file in the control process while still giving object-store retries
+// a seekable source. The sentinel byte prevents truncation at the advertised cap.
+func spoolBoundedOpenAIUpload(r io.Reader, maxBytes int64) (*os.File, int64, error) {
+	if maxBytes <= 0 {
+		return nil, 0, errors.New("openai file upload limit must be positive")
+	}
+	tmp, err := os.CreateTemp("", "cx-openai-upload-*")
+	if err != nil {
+		return nil, 0, err
+	}
+	keep := false
+	defer func() {
+		if !keep {
+			name := tmp.Name()
+			_ = tmp.Close()
+			_ = os.Remove(name)
+		}
+	}()
+
+	size, err := io.Copy(tmp, io.LimitReader(r, maxBytes+1))
+	if err != nil {
+		return nil, 0, err
+	}
+	if size > maxBytes {
+		return nil, 0, errOpenAIUploadTooLarge
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return nil, 0, err
+	}
+	keep = true
+	return tmp, size, nil
+}
+
+func openAIUploadHasContent(r io.ReadSeeker) (bool, error) {
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return false, err
+	}
+	reader := bufio.NewReader(r)
+	for {
+		rn, _, err := reader.ReadRune()
+		if errors.Is(err, io.EOF) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if !unicode.IsSpace(rn) {
+			return true, nil
+		}
+	}
+}
+
+func readOpenAIUploadScalar(r io.Reader, field string) (string, *httpError) {
+	b, err := io.ReadAll(io.LimitReader(r, maxOpenAIUploadScalarBytes+1))
+	if err != nil {
+		return "", &httpError{http.StatusBadRequest, "reading multipart field " + field + ": " + err.Error()}
+	}
+	if len(b) > maxOpenAIUploadScalarBytes {
+		return "", &httpError{http.StatusBadRequest, "multipart field " + field + " exceeds its 256-byte limit"}
+	}
+	value := strings.TrimSpace(string(b))
+	if value == "" {
+		return "", &httpError{http.StatusBadRequest, "multipart field " + field + " must be nonempty"}
+	}
+	if !utf8.ValidString(value) {
+		return "", &httpError{http.StatusBadRequest, "multipart field " + field + " must be valid UTF-8"}
+	}
+	return value, nil
+}
+
+func stageOpenAIFileUpload(r *http.Request) (*stagedOpenAIUpload, *httpError) {
+	out := &stagedOpenAIUpload{filename: "input.jsonl", purpose: "batch"}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			out.close()
+		}
+	}()
+
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
+		mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err != nil || mediaType != "multipart/form-data" || params["boundary"] == "" {
+			return nil, &httpError{http.StatusUnsupportedMediaType, "Content-Type must be multipart/form-data with a boundary"}
+		}
+		for key := range params {
+			if key != "boundary" {
+				return nil, &httpError{http.StatusBadRequest, "multipart Content-Type contains an unsupported parameter: " + key}
+			}
+		}
+
+		reader := multipart.NewReader(r.Body, params["boundary"])
+		seen := make(map[string]bool, 2)
+		for {
+			part, nextErr := reader.NextRawPart()
+			if errors.Is(nextErr, io.EOF) {
+				break
+			}
+			if nextErr != nil {
+				var maxErr *http.MaxBytesError
+				if errors.As(nextErr, &maxErr) {
+					return nil, &httpError{http.StatusRequestEntityTooLarge, "multipart upload exceeds its bounded body limit"}
+				}
+				return nil, &httpError{http.StatusBadRequest, "invalid multipart upload: " + nextErr.Error()}
+			}
+
+			name := part.FormName()
+			if name == "" {
+				_ = part.Close()
+				return nil, &httpError{http.StatusBadRequest, "every multipart part must have a form field name"}
+			}
+			if seen[name] {
+				_ = part.Close()
+				return nil, &httpError{http.StatusBadRequest, "duplicate multipart field: " + name}
+			}
+			seen[name] = true
+
+			switch name {
+			case "file":
+				filename := part.FileName()
+				if filename == "" {
+					_ = part.Close()
+					return nil, &httpError{http.StatusBadRequest, "file must be a multipart file upload"}
+				}
+				if len(filename) > maxOpenAIUploadFilenameBytes || !utf8.ValidString(filename) || strings.ContainsAny(filename, "\x00\r\n") {
+					_ = part.Close()
+					return nil, &httpError{http.StatusBadRequest, "multipart filename must be valid UTF-8 without control delimiters and at most 255 bytes"}
+				}
+				file, size, readErr := spoolBoundedOpenAIUpload(part, maxUploadBytes)
+				_ = part.Close()
+				if errors.Is(readErr, errOpenAIUploadTooLarge) {
+					return nil, &httpError{http.StatusRequestEntityTooLarge, errOpenAIUploadTooLarge.Error()}
+				}
+				if readErr != nil {
+					var maxErr *http.MaxBytesError
+					if errors.As(readErr, &maxErr) {
+						return nil, &httpError{http.StatusRequestEntityTooLarge, "multipart upload exceeds its bounded body limit"}
+					}
+					return nil, &httpError{http.StatusInternalServerError, "staging multipart file: " + readErr.Error()}
+				}
+				out.file, out.size, out.filename = file, size, filename
+
+			case "purpose":
+				if part.FileName() != "" {
+					_ = part.Close()
+					return nil, &httpError{http.StatusBadRequest, "purpose must be a scalar multipart field"}
+				}
+				value, readErr := readOpenAIUploadScalar(part, "purpose")
+				_ = part.Close()
+				if readErr != nil {
+					return nil, readErr
+				}
+				out.purpose = value
+
+			default:
+				_ = part.Close()
+				return nil, &httpError{http.StatusBadRequest, "unsupported multipart field: " + name}
+			}
+		}
+		if !seen["file"] {
+			return nil, &httpError{http.StatusBadRequest, "exactly one file upload is required"}
+		}
+	} else {
+		file, size, err := spoolBoundedOpenAIUpload(r.Body, maxUploadBytes)
+		if errors.Is(err, errOpenAIUploadTooLarge) {
+			return nil, &httpError{http.StatusRequestEntityTooLarge, errOpenAIUploadTooLarge.Error()}
+		}
+		if err != nil {
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				return nil, &httpError{http.StatusRequestEntityTooLarge, "file upload exceeds its bounded body limit"}
+			}
+			return nil, &httpError{http.StatusInternalServerError, "staging file upload: " + err.Error()}
+		}
+		out.file, out.size = file, size
+		if purpose := r.URL.Query().Get("purpose"); purpose != "" {
+			if len(purpose) > maxOpenAIUploadScalarBytes || !utf8.ValidString(purpose) {
+				return nil, &httpError{http.StatusBadRequest, "purpose must be valid UTF-8 and at most 256 bytes"}
+			}
+			out.purpose = purpose
+		}
+	}
+
+	hasContent, err := openAIUploadHasContent(out.file)
+	if err != nil {
+		return nil, &httpError{http.StatusInternalServerError, "checking staged file upload: " + err.Error()}
+	}
+	if !hasContent {
+		return nil, &httpError{http.StatusBadRequest, "uploaded file is empty"}
+	}
+	cleanup = false
+	return out, nil
+}
 
 // modelNotFoundError marks parseBatchInput's error as an unsupported-model
 // rejection (as opposed to a generic malformed-input error), so
 // handleCreateBatch can return the OpenAI-shaped 404 model_not_found instead of
 // a generic 400 invalid_request_error.
-type modelNotFoundError struct{ model string }
+type modelNotFoundError struct {
+	model           string
+	endpoint        string
+	nativeModelHint string
+}
 
 func (e *modelNotFoundError) Error() string {
-	return fmt.Sprintf("model %q is not supported by this endpoint", e.model)
+	return fmt.Sprintf(
+		"model %q is not supported for batch endpoint %s; use native model %q",
+		e.model, e.endpoint, e.nativeModelHint,
+	)
 }
 
 // writeOpenAIErr writes an error in the real OpenAI wire shape
@@ -53,7 +286,7 @@ func (e *modelNotFoundError) Error() string {
 // bare STRING as the exception's `.body` instead of an object — so the exact
 // pattern OpenAI's own docs recommend (`except BadRequestError as e:
 // e.body["message"]`) throws `TypeError: string indices must be integers` in a
-// real, reproduced crash. Every OpenAI-compatible route (files/batches) uses this
+// real, reproduced crash. Every route in the OpenAI-shaped subset (files/batches) uses this
 // instead of writeErr so `.body["message"]`, `.code`, and `.type` all work for an
 // unmodified real SDK client. Native (non-OpenAI) routes are untouched.
 func writeOpenAIErr(w http.ResponseWriter, status int, errType, code, msg string) {
@@ -128,55 +361,21 @@ func (s *Server) handleCreateFile(w http.ResponseWriter, r *http.Request) {
 	auth := r.Context().Value(ctxBuyer).(*AuthResult)
 	ctx := r.Context()
 
-	var content []byte
-	purpose := "batch"
-	filename := "input.jsonl"
-	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
-		if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
-			openaiErr(w, http.StatusBadRequest, "parsing multipart upload: "+err.Error())
-			return
-		}
-		f, hdr, err := r.FormFile("file")
-		if err != nil {
-			openaiErr(w, http.StatusBadRequest, "missing `file` part: "+err.Error())
-			return
-		}
-		defer f.Close()
-		content, err = io.ReadAll(io.LimitReader(f, maxUploadBytes))
-		if err != nil {
-			openaiErr(w, http.StatusBadRequest, "reading uploaded file: "+err.Error())
-			return
-		}
-		if p := r.FormValue("purpose"); p != "" {
-			purpose = p
-		}
-		if hdr != nil && hdr.Filename != "" {
-			filename = hdr.Filename
-		}
-	} else {
-		b, err := io.ReadAll(io.LimitReader(r.Body, maxUploadBytes))
-		if err != nil {
-			openaiErr(w, http.StatusBadRequest, "reading body: "+err.Error())
-			return
-		}
-		content = b
-		if p := r.URL.Query().Get("purpose"); p != "" {
-			purpose = p
-		}
-	}
-	if len(bytes.TrimSpace(content)) == 0 {
-		openaiErr(w, http.StatusBadRequest, "uploaded file is empty")
+	upload, uploadErr := stageOpenAIFileUpload(r)
+	if uploadErr != nil {
+		openaiErr(w, uploadErr.status, uploadErr.msg)
 		return
 	}
+	defer upload.close()
 
 	id := "file-" + uuid.NewString()
-	if err := s.storage.PutObject(ctx, fileContentKey(id), content, "application/x-ndjson"); err != nil {
+	if err := s.storage.PutObjectReadSeeker(ctx, fileContentKey(id), upload.file, upload.size, "application/x-ndjson"); err != nil {
 		openaiErr(w, http.StatusInternalServerError, "storing file: "+err.Error())
 		return
 	}
 	meta := fileMeta{
-		ID: id, BuyerID: auth.BuyerID.String(), Purpose: purpose,
-		Filename: filename, Bytes: int64(len(content)), CreatedAt: time.Now().Unix(),
+		ID: id, BuyerID: auth.BuyerID.String(), Purpose: upload.purpose,
+		Filename: upload.filename, Bytes: upload.size, CreatedAt: time.Now().Unix(),
 	}
 	if err := s.putMeta(ctx, fileMetaKey(id), meta); err != nil {
 		openaiErr(w, http.StatusInternalServerError, "storing file meta: "+err.Error())
@@ -285,7 +484,7 @@ func (s *Server) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 	// policy still applies when the metadata key is absent.
 	resp, herr := s.createJob(ctx, auth.BuyerID, jobSubmit{
 		JobType:      JobType{Type: jobType},
-		Model:        ModelRef{Kind: "gguf", Ref: model},
+		Model:        generatedRuntimeModelRef(jobType, model),
 		Verification: verification,
 		Tier:         "batch",
 		Input:        inputField,
@@ -364,18 +563,25 @@ func (s *Server) handleGetFileContent(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id := r.PathValue("id")
 
-	if _, herr := s.getFileMeta(ctx, id, auth.BuyerID); herr != nil {
+	meta, herr := s.getFileMeta(ctx, id, auth.BuyerID)
+	if herr != nil {
 		openaiErr(w, herr.status, herr.msg)
 		return
 	}
-	body, err := s.storage.GetObject(ctx, fileContentKey(id))
+	body, err := s.storage.GetObjectReader(ctx, fileContentKey(id))
 	if err != nil {
 		openaiErr(w, http.StatusNotFound, "file content not found")
 		return
 	}
+	defer body.Close()
 	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", meta.Bytes))
 	w.WriteHeader(http.StatusOK)
-	w.Write(body)
+	if _, err := io.Copy(w, body); err != nil {
+		// Headers are already committed, so the only safe behavior is to stop the
+		// response. The client observes a truncated Content-Length and retries.
+		return
+	}
 }
 
 // --- translation + helpers ----------------------------------------------------
@@ -392,33 +598,19 @@ func endpointJobType(endpoint string) (string, bool) {
 	}
 }
 
-// embedModelAliases / chatModelAliases are the ONLY OpenAI model names this drop-in
-// honestly claims to serve, each mapped to the real native catalogue model that
-// actually runs the request. This is a hardening fix (Buyer Developer Experience
-// 7→8): the previous version silently remapped ANY model name — including typos
-// and models we have never claimed to support — onto a fallback with no signal to
-// the caller. A real `openai` SDK integration that requests a model we do not
-// serve now gets a real, typed 404 (see mapModel) instead of a silent substitution
-// that could return unexpectedly-shaped or unexpectedly-cheap/expensive results.
-// Blank (model omitted) is treated as "any embedding/chat model is fine" and
-// resolves to the canonical model — that is an honest default, not a substitution,
-// since the caller expressed no preference.
+// embedModelAliases / chatModelAliases contain only an omitted-model default and
+// an exact native identity. Branded cross-model rewrites are deliberately absent:
+// accepting `gpt-*` while running Llama, or `text-embedding-*` while running
+// MiniLM, would imply semantic compatibility that the runtime matrix cannot prove.
+// A non-native name gets a typed 404 with the exact native model id to use.
 var embedModelAliases = map[string]string{
-	"":                       "all-minilm-l6-v2",
-	"all-minilm-l6-v2":       "all-minilm-l6-v2",
-	"text-embedding-3-small": "all-minilm-l6-v2",
-	"text-embedding-3-large": "all-minilm-l6-v2",
-	"text-embedding-ada-002": "all-minilm-l6-v2",
+	"":                 "all-minilm-l6-v2",
+	"all-minilm-l6-v2": "all-minilm-l6-v2",
 }
 
 var chatModelAliases = map[string]string{
 	"":                         "llama-3.2-1b-instruct-q4",
 	"llama-3.2-1b-instruct-q4": "llama-3.2-1b-instruct-q4",
-	"gpt-4o-mini":              "llama-3.2-1b-instruct-q4",
-	"gpt-4o":                   "llama-3.2-1b-instruct-q4",
-	"gpt-4":                    "llama-3.2-1b-instruct-q4",
-	"gpt-4-turbo":              "llama-3.2-1b-instruct-q4",
-	"gpt-3.5-turbo":            "llama-3.2-1b-instruct-q4",
 }
 
 // mapModel resolves the OpenAI model name (or a native id) to our catalogue id for
@@ -427,13 +619,17 @@ var chatModelAliases = map[string]string{
 func mapModel(jobType, openaiModel string) (string, error) {
 	m := strings.ToLower(strings.TrimSpace(openaiModel))
 	aliases := chatModelAliases
+	endpoint := "/v1/chat/completions"
 	if jobType == "embed" {
 		aliases = embedModelAliases
+		endpoint = "/v1/embeddings"
 	}
 	if native, ok := aliases[m]; ok {
 		return native, nil
 	}
-	return "", &modelNotFoundError{model: openaiModel}
+	return "", &modelNotFoundError{
+		model: openaiModel, endpoint: endpoint, nativeModelHint: aliases[""],
+	}
 }
 
 // batchInputLine is one OpenAI batch request line.

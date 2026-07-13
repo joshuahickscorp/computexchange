@@ -49,7 +49,8 @@ func jobChargeRow(t *testing.T, jobID uuid.UUID) (chargeStatus string, batchID *
 // TestChargeBatchFormationAndFreeze proves the batching core: sub-threshold
 // deferred jobs group per buyer into ONE batch whose amount is FROZEN at
 // formation, each job is stamped into the batch exactly once, a second sweep
-// forms no duplicate, and with no Stripe key the sweep is an honest no-op.
+// forms no duplicate or blind retry, and with no Stripe key the sweep is an
+// honest no-op.
 func TestChargeBatchFormationAndFreeze(t *testing.T) {
 	reset(t)
 	ctx := context.Background()
@@ -63,9 +64,10 @@ func TestChargeBatchFormationAndFreeze(t *testing.T) {
 	// not Stripe).
 	if _, err := itPool.Exec(ctx,
 		`INSERT INTO billing_customers (buyer_id, stripe_customer_id, default_payment_method)
-		 VALUES ($1,'cus_test_batch','pm_test_batch')
+		 VALUES ($1::uuid,'cus_test_batch_' || $1::uuid::text,'pm_test_batch_' || $1::uuid::text)
 		 ON CONFLICT (buyer_id) DO UPDATE
-		   SET stripe_customer_id='cus_test_batch', default_payment_method='pm_test_batch'`,
+		   SET stripe_customer_id=EXCLUDED.stripe_customer_id,
+		       default_payment_method=EXCLUDED.default_payment_method`,
 		buyer); err != nil {
 		t.Fatalf("seed billing customer: %v", err)
 	}
@@ -89,8 +91,9 @@ func TestChargeBatchFormationAndFreeze(t *testing.T) {
 	}
 
 	// (2) With a (fake) key the batch FORMS: frozen sum, both jobs stamped. The
-	// actual PaymentIntent attempt fails honestly against the fake key, so the
-	// batch stays 'attempting' — formation and freezing are what is under test.
+	// durable request boundary is armed before the fake Stripe request. Because
+	// the transport failure cannot prove whether Stripe moved cash, the batch and
+	// jobs remain outcome_unknown for explicit reconciliation, never blind retry.
 	t.Setenv("STRIPE_SECRET_KEY", "sk_test_fake_formation_only")
 	if err := wk.collectCharges(ctx); err != nil {
 		t.Fatalf("collectCharges (fake key): %v", err)
@@ -106,18 +109,18 @@ func TestChargeBatchFormationAndFreeze(t *testing.T) {
 	if amount < 5.999 || amount > 6.001 {
 		t.Fatalf("batch amount must FREEZE the deferred sum 6.00, got %v", amount)
 	}
-	if status != "attempting" {
-		t.Fatalf("a failed charge must leave the batch 'attempting' (retried, never faked charged), got %q", status)
+	if status != "outcome_unknown" {
+		t.Fatalf("an ambiguous charge must leave the batch outcome_unknown (reconciled, never blindly retried), got %q", status)
 	}
 	for _, j := range []uuid.UUID{j1, j2} {
 		st, bid, _, _ := jobChargeRow(t, j)
-		if st != "deferred" || bid == nil || *bid != batchID {
-			t.Fatalf("job %s must be stamped into batch %s while attempting: status=%q batch=%v", j, batchID, st, bid)
+		if st != "outcome_unknown" || bid == nil || *bid != batchID {
+			t.Fatalf("job %s must be stamped into outcome-unknown batch %s: status=%q batch=%v", j, batchID, st, bid)
 		}
 	}
 
-	// (3) A second sweep retries the SAME batch (same idempotency key, frozen
-	// amount) and forms NO duplicate.
+	// (3) A second sweep neither resends the outcome-unknown operation nor forms
+	// a duplicate. Resolution requires independently verified Stripe evidence.
 	if err := wk.collectCharges(ctx); err != nil {
 		t.Fatalf("collectCharges (second sweep): %v", err)
 	}
@@ -126,6 +129,15 @@ func TestChargeBatchFormationAndFreeze(t *testing.T) {
 	}
 	if batches != 1 {
 		t.Fatalf("second sweep must not form a duplicate batch: want 1, got %d", batches)
+	}
+	var operations int
+	if err := itPool.QueryRow(ctx,
+		`SELECT count(*) FROM buyer_charge_operations WHERE charge_batch_id=$1 AND status='outcome_unknown'`,
+		batchID).Scan(&operations); err != nil {
+		t.Fatal(err)
+	}
+	if operations != 1 {
+		t.Fatalf("second sweep must retain exactly one outcome-unknown operation, got %d", operations)
 	}
 	if _, bid, _, _ := jobChargeRow(t, j1); bid == nil || *bid != batchID {
 		t.Fatalf("job stamping must be once-only; batch id changed to %v", bid)
@@ -220,9 +232,12 @@ func TestAdminSummaryMoneyTruth(t *testing.T) {
 	ctx := context.Background()
 	t.Setenv("STRIPE_SECRET_KEY", "") // stripe section must be nil, honestly
 
-	// Collected job (charged, pi recorded) with two tasks.
-	charged := seedSettledJob(t, demoBuyerUUID, "complete", 10.00, "charged")
-	if _, err := itPool.Exec(ctx, `UPDATE jobs SET stripe_pi='pi_test_mt_1' WHERE id=$1`, charged); err != nil {
+	// Collected job with one canonical exact PaymentIntent fact and two tasks.
+	charged := seedSettledJob(t, demoBuyerUUID, "complete", 10.00, "not_attempted")
+	if err := itStore.SetJobCharged(ctx, charged, ChargeResult{
+		PaymentIntentID: "pi_test_mt_1", ChargeID: "ch_pi_test_mt_1", RequestedCents: 1000,
+		ReceivedCents: 1000, Currency: "usd",
+	}); err != nil {
 		t.Fatal(err)
 	}
 	// Uncollected terminal job (settled but deferred).
@@ -266,6 +281,28 @@ func TestAdminSummaryMoneyTruth(t *testing.T) {
 			t.Fatalf("seed ledger: %v", err)
 		}
 	}
+	// A released ledger label is not cash proof. Attach the exact immutable
+	// minor-unit split and cash-moved operation for the transferred $1.00 row.
+	var releasedEntry uuid.UUID
+	if err := itPool.QueryRow(ctx, `
+		SELECT id FROM ledger_entries
+		 WHERE kind='supplier_credit' AND task_id=$1 AND payout_status='released'`, tC2,
+	).Scan(&releasedEntry); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := itPool.Exec(ctx, `
+		INSERT INTO supplier_minor_unit_settlements
+		  (ledger_entry_id,policy,liability_microusd,cash_cents,remainder_microusd,currency)
+		VALUES ($1,'floor_cent_carry_v1',1000000,100,0,'usd')`, releasedEntry); err != nil {
+		t.Fatalf("seed exact released settlement: %v", err)
+	}
+	if _, err := itPool.Exec(ctx, `
+		INSERT INTO supplier_payout_operations
+		  (ledger_entry_id,supplier_id,requested_cents,sent_cents,currency,status,cash_moved,transfer_ref)
+		VALUES ($1,$2,100,100,'usd','released',true,'tr_test_mt_1')`,
+		releasedEntry, demoSupplierUUID); err != nil {
+		t.Fatalf("seed exact released cash fact: %v", err)
+	}
 
 	code, out := req(t, "GET", "/admin/summary", nil, adminKey())
 	if code != http.StatusOK {
@@ -281,7 +318,7 @@ func TestAdminSummaryMoneyTruth(t *testing.T) {
 		}
 	}
 
-	near(sum.Money.CollectedUSD, 10.00, "money.collected_usd (charged job's actual)")
+	near(sum.Money.CollectedUSD, 10.00, "money.collected_usd (canonical received cents)")
 	near(sum.Money.UncollectedUSD, 3.00, "money.uncollected_usd (settled terminal, not charged)")
 	near(sum.Money.StripeFeesUSD, 0.59, "money.stripe_fees_usd (the real fee, positive-normalized)")
 	near(sum.Money.PlatformTakeUSD, 0.39, "money.platform_take_usd (0.30 + 0.09)")

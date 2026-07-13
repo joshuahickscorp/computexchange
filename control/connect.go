@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 
 	"github.com/google/uuid"
 )
@@ -42,13 +44,10 @@ func ensureConnectAccount(ctx context.Context, store *Store, supplierID uuid.UUI
 
 // onboardingLink creates a Stripe-hosted onboarding URL for the account.
 func onboardingLink(ctx context.Context, acct string) (string, error) {
-	ret := os.Getenv("CX_CONNECT_RETURN_URL")
-	if ret == "" {
-		ret = "https://compute.exchange/earn?connected=1"
-	}
-	refresh := os.Getenv("CX_CONNECT_REFRESH_URL")
-	if refresh == "" {
-		refresh = ret
+	ret, refresh := strings.TrimSpace(os.Getenv("CX_CONNECT_RETURN_URL")),
+		strings.TrimSpace(os.Getenv("CX_CONNECT_REFRESH_URL"))
+	if err := validateConnectURLPair(ret, refresh, os.Getenv("SITE_HOST")); err != nil {
+		return "", err
 	}
 	out, err := stripeForm(ctx, "account_links", url.Values{
 		"account":     {acct},
@@ -64,6 +63,41 @@ func onboardingLink(ctx context.Context, acct string) (string, error) {
 		return "", fmt.Errorf("stripe account_link: no url in response")
 	}
 	return link, nil
+}
+
+func validateConnectURLPair(returnURL, refreshURL, siteHost string) error {
+	siteHost = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(siteHost), "."))
+	if returnURL == "" || refreshURL == "" {
+		return errors.New("CX_CONNECT_RETURN_URL and CX_CONNECT_REFRESH_URL are required")
+	}
+	if siteHost == "" {
+		return errors.New("SITE_HOST is required to validate Stripe Connect return origins")
+	}
+	for name, raw := range map[string]string{
+		"CX_CONNECT_RETURN_URL": returnURL, "CX_CONNECT_REFRESH_URL": refreshURL,
+	} {
+		u, err := url.Parse(raw)
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Fragment != "" {
+			return fmt.Errorf("%s must be an absolute HTTPS URL without credentials or fragment", name)
+		}
+		host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+		if host != siteHost || (u.Port() != "" && u.Port() != "443") {
+			return fmt.Errorf("%s must use the SITE_HOST HTTPS origin", name)
+		}
+	}
+	return nil
+}
+
+func validateLiveConnectURLConfig(cxEnv, stripeSecret, returnURL, refreshURL, siteHost string) error {
+	liveStripe := strings.HasPrefix(stripeSecret, "sk_live_")
+	production := strings.EqualFold(cxEnv, "production") || strings.EqualFold(cxEnv, "prod")
+	if !production && !liveStripe {
+		return nil
+	}
+	if err := validateConnectURLPair(returnURL, refreshURL, siteHost); err != nil {
+		return fmt.Errorf("live Stripe Connect configuration invalid: %w; refusing to start", err)
+	}
+	return nil
 }
 
 // handleWorkerConnect ensures the supplier has a Connect account and returns an
@@ -89,7 +123,11 @@ func (s *Server) handleWorkerConnectStatus(w http.ResponseWriter, r *http.Reques
 	auth := r.Context().Value(ctxWorker).(*WorkerAuth)
 	acct, _ := s.store.SupplierStripeAcct(r.Context(), auth.SupplierID)
 	if stripeKey() == "" || acct == "" {
-		writeJSON(w, http.StatusOK, map[string]any{"configured": stripeKey() != "", "connected": false, "payouts_enabled": false})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"configured": stripeKey() != "", "connected": false, "payouts_enabled": false,
+			"credential_id": auth.CredentialID, "enrollment_device_bound": auth.EnrollmentDeviceBound,
+			"device_fingerprint": auth.DeviceFingerprint, "credential_version": auth.CredentialVersion,
+		})
 		return
 	}
 	out, err := stripeGet(r.Context(), "accounts/"+acct)
@@ -98,5 +136,9 @@ func (s *Server) handleWorkerConnectStatus(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	pe, _ := out["payouts_enabled"].(bool)
-	writeJSON(w, http.StatusOK, map[string]any{"configured": true, "connected": true, "payouts_enabled": pe})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"configured": true, "connected": true, "payouts_enabled": pe,
+		"credential_id": auth.CredentialID, "enrollment_device_bound": auth.EnrollmentDeviceBound,
+		"device_fingerprint": auth.DeviceFingerprint, "credential_version": auth.CredentialVersion,
+	})
 }

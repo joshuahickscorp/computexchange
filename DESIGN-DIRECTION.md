@@ -1,3 +1,4 @@
+<!-- CLAIM-SCOPE: internal-engineering-non-authoritative -->
 # computexchange · design direction · how to read this
 
 This is a design DIRECTION, research-backed and grounded in the actual codebase, not code.

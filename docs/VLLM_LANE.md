@@ -1,3 +1,4 @@
+<!-- CLAIM-SCOPE: internal-engineering-non-authoritative -->
 # vLLM CUDA serving lane
 
 > The plan-of-record for wiring vLLM as the `nvidia_*` serving lane, behind the

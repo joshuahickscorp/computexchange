@@ -11,7 +11,7 @@
 //
 //	cx submit   --model <id> --type <jobtype> [--input <file|->] [--labels a,b,c]
 //	            [--max-tokens N] [--temperature F] [--top-k N] [--schema <file>]
-//	            [--language L] [--timestamps] [--batch-size N]
+//	            [--batch-size N]
 //	            [--tier batch|priority|trusted] [--redundancy F] [--honeypot F]
 //	            [--split N] [--min-memory G] [--hw-classes a,b] [--webhook URL]
 //	            [--wait] [--poll D] [--timeout D]
@@ -33,9 +33,18 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
+)
+
+// Release metadata is injected by scripts/build-cli-release.sh. Development
+// builds stay explicit instead of pretending to be a published version.
+var (
+	cliVersion   = "dev"
+	cliCommit    = "unknown"
+	cliBuildDate = "unknown"
 )
 
 // ---- wire shapes (mirror control/types.go + the jobSubmit in control/api.go) ----
@@ -55,7 +64,9 @@ type jobType struct {
 }
 
 type modelRef struct {
-	Kind string `json:"kind"`
+	// Kind is optional on buyer ingress. Runtime-matrix authority selects and
+	// freezes the canonical gguf/hf/mlx wire kind when a worker claims the task.
+	Kind string `json:"kind,omitempty"`
 	Ref  string `json:"ref"`
 }
 
@@ -170,6 +181,8 @@ func main() {
 		cmdCancel(args)
 	case "private-pool":
 		cmdPrivatePool(args)
+	case "version":
+		cmdVersion(args)
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -177,10 +190,40 @@ func main() {
 	}
 }
 
+type cliVersionInfo struct {
+	Version   string `json:"version"`
+	Commit    string `json:"commit"`
+	BuildDate string `json:"build_date"`
+	GoVersion string `json:"go_version"`
+	Platform  string `json:"platform"`
+}
+
+func cmdVersion(args []string) {
+	fs := flag.NewFlagSet("version", flag.ExitOnError)
+	asJSON := fs.Bool("json", false, "print machine-readable release identity")
+	fs.Parse(args)
+	if fs.NArg() != 0 {
+		fatalf("version accepts no positional arguments")
+	}
+	info := cliVersionInfo{
+		Version: cliVersion, Commit: cliCommit, BuildDate: cliBuildDate,
+		GoVersion: runtime.Version(), Platform: runtime.GOOS + "/" + runtime.GOARCH,
+	}
+	if *asJSON {
+		out, err := json.Marshal(info)
+		if err != nil {
+			fatalf("encoding version: %v", err)
+		}
+		fmt.Println(string(out))
+		return
+	}
+	fmt.Printf("cx %s (%s, %s, %s, %s)\n", info.Version, info.Commit, info.BuildDate, info.GoVersion, info.Platform)
+}
+
 func cmdSubmit(args []string) {
 	fs := flag.NewFlagSet("submit", flag.ExitOnError)
 	model := fs.String("model", "", "model id, e.g. all-minilm-l6-v2 (required)")
-	typ := fs.String("type", "", "job type: embed|batch_infer|audio_transcribe|batch_classification|json_extraction|rerank (required)")
+	typ := fs.String("type", "", "generic JSON job type: embed|batch_infer|batch_classification|json_extraction|rerank (required)")
 	input := fs.String("input", "-", "JSONL input file, or - for stdin")
 	tier := fs.String("tier", "batch", "service tier: batch|priority|trusted")
 	labels := fs.String("labels", "", "comma-separated labels (batch_classification)")
@@ -188,8 +231,8 @@ func cmdSubmit(args []string) {
 	maxTokens := fs.Uint("max-tokens", 0, "max tokens (batch_infer)")
 	temperature := fs.Float64("temperature", 0, "sampling temperature (batch_infer)")
 	topK := fs.Uint("top-k", 0, "cut ranking to top-K (rerank)")
-	language := fs.String("language", "", "language hint (audio_transcribe)")
-	timestamps := fs.Bool("timestamps", false, "emit segment timestamps (audio_transcribe)")
+	language := fs.String("language", "", "reserved for the dedicated audio WAV surface (not supported by cx yet)")
+	timestamps := fs.Bool("timestamps", false, "reserved for the dedicated audio WAV surface (not supported by cx yet)")
 	batchSize := fs.Uint("batch-size", 0, "embedding batch size (embed)")
 	redundancy := fs.Float64("redundancy", 0, "redundancy fraction 0.0-1.0")
 	honeypot := fs.Float64("honeypot", 0, "honeypot fraction 0.0-1.0")
@@ -210,6 +253,9 @@ func cmdSubmit(args []string) {
 
 	if *model == "" || *typ == "" {
 		fatalf("--model and --type are required")
+	}
+	if *typ == "audio_transcribe" || *language != "" || *timestamps {
+		fatalf("audio transcription requires POST /v1/audio/jobs/quote and POST /v1/audio/jobs; cx does not expose that development-only multipart surface yet (see docs/QUICKSTART.md)")
 	}
 
 	jt := jobType{Type: *typ}
@@ -261,7 +307,7 @@ func cmdSubmit(args []string) {
 
 	sub := jobSubmit{
 		JobType: jt,
-		Model:   modelRef{Kind: "gguf", Ref: *model},
+		Model:   modelRef{Ref: *model},
 		Params:  params,
 		Constraints: jobConstraints{
 			MinMemoryGB:   float32(*minMemory),
@@ -555,11 +601,12 @@ func cmdExplainScheduler(args []string) {
 // quoteResp mirrors the server's Quote (control/quote.go) — the fields cmdQuote
 // prints. Decoded leniently; unknown fields are ignored.
 type quoteResp struct {
-	QuoteID string `json:"quote_id"`
-	JobType string `json:"job_type"`
-	Model   string `json:"model"`
-	Tier    string `json:"tier"`
-	Input   struct {
+	QuoteID       string `json:"quote_id"`
+	JobType       string `json:"job_type"`
+	Model         string `json:"model"`
+	Tier          string `json:"tier"`
+	TierSemantics string `json:"tier_semantics"`
+	Input         struct {
 		Records          int   `json:"records"`
 		Bytes            int   `json:"bytes"`
 		EstimatedTokens  int64 `json:"estimated_tokens"`
@@ -598,7 +645,7 @@ type quoteResp struct {
 func cmdQuote(args []string) {
 	fs := flag.NewFlagSet("quote", flag.ExitOnError)
 	model := fs.String("model", "", "model id, e.g. all-minilm-l6-v2 (required)")
-	typ := fs.String("type", "", "job type: embed|batch_infer|audio_transcribe|batch_classification|json_extraction|rerank (required)")
+	typ := fs.String("type", "", "generic JSON job type: embed|batch_infer|batch_classification|json_extraction|rerank (required)")
 	input := fs.String("input", "-", "JSONL input file, or - for stdin")
 	tier := fs.String("tier", "batch", "service tier: batch|priority|trusted")
 	split := fs.Int("split", 0, "lines per task (0 = server adaptive default)")
@@ -610,6 +657,9 @@ func cmdQuote(args []string) {
 	if *model == "" || *typ == "" {
 		fatalf("--model and --type are required")
 	}
+	if *typ == "audio_transcribe" {
+		fatalf("audio transcription quotes require POST /v1/audio/jobs/quote; cx does not expose that development-only multipart surface yet (see docs/QUICKSTART.md)")
+	}
 	data := readInput(*input)
 	if len(bytes.TrimSpace(data)) == 0 {
 		fatalf("input is empty (pass --input <file> or pipe JSONL on stdin)")
@@ -620,7 +670,7 @@ func cmdQuote(args []string) {
 	}
 	sub := jobSubmit{
 		JobType:      jobType{Type: *typ},
-		Model:        modelRef{Kind: "gguf", Ref: *model},
+		Model:        modelRef{Ref: *model},
 		Params:       params,
 		Constraints:  jobConstraints{MinMemoryGB: float32(*minMemory)},
 		Verification: verificationPolicy{RedundancyFrac: float32(*redundancy)},
@@ -651,6 +701,9 @@ func printQuote(q quoteResp, model, typ, tier, inputPath string) {
 		p("  ⚠ Input  : %d malformed record(s); first at line %d", q.Input.MalformedRecords, q.Input.FirstBadLine)
 	}
 	p("  Plan     : %d tasks, split_size=%d, %s tier", q.Execution.EstimatedTasks, q.Execution.RecommendedSplitSize, q.Tier)
+	if q.TierSemantics != "" {
+		p("  Service  : %s", q.TierSemantics)
+	}
 	p("  Supply   : %d eligible now", q.Execution.EligibleWorkersNow)
 	p("  Cost     : $%.4f-$%.4f expected $%.4f", q.Cost.MinUSD, q.Cost.MaxUSD, q.Cost.ExpectedUSD)
 	p("  ETA      : p50 %s, p90 %s", humanSecs(q.Time.P50Secs), humanSecs(q.Time.P90Secs))
@@ -796,12 +849,13 @@ Usage:
   cx estimate --model <id> --units N [--tier t]
   cx explain-scheduler --worker <id>   (admin key)
   cx private-pool add|list|remove <supplier_id>
+  cx version [--json]
 
 Env:
   CX_API_URL   control plane base URL (default http://localhost:8080)
   CX_API_KEY   buyer api key (sent as Authorization: Bearer)
 
-Job types: embed, batch_infer, audio_transcribe, batch_classification,
+Generic JSON job types: embed, batch_infer, batch_classification,
            json_extraction, rerank
 Run "cx submit -h" for the full flag list.
 `)

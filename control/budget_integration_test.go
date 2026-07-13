@@ -9,8 +9,50 @@ import (
 	"github.com/google/uuid"
 )
 
+// createFrozenBudgetTestJob uses the same admission path as production so the
+// budget governor reads an immutable per-task buyer charge rather than the legacy
+// estimated_usd/task_count approximation. The cap is deliberately halfway between
+// one and two task charges: one claim fits, while charged/in-flight + candidate
+// does not.
+func createFrozenBudgetTestJob(t *testing.T, ctx context.Context) (uuid.UUID, [2]uuid.UUID, EconomicPlan, float64) {
+	t.Helper()
+	schedule, err := LoadEconomicScheduleFromEnv()
+	if err != nil {
+		t.Fatalf("LoadEconomicScheduleFromEnv: %v", err)
+	}
+	plan := BuildEconomicPlan(EconomicPlanInput{
+		BaseComputeUSD:   1,
+		InitialTaskCount: 2,
+		SupplierShare:    supplierShareRate,
+	}, schedule)
+	if !plan.Executable {
+		t.Fatalf("budget test economic plan blocked: %s", plan.BlockReason)
+	}
+	capUSD := roundEconomicUSD(plan.BuyerChargePerTaskUSD * 1.5)
+	jobID := uuid.New()
+	taskIDs := [2]uuid.UUID{uuid.New(), uuid.New()}
+	tasks := make([]taskRow, len(taskIDs))
+	for i, taskID := range taskIDs {
+		tasks[i] = taskRow{
+			ID: taskID, JobID: jobID,
+			InputRef: "jobs/budget/t/in.jsonl", ResultKey: "jobs/budget/t/out.json",
+			ChunkIndex: i,
+		}
+	}
+	job := &jobRow{
+		ID: jobID, BuyerID: demoBuyerUUID, JobType: "embed", ModelRef: "all-minilm-l6-v2",
+		InputRef: "jobs/budget/in.jsonl", OutputRef: "jobs/budget/out.jsonl",
+		Tier: "batch", VerificationPolicy: []byte(`{}`), TaskCount: len(tasks), MinMemoryGB: 2,
+		EstimatedUSD: plan.InitialBuyerChargeUSD, MaxUSD: capUSD, EconomicPlan: plan,
+	}
+	if err := itStore.CreateJobWithTasks(ctx, job, tasks); err != nil {
+		t.Fatalf("CreateJobWithTasks: %v", err)
+	}
+	return jobID, taskIDs, plan, capUSD
+}
+
 // Budget Governor (Plane C §12 / Plane D §14 D8): a job with a tiny max_usd whose
-// next task's PROJECTED charge (already-charged + one task's estimate) would breach
+// next task's PROJECTED charge (already-charged + one frozen task charge) would breach
 // the cap must NOT have that task dispatched. The cap PREVENTS dispatch — the task
 // stays queued; a subsequent SweepBudgetStops (Control Plane Hot Path 7->8: this
 // used to run inline inside ClaimTask's own transaction, now its own ticker — see
@@ -27,38 +69,25 @@ func TestBudgetCapPausesDispatch(t *testing.T) {
 	})
 	reset(t) // demo worker live + eligible (apple_silicon_max, supports embed)
 
-	jobID := uuid.New()
-	doneTask, queuedTask := uuid.New(), uuid.New()
-	// estimated_usd 1.00 over task_count 2 ⇒ per-task estimate 0.50. Cap 0.60.
-	// One task already charged 0.50 ⇒ projecting one MORE = 0.50 + 0.50 = 1.00 > 0.60,
-	// so the queued task must be refused. budget_state starts at the default 'tracking'.
+	jobID, taskIDs, plan, capUSD := createFrozenBudgetTestJob(t, ctx)
+	doneTask, queuedTask := taskIDs[0], taskIDs[1]
+	// One frozen task charge fits under capUSD; two do not. Mark task1 complete and
+	// charged so projecting task2 crosses that exact immutable-plan boundary.
 	if _, err := itPool.Exec(ctx,
-		`INSERT INTO jobs (id, buyer_id, status, job_type, model_ref, input_ref, tier,
-		                   task_count, tasks_done, min_memory_gb, estimated_usd, max_usd, budget_state)
-		 VALUES ($1,$2,'running','embed','all-minilm-l6-v2','jobs/x/in.jsonl','batch',
-		         2,1,2,1.00,0.60,'tracking')`,
-		jobID, demoBuyerUUID); err != nil {
+		`UPDATE jobs SET status='running', tasks_done=1 WHERE id=$1`, jobID); err != nil {
 		t.Fatal(err)
 	}
-	// task1: already complete + charged (the spent half of the budget).
 	if _, err := itPool.Exec(ctx,
-		`INSERT INTO tasks (id, job_id, status, worker_id, input_ref, result_key, chunk_index, completed_at)
-		 VALUES ($1,$2,'complete',$3,'jobs/x/t0/in.jsonl','jobs/x/t0/out.json',0, now())`,
-		doneTask, jobID, demoWorkerUUID); err != nil {
+		`UPDATE tasks SET status='complete', worker_id=$2, completed_at=now() WHERE id=$1`,
+		doneTask, demoWorkerUUID); err != nil {
 		t.Fatal(err)
 	}
-	// task2: queued + claimable on every axis EXCEPT the budget gate.
-	if _, err := itPool.Exec(ctx,
-		`INSERT INTO tasks (id, job_id, status, input_ref, result_key, chunk_index, visible_at)
-		 VALUES ($1,$2,'queued','jobs/x/t1/in.jsonl','jobs/x/t1/out.json',1, now())`,
-		queuedTask, jobID); err != nil {
-		t.Fatal(err)
-	}
-	// The real buyer_charge debit (-0.50) the projection reads (same ledger shape
+	// The real buyer_charge debit the projection reads (same ledger shape
 	// failJobAndSettleOnce settles from). This is what makes the next dispatch breach the cap.
 	if _, err := itPool.Exec(ctx,
 		`INSERT INTO ledger_entries (kind, buyer_id, task_id, amount_usd, payout_status)
-		 VALUES ('buyer_charge',$1,$2,-0.50,'released')`, demoBuyerUUID, doneTask); err != nil {
+		 VALUES ('buyer_charge',$1,$2,$3,'released')`,
+		demoBuyerUUID, doneTask, -plan.BuyerChargePerTaskUSD); err != nil {
 		t.Fatal(err)
 	}
 
@@ -124,7 +153,8 @@ func TestBudgetCapPausesDispatch(t *testing.T) {
 
 	// 6) Raising the cap above the projection lets the SAME worker claim the SAME task,
 	// proving the budget gate (not another filter) was what held it back.
-	if _, err := itPool.Exec(ctx, `UPDATE jobs SET max_usd=10.00 WHERE id=$1`, jobID); err != nil {
+	if _, err := itPool.Exec(ctx, `UPDATE jobs SET max_usd=$2 WHERE id=$1`,
+		jobID, roundEconomicUSD(capUSD+2*plan.BuyerChargePerTaskUSD)); err != nil {
 		t.Fatal(err)
 	}
 	c2, err := itStore.ClaimTask(ctx, wauth)
@@ -148,25 +178,7 @@ func TestBudgetCapCountsInflightTasks(t *testing.T) {
 	})
 	reset(t)
 
-	jobID := uuid.New()
-	t1, t2 := uuid.New(), uuid.New()
-	// per-task estimate = 1.00/2 = 0.50; cap 0.60. NO prior charge: one running task
-	// (0.50) + the candidate (0.50) = 1.00 > 0.60 ⇒ the 2nd must be refused.
-	if _, err := itPool.Exec(ctx,
-		`INSERT INTO jobs (id, buyer_id, status, job_type, model_ref, input_ref, tier,
-		                   task_count, tasks_done, min_memory_gb, estimated_usd, max_usd, budget_state)
-		 VALUES ($1,$2,'running','embed','all-minilm-l6-v2','jobs/x/in.jsonl','batch',2,0,2,1.00,0.60,'tracking')`,
-		jobID, demoBuyerUUID); err != nil {
-		t.Fatal(err)
-	}
-	for _, tid := range []uuid.UUID{t1, t2} {
-		if _, err := itPool.Exec(ctx,
-			`INSERT INTO tasks (id, job_id, status, input_ref, result_key, chunk_index, visible_at)
-			 VALUES ($1,$2,'queued','jobs/x/t/in.jsonl','jobs/x/t/out.json',0, now())`,
-			tid, jobID); err != nil {
-			t.Fatal(err)
-		}
-	}
+	createFrozenBudgetTestJob(t, ctx)
 	wauth := WorkerAuth{WorkerID: demoWorkerUUID, SupplierID: demoSupplierUUID}
 
 	// First claim succeeds (nothing charged/running yet, 1 candidate within cap).
@@ -178,7 +190,7 @@ func TestBudgetCapCountsInflightTasks(t *testing.T) {
 		t.Fatal("first task should be claimable under the cap")
 	}
 	// It is now 'running' (claimed, uncommitted). The SECOND claim must be refused:
-	// the in-flight task's estimate + the candidate's estimate breaches the cap.
+	// the in-flight task's frozen charge + the candidate's frozen charge breaches the cap.
 	c2, err := itStore.ClaimTask(ctx, wauth)
 	if err != nil {
 		t.Fatalf("ClaimTask 2: %v", err)

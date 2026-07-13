@@ -7,6 +7,7 @@
 //!   * losslessness (every emitted stream equals the target greedy stream),
 //!   * draft ACCEPTANCE rate, and
 //!   * TARGET-CALL REDUCTION (the speedup CEILING).
+//!
 //! It does NOT claim a wall-clock speedup — `speedup_x` is labeled MODELED.
 //!
 //! With `--features candle --gguf <path> --prompt <text>`: swaps the mock target
@@ -81,17 +82,29 @@ fn run_stream_mock(name: &str, stream: &[u32], k: usize, order: usize) -> String
     let mut draft = NgramDraft::new(order, 64);
     let out = run_spec_decode(&unit, &mut draft, &mut target, k, "token-spec-poc");
     let mut receipt = out.receipt;
-    receipt.meta.notes = format!(
-        "stream={name}; order={order}; {}",
-        receipt.meta.notes
-    );
+    receipt.meta.notes = format!("stream={name}; order={order}; {}", receipt.meta.notes);
     serde_json::to_string(&receipt).unwrap()
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let k = arg_val(&args, "--k").and_then(|v| v.parse().ok()).unwrap_or(16usize);
-    let order = arg_val(&args, "--order").and_then(|v| v.parse().ok()).unwrap_or(3usize);
+    let k = arg_val(&args, "--k")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(16usize);
+    let order = arg_val(&args, "--order")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3usize);
+    if k == 0 || k > token_spec_poc::MAX_DRAFT_WINDOW {
+        eprintln!("--k must be in [1, {}]", token_spec_poc::MAX_DRAFT_WINDOW);
+        std::process::exit(2);
+    }
+    if order == 0 || order > token_spec_poc::MAX_NGRAM_ORDER {
+        eprintln!(
+            "--order must be in [1, {}]",
+            token_spec_poc::MAX_NGRAM_ORDER
+        );
+        std::process::exit(2);
+    }
 
     #[cfg(feature = "candle")]
     {

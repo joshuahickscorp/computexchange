@@ -1,3 +1,4 @@
+<!-- CLAIM-SCOPE: internal-engineering-non-authoritative -->
 # REVISION-SITE · why it is slow, and how to make the effects refined
 
 Written for a revision pass, not as a closure. The choreography was built and

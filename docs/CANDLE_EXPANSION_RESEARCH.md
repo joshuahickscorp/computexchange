@@ -1,3 +1,4 @@
+<!-- CLAIM-SCOPE: internal-engineering-non-authoritative -->
 # Candle / Inference-Engine Expansion Research
 
 > **Implementation pass 1 — DONE (branch feat/perf-wave, uncommitted; agent build green, cargo test 89/0/13-ignored).**

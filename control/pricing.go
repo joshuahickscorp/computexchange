@@ -147,48 +147,86 @@ func RepriceCatalogueFromSupplierEconomics(supplierShare float64) []RepriceResul
 	return out
 }
 
-// --- Project Detection & Quotation 6.5->7: close the cost-drift loop ------------
+// --- Quote-to-settlement visibility (not execution-cost telemetry) -------------
 //
-// docs/internal/CREED_AND_PATH_TO_TEN.md: "All the needed data already lands in
-// Postgres (quotes.cost_expected_usd, jobs.actual_usd, the invoice's quoted_usd);
-// build the missing GET /admin/quotes drift rollup per (job_type, model), and use
-// it to auto-adjust catalogue prices instead of leaving them static."
-//
-// This is the COST twin of the existing GET /admin/drift (store.go DriftRollup),
-// which is ETA-only (ObservedP90DurationMs vs the quoted eta_secs) and never once
-// touches money. That rollup already exists and is explicitly out of scope here —
-// this is the missing half named directly by the rung.
+// jobs.actual_usd sounds like observed execution cost, but its source is the
+// buyer-charge ledger. Each completed task is charged jobs.estimated_usd/task_count
+// (scheduleTaskPayout in api.go), and SetJobActualUSD then sums those quote-derived
+// buyer_charge entries. It is therefore useful settlement/charge-realization data,
+// but it is circular evidence for catalogue pricing: changing the catalogue changes
+// the estimate, which changes actual_usd, which must not be presented as independent
+// proof that the catalogue price was economically correct.
 
-// CostDriftRow is one per-(job_type, model_ref) quoted-vs-actual COST rollup for
-// GET /admin/quotes. Only jobs that (a) were bound to a quote (Plane D D7) and (b)
-// reached a terminal, money-settled state (complete or failed — a failed job still
-// partial-settles actual_usd for whatever it delivered, see the partial-settle
-// discipline elsewhere in this codebase) are counted: a still-running job's
-// actual_usd is not yet a real number to compare against.
-type CostDriftRow struct {
-	JobType        string  `json:"job_type"`
-	ModelRef       string  `json:"model_ref"`
-	Samples        int     `json:"samples"`          // quote-bound, terminal jobs behind this rollup
-	AvgQuotedUSD   float64 `json:"avg_quoted_usd"`   // mean quotes.cost_expected_usd
-	AvgActualUSD   float64 `json:"avg_actual_usd"`   // mean jobs.actual_usd (the real settled cost)
-	DriftRatio     float64 `json:"drift_ratio"`      // avg_actual / avg_quoted; 1.0 = perfectly priced, >1 = underpriced quote, <1 = overpriced quote
-	DriftPct       float64 `json:"drift_pct"`        // (drift_ratio - 1) * 100, signed — the buyer-facing "we underquoted by X%" number
-	UsingForTuning bool    `json:"using_for_tuning"` // true once samples >= the trust floor (same floor as the ETA drift rollup)
+// actualUSDBasisQuoteDerivedSettlement is emitted verbatim on every admin row so
+// consumers cannot mistake AvgActualUSD for measured execution cost.
+const actualUSDBasisQuoteDerivedSettlement = "quote_derived_per_task_buyer_charge_settlement"
+
+// PriceTuningBlockReason is a stable, machine-readable reason an admin surface can
+// use without string-matching an error message.
+type PriceTuningBlockReason string
+
+const priceTuningBlockedNoIndependentTelemetry PriceTuningBlockReason = "independent_execution_cost_telemetry_unavailable"
+
+const requiredPriceTuningTelemetry = "independent per-task execution cost from measured runtime, energy, hardware amortization, supplier compensation, and platform/rail costs"
+
+// PriceTuningUnavailableError is returned instead of silently treating settlement
+// arithmetic as observed economics. It is intentionally structured so the HTTP
+// layer can later map it to a stable non-500 response without parsing Error().
+type PriceTuningUnavailableError struct {
+	Reason            PriceTuningBlockReason `json:"reason"`
+	ActualUSDBasis    string                 `json:"actual_usd_basis"`
+	RequiredTelemetry string                 `json:"required_telemetry"`
 }
 
-// costDriftMinSamples is the minimum quote-bound, terminal-job sample count before
-// a (job_type, model) slice is trusted enough to auto-tune a catalogue price from
-// — deliberately the SAME floor store.go's ETA drift rollup already uses
-// (driftMinSamples), so both drift surfaces agree on what counts as "enough real
-// history," rather than inventing a second, uncoordinated threshold.
-const costDriftMinSamples = driftMinSamples
+func (e *PriceTuningUnavailableError) Error() string {
+	return fmt.Sprintf(
+		"price auto-tuning refused (%s): jobs.actual_usd basis=%q is settlement/charge data, not independent execution cost; required telemetry: %s",
+		e.Reason, e.ActualUSDBasis, e.RequiredTelemetry,
+	)
+}
 
-// CostDriftRollup returns the quoted-vs-actual COST rollup per (job_type,
-// model_ref): the real number GET /admin/quotes serves. Grouped over quote-bound
-// jobs (jobs.quote_id IS NOT NULL) that have reached a terminal state, joined back
-// to the quote's own cost_expected_usd (never a job's OWN estimated_usd, which can
-// differ from what a bound quote specifically promised if the job's shape drifted
-// between quote and submit — the quote is the promise, actual_usd is the reality).
+func newPriceTuningUnavailableError() *PriceTuningUnavailableError {
+	return &PriceTuningUnavailableError{
+		Reason:            priceTuningBlockedNoIndependentTelemetry,
+		ActualUSDBasis:    actualUSDBasisQuoteDerivedSettlement,
+		RequiredTelemetry: requiredPriceTuningTelemetry,
+	}
+}
+
+// CostDriftRow retains its historical name for API compatibility, but represents
+// quote-to-settlement charge realization, not execution-cost drift. Only
+// quote-bound terminal jobs are counted because actual_usd is not settled earlier.
+type CostDriftRow struct {
+	JobType           string                 `json:"job_type"`
+	ModelRef          string                 `json:"model_ref"`
+	Samples           int                    `json:"samples"`             // quote-bound, terminal jobs behind this rollup
+	AvgQuotedUSD      float64                `json:"avg_quoted_usd"`      // mean quotes.cost_expected_usd
+	AvgActualUSD      float64                `json:"avg_actual_usd"`      // mean quote-derived jobs.actual_usd settlement
+	DriftRatio        float64                `json:"drift_ratio"`         // settled charge / quoted charge; not a cost-overrun ratio
+	DriftPct          float64                `json:"drift_pct"`           // (drift_ratio - 1) * 100, signed charge-realization difference
+	ActualUSDBasis    string                 `json:"actual_usd_basis"`    // explicitly names the source semantics of AvgActualUSD
+	UsingForTuning    bool                   `json:"using_for_tuning"`    // always false until independent economic telemetry exists
+	TuningBlockReason PriceTuningBlockReason `json:"tuning_block_reason"` // machine-readable fail-closed reason
+}
+
+// finalizeCostDriftRow computes the display ratio and stamps the semantics and
+// fail-closed tuning decision. Kept pure so the economic boundary is unit-testable
+// without Postgres.
+func finalizeCostDriftRow(d CostDriftRow) CostDriftRow {
+	if d.AvgQuotedUSD > 0 {
+		d.DriftRatio = d.AvgActualUSD / d.AvgQuotedUSD
+		d.DriftPct = (d.DriftRatio - 1) * 100
+	}
+	d.ActualUSDBasis = actualUSDBasisQuoteDerivedSettlement
+	d.UsingForTuning = false
+	d.TuningBlockReason = priceTuningBlockedNoIndependentTelemetry
+	return d
+}
+
+// CostDriftRollup returns quote-to-settlement charge realization per (job_type,
+// model_ref) for GET /admin/quotes. It joins the quote promise to the settled buyer
+// charge, while every returned row explicitly says that the latter is quote-derived
+// and ineligible for economic auto-tuning.
 func (s *Store) CostDriftRollup(ctx context.Context) ([]CostDriftRow, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT j.job_type,
@@ -213,94 +251,22 @@ func (s *Store) CostDriftRollup(ctx context.Context) ([]CostDriftRow, error) {
 		if err := rows.Scan(&d.JobType, &d.ModelRef, &d.Samples, &d.AvgQuotedUSD, &d.AvgActualUSD); err != nil {
 			return nil, err
 		}
-		if d.AvgQuotedUSD > 0 {
-			d.DriftRatio = d.AvgActualUSD / d.AvgQuotedUSD
-			d.DriftPct = (d.DriftRatio - 1) * 100
-		}
-		d.UsingForTuning = d.Samples >= costDriftMinSamples
-		out = append(out, d)
+		out = append(out, finalizeCostDriftRow(d))
 	}
 	return out, rows.Err()
 }
 
-// autoTuneMaxAdjustment caps how much ONE auto-tune pass may move a price in
-// either direction (±15%). A real, non-zero drift should correct the catalogue —
-// but a single pass moving price_per_1k by, say, 5x on a thin or freshly-noisy
-// sample would be a bug pretending to be automation. Clamping means a large,
-// persistent drift takes several tuning passes to fully correct — a deliberate
-// damping choice, not a limitation nobody considered.
-const autoTuneMaxAdjustmentFrac = 0.15
-
-// clampAutoTuneAdjustment bounds a raw drift ratio to ±autoTuneMaxAdjustmentFrac
-// around 1.0 before it is applied to a price. Pure — no I/O — so the clamping
-// behavior itself is unit-tested without a DB.
-func clampAutoTuneAdjustment(ratio float64) float64 {
-	if ratio > 1+autoTuneMaxAdjustmentFrac {
-		return 1 + autoTuneMaxAdjustmentFrac
-	}
-	if ratio < 1-autoTuneMaxAdjustmentFrac {
-		return 1 - autoTuneMaxAdjustmentFrac
-	}
-	return ratio
-}
-
-// AutoTunePrices reads the real cost-drift rollup and nudges each (job_type,
-// model)'s catalogue price_per_1k toward the drift-corrected value: a model that
-// actually cost MORE than quoted (drift_ratio > 1) gets its price raised so the
-// NEXT quote prices closer to reality, and vice versa. Only rows with
-// UsingForTuning (enough real samples) and a model actually in the catalogue are
-// touched; the per-pass adjustment is clamped to ±autoTuneMaxAdjustmentFrac so one
-// noisy pass cannot swing a price wildly. Returns the rows it actually adjusted —
-// the proof artifact the rung asks for ("used at least once to correct a
-// catalogue price").
+// AutoTunePrices refuses before reading or writing the database. The only current
+// monetary rollup is circular settlement data, so no sample count or damping clamp
+// can make it valid execution-cost evidence. When independent telemetry is landed,
+// this function must be deliberately reimplemented against that source; until then
+// the typed error is the honest contract and models remain untouched.
 func (s *Store) AutoTunePrices(ctx context.Context) ([]PriceTuneResult, error) {
-	drift, err := s.CostDriftRollup(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("auto-tune: reading cost drift: %w", err)
-	}
-	var applied []PriceTuneResult
-	for _, d := range drift {
-		if !d.UsingForTuning || d.ModelRef == "" || d.DriftRatio <= 0 {
-			continue
-		}
-		m, gerr := s.GetModel(ctx, d.ModelRef)
-		if gerr != nil {
-			continue // model not in the catalogue (custom/unpriced job) — nothing to tune
-		}
-		oldPrice := modelPrice(*m)
-		if oldPrice <= 0 {
-			continue
-		}
-		adj := clampAutoTuneAdjustment(d.DriftRatio)
-		newPrice := roundUSD(oldPrice * adj)
-		if newPrice == oldPrice {
-			continue // clamped/rounded to a no-op — nothing to write
-		}
-		formula := fmt.Sprintf(
-			"price_per_1k auto-tuned from cost drift: old=%.8f * clamped_ratio=%.4f (raw avg_actual/avg_quoted=%.4f over %d terminal quote-bound jobs) = %.8f",
-			oldPrice, adj, d.DriftRatio, d.Samples, newPrice,
-		)
-		tag, uerr := s.pool.Exec(ctx,
-			`UPDATE models SET price_per_1k = $2, price_source = 'drift_auto_tuned', price_formula = $3 WHERE id = $1`,
-			d.ModelRef, newPrice, formula,
-		)
-		if uerr != nil {
-			return applied, fmt.Errorf("auto-tune: updating %s: %w", d.ModelRef, uerr)
-		}
-		if tag.RowsAffected() > 0 {
-			applied = append(applied, PriceTuneResult{
-				ModelID: d.ModelRef, JobType: d.JobType,
-				OldPricePer1K: oldPrice, NewPricePer1K: newPrice,
-				DriftRatio: d.DriftRatio, Samples: d.Samples, Formula: formula,
-			})
-		}
-	}
-	return applied, nil
+	return nil, newPriceTuningUnavailableError()
 }
 
-// PriceTuneResult is one catalogue price change AutoTunePrices actually applied —
-// the real, checkable proof that the drift rollup was used at least once to
-// correct a price, not just computed and left on a dashboard.
+// PriceTuneResult is retained for API compatibility and for the future independent
+// telemetry implementation. The current AutoTunePrices returns no such rows.
 type PriceTuneResult struct {
 	ModelID       string  `json:"model_id"`
 	JobType       string  `json:"job_type"`

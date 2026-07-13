@@ -31,13 +31,13 @@
 	# active health check fails and resumes when it recovers — that is the HA
 	# behaviour: one control instance can die and the edge keeps serving from the
 	# other. The Postgres SKIP-LOCKED queue makes both instances safe to dispatch
-	# from concurrently (see docs/RUNBOOKS.md §HA for the honest caveats).
+	# from concurrently; a PostgreSQL advisory lock elects one sweep owner (see
+	# docs/RUNBOOKS.md §HA for the single-host failure-domain boundary).
 	reverse_proxy control:8080 control-2:8080 {
 		lb_policy round_robin
-		# Active health probe of the unauthed /readyz: 503s if Postgres is unreachable
-		# OR a background ticker on the worker instance has wedged, so a degraded
-		# instance is pulled from rotation. API-only secondaries (CX_RUN_WORKERS=false)
-		# register no tickers, so /readyz there reflects DB reachability only.
+		# Active health probe of the unauthed /readyz: 503s if Postgres is
+		# unreachable, worker election stops progressing, or a ticker owned by this
+		# replica wedges. Followers prove election progress but own no sweep tickers.
 		health_uri /readyz
 		health_interval 10s
 		health_timeout 4s

@@ -294,18 +294,22 @@ const CATALOGUE_QUANT: &str = "q4_k_m";
 /// docs/DETERMINISM_CLASS.md). It hashes the byte-output-determining build inputs:
 ///   - `engine`        — the runtime tag (`candle` / `mlx` / `vllm` / `hawking`);
 ///   - `agent_version` — the cx-agent build (a kernel/codegen change ships with a
-///                       new agent build, so the version stands in for "shader/kernel
-///                       build" the way Hawking's shader_hash does);
+///     new agent build, so the version stands in for "shader/kernel build" the way
+///     Hawking's shader_hash does);
 ///   - device backend  — `metal` vs `cuda` vs `cpu` (the same engine emits DIFFERENT
-///                       FP bytes per backend, exactly the cross-Mac/CUDA split the
-///                       audit's determinism ledger calls out);
+///     FP bytes per backend, exactly the cross-Mac/CUDA split the audit's determinism
+///     ledger calls out);
 ///   - `CATALOGUE_QUANT` — the weight format the catalogue is loaded under;
-///   - inference-module content hash — a SHA-256 of the vendored
-///     `quantized_llama_batched.rs` source (`infer_content_id`), so an
-///     output-changing kernel/forward patch (a new rotary convention, a KV-layout
-///     change, an attention edit) moves the class even WITHOUT an `agent_version`
-///     bump. This closes the moat hole where a kernel patch shipped into the SAME
-///     class and could dock honest old-kernel peers (CANDLE_EXPANSION_RESEARCH L17).
+///   - inference content hash — a SHA-256 over the owned forward/scheduler sources,
+///     the vendored Candle Metal Q4_K host+shader sources, and the Cargo lock;
+///   - runtime tuning identity — the non-secret speculative/kernel environment
+///     knobs that select materially different execution paths.
+///
+/// Together these move an output-changing kernel/forward patch (or a runtime
+/// split-K/speculation selection) into a new class even WITHOUT an
+/// `agent_version` bump. This closes the moat hole where a kernel patch shipped
+/// into the SAME class and could dock honest old-kernel peers
+/// (CANDLE_EXPANSION_RESEARCH L17).
 ///
 /// The control plane pins BYTE-EXACT redundancy peers and honeypots to the same
 /// (hw_class, engine, build_hash). Two workers in the same hw_class + engine but on
@@ -316,19 +320,50 @@ const CATALOGUE_QUANT: &str = "q4_k_m";
 /// heterogeneous Apple-Silicon generations, so this boundary is the moat, not a
 /// nicety. The hash is the first 16 hex chars of a SHA-256 — short, stable, and
 /// collision-safe for a class tag (NOT a security primitive).
-/// SHA-256 (first 8 bytes, hex) of the vendored inference module's SOURCE — the
-/// "kernel/content identity". `include_str!` pins `quantized_llama_batched.rs` at
-/// COMPILE time, so ANY change to the forward pass, rotary convention, KV layout,
-/// attention, or quant constants changes this id, which moves the worker into a NEW
-/// (hw_class, engine, build_hash) class automatically — even when `agent_version` is
-/// not bumped. Over-sensitive by design (a comment-only edit also moves the class):
-/// the only cost is an unnecessary reseed, never a wrongful same-class byte-compare.
+/// SHA-256 (first 8 bytes, hex) of every owned/vendored source that can alter this
+/// inference lane's token bytes, plus its dependency lock. `include_str!` pins them
+/// at compile time. Over-sensitive by design (a comment-only edit also moves the
+/// class): the only cost is an unnecessary reseed, never a wrongful same-class
+/// byte comparison.
+const INFERENCE_CONTENT_SOURCES: &[(&str, &str)] = &[
+    (
+        "quantized_llama_batched.rs",
+        include_str!("quantized_llama_batched.rs"),
+    ),
+    (
+        "whisper_decoder_kv.rs",
+        include_str!("whisper_decoder_kv.rs"),
+    ),
+    ("runners.rs", include_str!("runners.rs")),
+    ("continuous_batch.rs", include_str!("continuous_batch.rs")),
+    (
+        "hawking_metal_kernel.rs",
+        include_str!("hawking_metal_kernel.rs"),
+    ),
+    (
+        "token-spec-poc/src/lib.rs",
+        include_str!("../../token-spec-poc/src/lib.rs"),
+    ),
+    (
+        "vendor/candle-metal-kernels/src/kernels/quantized.rs",
+        include_str!("../vendor/candle-metal-kernels/src/kernels/quantized.rs"),
+    ),
+    (
+        "vendor/candle-metal-kernels/src/metal_src/quantized.metal",
+        include_str!("../vendor/candle-metal-kernels/src/metal_src/quantized.metal"),
+    ),
+    ("Cargo.lock", include_str!("../Cargo.lock")),
+];
+
 pub fn infer_content_id() -> String {
     use sha2::{Digest, Sha256};
-    // Relative to this file's directory (agent/src/) -> agent/src/quantized_llama_batched.rs.
-    const SRC: &str = include_str!("quantized_llama_batched.rs");
     let mut h = Sha256::new();
-    h.update(SRC.as_bytes());
+    for (name, source) in INFERENCE_CONTENT_SOURCES {
+        h.update((name.len() as u64).to_le_bytes());
+        h.update(name.as_bytes());
+        h.update((source.len() as u64).to_le_bytes());
+        h.update(source.as_bytes());
+    }
     h.finalize()
         .iter()
         .take(8)
@@ -336,14 +371,57 @@ pub fn infer_content_id() -> String {
         .collect()
 }
 
+/// Non-secret runtime switches that select different native inference math or
+/// scheduling. Raw values are intentionally retained: an invalid/unusual setting
+/// is over-separated rather than accidentally sharing a class with the default.
+fn inference_runtime_tuning_identity(engine: &str) -> String {
+    if !matches!(engine, "candle" | "hawking") {
+        return "native-tuning=not-applicable".to_string();
+    }
+    let value = |name: &str, default: &str| {
+        std::env::var(name)
+            .ok()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| default.to_string())
+    };
+    let spec_mode = value("CX_SPEC_DECODE", "off");
+    let (spec_window, spec_order) = if matches!(spec_mode.trim(), "1" | "on" | "ngram") {
+        (
+            value("CX_SPEC_DECODE_WINDOW", "32"),
+            value("CX_SPEC_DECODE_NGRAM_ORDER", "3"),
+        )
+    } else {
+        ("inactive".to_string(), "inactive".to_string())
+    };
+    format!(
+        "spec={spec_mode};window={spec_window};order={spec_order};q4k_splitk={};q4k_skinny_m={};dequant_f16={};fast_math={};metal_compute_per_buffer={};metal_command_pool_size={}",
+        value("CX_Q4K_SPLITK", "0"),
+        value("CX_Q4K_SKINNY_M", "0"),
+        value("CANDLE_DEQUANTIZE_ALL_F16", "0"),
+        value("CANDLE_METAL_ENABLE_FAST_MATH", "default"),
+        value("CANDLE_METAL_COMPUTE_PER_BUFFER", "default"),
+        value("CANDLE_METAL_COMMAND_POOL_SIZE", "default"),
+    )
+}
+
 pub fn engine_build_hash(engine: &str, agent_version: &str) -> String {
-    engine_build_hash_inner(engine, agent_version, &infer_content_id())
+    engine_build_hash_inner(
+        engine,
+        agent_version,
+        &infer_content_id(),
+        &inference_runtime_tuning_identity(engine),
+    )
 }
 
 /// Pure core of `engine_build_hash`, taking the inference-module content id
 /// explicitly so a test can prove a content-id change moves the class WITHOUT
 /// mutating a source file. The public wrapper feeds it `infer_content_id()`.
-fn engine_build_hash_inner(engine: &str, agent_version: &str, infer_content_id: &str) -> String {
+fn engine_build_hash_inner(
+    engine: &str,
+    agent_version: &str,
+    infer_content_id: &str,
+    runtime_tuning_identity: &str,
+) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     // Length-prefix each field so distinct field splits never collide
@@ -354,6 +432,7 @@ fn engine_build_hash_inner(engine: &str, agent_version: &str, infer_content_id: 
         crate::models::device_label(),
         CATALOGUE_QUANT,
         infer_content_id,
+        runtime_tuning_identity,
     ] {
         h.update((field.len() as u32).to_le_bytes());
         h.update(field.as_bytes());
@@ -504,9 +583,10 @@ pub fn read_vram_snapshot() -> Option<MemorySnapshot> {
 /// (`candle` default, from `config.inference_backend.engine_tag()`); it is the
 /// second axis of the verification class so a future mlx/vllm/hawking worker is
 /// never byte-compared against a Candle one. The advertised
-/// `supported_models`/`supported_jobs` are the CANONICAL catalogue (contract #4),
-/// not whatever happened to benchmark — the control plane's hard model filter
-/// dispatches against these exact ids.
+/// `supported_models`/`supported_jobs` are compatibility roll-ups derived from
+/// the generated production cells for this exact engine/hardware pair, not from
+/// whatever happened to benchmark. The control plane persists the underlying
+/// exact cells and never treats the arrays as Cartesian authority.
 /// `pool` is the SAME `ModelPool` the agent reuses for real task dispatch
 /// afterward (Warm Model Pool 6->6.5, docs/internal/CREED_AND_PATH_TO_TEN.md):
 /// the benchmark load below is routed through it so it becomes the agent's one
@@ -588,32 +668,35 @@ pub async fn detect_and_benchmark(
             (memory_bw_gbps, benchmarks)
         }
     };
-    // Advertise the CANONICAL catalogue ids (contract #4), regardless of which
-    // benchmarks happened to load. These must match prove-local's submitted refs
-    // and the control-plane models table, or the hard model filter never
-    // dispatches work. `benchmarks` still carries only what we actually measured.
-    let supported_models: Vec<String> = [
-        "all-minilm-l6-v2",
-        "llama-3.2-1b-instruct-q4",
-        "whisper-tiny",
-        "whisper-base",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
-
-    // BYO-container general-compute (`custom`, ACCRETION.md §7-8) runs only on a
-    // container-capable GPU host. Advertise it only on an NVIDIA worker with a
-    // reachable Docker daemon, so the scheduler never routes an opaque container job
-    // to a worker that can't sandbox it; run() still errors honestly if the daemon
-    // dies between detection and dispatch. (matches! borrows hw_class — no move.)
-    let runs_custom = matches!(
-        hw_class,
-        HardwareClass::Nvidia24g
-            | HardwareClass::Nvidia48g
-            | HardwareClass::Nvidia80g
-            | HardwareClass::Nvidia180g
-    ) && container_sandbox_available();
+    // Production advertisement comes from the SAME generated exact-cell projection
+    // the control plane consumes. The arrays remain compatibility roll-ups on the
+    // wire, but they are no longer a separately maintained catalogue that can drift
+    // or accidentally light a hardware-pending runner. Benchmark rows are filtered
+    // to those exact tuples as well: measuring a soak/pending model is useful local
+    // research, never authority to register it as production supply.
+    let authorized = generated_authorized_capabilities(engine, hw_class);
+    let supported_jobs: Vec<String> = authorized
+        .iter()
+        .map(|cell| cell.job)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let supported_models: Vec<String> = authorized
+        .iter()
+        .filter_map(|cell| cell.model)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let benchmarks: Vec<BenchResult> = benchmarks
+        .into_iter()
+        .filter(|bench| {
+            authorized.iter().any(|cell| {
+                cell.job == bench.job_type && cell.model == Some(bench.model_id.as_str())
+            })
+        })
+        .collect();
 
     WorkerCapability {
         worker_id: Uuid::new_v4(),
@@ -633,32 +716,36 @@ pub async fn detect_and_benchmark(
         build_hash,
         memory_gb,
         memory_bw_gbps,
-        // Job types this agent will accept dispatch for. `can_run` in runners.rs
-        // is the real per-task guard; this is the advertised superset (every
-        // runner we registered, including the new workloads).
-        supported_jobs: {
-            let mut jobs: Vec<String> = [
-                "embed",
-                "batch_infer",
-                "audio_transcribe",
-                "batch_classification",
-                "json_extraction",
-                "rerank",
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-            if runs_custom {
-                jobs.push("custom".to_string());
-            }
-            jobs
-        },
+        supported_jobs,
         supported_models,
         benchmarks,
         agent_version: agent_version.to_string(),
         os_version: os_version(),
         min_payout_usd_hr,
     }
+}
+
+fn generated_authorized_capabilities(
+    engine: &str,
+    hw_class: HardwareClass,
+) -> Vec<&'static crate::runtime_matrix_generated::GeneratedRuntimeCapability> {
+    generated_authorized_capabilities_for(engine, hw_class, crate::models::device_label())
+}
+
+fn generated_authorized_capabilities_for(
+    engine: &str,
+    hw_class: HardwareClass,
+    device: &str,
+) -> Vec<&'static crate::runtime_matrix_generated::GeneratedRuntimeCapability> {
+    let hw_tag = hw_class.as_wire_str();
+    crate::runtime_matrix_generated::ADVERTISED_RUNTIME_CAPABILITIES
+        .iter()
+        .filter(|cell| {
+            cell.engine == engine
+                && cell.device == device
+                && cell.hardware_classes.contains(&hw_tag)
+        })
+        .collect()
 }
 
 /// Sample the active GPU's utilization (%) and temperature (°C) via nvidia-smi for the
@@ -776,20 +863,6 @@ pub fn read_thermal_pressure() -> Option<crate::config::ThermalPressure> {
     None
 }
 
-/// True when this host can run the BYO-container `custom` lane: a reachable Docker
-/// daemon. Checked once at capability build so the worker never advertises a lane it
-/// cannot execute (the NVIDIA Container Toolkit is assumed on a GPU supplier box and
-/// surfaces honestly at run() time if absent). `docker version --format {{.Server...}}`
-/// prints the SERVER version only when the daemon answers, so a missing binary or a
-/// dead daemon both yield false — never a fabricated capability.
-fn container_sandbox_available() -> bool {
-    std::process::Command::new("docker")
-        .args(["version", "--format", "{{.Server.Version}}"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -802,6 +875,38 @@ mod tests {
         assert_eq!(classify("Apple M1"), HardwareClass::AppleSiliconBase);
         assert_eq!(classify("Apple M4"), HardwareClass::AppleSiliconBase);
         assert_eq!(classify("Intel(R) Core(TM) i9-9980HK"), HardwareClass::Cpu);
+    }
+
+    #[test]
+    fn production_advertisement_is_generated_and_hardware_exact() {
+        let metal = generated_authorized_capabilities_for(
+            "candle",
+            HardwareClass::AppleSiliconPro,
+            "metal",
+        );
+        assert_eq!(metal.len(), 7);
+        assert!(metal.iter().all(|cell| cell.runtime == "candle_metal"));
+        assert!(metal
+            .iter()
+            .any(|cell| cell.id == "candle-metal-minilm-embed"));
+
+        // CUDA cells exist in the truth matrix but remain hardware_pending, so a
+        // CUDA worker gets zero production authority instead of advertising a
+        // runner merely because its code compiled locally.
+        assert!(
+            generated_authorized_capabilities_for("candle", HardwareClass::Nvidia80g, "cuda")
+                .is_empty()
+        );
+        assert!(
+            generated_authorized_capabilities_for("vllm", HardwareClass::Nvidia80g, "cuda")
+                .is_empty()
+        );
+        assert!(generated_authorized_capabilities_for(
+            "candle",
+            HardwareClass::AppleSiliconPro,
+            "cpu"
+        )
+        .is_empty());
     }
 
     #[test]
@@ -825,15 +930,28 @@ mod tests {
         // Each must resolve to its real HBM/GDDR spec — an order of magnitude
         // above any host-CPU streaming microbenchmark (~40-60 GB/s), which is the
         // whole point of the CUDA 6->6.5 fix.
-        assert_eq!(nvidia_vram_bandwidth_gbps("NVIDIA A100-SXM4-80GB"), Some(2039.0));
-        assert_eq!(nvidia_vram_bandwidth_gbps("NVIDIA A100-PCIE-40GB"), Some(1555.0));
-        assert_eq!(nvidia_vram_bandwidth_gbps("NVIDIA H100 80GB HBM3"), Some(3350.0));
+        assert_eq!(
+            nvidia_vram_bandwidth_gbps("NVIDIA A100-SXM4-80GB"),
+            Some(2039.0)
+        );
+        assert_eq!(
+            nvidia_vram_bandwidth_gbps("NVIDIA A100-PCIE-40GB"),
+            Some(1555.0)
+        );
+        assert_eq!(
+            nvidia_vram_bandwidth_gbps("NVIDIA H100 80GB HBM3"),
+            Some(3350.0)
+        );
         assert_eq!(nvidia_vram_bandwidth_gbps("NVIDIA L4"), Some(300.0));
         // Most-specific-substring wins: the 80GB SXM SKU must NOT fall through to
         // the generic "A100" 40GB family entry.
         assert!(nvidia_vram_bandwidth_gbps("NVIDIA A100-SXM4-80GB").unwrap() > 2000.0);
         // Every known datacenter card is >> any plausible host streaming number.
-        for name in ["NVIDIA A100-SXM4-80GB", "NVIDIA H100 PCIe", "Tesla V100-SXM2-16GB"] {
+        for name in [
+            "NVIDIA A100-SXM4-80GB",
+            "NVIDIA H100 PCIe",
+            "Tesla V100-SXM2-16GB",
+        ] {
             assert!(
                 nvidia_vram_bandwidth_gbps(name).unwrap() > 500.0,
                 "{name} must resolve to a real GPU bandwidth, not a host figure"
@@ -944,9 +1062,19 @@ mod tests {
         // inference-module source) MUST move the class even at the SAME engine +
         // agent_version — the moat hole the content id closes (CANDLE_EXPANSION L17).
         assert_ne!(
-            engine_build_hash_inner("candle", "0.1.0", "aaaaaaaaaaaaaaaa"),
-            engine_build_hash_inner("candle", "0.1.0", "bbbbbbbbbbbbbbbb"),
+            engine_build_hash_inner("candle", "0.1.0", "aaaaaaaaaaaaaaaa", "spec=off"),
+            engine_build_hash_inner("candle", "0.1.0", "bbbbbbbbbbbbbbbb", "spec=off"),
             "a content/kernel identity change must move the verification class"
+        );
+        assert_ne!(
+            engine_build_hash_inner("candle", "0.1.0", "aaaaaaaaaaaaaaaa", "spec=off"),
+            engine_build_hash_inner(
+                "candle",
+                "0.1.0",
+                "aaaaaaaaaaaaaaaa",
+                "spec=ngram;window=32;order=3;q4k_splitk=1"
+            ),
+            "runtime inference tuning must move the verification class"
         );
         // The real inference-module content id is deterministic and a 16-char hex tag.
         let cid = infer_content_id();
@@ -955,6 +1083,16 @@ mod tests {
         assert!(
             cid.chars().all(|c| c.is_ascii_hexdigit()),
             "content id must be hex"
+        );
+    }
+
+    #[test]
+    fn inference_content_identity_covers_whisper_decoder_math() {
+        assert!(
+            INFERENCE_CONTENT_SOURCES
+                .iter()
+                .any(|(name, _)| *name == "whisper_decoder_kv.rs"),
+            "byte-exact audio verification requires whisper_decoder_kv.rs in the worker build identity"
         );
     }
 

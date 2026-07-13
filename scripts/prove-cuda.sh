@@ -17,7 +17,7 @@
 # Usage:  bash scripts/prove-cuda.sh
 # Env:    CUDA_HOME (default /usr/local/cuda), SM_ARCH (auto-detected from the GPU).
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 
 pass=0 fail=0
 ok()   { echo "  ✓ $1"; pass=$((pass + 1)); }
@@ -43,7 +43,12 @@ if ! command -v cargo >/dev/null 2>&1; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal >/dev/null 2>&1
   export PATH="$HOME/.cargo/bin:$PATH"
 fi
-command -v cargo >/dev/null 2>&1 && ok "cargo: $(cargo --version)" || { bad "cargo unavailable"; exit 1; }
+if command -v cargo >/dev/null 2>&1; then
+  ok "cargo: $(cargo --version)"
+else
+  bad "cargo unavailable"
+  exit 1
+fi
 
 # GPU compute capability -> nvcc -arch (8.0 A100, 8.6 A10/3090, 8.9 4090/L40, 9.0 H100/H200).
 cc="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d '. ')"
@@ -111,4 +116,9 @@ fi
 
 hr "result"
 echo "  passed: $pass   failed: $fail"
-[ "$fail" -eq 0 ] && { echo "  CUDA lane PROVEN ✅"; exit 0; } || { echo "  CUDA lane has failures ✗"; exit 1; }
+if [ "$fail" -eq 0 ]; then
+  echo "  CUDA lane PROVEN ✅"
+  exit 0
+fi
+echo "  CUDA lane has failures ✗"
+exit 1

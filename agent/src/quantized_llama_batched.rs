@@ -148,6 +148,21 @@ impl KvCacheSlot {
         self.cap = cap.clamp(1, MAX_SEQ_LEN);
     }
 
+    /// Transactionally discard speculative KV entries at positions `len..cur_len`.
+    /// The backing allocation and bytes are retained; every reader is bounded by
+    /// `cur_len`, and the next append overwrites the discarded tail. Growing through
+    /// this API is forbidden because unwritten/stale rows must never become live KV.
+    fn truncate(&mut self, len: usize) -> Result<()> {
+        if len > self.cur_len {
+            candle_core::bail!(
+                "kv truncate cannot grow live length from {} to {len}",
+                self.cur_len
+            );
+        }
+        self.cur_len = len;
+        Ok(())
+    }
+
     /// Append `src` (shape `(b_sz, n_kv_head, seq_len, head_dim)`) at the
     /// current offset and return the live region `(b_sz, n_kv_head, cur_len,
     /// head_dim)` as a contiguous tensor — byte-identical to what
@@ -1227,6 +1242,49 @@ impl ModelWeights {
         Ok(())
     }
 
+    /// Return the coherent live KV length shared by every K/V slot and layer.
+    /// A mismatch is an internal corruption signal and fails closed.
+    pub fn kv_cache_len(&self) -> Result<usize> {
+        let Some(first) = self.layers.first() else {
+            return Ok(0);
+        };
+        let expected = first.kv_k.cur_len;
+        for (index, layer) in self.layers.iter().enumerate() {
+            if layer.kv_k.cur_len != expected || layer.kv_v.cur_len != expected {
+                candle_core::bail!(
+                    "incoherent KV lengths at layer {index}: k={}, v={}, expected={expected}",
+                    layer.kv_k.cur_len,
+                    layer.kv_v.cur_len
+                );
+            }
+        }
+        Ok(expected)
+    }
+
+    /// Commit only the accepted prefix of a speculative target pass. Validation is
+    /// completed across every layer before any length is mutated, so a bad request
+    /// cannot leave a half-truncated model. This deliberately accepts temporarily
+    /// incoherent *longer* layer lengths: if a target forward fails after mutating
+    /// only some layers, the caller can still roll every slot back to its known-good
+    /// checkpoint. Discarded bytes remain inaccessible and are overwritten by the
+    /// next `KvCacheSlot::append`.
+    pub fn truncate_kv_cache(&mut self, len: usize) -> Result<()> {
+        for (index, layer) in self.layers.iter().enumerate() {
+            if layer.kv_k.cur_len < len || layer.kv_v.cur_len < len {
+                candle_core::bail!(
+                    "kv truncate cannot grow layer {index} to {len}: k={}, v={}",
+                    layer.kv_k.cur_len,
+                    layer.kv_v.cur_len
+                );
+            }
+        }
+        for layer in self.layers.iter_mut() {
+            layer.kv_k.truncate(len)?;
+            layer.kv_v.truncate(len)?;
+        }
+        Ok(())
+    }
+
     /// Snapshot every layer's live KV region (the prefix-KV-sharing lever in
     /// docs/PERF_AND_CAPABILITY_AUDIT.md, Wave 1 B). Capture the KV state after
     /// a shared-prefix prefill ONCE, then `restore_kv_cache` it per item so the
@@ -1291,7 +1349,11 @@ impl ModelWeights {
     /// broadcast FROM, so that case is rejected rather than silently guessed; the
     /// shared-prefix caller only ever calls this after a real prefix prefill.
     /// See `KvCacheSlot::restore_broadcast` for the determinism argument.
-    pub fn restore_kv_cache_broadcast(&mut self, snapshot: &[KvSnapshot], b_sz: usize) -> Result<()> {
+    pub fn restore_kv_cache_broadcast(
+        &mut self,
+        snapshot: &[KvSnapshot],
+        b_sz: usize,
+    ) -> Result<()> {
         if snapshot.len() != self.layers.len() {
             candle_core::bail!(
                 "restore_kv_cache_broadcast: snapshot has {} layers, model has {}",
@@ -1407,6 +1469,101 @@ impl ModelWeights {
         self.output.forward(&x)
     }
 
+    /// Run one target-model pass over a contiguous speculative span and retain
+    /// logits for every input position, returning `(batch, seq_len, vocab)`.
+    ///
+    /// This is the live verifier primitive speculative decoding needs. After the
+    /// caller caches the target distribution produced by the last committed token,
+    /// it can submit `k` draft tokens at the current KV length: that cached
+    /// distribution validates draft 1, while these rows validate drafts 2..k and
+    /// produce the bonus-token distribution in one model pass. It is deliberately
+    /// the scalar-position twin of `forward_padded`; unlike `forward`, it does not
+    /// narrow to the final sequence position before the output head.
+    pub fn forward_all_logits(&mut self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
+        let (_b_sz, seq_len) = x.dims2()?;
+        if seq_len == 0 {
+            candle_core::bail!("forward_all_logits requires at least one token");
+        }
+        let end_pos = index_pos.checked_add(seq_len).ok_or_else(|| {
+            candle_core::Error::Msg("forward_all_logits context position overflow".to_string())
+        })?;
+        if end_pos > MAX_SEQ_LEN {
+            candle_core::bail!(
+                "context length exceeded: index_pos={index_pos} + seq_len={seq_len} = \
+                 {end_pos} tokens, which is beyond this model's MAX_SEQ_LEN={MAX_SEQ_LEN} \
+                 ceiling — shorten the prompt/speculative window"
+            );
+        }
+        let checkpoint_len = if index_pos > 0 {
+            let current = self.kv_cache_len()?;
+            if current != index_pos {
+                candle_core::bail!(
+                    "forward_all_logits KV position mismatch: cache has {current} tokens, \
+                     requested index_pos={index_pos}"
+                );
+            }
+            current
+        } else {
+            0
+        };
+        let result = (|| {
+            let mask = if seq_len == 1 {
+                None
+            } else {
+                Some(self.mask(seq_len, index_pos, x.device())?)
+            };
+            let seq_cap = self.next_seq_cap.take().unwrap_or(MAX_SEQ_LEN);
+            let _enter = self.span.enter();
+            let mut layer_in = self.tok_embeddings.forward(x)?;
+            for layer in self.layers.iter_mut() {
+                let x = layer_in;
+                let residual = &x;
+                let x = layer.attention_norm.forward(&x)?;
+                let attn = layer.forward_attn(&x, mask.as_ref(), index_pos, seq_cap)?;
+                let x = (attn + residual)?;
+
+                let _enter = layer.span_mlp.enter();
+                let residual = &x;
+                let x = layer.ffn_norm.forward(&x)?;
+                let x = layer.mlp_or_moe.forward(&x)?;
+                layer_in = (x + residual)?;
+            }
+            let x = self.norm.forward(&layer_in)?.contiguous()?;
+            let _enter = self.span_output.enter();
+            self.output.forward(&x)
+        })();
+        if result.is_err() {
+            // Exception safety for the speculative transaction: a layer can fail
+            // after earlier layers appended their draft KV. Always restore the
+            // known-good boundary before surfacing the model error.
+            self.truncate_kv_cache(checkpoint_len)?;
+        }
+        result
+    }
+
+    /// Greedy verifier fast surface: keep the full vocabulary projection on the
+    /// accelerator and return only `(batch, seq_len)` target token ids. This avoids
+    /// copying `batch * seq_len * vocab` logits to the host for exact greedy spec
+    /// decode while preserving `forward_all_logits` for future probabilistic sampling.
+    pub fn forward_all_argmax(&mut self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
+        let checkpoint_len = if index_pos == 0 {
+            0
+        } else {
+            self.kv_cache_len()?
+        };
+        let logits = self.forward_all_logits(x, index_pos)?;
+        match logits.argmax(2) {
+            Ok(tokens) => Ok(tokens),
+            Err(err) => {
+                // The target forward has already appended speculative KV even
+                // though token selection failed. Preserve the same all-or-nothing
+                // contract as `forward_all_logits` itself.
+                self.truncate_kv_cache(checkpoint_len)?;
+                Err(err)
+            }
+        }
+    }
+
     /// PATCH (P-padbucket, Inference Hot Path 7.5→8 / Batching Efficiency 7→7.5,
     /// docs/internal/CREED_AND_PATH_TO_TEN.md "Near-length bucketing with padded
     /// prefill"). The per-ROW forward that lets a batch of DIFFERENT-length prompts
@@ -1452,10 +1609,7 @@ impl ModelWeights {
         // Same P-ctxbound guard as `forward`: the rotary table only covers
         // `0..MAX_SEQ_LEN`, so a position past it would panic opaquely inside
         // `index_select`. Check the true maximum global position any row reaches.
-        let max_pos = positions
-            .flatten_all()?
-            .max(0)?
-            .to_scalar::<u32>()? as usize;
+        let max_pos = positions.flatten_all()?.max(0)?.to_scalar::<u32>()? as usize;
         if max_pos >= MAX_SEQ_LEN {
             candle_core::bail!(
                 "context length exceeded: max per-row position {max_pos} reaches this model's \
@@ -1686,7 +1840,12 @@ impl ModelWeights {
             .first()
             .map(|l| (l.n_kv_head, l.head_dim))
             .ok_or_else(|| candle_core::Error::Msg("no layers".into()))?;
-        let num_regions = regions.iter().copied().max().map(|m| m as usize + 1).unwrap_or(0);
+        let num_regions = regions
+            .iter()
+            .copied()
+            .max()
+            .map(|m| m as usize + 1)
+            .unwrap_or(0);
         HawkingKvCache::zeros(
             &device,
             self.layers.len(),
@@ -1939,6 +2098,40 @@ mod tests {
             out2.flatten_all()?.to_vec1::<f32>()?,
             second.flatten_all()?.to_vec1::<f32>()?,
             "after reset the slot holds only the new prefill"
+        );
+        Ok(())
+    }
+
+    /// Speculative rollback exposes only the accepted prefix and overwrites the
+    /// discarded tail on the next append. It must match a cache that never saw the
+    /// rejected proposals, byte for byte, and must never permit growth.
+    #[test]
+    fn prealloc_kv_truncate_matches_never_speculated_path() -> Result<()> {
+        let (b, h, d) = (2usize, 2usize, 4usize);
+        let prefix = ramp(b, h, 3, d, 1.0)?;
+        let proposals = ramp(b, h, 4, d, 1000.0)?;
+        let correction = ramp(b, h, 1, d, 9000.0)?;
+
+        let mut speculative = KvCacheSlot::new();
+        speculative.append(&prefix)?;
+        speculative.append(&proposals)?;
+        speculative.truncate(5)?; // accept two of four proposal positions
+        let got = speculative.append(&correction)?;
+
+        let mut reference = KvCacheSlot::new();
+        reference.append(&prefix)?;
+        reference.append(&proposals.narrow(2, 0, 2)?)?;
+        let expected = reference.append(&correction)?;
+
+        assert_eq!(
+            got.flatten_all()?.to_vec1::<f32>()?,
+            expected.flatten_all()?.to_vec1::<f32>()?,
+            "truncate + overwrite must equal a cache that never exposed rejected KV"
+        );
+        let err = speculative.truncate(7).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot grow"),
+            "unexpected error: {err}"
         );
         Ok(())
     }
@@ -2329,11 +2522,7 @@ mod tests {
                     .to_vec1()?;
                 // Every row of the padded mask must equal the shared causal mask.
                 for r in 0..b_sz {
-                    let row: Vec<u8> = padded
-                        .i((r, 0))?
-                        .contiguous()?
-                        .flatten_all()?
-                        .to_vec1()?;
+                    let row: Vec<u8> = padded.i((r, 0))?.contiguous()?.flatten_all()?.to_vec1()?;
                     assert_eq!(
                         row, causal,
                         "row {r} of the padded mask (seq_len={seq_len}, b_sz={b_sz}) must equal build_causal_mask"
@@ -2359,12 +2548,7 @@ mod tests {
         let q_global_pos: Vec<Vec<usize>> = vec![(0..5).collect(), (0..5).collect()];
         let mask = super::build_padded_mask(&real_len, &q_global_pos, 0, seq_len, &device)?;
         let m: Vec<Vec<u8>> = (0..2)
-            .map(|r| {
-                mask.i((r, 0))?
-                    .contiguous()?
-                    .flatten_all()?
-                    .to_vec1::<u8>()
-            })
+            .map(|r| mask.i((r, 0))?.contiguous()?.flatten_all()?.to_vec1::<u8>())
             .collect::<Result<_>>()?;
         // Row 0 (real length 5) is a plain lower-triangular causal mask.
         let want0: Vec<u8> = (0..5)
@@ -2408,12 +2592,16 @@ mod tests {
         // irrelevant to the equivalence — only that both paths read the SAME
         // rows). Shape (table_len, half), matching self.cos/self.sin.
         let cos_tab = Tensor::from_vec(
-            (0..table_len * half).map(|i| (i as f32 * 0.013).cos()).collect::<Vec<f32>>(),
+            (0..table_len * half)
+                .map(|i| (i as f32 * 0.013).cos())
+                .collect::<Vec<f32>>(),
             (table_len, half),
             &device,
         )?;
         let sin_tab = Tensor::from_vec(
-            (0..table_len * half).map(|i| (i as f32 * 0.017).sin()).collect::<Vec<f32>>(),
+            (0..table_len * half)
+                .map(|i| (i as f32 * 0.017).sin())
+                .collect::<Vec<f32>>(),
             (table_len, half),
             &device,
         )?;
@@ -2439,8 +2627,14 @@ mod tests {
                 .collect();
             let pos = Tensor::from_vec(positions, (b_sz, seq_len), &device)?;
             let flat = pos.flatten_all()?.contiguous()?;
-            let cos3 = cos_tab.index_select(&flat, 0)?.reshape((b_sz, seq_len, half))?.contiguous()?;
-            let sin3 = sin_tab.index_select(&flat, 0)?.reshape((b_sz, seq_len, half))?.contiguous()?;
+            let cos3 = cos_tab
+                .index_select(&flat, 0)?
+                .reshape((b_sz, seq_len, half))?
+                .contiguous()?;
+            let sin3 = sin_tab
+                .index_select(&flat, 0)?
+                .reshape((b_sz, seq_len, half))?
+                .contiguous()?;
             let per_row = candle_nn::rotary_emb::rope_i(&x.contiguous()?, &cos3, &sin3)?;
 
             let a: Vec<f32> = scalar.flatten_all()?.to_vec1()?;

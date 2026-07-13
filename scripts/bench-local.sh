@@ -155,7 +155,10 @@ wait_for() {
   local timeout="$1" label="$2"; shift 2
   local deadline=$(( $(date +%s) + timeout ))
   until "$@" >/dev/null 2>&1; do
-    [ "$(date +%s)" -ge "$deadline" ] && return 1
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      warn "timed out waiting for $label after ${timeout}s"
+      return 1
+    fi
     sleep 1
   done
   return 0
@@ -238,7 +241,7 @@ else
 fi
 
 # Schema + demo creds (idempotent — schema.sql is IF NOT EXISTS, seed re-confirms).
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/schema.sql >/dev/null || die "schema apply failed"
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction -f db/schema.sql >/dev/null || die "schema apply failed"
 say "building + starting the control plane (for the quote benchmark)"
 (cd control && go build -o "$ART/control" .) || die "control build failed"
 (cd control && "$ART/control" seed) >/dev/null 2>&1 || (cd control && go run . seed) >/dev/null 2>&1 \
@@ -309,6 +312,8 @@ say "(b) seeding realistic queue ($SYNTH_TASKS tasks / $SYNTH_WORKERS workers / 
 #    to a hand-written copy.
 CLAIM_SQL_BODY="$("$ART/control" print-claim-sql)"
 [ -n "$CLAIM_SQL_BODY" ] || die "control print-claim-sql produced no output"
+MATRIX_SHA256="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["matrix_sha256"])' "$ROOT/proof/runtime-matrix.generated.json")"
+[ "${#MATRIX_SHA256}" -eq 64 ] || die "runtime matrix artifact has no valid matrix_sha256"
 printf '%s' "$CLAIM_SQL_BODY" | grep -q "cheaper_class_online" \
   || die "print-claim-sql output missing cheaper_class_online — does not look like the real query"
 printf '%s' "$CLAIM_SQL_BODY" | grep -q "enable_seqscan" \
@@ -330,7 +335,7 @@ INSERT INTO suppliers (id, email, reputation, status, completed_tasks, data_coun
          0.3 + (g % 7)::real / 10.0, 'active', (g * 37) % 5000, 'US'
   FROM generate_series(1, $SYNTH_SUPPLIERS) AS g;
 
--- $SYNTH_WORKERS workers across those suppliers, varied hw_class (drives the
+-- $SYNTH_WORKERS workers across those suppliers, varied production hw_class (drives the
 -- cheaper_class_online EXISTS subquery — real candidates at every cost rank),
 -- all live (<60s) and unthrottled so they are real eligible peers, not dead rows.
 INSERT INTO workers (id, supplier_id, hw_class, memory_gb, bw_gbps, last_seen_at,
@@ -338,11 +343,20 @@ INSERT INTO workers (id, supplier_id, hw_class, memory_gb, bw_gbps, last_seen_at
                       effective_memory_gb, throttled)
   SELECT gen_random_uuid(),
          (SELECT id FROM suppliers WHERE email LIKE '$SYNTH_TAG-%' ORDER BY email OFFSET (g % $SYNTH_SUPPLIERS) LIMIT 1),
-         (ARRAY['cpu','apple_silicon_base','apple_silicon_pro','nvidia_24g','apple_silicon_max','nvidia_48g','nvidia_80g','apple_silicon_ultra','nvidia_180g'])[1 + (g % 9)],
+         (ARRAY['apple_silicon_base','apple_silicon_pro','apple_silicon_max','apple_silicon_ultra'])[1 + (g % 4)],
          16 + (g % 8) * 8, 200 + (g % 5) * 100, now() - (g % 30 || ' seconds')::interval,
          ARRAY['embed','batch_infer'], ARRAY['all-minilm-l6-v2'], 0,
          16 + (g % 8) * 8, false
   FROM generate_series(1, $SYNTH_WORKERS) AS g;
+
+-- Runtime authority is normalized exact cells, never the two arrays above. Bind
+-- every synthetic worker to the one production cell this benchmark queues.
+INSERT INTO worker_authorized_capabilities
+  (worker_id, cell_id, runtime_id, job_type, model_ref, model_kind, matrix_sha256)
+  SELECT id, 'candle-metal-minilm-embed', 'candle_metal', 'embed',
+         'all-minilm-l6-v2', 'hf', '$MATRIX_SHA256'
+    FROM workers
+   WHERE supplier_id IN (SELECT id FROM suppliers WHERE email LIKE '$SYNTH_TAG-%');
 
 -- A benchmark_results row per worker (worker_tps ORDER BY tiebreak). PATCH
 -- (Control plane hot path 7->8): worker_tps is now read from the maintained
@@ -423,9 +437,15 @@ INSERT INTO workers (id, supplier_id, hw_class, memory_gb, bw_gbps, last_seen_at
           'apple_silicon_max', 64, 400, now(), ARRAY['embed','batch_infer'], ARRAY['all-minilm-l6-v2'],
           0, 64, false)
   ON CONFLICT (id) DO NOTHING;
+INSERT INTO worker_authorized_capabilities
+  (worker_id, cell_id, runtime_id, job_type, model_ref, model_kind, matrix_sha256)
+  VALUES ('22222222-2222-2222-2222-222222222222', 'candle-metal-minilm-embed',
+          'candle_metal', 'embed', 'all-minilm-l6-v2', 'hf', '$MATRIX_SHA256')
+  ON CONFLICT DO NOTHING;
 
 ANALYZE suppliers; ANALYZE workers; ANALYZE benchmark_results; ANALYZE worker_model_state;
-ANALYZE worker_tps_cache; ANALYZE jobs; ANALYZE tasks; ANALYZE ledger_entries;
+ANALYZE worker_tps_cache; ANALYZE worker_authorized_capabilities;
+ANALYZE jobs; ANALYZE tasks; ANALYZE ledger_entries;
 SQL
 CLAIMING_WORKER="22222222-2222-2222-2222-222222222222"
 QUEUE_DEPTH="$(psql "$DATABASE_URL" -tAc "SELECT count(*) FROM tasks WHERE status IN ('queued','retrying') AND claimed_by IS NULL AND job_id IN (SELECT id FROM jobs WHERE input_ref LIKE 'jobs/bench/%')" 2>/dev/null | tr -d '[:space:]')"
@@ -441,11 +461,12 @@ ok "seeded $QUEUE_DEPTH claimable tasks across $((SYNTH_TASKS / 50))+ jobs, $WOR
 #    matching a real high-reputation supplier), $3=selfCostRank for
 #    apple_silicon_max (rank 4, per hwClassCostRank in scheduler.go — cheaper
 #    classes 0-3 are online in the seeded fleet above, so cheaper_class_online
-#    is exercised both true and false across candidate rows).
+#    is exercised both true and false across candidate rows), and $4 is the exact
+#    generated runtime-matrix SHA required by every capability row.
 CLAIM_MS="$ART/claim_ms.txt"; : >"$CLAIM_MS"
 CLAIM_PLAN=""
 # CLAIM_SQL_BODY (from `control print-claim-sql`) contains REAL Postgres bind
-# placeholders ($1/$2/$3) — it must NEVER pass through an unquoted bash
+# placeholders ($1/$2/$3/$4) — it must NEVER pass through an unquoted bash
 # heredoc/here-string, where bash itself would expand those as positional
 # parameters before psql ever saw them (silently corrupting the query). We
 # build the whole driver script as a FILE via `printf '%s'` (no shell
@@ -457,10 +478,10 @@ printf '%s' "$CLAIM_SQL_BODY" >"$CLAIM_SQL_FILE"
 CLAIM_DRIVER_FILE="$ART/claim_driver.sql"
 {
   printf 'BEGIN;\n'
-  printf 'PREPARE cx_bench_claim (uuid, int, int) AS\n'
+  printf 'PREPARE cx_bench_claim (uuid, int, int, text) AS\n'
   printf '%s' "$CLAIM_SQL_BODY"
   printf ';\n'
-  printf "EXPLAIN (ANALYZE, TIMING ON, FORMAT JSON) EXECUTE cx_bench_claim('%s', 2, 4);\n" "$CLAIMING_WORKER"
+  printf "EXPLAIN (ANALYZE, TIMING ON, FORMAT JSON) EXECUTE cx_bench_claim('%s', 2, 4, '%s');\n" "$CLAIMING_WORKER" "$MATRIX_SHA256"
   printf 'ROLLBACK;\n'
 } >"$CLAIM_DRIVER_FILE"
 for _ in $(seq 1 "$CLAIM_RUNS"); do
@@ -526,7 +547,7 @@ try:
 except Exception:
     pass' >>"$CLAIM_NEAR_MS" 2>/dev/null || true
 done
-read -r CN_P50 CN_P90 CN_N CN_MIN CN_MAX < <(percentiles <"$CLAIM_NEAR_MS")
+read -r CN_P50 CN_P90 CN_N _cn_min _cn_max < <(percentiles <"$CLAIM_NEAR_MS")
 # Loaded:near-empty ratio on p50 (the flatness number). Guard against a zero
 # denominator (a sub-millisecond near-empty p50 rounds to 0.000).
 CLAIM_RATIO="$(C_P50="$C_P50" CN_P50="$CN_P50" python3 -c '

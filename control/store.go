@@ -3,16 +3,20 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -24,27 +28,111 @@ import (
 
 // Store is the database access layer.
 type Store struct {
-	pool *pgxpool.Pool
+	pool                  *pgxpool.Pool
+	verificationResources *verificationResourceBudget
 }
 
 // NewStore wraps an already-opened pool.
-func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
+func NewStore(pool *pgxpool.Pool) *Store {
+	maxConns := int32(0)
+	if pool != nil {
+		maxConns = pool.Config().MaxConns
+	}
+	return &Store{
+		pool:                  pool,
+		verificationResources: newVerificationResourceBudget(maxConns, verificationArtifactMemoryCeiling),
+	}
+}
 
 // Ping verifies DB connectivity for /healthz.
 func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
 
-// Migrate applies the control-plane schema additions the V2 job-split + webhook
-// contract needs, idempotently (IF NOT EXISTS everywhere). db/schema.sql is owned
-// by the infra side and is the base contract; these statements only ADD the
-// columns/tables this binary requires and that the mandate's schema names exactly
-// (tasks.input_ref, tasks.result_key, the webhooks and models tables). Running
-// twice is a no-op. Surfacing a failure here is fatal at startup, never silent.
+const schemaMigrationAdvisoryLock = "computeexchange-control-schema-v1"
+
+// acquireSchemaMigrationLock serializes startup migration across every control
+// replica and the one-shot schema job. PostgreSQL DDL is transactional, but two
+// independently starting replicas can still interleave idempotent-looking ALTER
+// and trigger replacement statements. A session lock spans the smaller
+// per-table telemetry transactions as well. If unlock cannot be confirmed, the
+// connection is removed from the pool and closed so a session lock can never
+// leak into normal request traffic.
+func (s *Store) acquireSchemaMigrationLock(ctx context.Context) (*pgxpool.Conn, func(), error) {
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("acquire migration connection: %w", err)
+	}
+	if _, err := conn.Exec(ctx,
+		`SELECT pg_advisory_lock(hashtextextended($1, 0))`, schemaMigrationAdvisoryLock); err != nil {
+		conn.Release()
+		return nil, nil, fmt.Errorf("acquire migration lock: %w", err)
+	}
+
+	released := false
+	release := func() {
+		if released {
+			return
+		}
+		released = true
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		var unlocked bool
+		err := conn.QueryRow(cleanupCtx,
+			`SELECT pg_advisory_unlock(hashtextextended($1, 0))`, schemaMigrationAdvisoryLock).Scan(&unlocked)
+		if err == nil && unlocked {
+			conn.Release()
+			return
+		}
+		// Release would return a possibly still-locked session to the pool. Hijack
+		// and close it instead; PostgreSQL releases every advisory lock on close.
+		raw := conn.Hijack()
+		if closeErr := raw.Close(cleanupCtx); closeErr != nil {
+			log.Printf("migration lock connection close failed: %v", closeErr)
+		}
+		if err != nil {
+			log.Printf("migration advisory unlock failed; connection discarded: %v", err)
+		} else {
+			log.Print("migration advisory unlock was not held; connection discarded")
+		}
+	}
+	return conn, release, nil
+}
+
+// Migrate applies the control-plane schema changes idempotently. db/schema.sql is
+// the base contract; these statements mirror changes the running binary requires
+// so a deployment cannot start against a partially upgraded schema. Most changes
+// are additive; explicitly marked security migrations may remove legacy sensitive
+// columns. Surfacing a failure here is fatal at startup, never silent.
 func (s *Store) Migrate(ctx context.Context) error {
+	migrationConn, releaseMigrationLock, err := s.acquireSchemaMigrationLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer releaseMigrationLock()
+
 	stmts := []string{
 		// Per-task input/result object keys. A task is a split of the job's input,
 		// so it carries its own chunk key (input_ref) and result target key.
 		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS input_ref TEXT`,
 		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS result_key TEXT`,
+		// Exact per-task output cardinality. NULL remains an explicit legacy/opaque
+		// unknown; it is never backfilled from jobs.split_size because that value is
+		// only a ceiling and would overstate every short final chunk.
+		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS expected_output_records BIGINT`,
+		`ALTER TABLE tasks DROP CONSTRAINT IF EXISTS tasks_expected_output_records_positive`,
+		`ALTER TABLE tasks ADD CONSTRAINT tasks_expected_output_records_positive
+		   CHECK (expected_output_records IS NULL OR expected_output_records > 0)`,
+		`CREATE OR REPLACE FUNCTION cx_reject_expected_output_records_update() RETURNS trigger AS $$
+		 BEGIN
+		   IF OLD.expected_output_records IS DISTINCT FROM NEW.expected_output_records THEN
+		     RAISE EXCEPTION 'task expected output records for % are immutable', OLD.id;
+		   END IF;
+		   RETURN NEW;
+		 END;
+		 $$ LANGUAGE plpgsql`,
+		`DROP TRIGGER IF EXISTS tasks_expected_output_records_immutable ON tasks`,
+		`CREATE TRIGGER tasks_expected_output_records_immutable
+		   BEFORE UPDATE OF expected_output_records ON tasks
+		   FOR EACH ROW EXECUTE FUNCTION cx_reject_expected_output_records_update()`,
 		// Verification-requeue worker exclusion (Scheduling & Matching Engine 8->9,
 		// docs/internal/CREED_AND_PATH_TO_TEN.md): RequeueTask records the worker that
 		// just failed a task here (until excluded_until) so the claim skips it for a
@@ -52,13 +140,29 @@ func (s *Store) Migrate(ctx context.Context) error {
 		// starved of the retry. See RequeueTask (store.go) and ClaimTaskSQL (scheduler.go).
 		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS excluded_worker UUID`,
 		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS excluded_until  TIMESTAMPTZ`,
-		// Webhook registrations for job-completion delivery.
+		// Webhook registrations are a leased, backoff-aware outbox. A stable
+		// (job_id,buyer_id) FK prevents a job-scoped registration from ever crossing
+		// buyer ownership, even if a future caller bypasses the HTTP handler.
 		`CREATE TABLE IF NOT EXISTS webhooks (
-		   id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-		   buyer_id   UUID,
-		   job_id     UUID,
-		   url        TEXT NOT NULL,
-		   created_at TIMESTAMPTZ DEFAULT now()
+		   id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		   buyer_id         UUID NOT NULL,
+		   job_id           UUID NOT NULL,
+		   url              TEXT NOT NULL,
+		   created_at       TIMESTAMPTZ DEFAULT now(),
+		   delivered_at     TIMESTAMPTZ,
+		   attempts         INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+		   next_attempt_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+		   lease_token      UUID,
+		   lease_expires_at TIMESTAMPTZ,
+		   dead_lettered_at TIMESTAMPTZ,
+		   last_attempt_at  TIMESTAMPTZ,
+		   last_error       TEXT,
+		   signing_secret_sealed TEXT,
+		   CHECK ((lease_token IS NULL) = (lease_expires_at IS NULL)),
+		   CONSTRAINT webhooks_signing_secret_sealed_check CHECK (
+		     signing_secret_sealed IS NULL OR
+		     (signing_secret_sealed LIKE 'enc:%' AND length(signing_secret_sealed)>4)
+		   )
 		 )`,
 		// Real model + pricing catalogue (replaces the old static Go list).
 		`CREATE TABLE IF NOT EXISTS models (
@@ -74,13 +178,102 @@ func (s *Store) Migrate(ctx context.Context) error {
 		   hf_repo       TEXT
 		 )`,
 		`CREATE INDEX IF NOT EXISTS webhooks_job_idx ON webhooks (job_id)`,
-		// Delivery flag for the completion-webhook sweep: a webhook is delivered
-		// once for its job. NULL = not yet delivered.
+		// Additive outbox upgrade for databases created before durable retry state.
 		`ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ`,
+		`ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now()`,
+		`ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS lease_token UUID`,
+		`ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ`,
+		`ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS dead_lettered_at TIMESTAMPTZ`,
+		`ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ`,
+		`ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS last_error TEXT`,
+		`ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS signing_secret_sealed TEXT`,
+		// Never preserve a plaintext/raw partial-deployment value. Converting it to
+		// the same NULL legacy state below guarantees it is dead-lettered before I/O.
+		`UPDATE webhooks
+		    SET signing_secret_sealed=NULL
+		  WHERE signing_secret_sealed IS NOT NULL
+		    AND NOT (
+		      signing_secret_sealed LIKE 'enc:%' AND length(signing_secret_sealed)>4
+		    )`,
+		`DO $$
+		 BEGIN
+		   IF NOT EXISTS (
+		     SELECT 1 FROM pg_constraint
+		      WHERE conrelid='webhooks'::regclass
+		        AND conname='webhooks_signing_secret_sealed_check'
+		   ) THEN
+		     ALTER TABLE webhooks ADD CONSTRAINT webhooks_signing_secret_sealed_check
+		       CHECK (
+		         signing_secret_sealed IS NULL OR
+		         (signing_secret_sealed LIKE 'enc:%' AND length(signing_secret_sealed)>4)
+		       ) NOT VALID;
+		   END IF;
+		 END
+		 $$`,
+		`ALTER TABLE webhooks VALIDATE CONSTRAINT webhooks_signing_secret_sealed_check`,
+		// A pre-signing registration has no secret that its receiver could know.
+		// Dead-letter it without an outbound request; an authenticated exact
+		// re-registration upgrades the row with a new recoverable secret.
+		`UPDATE webhooks
+		    SET dead_lettered_at=now(),
+		        lease_token=NULL,
+		        lease_expires_at=NULL,
+		        last_error='legacy webhook has no per-registration signing secret; re-register it'
+		  WHERE delivered_at IS NULL
+		    AND dead_lettered_at IS NULL
+		    AND signing_secret_sealed IS NULL`,
+		// NULL-job "catch-all" rows were historically accepted but never had a
+		// fanout/delivery model, so they could never fire. Ownership-invalid legacy
+		// rows are equally undeliverable. Remove both before installing the honest
+		// one-row/one-job invariant.
+		`DELETE FROM webhooks wh
+		  WHERE wh.job_id IS NULL OR wh.buyer_id IS NULL
+		     OR NOT EXISTS (
+		       SELECT 1 FROM jobs j WHERE j.id=wh.job_id AND j.buyer_id=wh.buyer_id
+		     )`,
+		`ALTER TABLE webhooks ALTER COLUMN buyer_id SET NOT NULL`,
+		`ALTER TABLE webhooks ALTER COLUMN job_id SET NOT NULL`,
+		// Collapse duplicate legacy deliveries before making registration idempotent.
+		// Prefer an already-delivered row so migration never resurrects an event.
+		`DELETE FROM webhooks
+		  WHERE id IN (
+		    SELECT id FROM (
+		      SELECT id,row_number() OVER (
+		        PARTITION BY buyer_id,job_id,url
+		        ORDER BY (delivered_at IS NULL),(dead_lettered_at IS NOT NULL),created_at NULLS LAST,id
+		      ) AS duplicate_rank
+		      FROM webhooks
+		    ) ranked
+		    WHERE duplicate_rank>1
+		  )`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS webhooks_job_url_uniq ON webhooks (buyer_id,job_id,url)`,
+		`CREATE INDEX IF NOT EXISTS webhooks_delivery_due_idx ON webhooks (next_attempt_at,created_at,id)
+		   WHERE delivered_at IS NULL AND dead_lettered_at IS NULL`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS jobs_id_buyer_id_uniq ON jobs (id,buyer_id)`,
+		`DO $$
+		 BEGIN
+		   IF NOT EXISTS (
+		     SELECT 1 FROM pg_constraint
+		      WHERE conrelid='webhooks'::regclass AND conname='webhooks_job_owner_fkey'
+		   ) THEN
+		     ALTER TABLE webhooks ADD CONSTRAINT webhooks_job_owner_fkey
+		       FOREIGN KEY (job_id,buyer_id) REFERENCES jobs(id,buyer_id)
+		       ON DELETE CASCADE NOT VALID;
+		   END IF;
+		 END
+		 $$`,
+		`ALTER TABLE webhooks VALIDATE CONSTRAINT webhooks_job_owner_fkey`,
 		// Scheduler V2 / Turbo columns. These MIRROR db/schema.sql (owned by infra)
 		// so a control plane that only ran Migrate (not the full schema.sql) still
 		// self-migrates to the columns the hard-filter claim + result merge need.
 		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS min_memory_gb REAL DEFAULT 0`,
+		// Buyer-authored execution ceiling. Keep the full uint32 wire range and make
+		// zero the explicit "runner default" value for legacy jobs.
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_duration_secs BIGINT NOT NULL DEFAULT 0`,
+		`ALTER TABLE jobs DROP CONSTRAINT IF EXISTS jobs_max_duration_secs_range`,
+		`ALTER TABLE jobs ADD CONSTRAINT jobs_max_duration_secs_range
+		   CHECK (max_duration_secs BETWEEN 0 AND 4294967295)`,
 		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS min_reputation REAL DEFAULT 0`,
 		// Private Deployment tier (research §3): a private_pool job routes ONLY to the
 		// buyer's own bound suppliers (their dedicated Mac/GPU fleet), so "data never
@@ -105,10 +298,110 @@ func (s *Store) Migrate(ctx context.Context) error {
 		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS budget_state TEXT DEFAULT 'tracking'`,
 		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS chunk_index INT DEFAULT 0`,
 		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS hedged_from UUID`,
+		// Third-opinion tasks carry the immutable verification class of the
+		// disagreement attempt that created them. Worker profiles are mutable, so a
+		// later retry must never infer its comparison class from today's profile.
+		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS verification_hw_class TEXT`,
+		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS verification_engine TEXT`,
+		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS verification_build_hash TEXT`,
+		`ALTER TABLE workers ADD COLUMN IF NOT EXISTS engine TEXT NOT NULL DEFAULT 'candle'`,
+		`ALTER TABLE workers ADD COLUMN IF NOT EXISTS build_hash TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE workers ADD COLUMN IF NOT EXISTS supported_jobs TEXT[]`,
 		`ALTER TABLE workers ADD COLUMN IF NOT EXISTS supported_models TEXT[]`,
 		`ALTER TABLE workers ADD COLUMN IF NOT EXISTS min_payout_usd_hr REAL DEFAULT 0`,
 		`ALTER TABLE workers ADD COLUMN IF NOT EXISTS thermal_ok BOOLEAN DEFAULT true`,
+		// Durable per-worker service-lane debt. Three consecutive ordinary priority
+		// claims force the next eligible ordinary batch task to the front; pinned
+		// verification claims bypass and do not mutate this counter.
+		`ALTER TABLE workers ADD COLUMN IF NOT EXISTS priority_claim_streak INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE workers DROP CONSTRAINT IF EXISTS workers_priority_claim_streak_range`,
+		`ALTER TABLE workers ADD CONSTRAINT workers_priority_claim_streak_range
+		   CHECK (priority_claim_streak BETWEEN 0 AND 3)`,
+		// Exact worker/runtime authority. Deliberately no INSERT...SELECT backfill from
+		// supported_jobs/supported_models: legacy array-only workers remain inert until
+		// a real registration atomically projects the current generated matrix.
+		`CREATE TABLE IF NOT EXISTS worker_authorized_capabilities (
+		   worker_id     UUID NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
+		   cell_id       TEXT NOT NULL,
+		   runtime_id    TEXT NOT NULL,
+		   job_type      TEXT NOT NULL,
+		   model_ref     TEXT NOT NULL,
+		   model_kind    TEXT NOT NULL,
+		   matrix_sha256 TEXT NOT NULL,
+		   authorized_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		   PRIMARY KEY (worker_id, cell_id, runtime_id, job_type, model_ref, matrix_sha256),
+		   CHECK (cell_id <> ''),
+		   CHECK (runtime_id <> ''),
+		   CHECK (job_type <> ''),
+		   CHECK (matrix_sha256 ~ '^[0-9a-f]{64}$')
+		 )`,
+		// Rows created by the pre-model-kind projection cannot be upgraded from the
+		// mutable model catalog without inventing authority. Delete them and require a
+		// real worker re-registration, matching the existing no-array-backfill rule.
+		`ALTER TABLE worker_authorized_capabilities ADD COLUMN IF NOT EXISTS model_kind TEXT`,
+		`DELETE FROM worker_authorized_capabilities
+		   WHERE COALESCE(model_kind,'') NOT IN ('gguf','hf','mlx')`,
+		`ALTER TABLE worker_authorized_capabilities ALTER COLUMN model_kind SET NOT NULL`,
+		`ALTER TABLE worker_authorized_capabilities
+		   DROP CONSTRAINT IF EXISTS worker_authorized_capabilities_model_kind_valid`,
+		`ALTER TABLE worker_authorized_capabilities
+		   ADD CONSTRAINT worker_authorized_capabilities_model_kind_valid
+		   CHECK (model_kind IN ('gguf','hf','mlx'))`,
+		`CREATE INDEX IF NOT EXISTS worker_authorized_capabilities_exact_idx
+		   ON worker_authorized_capabilities (worker_id, job_type, model_ref, matrix_sha256)`,
+		`CREATE INDEX IF NOT EXISTS worker_authorized_capabilities_supply_idx
+		   ON worker_authorized_capabilities (job_type, model_ref, matrix_sha256, worker_id)`,
+		// Immutable execution provenance for the CURRENT task attempt. ClaimTask writes
+		// these fields from the server-authorized exact capability row in the same
+		// transaction that hands the task to a worker. A retry may replace them with
+		// the newly selected attempt's authority, but workers can never supply or edit
+		// them. Clearing receipts therefore bind the accepted task to the exact runtime
+		// cell and matrix revision that authorized execution instead of inferring it
+		// later from a mutable worker registration.
+		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS runtime_cell_id TEXT`,
+		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS runtime_id TEXT`,
+		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS runtime_matrix_sha256 TEXT`,
+		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS model_kind TEXT`,
+		// Immutable identity of the worker attempt itself. workers is live routing
+		// state and UpsertWorker intentionally mutates its class/build; accepted work
+		// must remain attributable to the exact identity observed by ClaimTask.
+		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS execution_worker_id UUID`,
+		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS execution_supplier_id UUID`,
+		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS execution_hw_class TEXT`,
+		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS execution_engine TEXT`,
+		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS execution_build_hash TEXT`,
+		`ALTER TABLE tasks DROP CONSTRAINT IF EXISTS tasks_execution_identity_complete`,
+		`ALTER TABLE tasks ADD CONSTRAINT tasks_execution_identity_complete CHECK (
+		   (execution_worker_id IS NULL AND execution_supplier_id IS NULL
+		    AND execution_hw_class IS NULL AND execution_engine IS NULL
+		    AND execution_build_hash IS NULL)
+		   OR
+		   (execution_worker_id IS NOT NULL AND execution_supplier_id IS NOT NULL
+		    AND COALESCE(btrim(execution_hw_class),'') <> ''
+		    AND COALESCE(btrim(execution_engine),'') <> ''
+		    AND execution_build_hash IS NOT NULL)
+		 )`,
+		`ALTER TABLE tasks DROP CONSTRAINT IF EXISTS tasks_runtime_provenance_complete`,
+		`ALTER TABLE tasks ADD CONSTRAINT tasks_runtime_provenance_complete CHECK (
+		   (runtime_cell_id IS NULL AND runtime_id IS NULL AND runtime_matrix_sha256 IS NULL AND model_kind IS NULL)
+		   OR
+		   (COALESCE(runtime_cell_id,'') <> '' AND COALESCE(runtime_id,'') <> ''
+		    AND runtime_matrix_sha256 ~ '^[0-9a-f]{64}$' AND COALESCE(model_kind,'') <> '')
+		 )`,
+		// Durable third-opinion claim history keeps every worker/supplier that started
+		// a tiebreak visible after FailTask/the stale reaper clears tasks.worker_id.
+		// No prior peer (or another machine owned by that supplier) may retry the
+		// third vote; ordinary claims deliberately do not write this sparse table.
+		`CREATE TABLE IF NOT EXISTS task_execution_history (
+		   task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+		   attempt SMALLINT NOT NULL CHECK (attempt >= 0),
+		   worker_id UUID NOT NULL REFERENCES workers(id) ON DELETE RESTRICT,
+		   supplier_id UUID NOT NULL REFERENCES suppliers(id) ON DELETE RESTRICT,
+		   started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		   PRIMARY KEY (task_id,attempt,worker_id)
+		 )`,
+		`CREATE INDEX IF NOT EXISTS task_execution_history_task_supplier_idx
+		   ON task_execution_history (task_id,supplier_id,worker_id)`,
 		`ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS data_country TEXT`,
 		`ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS quarantined_at TIMESTAMPTZ`,
 		// Stripe Connect payout readiness (suppliers.go): flipped by the account.updated
@@ -141,6 +434,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		`ALTER TABLE task_durations ADD COLUMN IF NOT EXISTS worker_id UUID`,
 		`ALTER TABLE task_durations ADD COLUMN IF NOT EXISTS engine TEXT`,
 		`ALTER TABLE task_durations ADD COLUMN IF NOT EXISTS build_hash TEXT`,
+		`ALTER TABLE task_durations ADD COLUMN IF NOT EXISTS task_id UUID`,
 		// Concierge intake (intake.go) + buyer billing (billing.go): connected git
 		// sources, detected-pipeline intakes, and the buyer→Stripe-customer map.
 		`CREATE TABLE IF NOT EXISTS git_sources (
@@ -172,6 +466,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 		   default_payment_method TEXT,
 		   created_at             TIMESTAMPTZ DEFAULT now()
 		 )`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS billing_customers_stripe_customer_uidx
+		   ON billing_customers (stripe_customer_id)
+		   WHERE stripe_customer_id IS NOT NULL AND stripe_customer_id <> ''`,
 		// Supplier Connect account (the payout transfers' destination) + the
 		// intake→job links that drive multi-stage pipeline execution.
 		`ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS stripe_acct TEXT`,
@@ -211,6 +508,44 @@ func (s *Store) Migrate(ctx context.Context) error {
 		   free_credit_usd NUMERIC(12,6) NOT NULL DEFAULT 0,
 		   created_at      TIMESTAMPTZ DEFAULT now()
 		 )`,
+		// Supplier identity is owned by an authenticated buyer account. Legacy rows
+		// are backfilled only when the case-insensitive email relationship is exactly
+		// one-to-one; ambiguous/unmatched suppliers stay unowned and therefore inert
+		// to self-serve routes. Stripe Connect, not CX, stores KYC/tax identifiers.
+		`ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS owner_buyer_id UUID`,
+		`WITH ownership_matches AS (
+		   SELECT s.id AS supplier_id,
+		          b.id AS buyer_id,
+		          count(*) OVER (PARTITION BY s.id) AS buyer_matches,
+		          count(*) OVER (PARTITION BY b.id) AS supplier_matches
+		     FROM suppliers s
+		     JOIN buyers b ON lower(b.email) = lower(s.email)
+		 )
+		 UPDATE suppliers s
+		    SET owner_buyer_id = m.buyer_id
+		   FROM ownership_matches m
+		  WHERE s.id = m.supplier_id
+		    AND s.owner_buyer_id IS NULL
+		    AND m.buyer_matches = 1
+		    AND m.supplier_matches = 1
+		    AND NOT EXISTS (
+		        SELECT 1 FROM suppliers owned WHERE owned.owner_buyer_id = m.buyer_id
+		    )`,
+		`DO $$ BEGIN
+		   IF NOT EXISTS (
+		       SELECT 1 FROM pg_constraint
+		        WHERE conname = 'suppliers_owner_buyer_fk'
+		          AND conrelid = 'suppliers'::regclass
+		   ) THEN
+		     ALTER TABLE suppliers
+		       ADD CONSTRAINT suppliers_owner_buyer_fk
+		       FOREIGN KEY (owner_buyer_id) REFERENCES buyers(id) ON DELETE RESTRICT;
+		   END IF;
+		 END $$`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS suppliers_owner_buyer_uniq
+		   ON suppliers (owner_buyer_id) WHERE owner_buyer_id IS NOT NULL`,
+		`ALTER TABLE suppliers DROP COLUMN IF EXISTS tax_id`,
+		`ALTER TABLE suppliers DROP COLUMN IF EXISTS tax_country`,
 		`CREATE TABLE IF NOT EXISTS sessions (
 		   token_hash TEXT PRIMARY KEY,
 		   buyer_id   UUID NOT NULL,
@@ -219,6 +554,118 @@ func (s *Store) Migrate(ctx context.Context) error {
 		   revoked    BOOLEAN DEFAULT false
 		 )`,
 		`CREATE INDEX IF NOT EXISTS sessions_buyer_idx ON sessions (buyer_id)`,
+		// OAuth account-link attempts are server-side capabilities, not signed buyer
+		// identifiers. Only hashes of the two independent browser secrets are stored;
+		// the callback atomically consumes a live row and recovers its bound buyer.
+		`CREATE TABLE IF NOT EXISTS oauth_link_states (
+		   state_hash      TEXT PRIMARY KEY CHECK (state_hash ~ '^[0-9a-f]{64}$'),
+		   buyer_id        UUID NOT NULL,
+		   provider        TEXT NOT NULL CHECK (provider <> ''),
+		   initiation_hash TEXT NOT NULL CHECK (initiation_hash ~ '^[0-9a-f]{64}$'),
+		   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+		   expires_at      TIMESTAMPTZ NOT NULL,
+		   consumed_at     TIMESTAMPTZ,
+		   CHECK (expires_at > created_at),
+		   CHECK (consumed_at IS NULL OR consumed_at >= created_at)
+		 )`,
+		// buyer_id historically also identifies API-key-only buyers that predate the
+		// buyers account table, so do not make OAuth linking silently unavailable to
+		// those still-valid identities.
+		`ALTER TABLE oauth_link_states DROP CONSTRAINT IF EXISTS oauth_link_states_buyer_id_fkey`,
+		`CREATE INDEX IF NOT EXISTS oauth_link_states_expiry_idx
+		   ON oauth_link_states (expires_at)`,
+		// Device-proofed, one-time supplier enrollment. Existing seed/manual tokens
+		// remain valid but visibly unbound; exchanged credentials carry the P-256
+		// public-key binding, stable lifecycle id, rotation chain, and audit trail.
+		`ALTER TABLE worker_tokens ADD COLUMN IF NOT EXISTS credential_id UUID DEFAULT gen_random_uuid()`,
+		`UPDATE worker_tokens SET credential_id = gen_random_uuid() WHERE credential_id IS NULL`,
+		`ALTER TABLE worker_tokens ALTER COLUMN credential_id SET NOT NULL`,
+		`ALTER TABLE worker_tokens ADD COLUMN IF NOT EXISTS device_key_algorithm TEXT`,
+		`ALTER TABLE worker_tokens ADD COLUMN IF NOT EXISTS device_public_key BYTEA`,
+		`ALTER TABLE worker_tokens ADD COLUMN IF NOT EXISTS device_fingerprint TEXT`,
+		`ALTER TABLE worker_tokens ADD COLUMN IF NOT EXISTS credential_version INT NOT NULL DEFAULT 1`,
+		`ALTER TABLE worker_tokens ADD COLUMN IF NOT EXISTS rotated_from_credential_id UUID`,
+		`ALTER TABLE worker_tokens ADD COLUMN IF NOT EXISTS label TEXT`,
+		`ALTER TABLE worker_tokens ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ`,
+		`ALTER TABLE worker_tokens ADD COLUMN IF NOT EXISTS revocation_reason TEXT`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS worker_tokens_credential_id_uniq ON worker_tokens (credential_id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS worker_tokens_active_device_fingerprint_uniq
+		   ON worker_tokens (device_fingerprint)
+		   WHERE device_fingerprint IS NOT NULL AND revoked = false`,
+		`ALTER TABLE worker_tokens DROP CONSTRAINT IF EXISTS worker_tokens_device_binding_valid`,
+		`ALTER TABLE worker_tokens ADD CONSTRAINT worker_tokens_device_binding_valid CHECK (
+		   num_nonnulls(device_key_algorithm,device_public_key,device_fingerprint) = 0
+		   OR (num_nonnulls(device_key_algorithm,device_public_key,device_fingerprint) = 3
+		       AND device_key_algorithm = 'p256' AND octet_length(device_public_key) = 65)
+		 )`,
+		`ALTER TABLE worker_tokens DROP CONSTRAINT IF EXISTS worker_tokens_credential_version_positive`,
+		`ALTER TABLE worker_tokens ADD CONSTRAINT worker_tokens_credential_version_positive CHECK (credential_version > 0)`,
+		`ALTER TABLE worker_tokens DROP CONSTRAINT IF EXISTS worker_tokens_rotated_from_fk`,
+		`CREATE TABLE IF NOT EXISTS worker_enrollment_codes (
+		   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		   code_hash TEXT NOT NULL UNIQUE,
+		   buyer_id UUID NOT NULL REFERENCES buyers(id) ON DELETE CASCADE,
+		   supplier_id UUID NOT NULL REFERENCES suppliers(id) ON DELETE CASCADE,
+		   audience TEXT NOT NULL,
+		   device_key_algorithm TEXT NOT NULL CHECK (device_key_algorithm = 'p256'),
+		   device_public_key BYTEA NOT NULL CHECK (octet_length(device_public_key) = 65),
+		   device_fingerprint TEXT NOT NULL,
+		   label TEXT,
+		   rotate_from_credential_id UUID,
+		   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		   expires_at TIMESTAMPTZ NOT NULL,
+		   consumed_at TIMESTAMPTZ,
+		   consumed_credential_id UUID REFERENCES worker_tokens(credential_id) ON DELETE SET NULL,
+		   revoked_at TIMESTAMPTZ,
+		   failed_attempts INT NOT NULL DEFAULT 0 CHECK (failed_attempts >= 0),
+		   last_attempt_at TIMESTAMPTZ,
+		   CHECK (expires_at > created_at)
+		 )`,
+		// Enrollment wire v2 cannot safely infer a trusted origin for legacy rows.
+		// Preserve them as protocol 1 and require every newly issued v2 row to carry
+		// the exact origin/request binding that the device signs at exchange time.
+		`ALTER TABLE worker_enrollment_codes ADD COLUMN IF NOT EXISTS protocol_version INT NOT NULL DEFAULT 1`,
+		`ALTER TABLE worker_enrollment_codes ADD COLUMN IF NOT EXISTS control_origin TEXT`,
+		`ALTER TABLE worker_enrollment_codes ADD COLUMN IF NOT EXISTS request_id TEXT`,
+		`ALTER TABLE worker_enrollment_codes DROP CONSTRAINT IF EXISTS worker_enrollment_codes_protocol_binding_valid`,
+		`ALTER TABLE worker_enrollment_codes ADD CONSTRAINT worker_enrollment_codes_protocol_binding_valid CHECK (
+		   (protocol_version = 1 AND control_origin IS NULL AND request_id IS NULL)
+		   OR
+		   (protocol_version = 2 AND control_origin IS NOT NULL AND control_origin <> ''
+		       AND request_id IS NOT NULL AND char_length(request_id) = 22)
+		 )`,
+		`ALTER TABLE worker_enrollment_codes
+		   DROP CONSTRAINT IF EXISTS worker_enrollment_codes_rotate_from_credential_id_fkey`,
+		`CREATE INDEX IF NOT EXISTS worker_enrollment_codes_owner_idx
+		   ON worker_enrollment_codes (buyer_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS worker_enrollment_codes_expiry_idx
+		   ON worker_enrollment_codes (expires_at)
+		   WHERE consumed_at IS NULL AND revoked_at IS NULL`,
+		`CREATE TABLE IF NOT EXISTS worker_credential_audit (
+		   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		   event_type TEXT NOT NULL CHECK (event_type IN (
+		     'code_issued','code_revoked','exchange_succeeded','exchange_rejected',
+		     'credential_revoked','credential_rotated')),
+		   buyer_id UUID,
+		   supplier_id UUID,
+		   worker_id UUID,
+		   enrollment_code_id UUID,
+		   credential_id UUID,
+		   reason TEXT,
+		   detail JSONB NOT NULL DEFAULT '{}'::jsonb,
+		   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		 )`,
+		`CREATE INDEX IF NOT EXISTS worker_credential_audit_owner_idx
+		   ON worker_credential_audit (buyer_id, created_at DESC)`,
+		`CREATE OR REPLACE FUNCTION cx_reject_worker_credential_audit_mutation() RETURNS trigger AS $$
+		 BEGIN
+		   RAISE EXCEPTION 'worker credential audit is append-only';
+		 END;
+		 $$ LANGUAGE plpgsql`,
+		`DROP TRIGGER IF EXISTS worker_credential_audit_append_only ON worker_credential_audit`,
+		`CREATE TRIGGER worker_credential_audit_append_only
+		   BEFORE UPDATE OR DELETE ON worker_credential_audit
+		   FOR EACH ROW EXECUTE FUNCTION cx_reject_worker_credential_audit_mutation()`,
 		// Stuck-run watchdog V2 (MIRRORS db/schema.sql): escalation strikes, the
 		// buyer deadline knob, and the ETA calibration loop.
 		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS watchdog_strikes INT NOT NULL DEFAULT 0`,
@@ -235,8 +682,8 @@ func (s *Store) Migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS eta_calibration_type_idx ON eta_calibration (job_type, tier, created_at DESC)`,
 		// Charge batching + Stripe fee truth (MIRRORS db/schema.sql; see collect.go).
 		// A charge batch is ONE PaymentIntent covering many small deferred jobs of one
-		// buyer; amount_usd is FROZEN at formation and every retry reuses the same
-		// idempotency key, so an ambiguous prior attempt can never double-charge.
+		// buyer; amount_usd is FROZEN at formation. A durable request operation now
+		// prevents any blind retry after an ambiguous external attempt.
 		`CREATE TABLE IF NOT EXISTS charge_batches (
 		   id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 		   buyer_id   UUID NOT NULL,
@@ -258,9 +705,160 @@ func (s *Store) Migrate(ctx context.Context) error {
 		`ALTER TABLE charge_batches ALTER COLUMN amount_usd TYPE NUMERIC(12,6)`,
 		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS stripe_pi TEXT`,
 		`CREATE INDEX IF NOT EXISTS jobs_charge_status_idx ON jobs (charge_status)`,
+		`CREATE TABLE IF NOT EXISTS buyer_charge_operations (
+		   operation_key TEXT PRIMARY KEY CHECK (btrim(operation_key) <> ''),
+		   source_kind TEXT NOT NULL CHECK (source_kind IN ('job','batch')),
+		   job_id UUID UNIQUE REFERENCES jobs(id) ON DELETE RESTRICT,
+		   charge_batch_id UUID UNIQUE REFERENCES charge_batches(id) ON DELETE RESTRICT,
+		   buyer_id UUID NOT NULL,
+		   stripe_customer TEXT NOT NULL CHECK (btrim(stripe_customer) <> ''),
+		   stripe_payment_method TEXT NOT NULL CHECK (btrim(stripe_payment_method) <> ''),
+		   amount_cents BIGINT NOT NULL CHECK (amount_cents > 0),
+		   currency TEXT NOT NULL CHECK (currency='usd'),
+		   status TEXT NOT NULL CHECK (status IN ('outcome_unknown','succeeded')),
+		   payment_intent TEXT UNIQUE,
+		   charge_id TEXT UNIQUE,
+		   last_error TEXT,
+		   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		   CHECK ((source_kind='job' AND job_id IS NOT NULL AND charge_batch_id IS NULL)
+		       OR (source_kind='batch' AND charge_batch_id IS NOT NULL AND job_id IS NULL)),
+		   CHECK (status<>'succeeded' OR (payment_intent IS NOT NULL AND charge_id IS NOT NULL))
+		 )`,
+		`CREATE INDEX IF NOT EXISTS buyer_charge_operations_status_idx
+		   ON buyer_charge_operations (status,created_at)`,
 		// One stripe_fee ledger row per PaymentIntent, structurally (the fee recorder
 		// is INSERT-if-absent by payout_ref; the partial unique index closes the race).
 		`CREATE UNIQUE INDEX IF NOT EXISTS ledger_stripe_fee_ref_uniq ON ledger_entries (payout_ref) WHERE kind = 'stripe_fee'`,
+		// Independent economic facts (economic_facts.go). Exact input/output units
+		// are nullable ingestion seams: current historical rows stay NULL rather than
+		// being reverse-engineered from quote estimates. The projection table is one
+		// idempotently recomputed row per job; unknown fee attribution stays NULL.
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS economic_input_records BIGINT`,
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS economic_input_bytes BIGINT`,
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS economic_input_source TEXT`,
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS economic_output_records BIGINT`,
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS economic_output_bytes BIGINT`,
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS economic_output_source TEXT`,
+		`CREATE TABLE IF NOT EXISTS job_economic_facts (
+		   job_id UUID PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+		   buyer_id UUID NOT NULL,
+		   job_status TEXT NOT NULL,
+		   charge_status TEXT NOT NULL,
+		   schema_version SMALLINT NOT NULL DEFAULT 1,
+		   reconciliation_state TEXT NOT NULL DEFAULT 'pending'
+		     CHECK (reconciliation_state IN ('pending','awaiting_collection','awaiting_processor_fee','unresolved_batch_fee','incomplete','complete')),
+		   missing_data_reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
+		   input_records BIGINT,
+		   input_bytes BIGINT,
+		   input_units_source TEXT,
+		   output_records BIGINT,
+		   output_bytes BIGINT,
+		   output_units_source TEXT,
+		   control_plane_elapsed_ms BIGINT,
+		   control_plane_elapsed_source TEXT,
+		   primary_tasks_run INT NOT NULL DEFAULT 0,
+		   verification_tasks_run INT NOT NULL DEFAULT 0,
+		   retry_attempts INT NOT NULL DEFAULT 0,
+		   verdict_attempts INT NOT NULL DEFAULT 0,
+		   verification_task_server_ms BIGINT,
+		   verification_tasks_with_server_ms INT NOT NULL DEFAULT 0,
+		   verification_work_source TEXT NOT NULL,
+		   worker_reported_tokens BIGINT,
+		   worker_reported_tokens_tasks INT NOT NULL DEFAULT 0,
+		   worker_reported_tokens_source TEXT,
+		   settlement_usd NUMERIC(12,6),
+		   settlement_usd_basis TEXT NOT NULL,
+		   supplier_liability_usd NUMERIC(12,6),
+		   supplier_liability_basis TEXT NOT NULL,
+		   refunds_usd NUMERIC(12,6),
+		   refunds_basis TEXT NOT NULL,
+		   billed_usd NUMERIC(12,6),
+		   billed_usd_basis TEXT NOT NULL,
+		   processor_fee_payment_intent TEXT,
+		   processor_fee_payment_intent_total_usd NUMERIC(12,6),
+		   processor_fee_usd NUMERIC(12,6),
+		   processor_fee_basis TEXT,
+		   contribution_margin_usd NUMERIC(12,6),
+		   recomputed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		 )`,
+		`CREATE INDEX IF NOT EXISTS job_economic_facts_state_idx
+		   ON job_economic_facts (reconciliation_state, recomputed_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS charge_batch_fee_allocations (
+		   charge_batch_id UUID NOT NULL REFERENCES charge_batches(id) ON DELETE CASCADE,
+		   job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+		   stripe_pi TEXT NOT NULL,
+		   allocation_ordinal INT NOT NULL,
+		   billed_weight_usd NUMERIC(12,6) NOT NULL CHECK (billed_weight_usd > 0),
+		   allocated_fee_usd NUMERIC(12,6) NOT NULL CHECK (allocated_fee_usd >= 0),
+		   allocated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		   PRIMARY KEY (charge_batch_id, job_id),
+		   UNIQUE (job_id),
+		   UNIQUE (charge_batch_id, allocation_ordinal)
+		 )`,
+		`CREATE INDEX IF NOT EXISTS charge_batch_fee_allocations_pi_idx
+		   ON charge_batch_fee_allocations (stripe_pi)`,
+		// Fail-closed quote/submit plans, immutable per-job snapshot, frozen task
+		// amounts, and the separately mutable dynamic-work reserve.
+		`ALTER TABLE quotes ADD COLUMN IF NOT EXISTS economic_schedule_version TEXT`,
+		`ALTER TABLE quotes ADD COLUMN IF NOT EXISTS economic_plan JSONB`,
+		`ALTER TABLE quotes ADD COLUMN IF NOT EXISTS economic_executable BOOLEAN NOT NULL DEFAULT false`,
+		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS economic_buyer_charge_usd NUMERIC(12,6)`,
+		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS economic_supplier_payout_usd NUMERIC(12,6)`,
+		`ALTER TABLE tasks DROP CONSTRAINT IF EXISTS tasks_frozen_economic_amounts_valid`,
+		`ALTER TABLE tasks ADD CONSTRAINT tasks_frozen_economic_amounts_valid CHECK (
+		   (economic_buyer_charge_usd IS NULL AND economic_supplier_payout_usd IS NULL)
+		   OR (economic_buyer_charge_usd > 0 AND economic_supplier_payout_usd >= 0
+		       AND economic_supplier_payout_usd <= economic_buyer_charge_usd)
+		 )`,
+		`CREATE OR REPLACE FUNCTION cx_reject_frozen_task_economics_update() RETURNS trigger AS $$
+		 BEGIN
+		   IF OLD.economic_buyer_charge_usd IS DISTINCT FROM NEW.economic_buyer_charge_usd
+		      OR OLD.economic_supplier_payout_usd IS DISTINCT FROM NEW.economic_supplier_payout_usd THEN
+		     RAISE EXCEPTION 'task economic amounts for % are immutable', OLD.id;
+		   END IF;
+		   RETURN NEW;
+		 END;
+		 $$ LANGUAGE plpgsql`,
+		`DROP TRIGGER IF EXISTS tasks_frozen_economics_immutable ON tasks`,
+		`CREATE TRIGGER tasks_frozen_economics_immutable
+		   BEFORE UPDATE OF economic_buyer_charge_usd, economic_supplier_payout_usd ON tasks
+		   FOR EACH ROW EXECUTE FUNCTION cx_reject_frozen_task_economics_update()`,
+		`CREATE TABLE IF NOT EXISTS job_economic_plans (
+		   job_id UUID PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+		   plan_version SMALLINT NOT NULL,
+		   schedule_version TEXT NOT NULL,
+		   plan_json JSONB NOT NULL,
+		   initial_task_count INT NOT NULL CHECK (initial_task_count > 0),
+		   buyer_charge_per_task_usd NUMERIC(12,6) NOT NULL CHECK (buyer_charge_per_task_usd > 0),
+		   supplier_payout_per_task_usd NUMERIC(12,6) NOT NULL CHECK (supplier_payout_per_task_usd >= 0),
+		   initial_buyer_charge_usd NUMERIC(12,6) NOT NULL CHECK (initial_buyer_charge_usd > 0),
+		   reserved_buyer_charge_usd NUMERIC(12,6) NOT NULL CHECK (reserved_buyer_charge_usd >= initial_buyer_charge_usd),
+		   sla_premium_usd NUMERIC(12,6) NOT NULL DEFAULT 0 CHECK (sla_premium_usd >= 0),
+		   firm_quote_max_usd NUMERIC(12,6),
+		   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		 )`,
+		`ALTER TABLE job_economic_plans DROP CONSTRAINT IF EXISTS job_economic_plans_firm_quote_max_positive`,
+		`ALTER TABLE job_economic_plans ADD CONSTRAINT job_economic_plans_firm_quote_max_positive
+		   CHECK (firm_quote_max_usd IS NULL OR firm_quote_max_usd > 0)`,
+		`CREATE OR REPLACE FUNCTION cx_reject_job_economic_plan_update() RETURNS trigger AS $$
+		 BEGIN
+		   RAISE EXCEPTION 'job economic plan % is immutable', OLD.job_id;
+		 END;
+		 $$ LANGUAGE plpgsql`,
+		`DROP TRIGGER IF EXISTS job_economic_plans_immutable ON job_economic_plans`,
+		`CREATE TRIGGER job_economic_plans_immutable
+		   BEFORE UPDATE ON job_economic_plans
+		   FOR EACH ROW EXECUTE FUNCTION cx_reject_job_economic_plan_update()`,
+		`CREATE TABLE IF NOT EXISTS job_economic_reserves (
+		   job_id UUID PRIMARY KEY REFERENCES job_economic_plans(job_id) ON DELETE CASCADE,
+		   reserved_tasks INT NOT NULL CHECK (reserved_tasks >= 0),
+		   consumed_tasks INT NOT NULL DEFAULT 0 CHECK (consumed_tasks >= 0 AND consumed_tasks <= reserved_tasks),
+		   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		 )`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS ledger_job_sla_premium_ref_uniq
+		   ON ledger_entries (payout_ref)
+		   WHERE kind = 'buyer_charge' AND task_id IS NULL AND payout_ref IS NOT NULL`,
 		// Wake-on-work (docs/CREED_AND_PATH_TO_TEN.md, "Control plane hot path" 6→7 /
 		// "Scalability headroom" 5→6 / "End-to-end job latency" 7.5→8 — the same fix
 		// serves all three). Before this, every idle long-polling worker re-attempted
@@ -393,6 +991,389 @@ func (s *Store) Migrate(ctx context.Context) error {
 		// one (or a pre-migration row) — the commit handler's fallback is a real
 		// GetObject, so correctness never depends on this column being populated.
 		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS result_sha256 TEXT`,
+		// Verification-before-settlement state machine. CommitTask persists an
+		// upload as `verifying`; FinalizeTaskVerification atomically records the
+		// verdict, completion counters/telemetry, and ledger rows.
+		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS verification_outcome TEXT`,
+		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ`,
+		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS reported_duration_ms BIGINT`,
+		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS reported_tokens_used BIGINT`,
+		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS reported_hardware_temp_c REAL`,
+		`CREATE TABLE IF NOT EXISTS task_verdicts (
+		   task_id       UUID NOT NULL REFERENCES tasks ON DELETE CASCADE,
+		   attempt       SMALLINT NOT NULL,
+		   job_id        UUID NOT NULL REFERENCES jobs ON DELETE CASCADE,
+		   supplier_id   UUID REFERENCES suppliers,
+		   outcome       TEXT NOT NULL CHECK (outcome IN ('pass','pass_with_penalty','fail','loss_no_payout','clawed_back')),
+		   result_sha256 TEXT,
+		   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+		   PRIMARY KEY (task_id, attempt)
+		 )`,
+		`CREATE INDEX IF NOT EXISTS task_verdicts_job_idx ON task_verdicts (job_id, created_at)`,
+		`ALTER TABLE task_verdicts ADD COLUMN IF NOT EXISTS decision_version INTEGER`,
+		`ALTER TABLE task_verdicts ADD COLUMN IF NOT EXISTS decision_sha256 TEXT`,
+		`ALTER TABLE task_verdicts ADD COLUMN IF NOT EXISTS artifact_key TEXT`,
+		`ALTER TABLE task_verdicts ADD COLUMN IF NOT EXISTS artifact_sha256 TEXT`,
+		`CREATE OR REPLACE FUNCTION reject_task_verdict_update() RETURNS trigger AS $$
+		 BEGIN RAISE EXCEPTION 'task verdict history is immutable'; END;
+		 $$ LANGUAGE plpgsql`,
+		`DROP TRIGGER IF EXISTS task_verdicts_no_update ON task_verdicts`,
+		`CREATE TRIGGER task_verdicts_no_update BEFORE UPDATE OR DELETE ON task_verdicts
+		 FOR EACH ROW EXECUTE FUNCTION reject_task_verdict_update()`,
+		`DROP TRIGGER IF EXISTS task_execution_history_append_only ON task_execution_history`,
+		`CREATE TRIGGER task_execution_history_append_only BEFORE UPDATE OR DELETE ON task_execution_history
+		 FOR EACH ROW EXECUTE FUNCTION reject_task_verdict_update()`,
+		`CREATE TABLE IF NOT EXISTS task_verdict_resolutions (
+		   effect_id UUID PRIMARY KEY,
+		   task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+		   source_task_id UUID REFERENCES tasks(id) ON DELETE SET NULL,
+		   kind TEXT NOT NULL CHECK (kind IN ('promoted_pass','clawed_back')),
+		   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		 )`,
+		`CREATE INDEX IF NOT EXISTS task_verdict_resolutions_task_idx
+		   ON task_verdict_resolutions (task_id,created_at,effect_id)`,
+		`DROP TRIGGER IF EXISTS task_verdict_resolutions_append_only ON task_verdict_resolutions`,
+		`CREATE TRIGGER task_verdict_resolutions_append_only BEFORE UPDATE OR DELETE ON task_verdict_resolutions
+		 FOR EACH ROW EXECUTE FUNCTION reject_task_verdict_update()`,
+		// Durable verification attempt/work foundation. Staging metadata is immutable
+		// but not authoritative; a live fenced lease pins one server-observed artifact
+		// tuple before a terminal decision can be recorded.
+		`CREATE TABLE IF NOT EXISTS verification_work (
+		   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		   task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+		   attempt BIGINT NOT NULL CHECK (attempt >= 0),
+		   job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT,
+		   worker_id UUID NOT NULL REFERENCES workers(id) ON DELETE RESTRICT,
+		   supplier_id UUID NOT NULL REFERENCES suppliers(id) ON DELETE RESTRICT,
+		   snapshot_version SMALLINT NOT NULL CHECK (snapshot_version > 0),
+		   input_snapshot JSONB NOT NULL CHECK (jsonb_typeof(input_snapshot)='object'),
+		   snapshot_sha256 TEXT NOT NULL CHECK (snapshot_sha256 ~ '^[0-9a-f]{64}$'),
+		   staged_result_key TEXT NOT NULL CHECK (btrim(staged_result_key) <> ''),
+		   reported_result_sha256 TEXT CHECK (reported_result_sha256 ~ '^[0-9a-f]{64}$'),
+		   duration_ms BIGINT NOT NULL CHECK (duration_ms >= 0),
+		   tokens_used BIGINT NOT NULL CHECK (tokens_used >= 0),
+		   hardware_temp_c REAL,
+		   sampling_policy TEXT,sampling_probability TEXT,sampling_selected BOOLEAN,
+		   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','leased','terminal')),
+		   artifact_key TEXT, artifact_sha256 TEXT, artifact_bytes BIGINT,
+		   lease_owner TEXT, lease_token UUID, lease_expires_at TIMESTAMPTZ,
+		   lease_attempts INT NOT NULL DEFAULT 0 CHECK (lease_attempts >= 0),
+		   next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(), last_error TEXT,
+		   terminal_outcome TEXT, decision_sha256 TEXT, terminal_at TIMESTAMPTZ,
+		   created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		   UNIQUE (task_id,attempt),
+		   CHECK ((artifact_key IS NULL AND artifact_sha256 IS NULL AND artifact_bytes IS NULL)
+		       OR (btrim(artifact_key) <> '' AND artifact_sha256 ~ '^[0-9a-f]{64}$' AND artifact_bytes >= 0)),
+		   CHECK ((sampling_policy IS NULL AND sampling_probability IS NULL AND sampling_selected IS NULL)
+		       OR (btrim(sampling_policy) <> '' AND sampling_probability IS NOT NULL AND sampling_selected IS NOT NULL)),
+		   CHECK ((status='leased' AND lease_owner IS NOT NULL AND btrim(lease_owner) <> ''
+		           AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL)
+		       OR (status<>'leased' AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL)),
+		   CHECK ((status='terminal'
+		           AND terminal_outcome IN ('pass','pass_with_penalty','fail','loss_no_payout')
+		           AND decision_sha256 ~ '^[0-9a-f]{64}$' AND terminal_at IS NOT NULL
+		           AND artifact_key IS NOT NULL AND sampling_policy IS NOT NULL)
+		       OR (status<>'terminal' AND terminal_outcome IS NULL AND decision_sha256 IS NULL AND terminal_at IS NULL))
+		 )`,
+		`ALTER TABLE verification_work ADD COLUMN IF NOT EXISTS sampling_policy TEXT`,
+		`ALTER TABLE verification_work ADD COLUMN IF NOT EXISTS sampling_probability TEXT`,
+		`ALTER TABLE verification_work ADD COLUMN IF NOT EXISTS sampling_selected BOOLEAN`,
+		`ALTER TABLE verification_work DROP CONSTRAINT IF EXISTS verification_work_sampling_complete`,
+		`ALTER TABLE verification_work ADD CONSTRAINT verification_work_sampling_complete CHECK (
+		   (sampling_policy IS NULL AND sampling_probability IS NULL AND sampling_selected IS NULL)
+		   OR (btrim(sampling_policy) <> '' AND sampling_probability IS NOT NULL AND sampling_selected IS NOT NULL)
+		 )`,
+		`ALTER TABLE verification_work DROP CONSTRAINT IF EXISTS verification_work_terminal_requires_sampling`,
+		`ALTER TABLE verification_work ADD CONSTRAINT verification_work_terminal_requires_sampling
+		   CHECK (status<>'terminal' OR sampling_policy IS NOT NULL)`,
+		// A replay may be upgrading a legacy in-flight row after this trigger was
+		// installed by an earlier binary/schema apply. Startup is not serving work;
+		// remove the guard for the narrowly-scoped backfill and recreate it below.
+		`DROP TRIGGER IF EXISTS tasks_execution_identity_immutable ON tasks`,
+		// Recover exact provenance only from an already-immutable attempt snapshot.
+		// For in-flight pre-deploy claims with no snapshot yet, freeze the best
+		// available live row once during migration. Completed legacy rows without
+		// verification_work deliberately remain unknown instead of being rewritten
+		// as if today's mutable worker profile had executed them.
+		`UPDATE tasks t
+		    SET execution_worker_id=vw.worker_id,
+		        execution_supplier_id=vw.supplier_id,
+		        execution_hw_class=vw.input_snapshot->>'hw_class',
+		        execution_engine=vw.input_snapshot->>'engine',
+		        execution_build_hash=vw.input_snapshot->>'build_hash'
+		   FROM verification_work vw
+		  WHERE vw.task_id=t.id AND vw.attempt=COALESCE(t.retry_count,0)
+		    AND t.execution_worker_id IS NULL
+		    AND COALESCE(btrim(vw.input_snapshot->>'hw_class'),'')<>''
+		    AND COALESCE(btrim(vw.input_snapshot->>'engine'),'')<>''
+		    AND vw.input_snapshot ? 'build_hash'`,
+		`UPDATE tasks t
+		    SET execution_worker_id=w.id,execution_supplier_id=w.supplier_id,
+		        execution_hw_class=w.hw_class,execution_engine=w.engine,
+		        execution_build_hash=w.build_hash
+		   FROM workers w
+		  WHERE t.execution_worker_id IS NULL
+		    AND t.status IN ('running','verifying')
+		    AND t.worker_id=w.id AND t.claimed_by=w.id
+		    AND COALESCE(btrim(w.hw_class),'')<>''
+		    AND COALESCE(btrim(w.engine),'')<>''`,
+		`DO $$ BEGIN
+		   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='tasks_execution_worker_fk') THEN
+		     ALTER TABLE tasks ADD CONSTRAINT tasks_execution_worker_fk
+		       FOREIGN KEY (execution_worker_id) REFERENCES workers(id) ON DELETE RESTRICT;
+		   END IF;
+		   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='tasks_execution_supplier_fk') THEN
+		     ALTER TABLE tasks ADD CONSTRAINT tasks_execution_supplier_fk
+		       FOREIGN KEY (execution_supplier_id) REFERENCES suppliers(id) ON DELETE RESTRICT;
+		   END IF;
+		 END $$`,
+		`CREATE OR REPLACE FUNCTION cx_protect_task_execution_identity() RETURNS trigger AS $$
+		 BEGIN
+		   IF (OLD.execution_worker_id,OLD.execution_supplier_id,OLD.execution_hw_class,
+		       OLD.execution_engine,OLD.execution_build_hash)
+		      IS DISTINCT FROM
+		      (NEW.execution_worker_id,NEW.execution_supplier_id,NEW.execution_hw_class,
+		       NEW.execution_engine,NEW.execution_build_hash) THEN
+		     IF NOT (
+		       OLD.status IN ('queued','retrying') AND NEW.status='running'
+		       AND NEW.execution_worker_id IS NOT NULL
+		       AND NEW.execution_supplier_id IS NOT NULL
+		       AND NEW.worker_id IS NOT DISTINCT FROM NEW.execution_worker_id
+		       AND NEW.claimed_by IS NOT DISTINCT FROM NEW.execution_worker_id
+		       AND COALESCE(btrim(NEW.execution_hw_class),'')<>''
+		       AND COALESCE(btrim(NEW.execution_engine),'')<>''
+		       AND NEW.execution_build_hash IS NOT NULL
+		       AND EXISTS (
+		         SELECT 1 FROM workers w
+		          WHERE w.id=NEW.execution_worker_id
+		            AND w.supplier_id=NEW.execution_supplier_id
+		            AND w.hw_class=NEW.execution_hw_class
+		            AND COALESCE(w.engine,'')=NEW.execution_engine
+		            AND COALESCE(w.build_hash,'')=NEW.execution_build_hash
+		       )
+		     ) THEN
+		       RAISE EXCEPTION 'task execution identity for % is immutable outside claim transition', OLD.id;
+		     END IF;
+		   END IF;
+		   RETURN NEW;
+		 END;
+		 $$ LANGUAGE plpgsql`,
+		`DROP TRIGGER IF EXISTS tasks_execution_identity_immutable ON tasks`,
+		`CREATE TRIGGER tasks_execution_identity_immutable
+		   BEFORE UPDATE OF execution_worker_id,execution_supplier_id,execution_hw_class,
+		                    execution_engine,execution_build_hash ON tasks
+		   FOR EACH ROW EXECUTE FUNCTION cx_protect_task_execution_identity()`,
+		// Freeze the best available class for pre-deploy queued tiebreaks. New rows
+		// always write these columns at creation; this one-time/idempotent projection
+		// uses only durable work or the claim-frozen execution tuple.
+		`UPDATE tasks t
+		    SET verification_hw_class=COALESCE(NULLIF((
+		          SELECT vw.input_snapshot->>'hw_class' FROM verification_work vw
+		           WHERE vw.task_id=anchor.id ORDER BY vw.attempt DESC LIMIT 1
+		        ),''),NULLIF(COALESCE(anchor.execution_hw_class,''),'')),
+		        verification_engine=COALESCE((
+		          SELECT vw.input_snapshot->>'engine' FROM verification_work vw
+		           WHERE vw.task_id=anchor.id ORDER BY vw.attempt DESC LIMIT 1
+		        ),COALESCE(anchor.execution_engine,'')),
+		        verification_build_hash=COALESCE((
+		          SELECT vw.input_snapshot->>'build_hash' FROM verification_work vw
+		           WHERE vw.task_id=anchor.id ORDER BY vw.attempt DESC LIMIT 1
+		        ),COALESCE(anchor.execution_build_hash,''))
+		   FROM tasks anchor
+		  WHERE t.is_redundancy=true AND t.hedged_from=anchor.id
+		    AND NULLIF(COALESCE(t.verification_hw_class,''),'') IS NULL
+		    AND COALESCE(NULLIF(anchor.execution_hw_class,''),(
+		          SELECT NULLIF(vw.input_snapshot->>'hw_class','') FROM verification_work vw
+		           WHERE vw.task_id=anchor.id ORDER BY vw.attempt DESC LIMIT 1
+		        )) IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS verification_work_pending_idx
+		   ON verification_work (status,next_attempt_at,created_at,id)`,
+		`CREATE INDEX IF NOT EXISTS verification_work_expired_lease_idx
+		   ON verification_work (status,lease_expires_at,id) WHERE status='leased'`,
+		`ALTER TABLE task_verdicts ADD COLUMN IF NOT EXISTS verification_work_id UUID REFERENCES verification_work(id)`,
+		`CREATE TABLE IF NOT EXISTS chunk_artifact_resolutions (
+		   effect_id UUID PRIMARY KEY,
+		   job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+		   chunk_index INT NOT NULL,
+		   winner_task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+		   verification_work_id UUID NOT NULL REFERENCES verification_work(id) ON DELETE RESTRICT,
+		   artifact_key TEXT NOT NULL CHECK (btrim(artifact_key) <> ''),
+		   artifact_sha256 TEXT NOT NULL CHECK (artifact_sha256 ~ '^[0-9a-f]{64}$'),
+		   artifact_bytes BIGINT NOT NULL CHECK (artifact_bytes >= 0),
+		   basis TEXT NOT NULL CHECK (basis IN ('provisional','majority')),
+		   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		 )`,
+		`ALTER TABLE chunk_artifact_resolutions DROP CONSTRAINT IF EXISTS chunk_artifact_resolutions_one_basis`,
+		`ALTER TABLE chunk_artifact_resolutions ADD CONSTRAINT chunk_artifact_resolutions_one_basis
+		   UNIQUE (job_id,chunk_index,basis)`,
+		`ALTER TABLE chunk_artifact_resolutions DROP CONSTRAINT IF EXISTS chunk_artifact_resolutions_chunk_nonnegative`,
+		`ALTER TABLE chunk_artifact_resolutions ADD CONSTRAINT chunk_artifact_resolutions_chunk_nonnegative
+		   CHECK (chunk_index >= 0)`,
+		`CREATE INDEX IF NOT EXISTS chunk_artifact_resolutions_lookup_idx
+		   ON chunk_artifact_resolutions (job_id,chunk_index,basis,created_at,effect_id)`,
+		`CREATE OR REPLACE FUNCTION validate_chunk_artifact_resolution_insert() RETURNS trigger AS $$
+		 BEGIN
+		   IF NOT EXISTS (
+		     SELECT 1
+		       FROM tasks t JOIN verification_work vw
+		         ON vw.id=NEW.verification_work_id AND vw.task_id=t.id
+		      WHERE t.id=NEW.winner_task_id
+		        AND t.job_id=NEW.job_id AND COALESCE(t.chunk_index,0)=NEW.chunk_index
+		        AND t.status='complete'
+		        AND t.result_ref=NEW.artifact_key AND t.result_sha256=NEW.artifact_sha256
+		        AND vw.job_id=NEW.job_id AND vw.attempt=t.retry_count
+		        AND vw.status='terminal' AND vw.terminal_outcome IN ('pass','pass_with_penalty')
+		        AND vw.artifact_key=NEW.artifact_key
+		        AND vw.artifact_sha256=NEW.artifact_sha256
+		        AND vw.artifact_bytes=NEW.artifact_bytes
+		        AND (NEW.basis<>'provisional' OR (
+		          t.is_redundancy=false AND t.is_honeypot=false AND EXISTS (
+		            SELECT 1 FROM ledger_entries le
+		             WHERE le.task_id=t.id AND le.kind='buyer_charge'
+		          )
+		        ))
+		   ) THEN
+		     RAISE EXCEPTION 'chunk artifact resolution is not bound to terminal sealed winner work';
+		   END IF;
+		   RETURN NEW;
+		 END;
+		 $$ LANGUAGE plpgsql`,
+		`DROP TRIGGER IF EXISTS chunk_artifact_resolutions_validate_insert ON chunk_artifact_resolutions`,
+		`CREATE TRIGGER chunk_artifact_resolutions_validate_insert BEFORE INSERT ON chunk_artifact_resolutions
+		 FOR EACH ROW EXECUTE FUNCTION validate_chunk_artifact_resolution_insert()`,
+		`DROP TRIGGER IF EXISTS chunk_artifact_resolutions_append_only ON chunk_artifact_resolutions`,
+		`CREATE TRIGGER chunk_artifact_resolutions_append_only BEFORE UPDATE OR DELETE ON chunk_artifact_resolutions
+		 FOR EACH ROW EXECUTE FUNCTION reject_task_verdict_update()`,
+		`CREATE TABLE IF NOT EXISTS verification_work_plans (
+		   work_id UUID PRIMARY KEY REFERENCES verification_work(id) ON DELETE RESTRICT,
+		   plan_version SMALLINT NOT NULL CHECK (plan_version > 0),
+		   snapshot_sha256 TEXT NOT NULL CHECK (snapshot_sha256 ~ '^[0-9a-f]{64}$'),
+		   artifact_key TEXT NOT NULL CHECK (btrim(artifact_key) <> ''),
+		   artifact_sha256 TEXT NOT NULL CHECK (artifact_sha256 ~ '^[0-9a-f]{64}$'),
+		   artifact_bytes BIGINT NOT NULL CHECK (artifact_bytes >= 0),
+		   sampling_policy TEXT NOT NULL CHECK (btrim(sampling_policy) <> ''),
+		   sampling_probability TEXT NOT NULL,sampling_selected BOOLEAN NOT NULL,
+		   decision_json JSONB NOT NULL CHECK (jsonb_typeof(decision_json)='object'),
+		   settlement_json JSONB NOT NULL CHECK (jsonb_typeof(settlement_json)='array'),
+		   decision_sha256 TEXT NOT NULL CHECK (decision_sha256 ~ '^[0-9a-f]{64}$'),
+		   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		 )`,
+		`CREATE OR REPLACE FUNCTION reject_verification_work_plan_update() RETURNS trigger AS $$
+		 BEGIN RAISE EXCEPTION 'verification work plan is immutable'; END;
+		 $$ LANGUAGE plpgsql`,
+		`DROP TRIGGER IF EXISTS verification_work_plans_no_update ON verification_work_plans`,
+		`CREATE TRIGGER verification_work_plans_no_update BEFORE UPDATE OR DELETE ON verification_work_plans
+		 FOR EACH ROW EXECUTE FUNCTION reject_verification_work_plan_update()`,
+		`CREATE OR REPLACE FUNCTION protect_verification_work_identity() RETURNS trigger AS $$
+		 BEGIN
+		   IF TG_OP='DELETE' THEN RAISE EXCEPTION 'verification work cannot be deleted'; END IF;
+		   IF (OLD.id,OLD.task_id,OLD.attempt,OLD.job_id,OLD.worker_id,OLD.supplier_id,
+		       OLD.snapshot_version,OLD.input_snapshot,OLD.snapshot_sha256,OLD.staged_result_key,
+		       OLD.reported_result_sha256,OLD.duration_ms,OLD.tokens_used,OLD.hardware_temp_c,OLD.created_at)
+		      IS DISTINCT FROM
+		      (NEW.id,NEW.task_id,NEW.attempt,NEW.job_id,NEW.worker_id,NEW.supplier_id,
+		       NEW.snapshot_version,NEW.input_snapshot,NEW.snapshot_sha256,NEW.staged_result_key,
+		       NEW.reported_result_sha256,NEW.duration_ms,NEW.tokens_used,NEW.hardware_temp_c,NEW.created_at)
+		      THEN RAISE EXCEPTION 'verification work attempt snapshot is immutable';
+		   END IF;
+		   IF OLD.artifact_key IS NOT NULL
+		      AND (OLD.artifact_key,OLD.artifact_sha256,OLD.artifact_bytes)
+		          IS DISTINCT FROM (NEW.artifact_key,NEW.artifact_sha256,NEW.artifact_bytes)
+		      THEN RAISE EXCEPTION 'verification artifact authority is immutable';
+		   END IF;
+		   IF OLD.sampling_policy IS NOT NULL
+		      AND (OLD.sampling_policy,OLD.sampling_probability,OLD.sampling_selected)
+		          IS DISTINCT FROM (NEW.sampling_policy,NEW.sampling_probability,NEW.sampling_selected)
+		      THEN RAISE EXCEPTION 'verification sampling decision is immutable';
+		   END IF;
+		   IF OLD.status='terminal' AND OLD IS DISTINCT FROM NEW
+		      THEN RAISE EXCEPTION 'terminal verification work is immutable'; END IF;
+		   IF OLD.status='pending' AND NEW.status NOT IN ('pending','leased')
+		      THEN RAISE EXCEPTION 'verification work must be leased before terminal transition'; END IF;
+		   IF OLD.status='leased' AND NEW.status='leased'
+		      AND OLD.lease_token IS DISTINCT FROM NEW.lease_token AND OLD.lease_expires_at>now()
+		      THEN RAISE EXCEPTION 'live verification lease cannot be stolen'; END IF;
+		   RETURN NEW;
+		 END;
+		 $$ LANGUAGE plpgsql`,
+		`DROP TRIGGER IF EXISTS verification_work_immutable ON verification_work`,
+		`CREATE TRIGGER verification_work_immutable BEFORE UPDATE OR DELETE ON verification_work
+		 FOR EACH ROW EXECUTE FUNCTION protect_verification_work_identity()`,
+		`CREATE OR REPLACE FUNCTION validate_verification_work_binding() RETURNS trigger AS $$
+		 BEGIN
+		   IF EXISTS (SELECT 1 FROM verification_work existing
+		               WHERE existing.task_id=NEW.task_id AND existing.attempt=NEW.attempt) THEN
+		     RETURN NEW;
+		   END IF;
+		   IF NEW.status<>'pending' OR NEW.artifact_key IS NOT NULL
+		      OR NEW.sampling_policy IS NOT NULL OR NEW.lease_owner IS NOT NULL
+		      OR NEW.terminal_outcome IS NOT NULL OR NEW.decision_sha256 IS NOT NULL
+		      OR NEW.terminal_at IS NOT NULL OR NEW.lease_attempts<>0 THEN
+		     RAISE EXCEPTION 'verification work must begin as an unleased pending attempt';
+		   END IF;
+		   IF NOT EXISTS (
+		     SELECT 1 FROM tasks t JOIN jobs j ON j.id=t.job_id
+		      WHERE t.id=NEW.task_id AND t.job_id=NEW.job_id AND t.status='verifying'
+		        AND t.worker_id=NEW.worker_id AND t.claimed_by=NEW.worker_id
+		        AND t.execution_worker_id=NEW.worker_id
+		        AND t.execution_supplier_id=NEW.supplier_id
+		        AND COALESCE(t.retry_count,0)::bigint=NEW.attempt
+		        AND t.result_ref=NEW.staged_result_key
+		        AND t.result_sha256 IS NOT DISTINCT FROM NEW.reported_result_sha256
+		        AND t.reported_duration_ms=NEW.duration_ms AND t.reported_tokens_used=NEW.tokens_used
+		        AND t.reported_hardware_temp_c IS NOT DISTINCT FROM NEW.hardware_temp_c
+		        AND j.status IN ('queued','running','verifying')
+		        AND NEW.snapshot_version=4
+		        AND (NEW.input_snapshot->>'is_honeypot')::boolean=t.is_honeypot
+		        AND (NEW.input_snapshot->>'is_redundancy')::boolean=t.is_redundancy
+		        AND COALESCE(NEW.input_snapshot->>'hw_class','')=COALESCE(t.execution_hw_class,'')
+		        AND COALESCE(NEW.input_snapshot->>'engine','')=COALESCE(t.execution_engine,'')
+		        AND COALESCE(NEW.input_snapshot->>'build_hash','')=COALESCE(t.execution_build_hash,'')
+		        AND COALESCE(NEW.input_snapshot->>'job_type','')=j.job_type
+		        AND COALESCE(NEW.input_snapshot->>'input_ref','')=COALESCE(t.input_ref,'')
+		        AND COALESCE(NEW.input_snapshot->>'model_ref','')=COALESCE(j.model_ref,'')
+		        AND COALESCE((NEW.input_snapshot->>'min_memory_gb')::real,0)=COALESCE(j.min_memory_gb,0)
+		        AND COALESCE((NEW.input_snapshot->>'chunk_index')::int,0)=COALESCE(t.chunk_index,0)
+		        AND COALESCE((NEW.input_snapshot->>'split_size')::int,0)=COALESCE(j.split_size,0)
+		        AND COALESCE((NEW.input_snapshot->>'result_max_bytes')::bigint,0) BETWEEN 1 AND 268435456
+		        AND COALESCE((NEW.input_snapshot->>'expected_output_records')::bigint,0)=COALESCE(t.expected_output_records,0)
+		   ) THEN RAISE EXCEPTION 'verification work does not match the claim-frozen task attempt snapshot'; END IF;
+		   RETURN NEW;
+		 END;
+		 $$ LANGUAGE plpgsql`,
+		`DROP TRIGGER IF EXISTS verification_work_binding ON verification_work`,
+		`CREATE TRIGGER verification_work_binding BEFORE INSERT ON verification_work
+		 FOR EACH ROW EXECUTE FUNCTION validate_verification_work_binding()`,
+		`ALTER TABLE verification_events ADD COLUMN IF NOT EXISTS effect_id UUID`,
+		`ALTER TABLE verification_events ADD COLUMN IF NOT EXISTS attempt SMALLINT`,
+		`DROP INDEX IF EXISTS verification_events_effect_uniq`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS verification_events_effect_uniq
+		   ON verification_events (effect_id)`,
+		`DELETE FROM verification_events newer
+		 USING verification_events older
+		 WHERE newer.effect_id IS NULL AND older.effect_id IS NULL
+		   AND newer.task_id IS NOT NULL
+		   AND newer.task_id = older.task_id AND newer.kind = older.kind
+		   AND (newer.created_at > older.created_at
+		        OR (newer.created_at = older.created_at AND newer.id::text > older.id::text))`,
+		`DROP INDEX IF EXISTS verification_events_task_kind_uniq`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS verification_events_legacy_task_kind_uniq
+		   ON verification_events (task_id, kind)
+		   WHERE task_id IS NOT NULL AND effect_id IS NULL`,
+		// Admin authority provenance. Sessions minted before they were linked to a
+		// passkey cannot be attributed honestly, so this migration expires them and
+		// requires one fresh login rather than inventing an origin credential.
+		`ALTER TABLE admin_credentials ADD COLUMN IF NOT EXISTS revoked BOOLEAN NOT NULL DEFAULT false`,
+		`ALTER TABLE admin_sessions ADD COLUMN IF NOT EXISTS id UUID DEFAULT gen_random_uuid()`,
+		`UPDATE admin_sessions SET id=gen_random_uuid() WHERE id IS NULL`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS admin_sessions_id_uniq ON admin_sessions (id)`,
+		`ALTER TABLE admin_sessions ALTER COLUMN id SET NOT NULL`,
+		`ALTER TABLE admin_sessions ADD COLUMN IF NOT EXISTS admin_credential_id UUID
+		   REFERENCES admin_credentials(id) ON DELETE RESTRICT`,
+		`DELETE FROM admin_sessions WHERE admin_credential_id IS NULL`,
+		`ALTER TABLE admin_sessions ALTER COLUMN admin_credential_id SET NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS admin_sessions_credential_idx
+		   ON admin_sessions (admin_credential_id, expires_at)`,
 		// Operator Tooling 7->8 (docs/internal/CREED_AND_PATH_TO_TEN.md, "Add write
 		// actions the operator currently has to reach into the database for"): an
 		// append-only audit log for every admin write action that used to be a raw
@@ -405,7 +1386,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		// WHY without re-deriving it from a diff of table state over time.
 		`CREATE TABLE IF NOT EXISTS admin_actions (
 		   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-		   created_at  TIMESTAMPTZ DEFAULT now(),
+		   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
 		   kind        TEXT NOT NULL,  -- task_requeued|reputation_adjusted|payout_released
 		   task_id     UUID,
 		   supplier_id UUID,
@@ -413,11 +1394,557 @@ func (s *Store) Migrate(ctx context.Context) error {
 		   reason      TEXT,
 		   detail      JSONB
 		 )`,
+		`ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS actor_mode TEXT`,
+		`ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS actor_principal_id UUID`,
+		`ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS actor_session_id UUID`,
+		`ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS actor_label TEXT`,
+		`ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS attribution_scope TEXT`,
+		`ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS intent_version INTEGER`,
+		`ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS request_sha256 TEXT`,
+		`ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS correlation_ref TEXT`,
+		`ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS target_kind TEXT`,
+		`ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS target_id UUID`,
+		`ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS fund_id UUID`,
+		`ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS fund_ref TEXT`,
+		`ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS authorization_ref TEXT`,
+		`ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS amount_cents BIGINT`,
+		`ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS currency TEXT`,
+		`ALTER TABLE admin_actions DROP CONSTRAINT IF EXISTS admin_actions_actor_shape`,
+		`ALTER TABLE admin_actions ADD CONSTRAINT admin_actions_actor_shape CHECK (
+		   (actor_mode IS NULL AND actor_principal_id IS NULL AND actor_session_id IS NULL
+		    AND attribution_scope IS NULL)
+		   OR (actor_mode='passkey_session' AND actor_principal_id IS NOT NULL
+		       AND actor_session_id IS NOT NULL AND attribution_scope='credential_only')
+		   OR (actor_mode='break_glass_api_key' AND actor_principal_id IS NOT NULL
+		       AND actor_session_id IS NULL AND attribution_scope='shared_credential_only')
+		 ) NOT VALID`,
+		`ALTER TABLE admin_actions DROP CONSTRAINT IF EXISTS admin_actions_money_shape`,
+		`ALTER TABLE admin_actions ADD CONSTRAINT admin_actions_money_shape CHECK (
+		   kind NOT IN ('subsidy_fund_authorized','payout_subsidy_authorized')
+		   OR (actor_mode IS NOT NULL AND intent_version=1
+		       AND request_sha256 ~ '^[0-9a-f]{64}$'
+		       AND correlation_ref IS NOT NULL AND btrim(correlation_ref) <> ''
+		       AND target_kind IS NOT NULL AND target_id IS NOT NULL
+		       AND fund_id IS NOT NULL AND fund_ref IS NOT NULL AND btrim(fund_ref) <> ''
+		       AND amount_cents > 0 AND currency='usd'
+		       AND reason IS NOT NULL AND btrim(reason) <> '')
+		 ) NOT VALID`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS admin_actions_money_correlation_uniq
+		   ON admin_actions (kind,correlation_ref)
+		   WHERE kind IN ('subsidy_fund_authorized','payout_subsidy_authorized')`,
+		`CREATE OR REPLACE FUNCTION reject_admin_action_mutation()
+		 RETURNS trigger LANGUAGE plpgsql AS $$
+		 BEGIN
+		   RAISE EXCEPTION 'admin actions are append-only';
+		 END;
+		 $$`,
+		`DROP TRIGGER IF EXISTS admin_actions_append_only ON admin_actions`,
+		`CREATE TRIGGER admin_actions_append_only
+		 BEFORE UPDATE OR DELETE ON admin_actions
+		 FOR EACH ROW EXECUTE FUNCTION reject_admin_action_mutation()`,
+		// Pricing/economics cash-safety tranche (kept as one distinct additive
+		// section): exact card minor units and a durable supplier-payout operation
+		// whose sending/reversal state cannot be erased by a racing status write.
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS charge_requested_cents BIGINT`,
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS charge_received_cents BIGINT`,
+		`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS charge_currency TEXT`,
+		`ALTER TABLE charge_batches ADD COLUMN IF NOT EXISTS charge_requested_cents BIGINT`,
+		`ALTER TABLE charge_batches ADD COLUMN IF NOT EXISTS charge_received_cents BIGINT`,
+		`ALTER TABLE charge_batches ADD COLUMN IF NOT EXISTS charge_currency TEXT`,
+		`CREATE TABLE IF NOT EXISTS buyer_cash_collections (
+		   payment_intent TEXT PRIMARY KEY CHECK (btrim(payment_intent) <> ''),
+		   charge_id TEXT UNIQUE CHECK (charge_id IS NULL OR btrim(charge_id) <> ''),
+		   buyer_id UUID NOT NULL,
+		   source_kind TEXT NOT NULL CHECK (source_kind IN ('job','batch')),
+		   job_id UUID UNIQUE REFERENCES jobs(id),
+		   charge_batch_id UUID UNIQUE REFERENCES charge_batches(id),
+		   requested_cents BIGINT NOT NULL CHECK (requested_cents > 0),
+		   received_cents BIGINT NOT NULL CHECK (received_cents > 0),
+		   currency TEXT NOT NULL CHECK (currency = 'usd'),
+		   recorded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		   CHECK (requested_cents = received_cents),
+		   CHECK ((source_kind='job' AND job_id IS NOT NULL AND charge_batch_id IS NULL)
+		       OR (source_kind='batch' AND charge_batch_id IS NOT NULL AND job_id IS NULL))
+		 )`,
+		`ALTER TABLE buyer_cash_collections ADD COLUMN IF NOT EXISTS charge_id TEXT`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS buyer_cash_collections_charge_id_uniq
+		   ON buyer_cash_collections (charge_id) WHERE charge_id IS NOT NULL`,
+		// Only exact historical confirmations are canonicalized. A legacy charged
+		// row without PI + matching positive minor-unit fields remains unfunded.
+		`INSERT INTO buyer_cash_collections
+		   (payment_intent,buyer_id,source_kind,job_id,requested_cents,received_cents,currency)
+		 SELECT stripe_pi,buyer_id,'job',id,charge_requested_cents,charge_received_cents,charge_currency
+		   FROM jobs
+		  WHERE charge_status='charged' AND COALESCE(stripe_pi,'') <> ''
+		    AND charge_requested_cents > 0
+		    AND charge_received_cents=charge_requested_cents AND charge_currency='usd'
+		 ON CONFLICT DO NOTHING`,
+		`INSERT INTO buyer_cash_collections
+		   (payment_intent,buyer_id,source_kind,charge_batch_id,requested_cents,received_cents,currency)
+		 SELECT stripe_pi,buyer_id,'batch',id,charge_requested_cents,charge_received_cents,charge_currency
+		   FROM charge_batches
+		  WHERE status='charged' AND COALESCE(stripe_pi,'') <> ''
+		    AND charge_requested_cents > 0
+		    AND charge_received_cents=charge_requested_cents AND charge_currency='usd'
+		 ON CONFLICT DO NOTHING`,
+		// Signed Stripe cash-event inbox and object state. Event ids plus payload
+		// digests make delivery replay idempotent and conflicting reuse fatal. Charge
+		// refunds are cumulative; dispute cash availability is ordered by Stripe's
+		// event creation time rather than webhook arrival order.
+		`CREATE TABLE IF NOT EXISTS stripe_webhook_events (
+		   event_id TEXT PRIMARY KEY CHECK (btrim(event_id) <> ''),
+		   event_type TEXT NOT NULL CHECK (event_type IN (
+		     'charge.refunded','charge.dispute.created','charge.dispute.funds_withdrawn',
+		     'charge.dispute.funds_reinstated','charge.dispute.closed')),
+		   object_id TEXT NOT NULL CHECK (btrim(object_id) <> ''),
+		   charge_id TEXT NOT NULL CHECK (btrim(charge_id) <> ''),
+		   payment_intent TEXT CHECK (payment_intent IS NULL OR btrim(payment_intent) <> ''),
+		   event_created BIGINT NOT NULL CHECK (event_created > 0),
+		   payload_sha256 TEXT NOT NULL CHECK (payload_sha256 ~ '^[0-9a-f]{64}$'),
+		   recorded_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		 )`,
+		`CREATE INDEX IF NOT EXISTS stripe_webhook_events_object_idx
+		   ON stripe_webhook_events (event_type,object_id,event_created)`,
+		`CREATE TABLE IF NOT EXISTS stripe_charge_cash_state (
+		   charge_id TEXT PRIMARY KEY CHECK (btrim(charge_id) <> ''),
+		   payment_intent TEXT CHECK (payment_intent IS NULL OR btrim(payment_intent) <> ''),
+		   amount_cents BIGINT NOT NULL CHECK (amount_cents > 0),
+		   refunded_cents BIGINT NOT NULL CHECK (refunded_cents > 0 AND refunded_cents <= amount_cents),
+		   currency TEXT NOT NULL CHECK (btrim(currency) <> ''),
+		   last_event_id TEXT NOT NULL REFERENCES stripe_webhook_events(event_id) ON DELETE RESTRICT,
+		   last_event_created BIGINT NOT NULL CHECK (last_event_created > 0),
+		   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		 )`,
+		`CREATE INDEX IF NOT EXISTS stripe_charge_cash_state_pi_idx
+		   ON stripe_charge_cash_state (payment_intent) WHERE payment_intent IS NOT NULL`,
+		`CREATE TABLE IF NOT EXISTS stripe_dispute_cash_state (
+		   dispute_id TEXT PRIMARY KEY CHECK (btrim(dispute_id) <> ''),
+		   charge_id TEXT NOT NULL CHECK (btrim(charge_id) <> ''),
+		   payment_intent TEXT CHECK (payment_intent IS NULL OR btrim(payment_intent) <> ''),
+		   amount_cents BIGINT NOT NULL CHECK (amount_cents > 0),
+		   currency TEXT NOT NULL CHECK (btrim(currency) <> ''),
+		   status TEXT NOT NULL CHECK (btrim(status) <> ''),
+		   cash_unavailable BOOLEAN NOT NULL DEFAULT false,
+		   cash_effect_created BIGINT NOT NULL DEFAULT 0 CHECK (cash_effect_created >= 0),
+		   cash_effect_rank INTEGER NOT NULL DEFAULT 0 CHECK (cash_effect_rank >= 0),
+		   last_event_id TEXT NOT NULL REFERENCES stripe_webhook_events(event_id) ON DELETE RESTRICT,
+		   last_event_type TEXT NOT NULL,
+		   last_event_created BIGINT NOT NULL CHECK (last_event_created > 0),
+		   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		 )`,
+		`CREATE INDEX IF NOT EXISTS stripe_dispute_cash_state_pi_unavailable_idx
+		   ON stripe_dispute_cash_state (payment_intent)
+		   WHERE payment_intent IS NOT NULL AND cash_unavailable`,
+		`CREATE TABLE IF NOT EXISTS platform_subsidy_funds (
+		   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		   authorization_action_id UUID NOT NULL UNIQUE REFERENCES admin_actions(id) ON DELETE RESTRICT,
+		   fund_ref TEXT NOT NULL UNIQUE CHECK (btrim(fund_ref) <> ''),
+		   external_treasury_ref TEXT NOT NULL UNIQUE CHECK (btrim(external_treasury_ref) <> ''),
+		   authorized_cents BIGINT NOT NULL CHECK (authorized_cents > 0),
+		   currency TEXT NOT NULL CHECK (currency = 'usd'),
+		   reason TEXT NOT NULL CHECK (btrim(reason) <> ''),
+		   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','closed')),
+		   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		 )`,
+		`ALTER TABLE platform_subsidy_funds ADD COLUMN IF NOT EXISTS authorization_action_id UUID`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS platform_subsidy_funds_authorization_action_uniq
+		   ON platform_subsidy_funds (authorization_action_id)
+		   WHERE authorization_action_id IS NOT NULL`,
+		`ALTER TABLE platform_subsidy_funds DROP CONSTRAINT IF EXISTS platform_subsidy_funds_authorization_action_fkey`,
+		`ALTER TABLE platform_subsidy_funds ADD CONSTRAINT platform_subsidy_funds_authorization_action_fkey
+		   FOREIGN KEY (authorization_action_id) REFERENCES admin_actions(id) ON DELETE RESTRICT NOT VALID`,
+		`ALTER TABLE platform_subsidy_funds DROP CONSTRAINT IF EXISTS platform_subsidy_funds_authorization_required`,
+		`ALTER TABLE platform_subsidy_funds ADD CONSTRAINT platform_subsidy_funds_authorization_required
+		   CHECK (authorization_action_id IS NOT NULL) NOT VALID`,
+		`CREATE TABLE IF NOT EXISTS supplier_payout_funding (
+		   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		   authorization_action_id UUID UNIQUE REFERENCES admin_actions(id) ON DELETE RESTRICT,
+		   ledger_entry_id UUID NOT NULL UNIQUE REFERENCES ledger_entries(id),
+		   source_kind TEXT NOT NULL CHECK (source_kind IN ('buyer_collection','platform_subsidy')),
+		   liability_job_id UUID REFERENCES jobs(id),
+		   collection_payment_intent TEXT REFERENCES buyer_cash_collections(payment_intent),
+		   subsidy_fund_id UUID REFERENCES platform_subsidy_funds(id),
+		   subsidy_authorization_ref TEXT UNIQUE,
+		   subsidy_reason TEXT,
+		   amount_cents BIGINT NOT NULL CHECK (amount_cents > 0),
+		   currency TEXT NOT NULL CHECK (currency = 'usd'),
+		   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		   CONSTRAINT supplier_payout_funding_source_valid CHECK (
+		     (source_kind='buyer_collection' AND liability_job_id IS NOT NULL
+		      AND collection_payment_intent IS NOT NULL
+		      AND subsidy_fund_id IS NULL
+		      AND subsidy_authorization_ref IS NULL AND subsidy_reason IS NULL)
+		     OR
+		     (source_kind='platform_subsidy' AND collection_payment_intent IS NULL
+		      AND subsidy_fund_id IS NOT NULL
+		      AND subsidy_authorization_ref IS NOT NULL AND btrim(subsidy_authorization_ref) <> ''
+		      AND subsidy_reason IS NOT NULL AND btrim(subsidy_reason) <> '')
+		   )
+		 )`,
+		`CREATE INDEX IF NOT EXISTS supplier_payout_funding_collection_idx
+		   ON supplier_payout_funding (collection_payment_intent)
+		   WHERE source_kind='buyer_collection'`,
+		`CREATE INDEX IF NOT EXISTS supplier_payout_funding_subsidy_fund_idx
+		   ON supplier_payout_funding (subsidy_fund_id)
+		   WHERE source_kind='platform_subsidy'`,
+		`ALTER TABLE supplier_payout_funding ADD COLUMN IF NOT EXISTS subsidy_fund_id UUID
+		   REFERENCES platform_subsidy_funds(id)`,
+		`ALTER TABLE supplier_payout_funding ADD COLUMN IF NOT EXISTS authorization_action_id UUID`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS supplier_payout_funding_authorization_action_uniq
+		   ON supplier_payout_funding (authorization_action_id)
+		   WHERE authorization_action_id IS NOT NULL`,
+		`ALTER TABLE supplier_payout_funding DROP CONSTRAINT IF EXISTS supplier_payout_funding_authorization_action_fkey`,
+		`ALTER TABLE supplier_payout_funding ADD CONSTRAINT supplier_payout_funding_authorization_action_fkey
+		   FOREIGN KEY (authorization_action_id) REFERENCES admin_actions(id) ON DELETE RESTRICT NOT VALID`,
+		`ALTER TABLE supplier_payout_funding DROP CONSTRAINT IF EXISTS supplier_payout_funding_source_valid`,
+		`ALTER TABLE supplier_payout_funding ADD CONSTRAINT supplier_payout_funding_source_valid CHECK (
+		   (source_kind='buyer_collection' AND liability_job_id IS NOT NULL
+		    AND collection_payment_intent IS NOT NULL AND subsidy_fund_id IS NULL
+		    AND authorization_action_id IS NULL
+		    AND subsidy_authorization_ref IS NULL AND subsidy_reason IS NULL)
+		   OR
+		   (source_kind='platform_subsidy' AND collection_payment_intent IS NULL
+		    AND subsidy_fund_id IS NOT NULL
+		    AND authorization_action_id IS NOT NULL
+		    AND subsidy_authorization_ref IS NOT NULL AND btrim(subsidy_authorization_ref) <> ''
+		    AND subsidy_reason IS NOT NULL AND btrim(subsidy_reason) <> '')
+		 ) NOT VALID`,
+		// Current impairment of an immutable funding reservation. The reservation row
+		// remains append-only; this event-derived state says whether Stripe cash still
+		// covers it and which signed event last changed that conclusion.
+		`CREATE TABLE IF NOT EXISTS supplier_payout_funding_state (
+		   funding_id UUID PRIMARY KEY REFERENCES supplier_payout_funding(id) ON DELETE RESTRICT,
+		   status TEXT NOT NULL CHECK (status IN ('available','compromised')),
+		   compromised_cents BIGINT NOT NULL CHECK (compromised_cents >= 0),
+		   last_event_id TEXT NOT NULL REFERENCES stripe_webhook_events(event_id) ON DELETE RESTRICT,
+		   reason TEXT NOT NULL CHECK (btrim(reason) <> ''),
+		   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		   CHECK ((status='available' AND compromised_cents=0)
+		       OR (status='compromised' AND compromised_cents>0))
+		 )`,
+		`CREATE INDEX IF NOT EXISTS supplier_payout_funding_state_compromised_idx
+		   ON supplier_payout_funding_state (updated_at,funding_id) WHERE status='compromised'`,
+		`CREATE TABLE IF NOT EXISTS supplier_minor_unit_settlements (
+		   ledger_entry_id UUID PRIMARY KEY REFERENCES ledger_entries(id) ON DELETE RESTRICT,
+		   policy TEXT NOT NULL CHECK (policy='floor_cent_carry_v1'),
+		   liability_microusd BIGINT NOT NULL CHECK (liability_microusd >= 0),
+		   cash_cents BIGINT NOT NULL CHECK (cash_cents >= 0),
+		   remainder_microusd BIGINT NOT NULL CHECK (
+		     remainder_microusd >= 0 AND remainder_microusd < 10000),
+		   currency TEXT NOT NULL DEFAULT 'usd' CHECK (currency='usd'),
+		   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		   CHECK (liability_microusd = cash_cents * 10000 + remainder_microusd)
+		 )`,
+		`CREATE OR REPLACE FUNCTION validate_minor_unit_settlement_binding()
+		 RETURNS trigger LANGUAGE plpgsql AS $$
+		 DECLARE ledger_kind TEXT; ledger_microusd BIGINT;
+		 BEGIN
+		   SELECT kind,(amount_usd*1000000)::bigint INTO ledger_kind,ledger_microusd
+		     FROM ledger_entries WHERE id=NEW.ledger_entry_id;
+		   IF ledger_kind IS DISTINCT FROM 'supplier_credit'
+		      OR ledger_microusd IS DISTINCT FROM NEW.liability_microusd THEN
+		     RAISE EXCEPTION 'minor-unit settlement does not match supplier-credit liability';
+		   END IF;
+		   RETURN NEW;
+		 END;
+		 $$`,
+		`DROP TRIGGER IF EXISTS supplier_minor_unit_settlement_binding
+		   ON supplier_minor_unit_settlements`,
+		`CREATE TRIGGER supplier_minor_unit_settlement_binding
+		 BEFORE INSERT ON supplier_minor_unit_settlements
+		 FOR EACH ROW EXECUTE FUNCTION validate_minor_unit_settlement_binding()`,
+		`CREATE OR REPLACE FUNCTION reject_settled_ledger_money_mutation()
+		 RETURNS trigger LANGUAGE plpgsql AS $$
+		 BEGIN
+		   IF (OLD.kind,OLD.amount_usd) IS DISTINCT FROM (NEW.kind,NEW.amount_usd)
+		      AND EXISTS (SELECT 1 FROM supplier_minor_unit_settlements
+		                   WHERE ledger_entry_id=OLD.id) THEN
+		     RAISE EXCEPTION 'settled supplier liability identity is immutable';
+		   END IF;
+		   RETURN NEW;
+		 END;
+		 $$`,
+		`DROP TRIGGER IF EXISTS settled_ledger_money_immutable ON ledger_entries`,
+		`CREATE TRIGGER settled_ledger_money_immutable
+		 BEFORE UPDATE OF kind,amount_usd ON ledger_entries
+		 FOR EACH ROW EXECUTE FUNCTION reject_settled_ledger_money_mutation()`,
+		`CREATE OR REPLACE FUNCTION reject_minor_unit_settlement_mutation()
+		 RETURNS trigger LANGUAGE plpgsql AS $$
+		 BEGIN
+		   RAISE EXCEPTION 'supplier minor-unit settlements are append-only';
+		 END;
+		 $$`,
+		`DROP TRIGGER IF EXISTS supplier_minor_unit_settlement_append_only
+		   ON supplier_minor_unit_settlements`,
+		`CREATE TRIGGER supplier_minor_unit_settlement_append_only
+		 BEFORE UPDATE OR DELETE ON supplier_minor_unit_settlements
+		 FOR EACH ROW EXECUTE FUNCTION reject_minor_unit_settlement_mutation()`,
+		`CREATE TABLE IF NOT EXISTS supplier_payout_operations (
+		   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		   ledger_entry_id UUID NOT NULL UNIQUE REFERENCES ledger_entries(id) ON DELETE RESTRICT,
+		   funding_id UUID REFERENCES supplier_payout_funding(id),
+		   supplier_id UUID NOT NULL REFERENCES suppliers(id),
+		   requested_cents BIGINT NOT NULL CHECK (requested_cents > 0),
+		   sent_cents BIGINT CHECK (sent_cents > 0),
+		   currency TEXT NOT NULL DEFAULT 'usd' CHECK (currency = 'usd'),
+		   status TEXT NOT NULL CHECK (status IN (
+		     'sending','ready','outcome_unknown','released','exported','clawed_back','reversal_required','reversed')),
+		   cash_moved BOOLEAN NOT NULL DEFAULT false,
+		   outcome_unknown BOOLEAN NOT NULL DEFAULT false,
+		   transfer_ref TEXT,
+		   last_error TEXT,
+		   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		   CHECK (NOT cash_moved OR (sent_cents IS NOT NULL AND transfer_ref IS NOT NULL)),
+		   CHECK (NOT outcome_unknown OR NOT cash_moved)
+		 )`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS supplier_payout_operations_transfer_ref_uniq
+		   ON supplier_payout_operations (transfer_ref) WHERE transfer_ref IS NOT NULL AND cash_moved`,
+		`CREATE INDEX IF NOT EXISTS supplier_payout_operations_status_idx
+		   ON supplier_payout_operations (status, updated_at)`,
+		`CREATE INDEX IF NOT EXISTS ledger_due_payout_idx
+		   ON ledger_entries (release_at,id)
+		   WHERE kind='supplier_credit' AND payout_status='held' AND release_at IS NOT NULL`,
+		`ALTER TABLE supplier_payout_operations ADD COLUMN IF NOT EXISTS funding_id UUID
+		   REFERENCES supplier_payout_funding(id)`,
+		`ALTER TABLE supplier_payout_operations ADD COLUMN IF NOT EXISTS outcome_unknown BOOLEAN
+		   NOT NULL DEFAULT false`,
+		`ALTER TABLE supplier_payout_operations DROP CONSTRAINT IF EXISTS supplier_payout_operations_status_check`,
+		`ALTER TABLE supplier_payout_operations ADD CONSTRAINT supplier_payout_operations_status_check
+		   CHECK (status IN ('sending','ready','outcome_unknown','released','exported',
+		                     'clawed_back','reversal_required','reversed'))`,
+		`ALTER TABLE supplier_payout_operations DROP CONSTRAINT IF EXISTS supplier_payout_operations_outcome_unknown_check`,
+		`ALTER TABLE supplier_payout_operations ADD CONSTRAINT supplier_payout_operations_outcome_unknown_check
+		   CHECK (NOT outcome_unknown OR NOT cash_moved)`,
+		`ALTER TABLE supplier_payout_operations DROP CONSTRAINT IF EXISTS supplier_payout_operations_ledger_entry_id_fkey`,
+		`ALTER TABLE supplier_payout_operations ADD CONSTRAINT supplier_payout_operations_ledger_entry_id_fkey
+		   FOREIGN KEY (ledger_entry_id) REFERENCES ledger_entries(id) ON DELETE RESTRICT`,
+		`CREATE OR REPLACE FUNCTION reject_immutable_money_fact_mutation()
+		 RETURNS trigger LANGUAGE plpgsql AS $$
+		 BEGIN
+		   IF TG_OP = 'DELETE' OR OLD IS DISTINCT FROM NEW THEN
+		     RAISE EXCEPTION '% rows are append-only', TG_TABLE_NAME;
+		   END IF;
+		   RETURN NEW;
+		 END;
+		 $$`,
+		`DROP TRIGGER IF EXISTS buyer_cash_collections_append_only ON buyer_cash_collections`,
+		`CREATE TRIGGER buyer_cash_collections_append_only
+		 BEFORE UPDATE OR DELETE ON buyer_cash_collections
+		 FOR EACH ROW EXECUTE FUNCTION reject_immutable_money_fact_mutation()`,
+		`DROP TRIGGER IF EXISTS stripe_webhook_events_append_only ON stripe_webhook_events`,
+		`CREATE TRIGGER stripe_webhook_events_append_only
+		 BEFORE UPDATE OR DELETE ON stripe_webhook_events
+		 FOR EACH ROW EXECUTE FUNCTION reject_immutable_money_fact_mutation()`,
+		`CREATE OR REPLACE FUNCTION protect_buyer_charge_operation()
+		 RETURNS trigger LANGUAGE plpgsql AS $$
+		 BEGIN
+		   IF TG_OP='DELETE' THEN
+		     RAISE EXCEPTION 'buyer charge operations cannot be deleted';
+		   END IF;
+		   IF (OLD.operation_key,OLD.source_kind,OLD.job_id,OLD.charge_batch_id,
+		       OLD.buyer_id,OLD.stripe_customer,OLD.stripe_payment_method,
+		       OLD.amount_cents,OLD.currency,OLD.created_at)
+		      IS DISTINCT FROM
+		      (NEW.operation_key,NEW.source_kind,NEW.job_id,NEW.charge_batch_id,
+		       NEW.buyer_id,NEW.stripe_customer,NEW.stripe_payment_method,
+		       NEW.amount_cents,NEW.currency,NEW.created_at) THEN
+		     RAISE EXCEPTION 'buyer charge operation request identity is immutable';
+		   END IF;
+		   IF OLD.status='succeeded' AND
+		      (NEW.status,NEW.payment_intent,NEW.charge_id) IS DISTINCT FROM
+		      (OLD.status,OLD.payment_intent,OLD.charge_id) THEN
+		     RAISE EXCEPTION 'succeeded buyer charge evidence is immutable';
+		   END IF;
+		   RETURN NEW;
+		 END;
+		 $$`,
+		`DROP TRIGGER IF EXISTS buyer_charge_operation_identity_immutable ON buyer_charge_operations`,
+		`CREATE TRIGGER buyer_charge_operation_identity_immutable
+		 BEFORE UPDATE OR DELETE ON buyer_charge_operations
+		 FOR EACH ROW EXECUTE FUNCTION protect_buyer_charge_operation()`,
+		`DROP TRIGGER IF EXISTS supplier_payout_funding_append_only ON supplier_payout_funding`,
+		`CREATE TRIGGER supplier_payout_funding_append_only
+		 BEFORE UPDATE OR DELETE ON supplier_payout_funding
+		 FOR EACH ROW EXECUTE FUNCTION reject_immutable_money_fact_mutation()`,
+		`CREATE OR REPLACE FUNCTION protect_subsidy_fund_identity()
+		 RETURNS trigger LANGUAGE plpgsql AS $$
+		 BEGIN
+		   IF TG_OP='DELETE' THEN
+		     RAISE EXCEPTION 'platform subsidy funds cannot be deleted';
+		   END IF;
+		   IF (OLD.id,OLD.authorization_action_id,OLD.fund_ref,OLD.external_treasury_ref,
+		       OLD.authorized_cents,OLD.currency,OLD.reason,OLD.created_at)
+		      IS DISTINCT FROM
+		      (NEW.id,NEW.authorization_action_id,NEW.fund_ref,NEW.external_treasury_ref,
+		       NEW.authorized_cents,NEW.currency,NEW.reason,NEW.created_at) THEN
+		     RAISE EXCEPTION 'platform subsidy fund authorization identity is immutable';
+		   END IF;
+		   IF OLD.status='closed' AND NEW.status<>'closed' THEN
+		     RAISE EXCEPTION 'closed platform subsidy funds cannot be reopened';
+		   END IF;
+		   RETURN NEW;
+		 END;
+		 $$`,
+		`DROP TRIGGER IF EXISTS platform_subsidy_funds_identity_immutable ON platform_subsidy_funds`,
+		`CREATE TRIGGER platform_subsidy_funds_identity_immutable
+		 BEFORE UPDATE OR DELETE ON platform_subsidy_funds
+		 FOR EACH ROW EXECUTE FUNCTION protect_subsidy_fund_identity()`,
+		`CREATE OR REPLACE FUNCTION validate_money_authority_action_binding()
+		 RETURNS trigger LANGUAGE plpgsql AS $$
+		 DECLARE binding_ok BOOLEAN;
+		 BEGIN
+		   IF NEW.kind IN ('subsidy_fund_authorized','payout_subsidy_authorized') THEN
+		     IF NEW.actor_mode='passkey_session' THEN
+		       SELECT EXISTS (
+		         SELECT 1 FROM admin_sessions s
+		         JOIN admin_credentials c ON c.id=s.admin_credential_id
+		          WHERE s.id=NEW.actor_session_id AND c.id=NEW.actor_principal_id
+		            AND s.revoked=false AND s.expires_at>clock_timestamp()
+		            AND c.revoked=false
+		       ) INTO binding_ok;
+		     ELSIF NEW.actor_mode='break_glass_api_key' THEN
+		       SELECT EXISTS (
+		         SELECT 1 FROM api_keys k
+		          WHERE k.id=NEW.actor_principal_id
+		            AND k.is_admin=true AND k.revoked=false
+		       ) INTO binding_ok;
+		     ELSE
+		       binding_ok:=false;
+		     END IF;
+		     IF NOT COALESCE(binding_ok,false) THEN
+		       RAISE EXCEPTION 'money authority action % has no live authenticated credential binding',NEW.id;
+		     END IF;
+		   END IF;
+		   IF NEW.kind='subsidy_fund_authorized' THEN
+		     SELECT EXISTS (
+		       SELECT 1 FROM platform_subsidy_funds f
+		        WHERE f.authorization_action_id=NEW.id
+		          AND NEW.target_kind='subsidy_fund'
+		          AND NEW.target_id=f.id AND NEW.fund_id=f.id
+		          AND NEW.fund_ref=f.fund_ref AND NEW.authorization_ref IS NULL
+		          AND NEW.amount_cents=f.authorized_cents
+		          AND NEW.currency=f.currency AND NEW.reason=f.reason
+		     ) INTO binding_ok;
+		   ELSIF NEW.kind='payout_subsidy_authorized' THEN
+		     SELECT EXISTS (
+		       SELECT 1 FROM supplier_payout_funding p
+		       JOIN platform_subsidy_funds f ON f.id=p.subsidy_fund_id
+		        WHERE p.authorization_action_id=NEW.id
+		          AND p.source_kind='platform_subsidy'
+		          AND NEW.target_kind='supplier_liability'
+		          AND NEW.target_id=p.ledger_entry_id
+		          AND NEW.ledger_entry_id=p.ledger_entry_id
+		          AND NEW.fund_id=f.id AND NEW.fund_ref=f.fund_ref
+		          AND NEW.authorization_ref=p.subsidy_authorization_ref
+		          AND NEW.amount_cents=p.amount_cents
+		          AND NEW.currency=p.currency AND NEW.reason=p.subsidy_reason
+		     ) INTO binding_ok;
+		   ELSE
+		     RETURN NEW;
+		   END IF;
+		   IF NOT COALESCE(binding_ok,false) THEN
+		     RAISE EXCEPTION 'money authority action % has no exact resource binding',NEW.id;
+		   END IF;
+		   RETURN NEW;
+		 END;
+		 $$`,
+		`DROP TRIGGER IF EXISTS admin_actions_money_binding ON admin_actions`,
+		`CREATE CONSTRAINT TRIGGER admin_actions_money_binding
+		 AFTER INSERT ON admin_actions DEFERRABLE INITIALLY DEFERRED
+		 FOR EACH ROW EXECUTE FUNCTION validate_money_authority_action_binding()`,
+		`CREATE OR REPLACE FUNCTION validate_money_authority_resource_binding()
+		 RETURNS trigger LANGUAGE plpgsql AS $$
+		 DECLARE binding_ok BOOLEAN;
+		 BEGIN
+		   IF TG_TABLE_NAME='platform_subsidy_funds' THEN
+		     SELECT EXISTS (
+		       SELECT 1 FROM admin_actions a
+		        WHERE a.id=NEW.authorization_action_id
+		          AND a.kind='subsidy_fund_authorized'
+		          AND a.target_kind='subsidy_fund'
+		          AND a.target_id=NEW.id AND a.fund_id=NEW.id
+		          AND a.fund_ref=NEW.fund_ref AND a.authorization_ref IS NULL
+		          AND a.amount_cents=NEW.authorized_cents
+		          AND a.currency=NEW.currency AND a.reason=NEW.reason
+		     ) INTO binding_ok;
+		   ELSE
+		     IF NEW.source_kind<>'platform_subsidy' THEN
+		       RETURN NEW;
+		     END IF;
+		     SELECT EXISTS (
+		       SELECT 1 FROM admin_actions a
+		       JOIN platform_subsidy_funds f ON f.id=NEW.subsidy_fund_id
+		        WHERE a.id=NEW.authorization_action_id
+		          AND a.kind='payout_subsidy_authorized'
+		          AND a.target_kind='supplier_liability'
+		          AND a.target_id=NEW.ledger_entry_id
+		          AND a.ledger_entry_id=NEW.ledger_entry_id
+		          AND a.fund_id=f.id AND a.fund_ref=f.fund_ref
+		          AND a.authorization_ref=NEW.subsidy_authorization_ref
+		          AND a.amount_cents=NEW.amount_cents
+		          AND a.currency=NEW.currency AND a.reason=NEW.subsidy_reason
+		     ) INTO binding_ok;
+		   END IF;
+		   IF NOT COALESCE(binding_ok,false) THEN
+		     RAISE EXCEPTION '% row has no exact money authority action binding',TG_TABLE_NAME;
+		   END IF;
+		   RETURN NEW;
+		 END;
+		 $$`,
+		`DROP TRIGGER IF EXISTS platform_subsidy_funds_money_binding ON platform_subsidy_funds`,
+		`CREATE CONSTRAINT TRIGGER platform_subsidy_funds_money_binding
+		 AFTER INSERT ON platform_subsidy_funds DEFERRABLE INITIALLY DEFERRED
+		 FOR EACH ROW EXECUTE FUNCTION validate_money_authority_resource_binding()`,
+		`DROP TRIGGER IF EXISTS supplier_payout_funding_money_binding ON supplier_payout_funding`,
+		`CREATE CONSTRAINT TRIGGER supplier_payout_funding_money_binding
+		 AFTER INSERT ON supplier_payout_funding DEFERRABLE INITIALLY DEFERRED
+		 FOR EACH ROW EXECUTE FUNCTION validate_money_authority_resource_binding()`,
+		`CREATE OR REPLACE FUNCTION reject_payout_operation_identity_mutation()
+		 RETURNS trigger LANGUAGE plpgsql AS $$
+		 BEGIN
+		   IF (OLD.ledger_entry_id,OLD.funding_id,OLD.supplier_id,OLD.requested_cents,
+		       OLD.currency,OLD.created_at)
+		      IS DISTINCT FROM
+		      (NEW.ledger_entry_id,NEW.funding_id,NEW.supplier_id,NEW.requested_cents,
+		       NEW.currency,NEW.created_at) THEN
+		     RAISE EXCEPTION 'supplier payout operation identity is immutable';
+		   END IF;
+		   RETURN NEW;
+		 END;
+		 $$`,
+		`DROP TRIGGER IF EXISTS supplier_payout_operation_identity_immutable
+		   ON supplier_payout_operations`,
+		`CREATE TRIGGER supplier_payout_operation_identity_immutable
+		 BEFORE UPDATE ON supplier_payout_operations
+		 FOR EACH ROW EXECUTE FUNCTION reject_payout_operation_identity_mutation()`,
+		`CREATE OR REPLACE FUNCTION reject_payout_operation_delete()
+		 RETURNS trigger LANGUAGE plpgsql AS $$
+		 BEGIN
+		   RAISE EXCEPTION 'supplier payout operations are append-only state records';
+		 END;
+		 $$`,
+		`DROP TRIGGER IF EXISTS supplier_payout_operation_no_delete
+		   ON supplier_payout_operations`,
+		`CREATE TRIGGER supplier_payout_operation_no_delete
+		 BEFORE DELETE ON supplier_payout_operations
+		 FOR EACH ROW EXECUTE FUNCTION reject_payout_operation_delete()`,
 	}
+	tx, err := migrationConn.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("migrate: begin: %w", err)
+	}
+	defer tx.Rollback(context.Background()) //nolint:errcheck // no-op after commit
 	for _, q := range stmts {
-		if _, err := s.pool.Exec(ctx, q); err != nil {
+		if _, err := tx.Exec(ctx, q); err != nil {
 			return fmt.Errorf("migrate: %q: %w", q, err)
 		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("migrate: commit schema changes: %w", err)
 	}
 	// Postgres Data Lifecycle 6->7 (docs/internal/CREED_AND_PATH_TO_TEN.md): convert the
 	// three high-churn telemetry tables to declarative RANGE partitioning by created_at,
@@ -426,8 +1953,18 @@ func (s *Store) Migrate(ctx context.Context) error {
 	// already partitioned is a no-op, so this is safe on every startup. A failure here
 	// is fatal at startup exactly like every statement above; a half-migrated table is
 	// impossible because each table's conversion is its own transaction.
-	if err := s.MigrateTelemetryPartitions(ctx); err != nil {
+	if err := migrateTelemetryPartitions(ctx, migrationConn); err != nil {
 		return fmt.Errorf("migrate: telemetry partitions: %w", err)
+	}
+	// Reconciliation uses the pool and must also work with a one-connection test
+	// or maintenance pool, so return the locked connection before running it.
+	releaseMigrationLock()
+	// Deployments predating durable verification_work may have crashed after
+	// flipping a task to verifying but before any recoverable attempt snapshot
+	// existed. Retry those uploads safely before the server accepts traffic; never
+	// synthesize a verdict or settlement from the incomplete legacy projection.
+	if _, err := s.ReconcileLegacyVerifyingTasks(ctx); err != nil {
+		return fmt.Errorf("migrate: reconcile legacy verification: %w", err)
 	}
 	return nil
 }
@@ -437,14 +1974,85 @@ var errNotFound = errors.New("not found")
 
 // --- intake + billing data access (git_sources, intakes, billing_customers) ---
 
+// errOAuthLinkStateInvalid deliberately collapses missing, expired, wrong-browser,
+// and already-consumed states into one result. Callers must not expose which part
+// of an OAuth capability was valid.
+var errOAuthLinkStateInvalid = errors.New("invalid or expired OAuth link state")
+
+const (
+	maxOAuthLinkCapabilityBytes = 256
+	maxOAuthLinkStateLifetime   = 15 * time.Minute
+)
+
+// CreateOAuthLinkState binds two independently random browser secrets to the buyer
+// initiating a provider link. Only hashes cross the storage boundary; raw state and
+// initiation values exist solely in the authorize URL and HttpOnly cookie.
+func (s *Store) CreateOAuthLinkState(ctx context.Context, buyerID uuid.UUID, provider, state, initiation string, expiresAt time.Time) error {
+	lifetime := time.Until(expiresAt)
+	if buyerID == uuid.Nil || provider == "" || len(provider) > 32 ||
+		len(state) < 32 || len(state) > maxOAuthLinkCapabilityBytes ||
+		len(initiation) < 32 || len(initiation) > maxOAuthLinkCapabilityBytes ||
+		state == initiation || lifetime <= 0 || lifetime > maxOAuthLinkStateLifetime {
+		return errOAuthLinkStateInvalid
+	}
+	_, err := s.pool.Exec(ctx,
+		`WITH expired AS (
+		   SELECT state_hash
+		     FROM oauth_link_states
+		    WHERE expires_at <= now()
+		    ORDER BY expires_at
+		    LIMIT 256
+		 ), pruned AS (
+		   DELETE FROM oauth_link_states o
+		    USING expired e
+		    WHERE o.state_hash = e.state_hash
+		 )
+		 INSERT INTO oauth_link_states
+		   (state_hash, buyer_id, provider, initiation_hash, expires_at)
+		 VALUES ($1,$2,$3,$4,$5)`,
+		hashKey(state), buyerID, provider, hashKey(initiation), expiresAt)
+	return err
+}
+
+// ConsumeOAuthLinkState atomically marks exactly one live, browser-bound state as
+// consumed and returns its buyer. PostgreSQL rechecks the WHERE predicate after a
+// concurrent updater releases the row lock, so simultaneous callbacks cannot both
+// win. A wrong initiation value does not burn the legitimate browser's attempt.
+func (s *Store) ConsumeOAuthLinkState(ctx context.Context, provider, state, initiation string) (uuid.UUID, error) {
+	if provider == "" || len(provider) > 32 ||
+		len(state) < 32 || len(state) > maxOAuthLinkCapabilityBytes ||
+		len(initiation) < 32 || len(initiation) > maxOAuthLinkCapabilityBytes {
+		return uuid.Nil, errOAuthLinkStateInvalid
+	}
+	var buyerID uuid.UUID
+	err := s.pool.QueryRow(ctx,
+		`UPDATE oauth_link_states
+		    SET consumed_at = now()
+		  WHERE state_hash = $1
+		    AND provider = $2
+		    AND initiation_hash = $3
+		    AND consumed_at IS NULL
+		    AND expires_at > now()
+		  RETURNING buyer_id`,
+		hashKey(state), provider, hashKey(initiation)).Scan(&buyerID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, errOAuthLinkStateInvalid
+	}
+	return buyerID, err
+}
+
 // InsertGitSource records a connected source for a buyer with its access token
 // (encrypted at rest in production — the KMS envelope is the external step). The
 // repo/branch are filled in when the buyer picks one.
 func (s *Store) InsertGitSource(ctx context.Context, buyerID uuid.UUID, token string) (uuid.UUID, error) {
+	sealed := sealToken(token)
+	if sealed == "" {
+		return uuid.Nil, fmt.Errorf("sealing github access token failed closed")
+	}
 	var id uuid.UUID
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO git_sources (buyer_id, provider, access_token) VALUES ($1, 'github', $2) RETURNING id`,
-		buyerID, sealToken(token)).Scan(&id) // sealed at the data boundary (AES-GCM when CX_TOKEN_KEY set)
+		buyerID, sealed).Scan(&id) // sealed at the data boundary (AES-GCM when CX_TOKEN_KEY set)
 	return id, err
 }
 
@@ -555,12 +2163,54 @@ func (s *Store) UpdateIntakeJob(ctx context.Context, intakeID, jobID uuid.UUID) 
 	return err
 }
 
+// ReserveIntakeLaunch atomically persists the stage launch contracts and moves a
+// detected intake to "launching". Exactly one concurrent launch request can win;
+// later requests receive reserved=false and cannot create duplicate chargeable jobs.
+func (s *Store) ReserveIntakeLaunch(ctx context.Context, buyerID, intakeID uuid.UUID, pipelineJSON []byte) (bool, error) {
+	var reserved bool
+	err := s.pool.QueryRow(ctx,
+		`UPDATE intakes
+		    SET pipeline=$3, status='launching'
+		  WHERE id=$1 AND buyer_id=$2 AND status='detected'
+		  RETURNING true`,
+		intakeID, buyerID, pipelineJSON,
+	).Scan(&reserved)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return reserved, err
+}
+
+func (s *Store) FailIntakeLaunch(ctx context.Context, buyerID, intakeID uuid.UUID) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE intakes SET status='failed' WHERE id=$1 AND buyer_id=$2 AND status IN ('launching','launched')`,
+		intakeID, buyerID,
+	)
+	return err
+}
+
 // SetBillingPMByCustomer records a buyer's default payment method, keyed by their
 // Stripe customer id (the webhook's view of who they are).
 func (s *Store) SetBillingPMByCustomer(ctx context.Context, custID, pm string) error {
-	_, err := s.pool.Exec(ctx,
+	tag, err := s.pool.Exec(ctx,
 		`UPDATE billing_customers SET default_payment_method=$2 WHERE stripe_customer_id=$1`, custID, pm)
-	return err
+	if err != nil {
+		return err
+	}
+	return validateBillingPMUpdateCount(tag.RowsAffected())
+}
+
+func validateBillingPMUpdateCount(rows int64) error {
+	switch rows {
+	case 1:
+		return nil
+	case 0:
+		return errNotFound
+	default:
+		// The unique partial index makes this impossible after migration; retain the
+		// check as defense-in-depth for a partially migrated or externally altered DB.
+		return fmt.Errorf("billing customer mapping matched %d rows, want exactly one", rows)
+	}
 }
 
 // JobChargeInfo returns a job's buyer + the amount to actually CHARGE it (for the
@@ -642,6 +2292,54 @@ func (s *Store) IntakeStageSubmitted(ctx context.Context, intakeID uuid.UUID, st
 	var n int
 	_ = s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM intake_jobs WHERE intake_id=$1 AND stage_index=$2`, intakeID, stageIndex).Scan(&n)
 	return n > 0
+}
+
+const (
+	intakeStageLockNamespace   uint32 = 0x4358494e // "CXIN"
+	pipelineStageLockNamespace uint32 = 0x4358504c // "CXPL"
+)
+
+// workflowStageLockKeys deterministically maps a workflow/stage into PostgreSQL's
+// two-int advisory-lock domain. Hash collisions only serialize unrelated stages;
+// they can never permit duplicate execution, which is the safe failure mode.
+func workflowStageLockKeys(namespace uint32, workflowID uuid.UUID, stageIndex int) (int32, int32) {
+	left := binary.BigEndian.Uint32(workflowID[0:4]) ^
+		binary.BigEndian.Uint32(workflowID[4:8]) ^ namespace
+	right := binary.BigEndian.Uint32(workflowID[8:12]) ^
+		binary.BigEndian.Uint32(workflowID[12:16]) ^ uint32(stageIndex)
+	return int32(left), int32(right)
+}
+
+// LockWorkflowStage holds a session advisory lock on a dedicated pool connection
+// across the check -> createJob -> link sequence. This closes the HA race where two
+// completion workers could both observe "not submitted" and create two chargeable
+// downstream jobs. Waiters serialize, then re-check the durable link after acquiring.
+func (s *Store) LockWorkflowStage(ctx context.Context, namespace uint32, workflowID uuid.UUID, stageIndex int) (func(), error) {
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	key1, key2 := workflowStageLockKeys(namespace, workflowID, stageIndex)
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1, $2)`, key1, key2); err != nil {
+		conn.Release()
+		return nil, err
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var unlocked bool
+			if err := conn.QueryRow(releaseCtx, `SELECT pg_advisory_unlock($1, $2)`, key1, key2).Scan(&unlocked); err != nil || !unlocked {
+				// Never return a connection with a possibly-held session lock to the
+				// pool. Closing the hijacked connection lets Postgres release it.
+				raw := conn.Hijack()
+				_ = raw.Close(releaseCtx)
+				return
+			}
+			conn.Release()
+		})
+	}, nil
 }
 
 // JobOutputRef returns a completed job's merged-output object key (for chaining the
@@ -850,6 +2548,13 @@ func nullPosInt(v int) any {
 	return v
 }
 
+func nullPosInt64(v int64) any {
+	if v <= 0 {
+		return nil
+	}
+	return v
+}
+
 // nullStr maps the empty string to nil so a text column stays SQL NULL rather
 // than an empty string (jobs.routing_substrate/routing_reason: "" means "no
 // routing block", persisted NULL, so `routing_substrate IS NULL` cleanly
@@ -903,8 +2608,10 @@ func hashKey(raw string) string {
 
 // AuthResult identifies the caller behind a credential.
 type AuthResult struct {
-	BuyerID uuid.UUID
-	IsAdmin bool
+	BuyerID     uuid.UUID
+	IsAdmin     bool
+	APIKeyID    uuid.UUID
+	APIKeyLabel string
 }
 
 // LookupAPIKey resolves a bearer API key to its buyer + admin flag. Missing or
@@ -912,10 +2619,12 @@ type AuthResult struct {
 func (s *Store) LookupAPIKey(ctx context.Context, rawKey string) (AuthResult, error) {
 	var r AuthResult
 	err := s.pool.QueryRow(ctx,
-		`SELECT buyer_id, is_admin FROM api_keys
+		`SELECT id, buyer_id, is_admin,
+		        COALESCE(NULLIF(name,''), CASE WHEN is_admin THEN 'break-glass API key' ELSE 'API key' END)
+		   FROM api_keys
 		 WHERE key_hash = $1 AND revoked = false`,
 		hashKey(rawKey),
-	).Scan(&r.BuyerID, &r.IsAdmin)
+	).Scan(&r.APIKeyID, &r.BuyerID, &r.IsAdmin, &r.APIKeyLabel)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return r, errNotFound
 	}
@@ -924,8 +2633,12 @@ func (s *Store) LookupAPIKey(ctx context.Context, rawKey string) (AuthResult, er
 
 // WorkerAuth identifies the worker/supplier behind a worker token.
 type WorkerAuth struct {
-	WorkerID   uuid.UUID
-	SupplierID uuid.UUID
+	WorkerID              uuid.UUID
+	SupplierID            uuid.UUID
+	CredentialID          uuid.UUID
+	DeviceFingerprint     string
+	CredentialVersion     int
+	EnrollmentDeviceBound bool
 }
 
 // LookupWorkerToken resolves an X-Worker-Token to its worker + supplier. Like
@@ -934,10 +2647,13 @@ type WorkerAuth struct {
 func (s *Store) LookupWorkerToken(ctx context.Context, token string) (WorkerAuth, error) {
 	var w WorkerAuth
 	err := s.pool.QueryRow(ctx,
-		`SELECT worker_id, supplier_id FROM worker_tokens
+		`SELECT worker_id,supplier_id,credential_id,COALESCE(device_fingerprint,''),
+		        credential_version,device_fingerprint IS NOT NULL
+		   FROM worker_tokens
 		 WHERE token_hash = $1 AND revoked = false`,
 		hashKey(token),
-	).Scan(&w.WorkerID, &w.SupplierID)
+	).Scan(&w.WorkerID, &w.SupplierID, &w.CredentialID, &w.DeviceFingerprint,
+		&w.CredentialVersion, &w.EnrollmentDeviceBound)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return w, errNotFound
 	}
@@ -955,14 +2671,13 @@ func (s *Store) LookupWorkerToken(ctx context.Context, token string) (WorkerAuth
 // actually registers with this token. So this inserts a minimal PLACEHOLDER workers
 // row first, in the same transaction: hw_class='cpu' (a valid enum member, used only
 // to satisfy the NOT NULL column) with supported_jobs/supported_models left NULL.
-// COALESCE(w.supported_jobs,'{}') @> ARRAY[job_type] in the claim query (scheduler.go)
-// means an empty/NULL supported_jobs can never match ANY job type, so this
-// placeholder is structurally inert — it can never be claimed against — until the
-// agent's first real registration overwrites it with real capability data.
+// More importantly it has no worker_authorized_capabilities rows. Every eligibility
+// path requires an exact current-matrix row, so this placeholder is structurally
+// inert until the agent's first real registration atomically creates those rows.
 //
 // It also activates the supplier (status 'pending' -> 'active') if this is their
-// FIRST token. Discovered by testing, not by reading: UpsertSupplierByEmail leaves
-// a brand-new supplier at status='pending', the claim query hard-requires
+// FIRST token. EnsureSupplierForBuyer leaves a brand-new supplier at
+// status='pending', the claim query hard-requires
 // s.status='active' (scheduler.go's quarantine gate), and — before this fix —
 // nothing in production code ever performed that transition; only test fixtures
 // and the demo seed set status='active' directly. Without this, a self-served
@@ -1116,8 +2831,16 @@ func maskKey(raw string) string {
 // --- workers + benchmarks ---
 
 // UpsertWorker inserts or refreshes a worker row and persists its benchmark
-// results, all in one transaction. Called on POST /v1/worker/register.
+// results plus its exact generated production capabilities, all in one
+// transaction. Called on POST /v1/worker/register. The independent capability
+// arrays remain stored for wire/debug compatibility but are never dispatch
+// authority; only worker_authorized_capabilities is.
 func (s *Store) UpsertWorker(ctx context.Context, cap WorkerCapability) error {
+	projected, err := projectWorkerRuntimeCapabilities(cap)
+	if err != nil {
+		return fmt.Errorf("projecting worker runtime capabilities: %w", err)
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -1159,12 +2882,37 @@ func (s *Store) UpsertWorker(ctx context.Context, cap WorkerCapability) error {
 		return err
 	}
 
+	// Replace, never merge: a worker that stops advertising a cell loses that
+	// authority in the same transaction that updates its worker row. Rows carry the
+	// generated matrix hash, and every reader requires the current hash, so a deploy
+	// also makes stale registrations inert until the agent re-registers. There is no
+	// legacy array backfill anywhere in Migrate or seedDemo.
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM worker_authorized_capabilities WHERE worker_id = $1`,
+		cap.WorkerID); err != nil {
+		return err
+	}
+	for _, authorized := range projected {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO worker_authorized_capabilities
+				   (worker_id, cell_id, runtime_id, job_type, model_ref, model_kind, matrix_sha256)
+				 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+			cap.WorkerID, authorized.ID, authorized.Runtime, authorized.Job,
+			authorized.Model, authorized.ModelKind, generatedRuntimeMatrixSHA256); err != nil {
+			return err
+		}
+	}
+
 	for _, b := range cap.Benchmarks {
+		loadMS, err := benchmarkLoadMSForStore(b.LoadMS)
+		if err != nil {
+			return err // projectWorkerRuntimeCapabilities already validates this; keep the cast local and checked.
+		}
 		_, err = tx.Exec(ctx,
 			`INSERT INTO benchmark_results
 			   (worker_id, model_id, job_type, tps, eps, thermal_ok, p99_latency_ms, load_ms)
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-			cap.WorkerID, b.ModelID, b.JobType, b.TPS, b.EPS, b.ThermalOK, float32(b.P99MS), int64(b.LoadMS),
+			cap.WorkerID, b.ModelID, b.JobType, b.TPS, b.EPS, b.ThermalOK, float32(b.P99MS), loadMS,
 		)
 		if err != nil {
 			return err
@@ -1181,12 +2929,16 @@ func (s *Store) UpsertWorker(ctx context.Context, cap WorkerCapability) error {
 		// "most recent" semantics — the maintained cache and the historical
 		// benchmark_results ledger (kept, unchanged, for HistoricalP90-style
 		// analysis elsewhere) never disagree about which measurement is newest.
+		schedulerRate := b.TPS
+		if b.JobType == "embed" {
+			schedulerRate = b.EPS
+		}
 		_, err = tx.Exec(ctx,
 			`INSERT INTO worker_tps_cache (worker_id, job_type, tps, updated_at)
 			 VALUES ($1,$2,$3, now())
 			 ON CONFLICT (worker_id, job_type) DO UPDATE SET
 			   tps = EXCLUDED.tps, updated_at = now()`,
-			cap.WorkerID, b.JobType, b.TPS,
+			cap.WorkerID, b.JobType, schedulerRate,
 		)
 		if err != nil {
 			return err
@@ -1281,7 +3033,7 @@ func (s *Store) HeartbeatWorker(ctx context.Context, workerID uuid.UUID, r Worke
 
 // MedianEffectiveMemoryGB returns the median effective memory (GB) across the most
 // recent memory sample of each LIVE eligible worker for (jobType, modelRef): one
-// row per worker (its latest sample), filtered to the same supported-job/model +
+// row per worker (its latest sample), filtered to the same exact capability +
 // active-supplier + not-throttled + seen-<60s predicate the claim uses, so the
 // median reflects supply a job could actually land on. ok is false when no eligible
 // worker has reported a sample yet (the caller then leaves quote risk unchanged
@@ -1299,12 +3051,17 @@ func (s *Store) MedianEffectiveMemoryGB(ctx context.Context, jobType, modelRef s
 		        AND w.last_seen_at > now() - interval '60 seconds'
 		        AND s.status = 'active'
 		        AND NOT COALESCE(w.throttled, false)
-		        AND COALESCE(w.supported_jobs,'{}') @> ARRAY[$1]
-		        AND ($2 = '' OR COALESCE(w.supported_models,'{}') @> ARRAY[$2])
+		        AND EXISTS (
+		          SELECT 1 FROM worker_authorized_capabilities wac
+		           WHERE wac.worker_id = w.id
+		             AND wac.job_type = $1
+		             AND wac.model_ref = $2
+		             AND wac.matrix_sha256 = $3
+		        )
 		      ORDER BY m.worker_id, m.created_at DESC
 		 )
 		 SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY effective_gb) FROM latest`,
-		jobType, modelRef,
+		jobType, modelRef, generatedRuntimeMatrixSHA256,
 	).Scan(&med)
 	if err != nil {
 		return 0, false, err
@@ -1494,23 +3251,34 @@ func (s *Store) ListJobsAdmin(ctx context.Context) ([]AdminJob, error) {
 
 // AdminPayout is one per-supplier, per-status rollup of supplier credits.
 type AdminPayout struct {
-	SupplierID   uuid.UUID `json:"supplier_id"`
-	PayoutStatus string    `json:"payout_status"`
-	Count        int       `json:"count"`
-	AmountUSD    float64   `json:"amount_usd"`
+	SupplierID               uuid.UUID `json:"supplier_id"`
+	PayoutStatus             string    `json:"payout_status"`
+	Count                    int       `json:"count"`
+	AmountUSD                float64   `json:"amount_usd"`
+	CashSentUSD              float64   `json:"cash_sent_usd"`
+	CarriedRemainderUSD      float64   `json:"carried_remainder_usd"`
+	OutcomeUnknownCount      int       `json:"outcome_unknown_count"`
+	ReleasedWithoutCashCount int       `json:"released_without_cash_count"`
 }
 
 // ListPayoutsAdmin rolls up supplier_credit ledger entries by (supplier, payout
-// status) so the admin panel can see who is owed what and in which state
-// (pending / held / released / clawed_back) — the payout review surface.
+// status) so the admin panel can see the complete payout state, confirmed cash,
+// carried debt, ambiguous outcomes, and structurally suspicious released rows.
 func (s *Store) ListPayoutsAdmin(ctx context.Context) ([]AdminPayout, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT COALESCE(supplier_id,'00000000-0000-0000-0000-000000000000'::uuid),
-		        payout_status, COUNT(*), COALESCE(SUM(amount_usd),0)
-		 FROM ledger_entries
-		 WHERE kind = 'supplier_credit'
-		 GROUP BY supplier_id, payout_status
-		 ORDER BY supplier_id, payout_status`)
+		`SELECT COALESCE(le.supplier_id,'00000000-0000-0000-0000-000000000000'::uuid),
+		        le.payout_status, COUNT(*), COALESCE(SUM(le.amount_usd),0),
+		        COALESCE(SUM(op.sent_cents) FILTER (WHERE op.cash_moved),0)::float8 / 100.0,
+		        COALESCE(SUM(mu.remainder_microusd),0)::float8 / 1000000.0,
+		        COUNT(*) FILTER (WHERE COALESCE(op.outcome_unknown,false)),
+		        COUNT(*) FILTER (
+		          WHERE le.payout_status='released' AND NOT COALESCE(op.cash_moved,false))
+		 FROM ledger_entries le
+		 LEFT JOIN supplier_payout_operations op ON op.ledger_entry_id=le.id
+		 LEFT JOIN supplier_minor_unit_settlements mu ON mu.ledger_entry_id=le.id
+		 WHERE le.kind = 'supplier_credit'
+		 GROUP BY le.supplier_id, le.payout_status
+		 ORDER BY le.supplier_id, le.payout_status`)
 	if err != nil {
 		return nil, err
 	}
@@ -1518,7 +3286,9 @@ func (s *Store) ListPayoutsAdmin(ctx context.Context) ([]AdminPayout, error) {
 	var out []AdminPayout
 	for rows.Next() {
 		var a AdminPayout
-		if err := rows.Scan(&a.SupplierID, &a.PayoutStatus, &a.Count, &a.AmountUSD); err != nil {
+		if err := rows.Scan(&a.SupplierID, &a.PayoutStatus, &a.Count, &a.AmountUSD,
+			&a.CashSentUSD, &a.CarriedRemainderUSD, &a.OutcomeUnknownCount,
+			&a.ReleasedWithoutCashCount); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -1722,20 +3492,334 @@ func (s *Store) AdminAdjustReputation(ctx context.Context, supplierID uuid.UUID,
 	return before, after, nil
 }
 
+var (
+	errPayoutFundingAlreadyBound = errors.New("payout already has a different funding source")
+	errSubsidyFundConflict       = errors.New("subsidy fund reference conflicts with existing authorization")
+	errSubsidyFundUnavailable    = errors.New("subsidy fund is missing, closed, or has insufficient unreserved capacity")
+)
+
+func isPayoutFundingUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+// CreateSubsidyFund records a finite, immutable operator-declared treasury pool.
+// externalTreasuryRef is an operator assertion rather than independent bank
+// reconciliation; the enforced theorem is exact and narrower: later reservations
+// are row-locked and cannot sum past authorizedCents. Identical creation retries
+// are idempotent, while any attempted rebinding or capacity change is rejected.
+func (s *Store) CreateSubsidyFund(
+	ctx context.Context,
+	actor AdminActor,
+	fundRef string,
+	externalTreasuryRef string,
+	authorizedCents int64,
+	reason string,
+) (bool, error) {
+	fundRef = strings.TrimSpace(fundRef)
+	externalTreasuryRef = strings.TrimSpace(externalTreasuryRef)
+	reason = strings.TrimSpace(reason)
+	if fundRef == "" || externalTreasuryRef == "" || reason == "" {
+		return false, errors.New("fund_ref, external_treasury_ref, and reason are required")
+	}
+	if len(fundRef) > 200 || len(externalTreasuryRef) > 300 || len(reason) > 1000 {
+		return false, errors.New("subsidy fund field is too long")
+	}
+	if authorizedCents <= 0 {
+		return false, errors.New("authorized_cents must be positive")
+	}
+	if err := validateAdminActorShape(actor); err != nil {
+		return false, err
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	if err := revalidateAdminActor(ctx, tx, actor); err != nil {
+		return false, err
+	}
+	// Serialize one natural fund reference before checking/inserting both sides of
+	// the action/resource binding. Hash collisions only serialize unrelated funds;
+	// they cannot merge authority or relax a constraint.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, fundRef); err != nil {
+		return false, err
+	}
+
+	var (
+		existingFundID, existingActionID                      uuid.UUID
+		existingTreasuryRef, existingCurrency, existingReason string
+		existingStatus                                        string
+		existingAuthorizedCents                               int64
+	)
+	err = tx.QueryRow(ctx, `
+		SELECT id,COALESCE(authorization_action_id,'00000000-0000-0000-0000-000000000000'::uuid),
+		       external_treasury_ref,authorized_cents,currency,reason,status
+		  FROM platform_subsidy_funds WHERE fund_ref=$1 FOR UPDATE`, fundRef).Scan(
+		&existingFundID, &existingActionID, &existingTreasuryRef, &existingAuthorizedCents,
+		&existingCurrency, &existingReason, &existingStatus)
+	if err == nil {
+		intent := moneyAuthorityIntent{
+			Kind: "subsidy_fund_authorized", TargetKind: "subsidy_fund",
+			TargetID: existingFundID, FundID: existingFundID, FundRef: fundRef,
+			ExternalTreasuryRef: externalTreasuryRef, AmountCents: authorizedCents,
+			Currency: "usd", Reason: reason, CorrelationRef: fundRef,
+		}
+		if existingTreasuryRef != externalTreasuryRef || existingAuthorizedCents != authorizedCents ||
+			existingCurrency != "usd" || existingReason != reason || existingStatus != "active" {
+			return false, errSubsidyFundConflict
+		}
+		if err := assertMoneyAuthorityAction(ctx, tx, actor, existingActionID, intent); err != nil {
+			return false, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return false, err
+	}
+
+	fundID, actionID := uuid.New(), uuid.New()
+	intent := moneyAuthorityIntent{
+		Kind: "subsidy_fund_authorized", TargetKind: "subsidy_fund",
+		TargetID: fundID, FundID: fundID, FundRef: fundRef,
+		ExternalTreasuryRef: externalTreasuryRef, AmountCents: authorizedCents,
+		Currency: "usd", Reason: reason, CorrelationRef: fundRef,
+	}
+	if _, err := insertMoneyAuthorityAction(ctx, tx, actor, actionID, intent, nil); err != nil {
+		if isPayoutFundingUniqueViolation(err) {
+			return false, errSubsidyFundConflict
+		}
+		return false, err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO platform_subsidy_funds
+		  (id,authorization_action_id,fund_ref,external_treasury_ref,
+		   authorized_cents,currency,reason,status)
+		VALUES ($1,$2,$3,$4,$5,'usd',$6,'active')`,
+		fundID, actionID, fundRef, externalTreasuryRef, authorizedCents, reason); err != nil {
+		if isPayoutFundingUniqueViolation(err) {
+			return false, errSubsidyFundConflict
+		}
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// AuthorizePayoutSubsidy is the explicit capped platform alternative to buyer
+// collection. It does not claim that cash moved or waive the payout hold: it
+// reserves exact cents from an existing operator-declared treasury pool. The pool
+// row is locked while aggregate reservations are checked, and the globally unique
+// per-liability authorization reference prevents approval reuse. Identical retries
+// are idempotent and do not append duplicate admin actions.
+func (s *Store) AuthorizePayoutSubsidy(
+	ctx context.Context,
+	actor AdminActor,
+	entryID uuid.UUID,
+	fundRef string,
+	authorizationRef string,
+	reason string,
+) (bool, error) {
+	fundRef = strings.TrimSpace(fundRef)
+	authorizationRef = strings.TrimSpace(authorizationRef)
+	reason = strings.TrimSpace(reason)
+	if fundRef == "" {
+		return false, errors.New("subsidy fund_ref is required")
+	}
+	if authorizationRef == "" {
+		return false, errors.New("subsidy authorization_ref is required")
+	}
+	if reason == "" {
+		return false, errors.New("subsidy reason is required")
+	}
+	if len(fundRef) > 200 || len(authorizationRef) > 200 {
+		return false, errors.New("subsidy authorization_ref is too long")
+	}
+	if len(reason) > 1000 {
+		return false, errors.New("subsidy reason is too long")
+	}
+	if err := validateAdminActorShape(actor); err != nil {
+		return false, err
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	if err := revalidateAdminActor(ctx, tx, actor); err != nil {
+		return false, err
+	}
+
+	var (
+		supplierID      uuid.UUID
+		taskID          *uuid.UUID
+		status          string
+		liabilityMicros int64
+	)
+	if err := tx.QueryRow(ctx, `
+		SELECT supplier_id,task_id,payout_status,(amount_usd*1000000)::bigint
+		  FROM ledger_entries
+		 WHERE id=$1 AND kind='supplier_credit'
+		 FOR UPDATE`, entryID,
+	).Scan(&supplierID, &taskID, &status, &liabilityMicros); errors.Is(err, pgx.ErrNoRows) {
+		return false, errNotFound
+	} else if err != nil {
+		return false, err
+	}
+	if status != PayoutHeld && status != PayoutReady && status != PayoutAwaitingFunding {
+		return false, errNotHeld
+	}
+	amountCents, _, err := splitSupplierLiabilityMicros(liabilityMicros)
+	if err != nil {
+		return false, err
+	}
+	if amountCents <= 0 {
+		return false, fmt.Errorf("supplier credit %s is carried below one cent and needs no subsidy cash authorization", entryID)
+	}
+
+	var (
+		existingSource, existingFundRef, existingRef, existingReason, existingCurrency string
+		existingAmount                                                                 int64
+		existingFundID, existingActionID                                               uuid.UUID
+	)
+	err = tx.QueryRow(ctx, `
+		SELECT funding.source_kind,COALESCE(fund.id,'00000000-0000-0000-0000-000000000000'::uuid),
+		       COALESCE(funding.authorization_action_id,'00000000-0000-0000-0000-000000000000'::uuid),
+		       COALESCE(fund.fund_ref,''),
+		       COALESCE(funding.subsidy_authorization_ref,''),
+		       COALESCE(funding.subsidy_reason,''),funding.amount_cents,funding.currency
+		  FROM supplier_payout_funding funding
+		  LEFT JOIN platform_subsidy_funds fund ON fund.id=funding.subsidy_fund_id
+		 WHERE funding.ledger_entry_id=$1
+		 FOR UPDATE OF funding`, entryID,
+	).Scan(&existingSource, &existingFundID, &existingActionID, &existingFundRef,
+		&existingRef, &existingReason, &existingAmount, &existingCurrency)
+	if err == nil {
+		if existingSource == payoutFundingPlatformSubsidy && existingFundRef == fundRef &&
+			existingRef == authorizationRef && existingReason == reason &&
+			existingAmount == amountCents && existingCurrency == "usd" {
+			intent := moneyAuthorityIntent{
+				Kind: "payout_subsidy_authorized", TargetKind: "supplier_liability",
+				TargetID: entryID, FundID: existingFundID, FundRef: fundRef,
+				AuthorizationRef: authorizationRef, AmountCents: amountCents,
+				Currency: "usd", Reason: reason, CorrelationRef: authorizationRef,
+			}
+			if err := assertMoneyAuthorityAction(ctx, tx, actor, existingActionID, intent); err != nil {
+				return false, err
+			}
+			if status == PayoutAwaitingFunding {
+				if _, err := tx.Exec(ctx,
+					`UPDATE ledger_entries SET payout_status=$2
+					  WHERE id=$1 AND payout_status=$3`,
+					entryID, PayoutHeld, PayoutAwaitingFunding); err != nil {
+					return false, err
+				}
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return false, err
+			}
+			return false, nil
+		}
+		return false, errPayoutFundingAlreadyBound
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return false, err
+	}
+
+	var fundID, fundActionID uuid.UUID
+	var capacity int64
+	var fundTreasuryRef, fundCurrency, fundReason string
+	if err := tx.QueryRow(ctx, `
+		SELECT id,COALESCE(authorization_action_id,'00000000-0000-0000-0000-000000000000'::uuid),
+		       external_treasury_ref,authorized_cents,currency,reason
+		  FROM platform_subsidy_funds
+		 WHERE fund_ref=$1 AND status='active' AND currency='usd'
+		 FOR UPDATE`, fundRef,
+	).Scan(&fundID, &fundActionID, &fundTreasuryRef, &capacity, &fundCurrency, &fundReason); errors.Is(err, pgx.ErrNoRows) {
+		return false, errSubsidyFundUnavailable
+	} else if err != nil {
+		return false, err
+	}
+	fundIntent := moneyAuthorityIntent{
+		Kind: "subsidy_fund_authorized", TargetKind: "subsidy_fund",
+		TargetID: fundID, FundID: fundID, FundRef: fundRef,
+		ExternalTreasuryRef: fundTreasuryRef, AmountCents: capacity,
+		Currency: fundCurrency, Reason: fundReason, CorrelationRef: fundRef,
+	}
+	if err := assertMoneyAuthorityAction(ctx, tx, actor, fundActionID, fundIntent); err != nil {
+		return false, err
+	}
+	var reserved int64
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(sum(amount_cents),0)::bigint
+		  FROM supplier_payout_funding
+		 WHERE source_kind='platform_subsidy' AND subsidy_fund_id=$1`, fundID,
+	).Scan(&reserved); err != nil {
+		return false, err
+	}
+	if reserved < 0 || reserved > capacity || amountCents > capacity-reserved {
+		return false, errSubsidyFundUnavailable
+	}
+
+	var liabilityJobID *uuid.UUID
+	if taskID != nil {
+		var jobID uuid.UUID
+		if err := tx.QueryRow(ctx, `SELECT job_id FROM tasks WHERE id=$1`, *taskID).Scan(&jobID); err != nil {
+			return false, err
+		}
+		liabilityJobID = &jobID
+	}
+	actionID := uuid.New()
+	intent := moneyAuthorityIntent{
+		Kind: "payout_subsidy_authorized", TargetKind: "supplier_liability",
+		TargetID: entryID, FundID: fundID, FundRef: fundRef,
+		AuthorizationRef: authorizationRef, AmountCents: amountCents,
+		Currency: "usd", Reason: reason, CorrelationRef: authorizationRef,
+	}
+	if _, err := insertMoneyAuthorityAction(ctx, tx, actor, actionID, intent, &supplierID); err != nil {
+		if isPayoutFundingUniqueViolation(err) {
+			return false, errPayoutFundingAlreadyBound
+		}
+		return false, err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO supplier_payout_funding
+		  (authorization_action_id,ledger_entry_id,source_kind,liability_job_id,
+		   subsidy_fund_id,subsidy_authorization_ref,subsidy_reason,amount_cents,currency)
+		VALUES ($1,$2,'platform_subsidy',$3,$4,$5,$6,$7,'usd')`,
+		actionID, entryID, liabilityJobID, fundID, authorizationRef, reason, amountCents); err != nil {
+		if isPayoutFundingUniqueViolation(err) {
+			return false, errPayoutFundingAlreadyBound
+		}
+		return false, err
+	}
+	if status == PayoutAwaitingFunding {
+		if _, err := tx.Exec(ctx,
+			`UPDATE ledger_entries SET payout_status=$2
+			  WHERE id=$1 AND payout_status=$3`,
+			entryID, PayoutHeld, PayoutAwaitingFunding); err != nil {
+			return false, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // AdminReleasePayoutHold closes the "manually trigger a payout-hold release" gap
-// named directly in the backlog rung (Operator Tooling 7->8). Accepts an entry in
-// EITHER of the two real "money is owed but not moving" states this codebase
-// produces: 'held' (a real hold whose release_at simply hasn't come due yet, or a
-// buyer wants it released early) or 'ready' (the honest no-rail-configured stub
-// state releasePayouts falls back to on a failed/deferred transfer — and that
-// DuePayouts, the real release-worker sweep query, never revisits on its own:
-// docs/RUNBOOKS.md's OWN earlier procedure re-set a stuck credit to 'ready' as
-// its documented "fix", verified against the real DuePayouts query to silently
-// never get retried — the exact bug this endpoint closes for good). Either way
-// it (re-)establishes a genuine 'held' row with release_at=now(), so the very
-// next sweep cycle picks it up; it never marks the entry 'released' itself (that
-// still requires a real transfer reference, enforced structurally by
-// ledger_released_requires_ref), so this can never fake a payout.
+// named directly in the backlog rung (Operator Tooling 7->8). The endpoint accepts
+// only 'held' and definitely-not-sent 'ready'. It never accepts awaiting_funding,
+// sending, outcome_unknown, or reversal states. Either accepted state becomes a
+// genuine 'held' row with release_at=now(), so the next sweep can claim it; this
+// action never marks cash released and cannot bypass the durable provider result.
 func (s *Store) AdminReleasePayoutHold(ctx context.Context, entryID uuid.UUID, reason string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1773,10 +3857,60 @@ var errNotHeld = errors.New("ledger entry is not held or ready")
 
 // --- jobs + tasks ---
 
-// CreateJobWithTasks inserts the job row and its task rows in one transaction.
-// Each task starts queued and immediately claimable (visible_at defaults to
-// now() in the schema). Returns the job id.
+// CreateJobWithTasks inserts the job, immutable economics, optional webhook, and
+// task rows in one transaction. Each task starts queued and immediately claimable
+// (visible_at defaults to now() in the schema).
 func (s *Store) CreateJobWithTasks(ctx context.Context, j *jobRow, tasks []taskRow) error {
+	hasWebhook := j.WebhookID != uuid.Nil || j.WebhookURL != "" || j.WebhookSigningSecretSealed != ""
+	if hasWebhook && (j.WebhookID == uuid.Nil || j.WebhookURL == "" ||
+		!strings.HasPrefix(j.WebhookSigningSecretSealed, "enc:")) {
+		return errors.New("job webhook requires id, url, and encrypted signing secret together")
+	}
+	if err := ValidateEconomicPlanSnapshot(j.EconomicPlan); err != nil {
+		return fmt.Errorf("refusing job without valid economic plan: %w", err)
+	}
+	if j.EconomicPlan.Input.InitialTaskCount != len(tasks) {
+		return fmt.Errorf("economic plan initial_task_count=%d does not match %d initial tasks",
+			j.EconomicPlan.Input.InitialTaskCount, len(tasks))
+	}
+	if j.TaskCount != len(tasks) {
+		return fmt.Errorf("job task_count=%d does not match %d initial tasks", j.TaskCount, len(tasks))
+	}
+	if j.EconomicInputSource == economicInputSourceSubmitStream {
+		var primaryRecords int64
+		for _, task := range tasks {
+			if task.ExpectedOutputRecords <= 0 {
+				return fmt.Errorf("exact streamed job task %s lacks expected output record authority", task.ID)
+			}
+			if !task.IsHoneypot && !task.IsRedundancy {
+				primaryRecords += task.ExpectedOutputRecords
+			}
+		}
+		if primaryRecords != j.EconomicInputRecords {
+			return fmt.Errorf("primary task output records %d do not match exact streamed input records %d",
+				primaryRecords, j.EconomicInputRecords)
+		}
+	}
+	if math.Abs(j.EstimatedUSD-j.EconomicPlan.InitialBuyerChargeUSD) > 0.000001 {
+		return fmt.Errorf("job estimate %.6f does not match frozen economic charge %.6f",
+			j.EstimatedUSD, j.EconomicPlan.InitialBuyerChargeUSD)
+	}
+	if math.Abs(j.SLAPremiumUSD-j.EconomicPlan.Input.SLAPremiumUSD) > 0.000001 {
+		return fmt.Errorf("job SLA premium %.6f does not match frozen economic premium %.6f",
+			j.SLAPremiumUSD, j.EconomicPlan.Input.SLAPremiumUSD)
+	}
+	if j.FirmQuote {
+		if j.FirmQuoteMaxUSD <= 0 || math.Abs(j.FirmQuoteMaxUSD-j.EconomicPlan.Input.FirmQuoteMaxUSD) > 0.000001 {
+			return fmt.Errorf("firm quote max %.6f does not match frozen economic cap %.6f",
+				j.FirmQuoteMaxUSD, j.EconomicPlan.Input.FirmQuoteMaxUSD)
+		}
+	} else if j.EconomicPlan.Input.FirmQuoteMaxUSD > 0 || j.FirmQuoteMaxUSD > 0 {
+		return errors.New("non-firm job cannot carry a firm economic cap")
+	}
+	planJSON, err := json.Marshal(j.EconomicPlan)
+	if err != nil {
+		return fmt.Errorf("marshal economic plan: %w", err)
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -1800,28 +3934,68 @@ func (s *Store) CreateJobWithTasks(ctx context.Context, j *jobRow, tasks []taskR
 		rFleetETA = j.RoutingFleetETASecs
 		rGPUModeled = j.RoutingGPUModeledSecs
 	}
+	// Exact input units are written only when the authoritative streaming submit
+	// path supplied its source marker. Older/direct jobRow callers leave all three
+	// NULL; a zero value without provenance must never become a fake measured zero.
+	var economicInputRecords, economicInputBytes, economicInputSource any
+	if j.EconomicInputSource != "" {
+		economicInputRecords = j.EconomicInputRecords
+		economicInputBytes = j.EconomicInputBytes
+		economicInputSource = j.EconomicInputSource
+	}
 	_, err = tx.Exec(ctx,
 		`INSERT INTO jobs
 		   (id, buyer_id, status, job_type, model_ref, input_ref, output_ref,
 		    tier, verification_policy, estimated_usd, actual_usd, task_count, tasks_done,
-		    min_memory_gb, hw_classes, data_residency, job_type_spec, split_size,
+		    min_memory_gb, max_duration_secs, hw_classes, data_residency, job_type_spec, split_size,
 		    offered_rate_usd_hr, eta_secs, max_usd, budget_state, quote_id, min_reputation, private_pool,
 		    deadline_secs, firm_quote, firm_quote_max_usd, sla_guarantee_secs, sla_premium_usd,
-		    routing_substrate, routing_reason, routing_fleet_eta_secs, routing_gpu_modeled_secs)
+		    routing_substrate, routing_reason, routing_fleet_eta_secs, routing_gpu_modeled_secs,
+		    economic_input_records, economic_input_bytes, economic_input_source)
 		 VALUES ($1,$2,'queued',$3,$4,$5,$6,$7,$8,$9,0,$10,0,
-		         $11,$12,$13,$14,$15,$16,$17,$18,'tracking',$19,$20,$21,$22,$23,$24,$25,$26,
-		         $27,$28,$29,$30)`,
+		         $11,$12,$13,$14,$15,$16,$17,$18,$19,'tracking',$20,$21,$22,$23,$24,$25,$26,$27,
+		         $28,$29,$30,$31,$32,$33,$34)`,
 		j.ID, j.BuyerID, j.JobType, j.ModelRef, j.InputRef, j.OutputRef,
 		j.Tier, j.VerificationPolicy, j.EstimatedUSD, j.TaskCount,
-		j.MinMemoryGB, nullStrSlice(j.HWClasses), nullStrSlice(j.DataResidency),
+		j.MinMemoryGB, j.MaxDurationSecs, nullStrSlice(j.HWClasses), nullStrSlice(j.DataResidency),
 		nullJSON(j.JobTypeSpec), j.SplitSize, j.OfferedRateUsdHr, j.ETASecs,
 		nullPosFloat(j.MaxUSD), nullUUID(j.QuoteID), j.MinReputation, j.PrivatePool,
 		j.DeadlineSecs, j.FirmQuote, nullPosFloat(j.FirmQuoteMaxUSD),
 		nullPosInt(j.SLAGuaranteeSecs), nullPosFloat(j.SLAPremiumUSD),
 		rSubstrate, rReason, rFleetETA, rGPUModeled,
+		economicInputRecords, economicInputBytes, economicInputSource,
 	)
 	if err != nil {
 		return err
+	}
+	if hasWebhook {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO webhooks (id,buyer_id,job_id,url,signing_secret_sealed)
+			VALUES ($1,$2,$3,$4,$5)`,
+			j.WebhookID, j.BuyerID, j.ID, j.WebhookURL, j.WebhookSigningSecretSealed); err != nil {
+			return fmt.Errorf("insert job webhook: %w", err)
+		}
+	}
+	// The immutable plan references jobs(job_id), so insert its parent first
+	// inside this same transaction. Job, plan, reserve, and tasks still become
+	// visible atomically only after the final commit.
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO job_economic_plans (
+		  job_id,plan_version,schedule_version,plan_json,initial_task_count,
+		  buyer_charge_per_task_usd,supplier_payout_per_task_usd,
+		  initial_buyer_charge_usd,reserved_buyer_charge_usd,sla_premium_usd,firm_quote_max_usd
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+		j.ID, j.EconomicPlan.Version, j.EconomicPlan.Schedule.Version, planJSON,
+		j.EconomicPlan.Input.InitialTaskCount, j.EconomicPlan.BuyerChargePerTaskUSD,
+		j.EconomicPlan.SupplierPayoutPerTaskUSD, j.EconomicPlan.InitialBuyerChargeUSD,
+		j.EconomicPlan.ReservedBuyerChargeUSD, j.EconomicPlan.Input.SLAPremiumUSD,
+		nullPosFloat(j.EconomicPlan.Input.FirmQuoteMaxUSD)); err != nil {
+		return fmt.Errorf("insert economic plan: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO job_economic_reserves (job_id,reserved_tasks,consumed_tasks)
+		VALUES ($1,$2,0)`, j.ID, j.EconomicPlan.Input.ExtraTaskReserve); err != nil {
+		return fmt.Errorf("insert economic reserve: %w", err)
 	}
 
 	// PATCH (Control plane hot path 8->9, docs/internal/CREED_AND_PATH_TO_TEN.md
@@ -1845,11 +4019,13 @@ func (s *Store) CreateJobWithTasks(ctx context.Context, j *jobRow, tasks []taskR
 		_, err = tx.CopyFrom(ctx,
 			pgx.Identifier{"tasks"},
 			[]string{"id", "job_id", "status", "is_honeypot", "is_redundancy", "retry_count",
-				"input_ref", "result_key", "chunk_index", "visible_at"},
+				"input_ref", "result_key", "chunk_index", "expected_output_records", "visible_at",
+				"economic_buyer_charge_usd", "economic_supplier_payout_usd"},
 			pgx.CopyFromSlice(len(tasks), func(i int) ([]any, error) {
 				t := tasks[i]
 				return []any{t.ID, t.JobID, "queued", t.IsHoneypot, t.IsRedundancy, int16(0),
-					t.InputRef, t.ResultKey, t.ChunkIndex, now}, nil
+					t.InputRef, t.ResultKey, t.ChunkIndex, nullPosInt64(t.ExpectedOutputRecords), now,
+					j.EconomicPlan.BuyerChargePerTaskUSD, j.EconomicPlan.SupplierPayoutPerTaskUSD}, nil
 			}),
 		)
 		if err != nil {
@@ -1875,6 +4051,7 @@ type jobRow struct {
 	EstimatedUSD       float64
 	TaskCount          int
 	MinMemoryGB        float32
+	MaxDurationSecs    uint32
 	HWClasses          []string // nil = any class
 	DataResidency      []string // nil = unrestricted
 	JobTypeSpec        []byte   // jsonb: the full submitted JobType (tag + fields)
@@ -1898,6 +4075,17 @@ type jobRow struct {
 	// sla_refund ledger row (collect.go settleSLAOutcome). 0 = no SLA → NULL.
 	SLAGuaranteeSecs int
 	SLAPremiumUSD    float64
+	// EconomicInput*: exact full-stream submit facts. Source="" keeps all three
+	// columns NULL for legacy/direct callers rather than inventing zero units.
+	EconomicInputRecords int64
+	EconomicInputBytes   int64
+	EconomicInputSource  string
+	EconomicPlan         EconomicPlan
+	// Webhook* is an all-or-none optional registration inserted in the same
+	// transaction as the job. Only the sealed secret crosses this data boundary.
+	WebhookID                  uuid.UUID
+	WebhookURL                 string
+	WebhookSigningSecretSealed string
 	// Routing*: the SUBSTRATE-ROUTING decision stamped at submit (Speed Lane
 	// road-to-ten rubric dimension 5, control/routing.go + quote.go). Present
 	// only for GENERATIVE jobs with records > 0 — the honesty boundary the quote
@@ -1918,13 +4106,14 @@ type jobRow struct {
 // ChunkIndex is the 0-based input position used to merge results back in order;
 // redundancy/honeypot clones reuse their primary's chunk_index.
 type taskRow struct {
-	ID           uuid.UUID
-	JobID        uuid.UUID
-	IsHoneypot   bool
-	IsRedundancy bool
-	InputRef     string
-	ResultKey    string
-	ChunkIndex   int
+	ID                    uuid.UUID
+	JobID                 uuid.UUID
+	IsHoneypot            bool
+	IsRedundancy          bool
+	InputRef              string
+	ResultKey             string
+	ChunkIndex            int
+	ExpectedOutputRecords int64 // 0 = explicit legacy/opaque unknown, persisted NULL
 }
 
 // JobView is the GET /v1/jobs/{id} projection. MaxUSD/BudgetState expose the
@@ -2038,45 +4227,208 @@ func (s *Store) getJobInternal(ctx context.Context, jobID uuid.UUID) (*jobIntern
 	return &j, nil
 }
 
+// TaskEconomicAmounts returns the immutable buyer/supplier amounts stamped on
+// this exact task at admission (or dynamic reserve authorization). Legacy NULL
+// rows are an error: settlement must fail closed rather than revive the mutable
+// estimated_usd/task_count formula.
+func (s *Store) TaskEconomicAmounts(ctx context.Context, taskID uuid.UUID) (buyerCharge, supplierPayout float64, err error) {
+	err = s.pool.QueryRow(ctx, `
+		SELECT economic_buyer_charge_usd::float8,economic_supplier_payout_usd::float8
+		  FROM tasks WHERE id=$1`, taskID).Scan(&buyerCharge, &supplierPayout)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, 0, errNotFound
+	}
+	if err != nil {
+		return 0, 0, fmt.Errorf("task %s has no frozen economic amounts: %w", taskID, err)
+	}
+	return buyerCharge, supplierPayout, nil
+}
+
 // CancelJob cancels a job only if it has not started (still queued). Returns
 // errNotFound if no such cancellable job exists for the buyer.
 func (s *Store) CancelJob(ctx context.Context, jobID, buyerID uuid.UUID) error {
-	ct, err := s.pool.Exec(ctx,
-		`UPDATE jobs SET status = 'cancelled'
-		 WHERE id = $1 AND buyer_id = $2 AND status = 'queued'`,
-		jobID, buyerID)
+	status, pending, err := s.jobTerminalTransitionState(ctx, jobID)
 	if err != nil {
 		return err
 	}
-	if ct.RowsAffected() == 0 {
+	if status != "queued" || pending {
 		return errNotFound
 	}
-	// Also drop the still-queued tasks so they cannot be claimed.
-	_, err = s.pool.Exec(ctx,
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockUnfinishedJobTasksTx(ctx, tx, jobID); err != nil {
+		return err
+	}
+	status, pending, err = jobTerminalTransitionStateTx(ctx, tx, jobID)
+	if err != nil {
+		return err
+	}
+	var owns bool
+	if err := tx.QueryRow(ctx, `SELECT buyer_id=$2 FROM jobs WHERE id=$1`, jobID, buyerID).Scan(&owns); err != nil {
+		return err
+	}
+	if status != "queued" || !owns || pending {
+		return errNotFound
+	}
+	if _, err := tx.Exec(ctx, `UPDATE jobs SET status='cancelled' WHERE id=$1`, jobID); err != nil {
+		return err
+	}
+	// Drop the still-queued tasks in the same parent-fenced transaction so a
+	// concurrent claim/commit cannot observe a cancelled job with live work.
+	if _, err := tx.Exec(ctx,
 		`UPDATE tasks SET status = 'failed'
-		 WHERE job_id = $1 AND status = 'queued'`, jobID)
-	return err
+		 WHERE job_id = $1 AND status = 'queued'`, jobID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // StartTask marks a claimed task running. Scoped to the worker that owns the
 // claim so a worker cannot start another worker's task.
 func (s *Store) StartTask(ctx context.Context, taskID, workerID uuid.UUID) error {
-	ct, err := s.pool.Exec(ctx,
-		`UPDATE tasks SET status = 'running', started_at = now()
-		 WHERE id = $1 AND claimed_by = $2 AND status IN ('queued','running')`,
-		taskID, workerID)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	if ct.RowsAffected() == 0 {
+	defer tx.Rollback(ctx)
+
+	// Freeze mutable registration axes under the same worker-row lock ClaimTask
+	// uses. Taking this before the task lock preserves a single worker -> task ->
+	// job lock order for the legacy explicit-start path.
+	var claimSupplierID uuid.UUID
+	var claimHWClass, claimEngine, claimBuildHash string
+	err = tx.QueryRow(ctx, `
+		SELECT supplier_id,COALESCE(hw_class,''),COALESCE(engine,''),COALESCE(build_hash,'')
+		  FROM workers WHERE id=$1 FOR UPDATE`, workerID).
+		Scan(&claimSupplierID, &claimHWClass, &claimEngine, &claimBuildHash)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return errNotFound
 	}
-	// Reflect first task start on the parent job.
-	_, err = s.pool.Exec(ctx,
-		`UPDATE jobs SET status = 'running'
-		 WHERE id = (SELECT job_id FROM tasks WHERE id = $1) AND status = 'queued'`,
-		taskID)
-	return err
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(claimHWClass) == "" || strings.TrimSpace(claimEngine) == "" {
+		return errNotFound
+	}
+
+	var (
+		jobID               uuid.UUID
+		status              string
+		claimedBy           *uuid.UUID
+		taskWorkerID        *uuid.UUID
+		executionWorkerID   *uuid.UUID
+		executionSupplierID *uuid.UUID
+		startedAt           *time.Time
+		isRedundancy        bool
+		hedgedFrom          *uuid.UUID
+		attempt             int16
+	)
+	err = tx.QueryRow(ctx, `
+		SELECT job_id,status,claimed_by,worker_id,execution_worker_id,execution_supplier_id,started_at,
+		       COALESCE(is_redundancy,false),hedged_from,COALESCE(retry_count,0)
+		  FROM tasks WHERE id=$1 FOR UPDATE`, taskID).
+		Scan(&jobID, &status, &claimedBy, &taskWorkerID, &executionWorkerID, &executionSupplierID, &startedAt,
+			&isRedundancy, &hedgedFrom, &attempt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if claimedBy == nil || *claimedBy != workerID || (status != "queued" && status != "running") {
+		return errNotFound
+	}
+
+	// Start, commit, apply, and terminal parent transitions share task -> parent
+	// ordering (this compatibility path additionally owns its worker lock first).
+	// Keeping the parent transition in this transaction closes the old
+	// gap where a task became running before its queued parent became running.
+	var parentStatus string
+	if err := tx.QueryRow(ctx, `SELECT status FROM jobs WHERE id=$1 FOR UPDATE`, jobID).Scan(&parentStatus); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errNotFound
+		}
+		return err
+	}
+	if parentStatus != "queued" && parentStatus != "running" && parentStatus != "verifying" {
+		return errNotFound
+	}
+
+	dynamicTiebreak := isRedundancy && hedgedFrom != nil
+	if status == "running" {
+		// ClaimTask already performs the eligibility check, starts the task, and
+		// inserts tiebreak execution history atomically. The explicit /start call
+		// made by an agent afterward is an exact idempotent acknowledgement only.
+		if taskWorkerID == nil || *taskWorkerID != workerID ||
+			executionWorkerID == nil || *executionWorkerID != workerID || executionSupplierID == nil {
+			return errNotFound
+		}
+		if dynamicTiebreak {
+			var historyExact bool
+			if err := tx.QueryRow(ctx, `
+				SELECT EXISTS (
+				 SELECT 1 FROM task_execution_history h
+				  WHERE h.task_id=$1 AND h.attempt=$2 AND h.worker_id=$3
+				    AND h.supplier_id=$4
+				)`, taskID, attempt, workerID, *executionSupplierID).Scan(&historyExact); err != nil {
+				return err
+			}
+			if !historyExact {
+				return errNotFound
+			}
+		}
+		if _, err := tx.Exec(ctx, `UPDATE jobs SET status='running' WHERE id=$1 AND status='queued'`, jobID); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+
+	if taskWorkerID != nil && *taskWorkerID != workerID {
+		return errNotFound
+	}
+	if dynamicTiebreak {
+		if startedAt != nil {
+			return errNotFound
+		}
+		eligible, err := tiebreakPeerClaimEligibleTx(ctx, tx, taskID, jobID, workerID)
+		if err != nil {
+			return err
+		}
+		if !eligible {
+			return errNotFound
+		}
+		ct, err := tx.Exec(ctx, `
+			INSERT INTO task_execution_history (task_id,attempt,worker_id,supplier_id)
+			VALUES ($1,$2,$3,$4)
+			ON CONFLICT (task_id,attempt,worker_id) DO NOTHING`,
+			taskID, attempt, workerID, claimSupplierID)
+		if err != nil {
+			return err
+		}
+		if ct.RowsAffected() != 1 {
+			return errNotFound
+		}
+	}
+
+	ct, err := tx.Exec(ctx, `
+		UPDATE tasks SET status='running',started_at=now(),worker_id=$2,
+		       execution_worker_id=$2,execution_supplier_id=$3,
+		       execution_hw_class=$4,execution_engine=$5,execution_build_hash=$6
+		 WHERE id=$1 AND claimed_by=$2 AND status='queued'`,
+		taskID, workerID, claimSupplierID, claimHWClass, claimEngine, claimBuildHash)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() != 1 {
+		return errNotFound
+	}
+	if _, err := tx.Exec(ctx, `UPDATE jobs SET status='running' WHERE id=$1 AND status='queued'`, jobID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // CommitTaskInfo is what CommitTask returns so verification can run.
@@ -2095,14 +4447,33 @@ type CommitTaskInfo struct {
 	// is not an auto-dock (two engines / two builds legitimately differ in bytes on
 	// identical hardware) — it falls back to provisional trust, mirroring the
 	// missing-third-worker pattern. Unexported: internal to verification.
-	engine      string
-	buildHash   string
-	jobType     string // parent job's job_type, for honeypot answer lookup
-	InputRef    string // this task's input chunk key (honeypot answer lookup)
-	ResultKey   string // canonical server-side result key (verification fetch)
-	ModelRef    string // parent job's model_ref (tiebreak peer selection)
-	MinMemoryGB float32
-	ChunkIndex  int // this task's chunk position (tiebreak pairing + N-way vote)
+	engine       string
+	buildHash    string
+	jobType      string // parent job's job_type, for honeypot answer lookup
+	jobMaxTokens uint32 // bounded projection of jobs.job_type_spec.max_tokens
+	// resultMaxBytes is frozen into the attempt snapshot. A restart therefore
+	// applies the same artifact policy even after a control-plane upgrade.
+	resultMaxBytes int64
+	InputRef       string // this task's input chunk key (honeypot answer lookup)
+	ResultKey      string // canonical server-side result key (verification fetch)
+	ModelRef       string // parent job's model_ref (tiebreak peer selection)
+	MinMemoryGB    float32
+	ChunkIndex     int // this task's chunk position (tiebreak pairing + N-way vote)
+	SplitSize      int
+	// ExpectedOutputRecords is the immutable exact cardinality captured while the
+	// input chunk was streamed. Zero is explicit legacy/opaque unknown and keeps
+	// the conservative <= split-size compatibility contract.
+	ExpectedOutputRecords int64
+	Attempt               int16
+	DurationMS            uint64
+	TokensUsed            uint64
+	ResultSHA256          string
+	hardwareTempC         *float32
+	// verificationCheckSampled is the once-persisted audit choice from the
+	// immutable verification work plan. Nil preserves direct/unit legacy behavior;
+	// recovery processors always set it so reputation changes cannot change a
+	// retried attempt's audit branch.
+	verificationCheckSampled *bool
 	// peerSupplierID is the redundancy peer's supplier, set by the commit handler
 	// when a sibling result exists. Used only by the no-object-store verification
 	// fallback so a 2-blob disagreement docks the RIGHT supplier (uuid.Nil = unknown).
@@ -2115,13 +4486,23 @@ type CommitTaskInfo struct {
 	peerBuildHash string
 }
 
-// CommitTask stores the result ref and flips the task to complete. Returns the
-// context verification needs. Scoped to the claiming worker. The stored
+// CommitTask stores the result ref and flips the task to verifying. It does NOT
+// mark work complete, increment counters, write duration telemetry, or create
+// money rows; FinalizeTaskVerification does all of those atomically only after a
+// durable verdict. Returns the context verification needs. Scoped to the claiming
+// worker. The stored
 // result_ref is the canonical server-side result_key (the key the control plane
 // presigned at dispatch), NOT whatever the worker echoes in the commit body — the
 // worker's TaskCommit.result_key is a presigned URL in V1, so trusting it would
 // store a URL where a key belongs. We trust the path + our own dispatch record.
 func (s *Store) CommitTask(ctx context.Context, taskID, workerID uuid.UUID, c TaskCommit) (*CommitTaskInfo, error) {
+	return s.commitTask(ctx, taskID, workerID, c, nil)
+}
+
+func (s *Store) commitTask(ctx context.Context, taskID, workerID uuid.UUID, c TaskCommit, probe recoveryBoundaryProbe) (*CommitTaskInfo, error) {
+	if c.DurationMS > math.MaxInt64 || c.TokensUsed > math.MaxInt64 {
+		return nil, fmt.Errorf("reported duration/tokens exceed durable range")
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -2137,80 +4518,108 @@ func (s *Store) CommitTask(ctx context.Context, taskID, workerID uuid.UUID, c Ta
 
 	ct, err := tx.Exec(ctx,
 		`UPDATE tasks
-		   SET status = 'complete', completed_at = now(),
-		       result_ref = COALESCE(NULLIF(result_key,''), $3),
-		       worker_id = $2, result_sha256 = $4
-		 WHERE id = $1 AND claimed_by = $2 AND status IN ('running','queued')`,
-		taskID, workerID, c.ResultKey, resultSHA256)
+		   SET status = 'verifying',
+		       completed_at = CASE WHEN status='verifying' THEN completed_at ELSE NULL END,
+		       result_ref = CASE WHEN status='verifying' THEN result_ref ELSE COALESCE(NULLIF(result_key,''), $3) END,
+		       worker_id = CASE WHEN status='verifying' THEN worker_id ELSE $2 END,
+		       result_sha256 = CASE WHEN status='verifying' THEN result_sha256 ELSE $4 END,
+		       reported_duration_ms = CASE WHEN status='verifying' THEN reported_duration_ms ELSE $5 END,
+		       reported_tokens_used = CASE WHEN status='verifying' THEN reported_tokens_used ELSE $6 END,
+		       reported_hardware_temp_c = CASE WHEN status='verifying' THEN reported_hardware_temp_c ELSE $7 END,
+		       verification_outcome = CASE WHEN status='verifying' THEN verification_outcome ELSE NULL END,
+		       verified_at = CASE WHEN status='verifying' THEN verified_at ELSE NULL END
+		 WHERE id = $1 AND claimed_by = $2 AND execution_worker_id = $2
+		   AND (status IN ('running','queued') OR (status = 'verifying' AND worker_id = $2))`,
+		taskID, workerID, c.ResultKey, resultSHA256, int64(c.DurationMS), int64(c.TokensUsed), c.HardwareTempC)
 	if err != nil {
 		return nil, err
 	}
 	if ct.RowsAffected() == 0 {
 		return nil, errNotFound
 	}
+	reachRecoveryBoundary(ctx, probe, BoundaryCommitAfterTaskProjection)
 
 	var info CommitTaskInfo
+	var jobMaxTokens int64
 	info.TaskID = taskID
-	info.WorkerID = workerID
-	var splitSize int
 	err = tx.QueryRow(ctx,
 		`SELECT t.job_id, t.is_honeypot, t.is_redundancy,
 		        COALESCE(t.input_ref,''),
 		        COALESCE(NULLIF(t.result_key,''), $3),
-		        w.supplier_id, COALESCE(w.hw_class,''),
-		        COALESCE(w.engine,''), COALESCE(w.build_hash,''), j.job_type,
+		        t.execution_worker_id,t.execution_supplier_id,t.execution_hw_class,
+		        t.execution_engine,t.execution_build_hash,j.job_type,
+		        COALESCE((j.job_type_spec->>'max_tokens')::bigint,0),
 		        COALESCE(j.model_ref,''), COALESCE(j.min_memory_gb,0),
-		        COALESCE(t.chunk_index,0), COALESCE(j.split_size,0)
-		 FROM tasks t
-		   JOIN workers w ON w.id = $2
-		   JOIN jobs j ON j.id = t.job_id
-		 WHERE t.id = $1`,
+		        COALESCE(t.chunk_index,0), COALESCE(j.split_size,0),
+		        COALESCE(t.expected_output_records,0),
+		        COALESCE(t.retry_count,0), COALESCE(t.result_sha256,'')
+	 FROM tasks t JOIN jobs j ON j.id = t.job_id
+	 WHERE t.id = $1 AND t.execution_worker_id=$2`,
 		taskID, workerID, c.ResultKey,
 	).Scan(&info.JobID, &info.IsHoneypot, &info.IsRedundancy, &info.InputRef,
-		&info.ResultKey, &info.SupplierID, &info.HWClass, &info.engine, &info.buildHash, &info.jobType,
-		&info.ModelRef, &info.MinMemoryGB, &info.ChunkIndex, &splitSize)
+		&info.ResultKey, &info.WorkerID, &info.SupplierID, &info.HWClass, &info.engine, &info.buildHash, &info.jobType, &jobMaxTokens,
+		&info.ModelRef, &info.MinMemoryGB, &info.ChunkIndex, &info.SplitSize,
+		&info.ExpectedOutputRecords, &info.Attempt, &info.ResultSHA256)
 	if err != nil {
 		return nil, err
 	}
+	if jobMaxTokens < 0 || jobMaxTokens > int64(^uint32(0)) {
+		return nil, fmt.Errorf("job max_tokens %d exceeds artifact-policy range", jobMaxTokens)
+	}
+	info.jobMaxTokens = uint32(jobMaxTokens)
+	info.resultMaxBytes = verificationArtifactMaxBytesForRecords(
+		info.jobType, info.ExpectedOutputRecords, info.SplitSize, info.jobMaxTokens,
+	)
 
-	// Increment the job's done counter.
-	_, err = tx.Exec(ctx,
-		`UPDATE jobs SET tasks_done = tasks_done + 1 WHERE id = $1`, info.JobID)
+	// Commit, apply, and every terminal job transition share task -> parent lock
+	// order. Without this parent fence a sibling could fail/cancel the job after
+	// this transaction changed the task to verifying but before that uncommitted
+	// row/work was visible; the commit would then strand durable verification under
+	// a terminal parent. Whichever transaction gets the parent lock first now wins
+	// coherently: a terminal parent rolls this upload projection back, while a
+	// committed upload makes terminal paths observe unresolved verification work.
+	var parentStatus string
+	if err := tx.QueryRow(ctx, `SELECT status FROM jobs WHERE id=$1 FOR UPDATE`, info.JobID).Scan(&parentStatus); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, errNotFound
+		}
+		return nil, err
+	}
+	if parentStatus != "queued" && parentStatus != "running" && parentStatus != "verifying" {
+		return nil, errNotFound
+	}
+	reachRecoveryBoundary(ctx, probe, BoundaryCommitAfterParentFence)
+
+	// Once every remaining task has uploaded and is awaiting a verdict, expose the
+	// parent as verifying. A later rejection/requeue moves it back to running.
+	if _, err := tx.Exec(ctx,
+		`UPDATE jobs j SET status = 'verifying'
+		 WHERE j.id = $1 AND j.status IN ('queued','running')
+		   AND NOT EXISTS (
+		     SELECT 1 FROM tasks t
+		     WHERE t.job_id = j.id AND t.status IN ('queued','retrying','running')
+		   )`, info.JobID); err != nil {
+		return nil, err
+	}
+	reachRecoveryBoundary(ctx, probe, BoundaryCommitAfterJobProjection)
+
+	info.DurationMS = c.DurationMS
+	info.TokensUsed = c.TokensUsed
+	info.hardwareTempC = c.HardwareTempC
+	snapshot, err := verificationWorkSnapshotFromCommit(&info, c)
 	if err != nil {
 		return nil, err
 	}
-
-	// Maintain the supplier's lifetime completed-task count HERE, at the one
-	// real commit, instead of ClaimTask re-deriving it with a `count(*)` scan on
-	// every single claim (Control Plane Hot Path 7->8,
-	// docs/internal/CREED_AND_PATH_TO_TEN.md). Scoped inside this same
-	// transaction: a commit that rolls back for any reason never leaves a
-	// phantom increment behind.
-	_, err = tx.Exec(ctx,
-		`UPDATE suppliers SET completed_tasks = completed_tasks + 1 WHERE id = $1`, info.SupplierID)
-	if err != nil {
+	if err := createVerificationWorkTx(ctx, tx, snapshot); err != nil {
 		return nil, err
 	}
+	reachRecoveryBoundary(ctx, probe, BoundaryCommitAfterWorkInsert)
 
-	// Quote-to-actual drift feedback (Plane D D6 / errata C-Errata-6): record the
-	// REAL committed-task wall-time so the Exchange Brain can learn an observed p90
-	// the next quote's ETA leans on. This lives INSIDE the commit transaction so a
-	// duration is recorded if and only if the task truly committed — a failed or
-	// malformed task takes the fail path (failJobAndSettleOnce), never this one, so
-	// it can never poison the estimate. duration_ms is the worker's reported value;
-	// we store it verbatim (real telemetry, never fabricated).
-	_, err = tx.Exec(ctx,
-		`INSERT INTO task_durations (job_id, job_type, model_ref, split_size, duration_ms, worker_id, engine, build_hash)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-		info.JobID, info.jobType, info.ModelRef, splitSize, int64(c.DurationMS),
-		info.WorkerID, info.engine, info.buildHash)
-	if err != nil {
-		return nil, err
-	}
-
+	reachRecoveryBoundary(ctx, probe, BoundaryCommitBeforeDBCommit)
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
+	reachRecoveryBoundary(ctx, probe, BoundaryCommitAfterDBCommit)
 	return &info, nil
 }
 
@@ -2507,11 +4916,12 @@ func (s *Store) RequeueTask(ctx context.Context, taskID uuid.UUID) error {
 	// count, so the backoff scales and the failer is the one we exclude. FOR UPDATE
 	// pins the row against a concurrent requeue/claim while we compute the delay.
 	var failedWorker *uuid.UUID
+	var jobID uuid.UUID
 	var priorRetries int
 	if err := tx.QueryRow(ctx,
-		`SELECT COALESCE(worker_id, claimed_by), retry_count FROM tasks WHERE id = $1 FOR UPDATE`,
+		`SELECT COALESCE(worker_id, claimed_by), job_id, retry_count FROM tasks WHERE id = $1 FOR UPDATE`,
 		taskID,
-	).Scan(&failedWorker, &priorRetries); err != nil {
+	).Scan(&failedWorker, &jobID, &priorRetries); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errNotFound
 		}
@@ -2530,6 +4940,10 @@ func (s *Store) RequeueTask(ctx context.Context, taskID uuid.UUID) error {
 		taskID, backoff.Seconds(), failedWorker,
 		(backoff + requeueExclusionGrace).Seconds(),
 	); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE jobs SET status = 'running' WHERE id = $1 AND status = 'verifying'`, jobID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -2608,14 +5022,17 @@ func (s *Store) InsertHoneypot(ctx context.Context, jobType, inputRef string, kn
 // GetObject in that case, so an absent hash never changes correctness.
 func (s *Store) PeerResultKey(ctx context.Context, taskID uuid.UUID) (peerResult string, peerSupplier uuid.UUID, peerEngine, peerBuildHash, peerSHA256 string, err error) {
 	err = s.pool.QueryRow(ctx,
-		`SELECT COALESCE(p.result_ref,''), w.supplier_id,
-		        COALESCE(w.engine,''), COALESCE(w.build_hash,''), COALESCE(p.result_sha256,'')
+		`SELECT COALESCE(p.result_ref,''),COALESCE(vw.supplier_id,p.execution_supplier_id),
+		        COALESCE(vw.input_snapshot->>'engine',p.execution_engine,''),
+		        COALESCE(vw.input_snapshot->>'build_hash',p.execution_build_hash,''),
+		        COALESCE(p.result_sha256,'')
 		 FROM tasks t
 		   JOIN tasks p ON p.job_id = t.job_id AND p.input_ref = t.input_ref
 		                AND p.id <> t.id AND p.status = 'complete'
 		                AND p.result_ref IS NOT NULL AND p.result_ref <> ''
-		   JOIN workers w ON w.id = p.worker_id
+		   LEFT JOIN verification_work vw ON vw.task_id=p.id AND vw.attempt=p.retry_count
 		 WHERE t.id = $1
+		   AND COALESCE(vw.supplier_id,p.execution_supplier_id) IS NOT NULL
 		 ORDER BY p.completed_at ASC
 		 LIMIT 1`,
 		taskID,
@@ -2626,6 +5043,32 @@ func (s *Store) PeerResultKey(ctx context.Context, taskID uuid.UUID) (peerResult
 	return peerResult, peerSupplier, peerEngine, peerBuildHash, peerSHA256, err
 }
 
+// PeerSealedResult returns the same earliest completed peer only when its result
+// is backed by terminal verification work and the task projection exactly matches
+// that server-observed artifact. This is the authority required for a safe hash
+// equality fast path; worker-reported hashes alone never qualify.
+func (s *Store) PeerSealedResult(ctx context.Context, taskID uuid.UUID) (VerificationArtifact, uuid.UUID, string, string, error) {
+	var artifact VerificationArtifact
+	var supplier uuid.UUID
+	var engine, build string
+	err := s.pool.QueryRow(ctx, `
+		SELECT vw.artifact_key,vw.artifact_sha256,vw.artifact_bytes,
+		       vw.supplier_id,COALESCE(vw.input_snapshot->>'engine',''),
+		       COALESCE(vw.input_snapshot->>'build_hash','')
+		  FROM tasks t
+		  JOIN tasks p ON p.job_id=t.job_id AND p.input_ref=t.input_ref
+		              AND p.id<>t.id AND p.status='complete'
+		  JOIN verification_work vw ON vw.task_id=p.id AND vw.attempt=p.retry_count
+		 WHERE t.id=$1 AND vw.status='terminal'
+		   AND p.result_ref=vw.artifact_key AND p.result_sha256=vw.artifact_sha256
+		 ORDER BY p.completed_at ASC,p.id LIMIT 1`, taskID).
+		Scan(&artifact.Key, &artifact.SHA256, &artifact.Bytes, &supplier, &engine, &build)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return artifact, uuid.Nil, "", "", errNotFound
+	}
+	return artifact, supplier, engine, build, err
+}
+
 // ChunkResult is one committed result for a chunk: its result key plus the
 // worker + supplier that produced it (so a majority vote can credit the winner
 // and dock the losers by supplier).
@@ -2634,6 +5077,10 @@ type ChunkResult struct {
 	WorkerID   uuid.UUID
 	SupplierID uuid.UUID
 	ResultRef  string
+	// Artifact is the terminal verification_work tuple when this result went
+	// through the durable verifier. Nil is an explicit pre-migration/legacy
+	// fallback: callers may read ResultRef, but must never hash-trust it.
+	Artifact *VerificationArtifact
 	// Engine + BuildHash are the finer verification-class axes of the worker behind
 	// this result, so the N-way vote can tell whether two byte-exact results are even
 	// in the same (hw_class, engine, build_hash) class before docking on a mismatch.
@@ -2647,12 +5094,20 @@ type ChunkResult struct {
 // once a tiebreak commits and does a real majorityVote over them.
 func (s *Store) ChunkResults(ctx context.Context, jobID uuid.UUID, chunkIndex int) ([]ChunkResult, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT t.id, t.worker_id, w.supplier_id, t.result_ref,
-		        COALESCE(w.engine,''), COALESCE(w.build_hash,'')
-		 FROM tasks t JOIN workers w ON w.id = t.worker_id
+		`SELECT t.id,COALESCE(vw.worker_id,t.execution_worker_id),
+		        COALESCE(vw.supplier_id,t.execution_supplier_id),
+		        t.result_ref,
+		        COALESCE(vw.input_snapshot->>'engine',t.execution_engine,''),
+		        COALESCE(vw.input_snapshot->>'build_hash',t.execution_build_hash,''),
+		        vw.artifact_key,vw.artifact_sha256,vw.artifact_bytes
+		 FROM tasks t
+		 LEFT JOIN verification_work vw
+		   ON vw.task_id=t.id AND vw.attempt=t.retry_count AND vw.status='terminal'
 		 WHERE t.job_id = $1 AND COALESCE(t.chunk_index,0) = $2
 		   AND t.status = 'complete' AND t.is_honeypot = false
 		   AND t.result_ref IS NOT NULL AND t.result_ref <> ''
+		   AND COALESCE(vw.worker_id,t.execution_worker_id) IS NOT NULL
+		   AND COALESCE(vw.supplier_id,t.execution_supplier_id) IS NOT NULL
 		 ORDER BY t.completed_at ASC NULLS LAST, t.id ASC`,
 		jobID, chunkIndex)
 	if err != nil {
@@ -2662,9 +5117,17 @@ func (s *Store) ChunkResults(ctx context.Context, jobID uuid.UUID, chunkIndex in
 	var out []ChunkResult
 	for rows.Next() {
 		var cr ChunkResult
+		var artifactKey, artifactSHA *string
+		var artifactBytes *int64
 		if err := rows.Scan(&cr.TaskID, &cr.WorkerID, &cr.SupplierID, &cr.ResultRef,
-			&cr.Engine, &cr.BuildHash); err != nil {
+			&cr.Engine, &cr.BuildHash, &artifactKey, &artifactSHA, &artifactBytes); err != nil {
 			return nil, err
+		}
+		if artifactKey != nil || artifactSHA != nil || artifactBytes != nil {
+			if artifactKey == nil || artifactSHA == nil || artifactBytes == nil {
+				return nil, fmt.Errorf("task %s has an incomplete terminal verification artifact tuple", cr.TaskID)
+			}
+			cr.Artifact = &VerificationArtifact{Key: *artifactKey, SHA256: *artifactSHA, Bytes: *artifactBytes}
 		}
 		out = append(out, cr)
 	}
@@ -2684,6 +5147,31 @@ func (s *Store) TiebreakExists(ctx context.Context, jobID uuid.UUID, chunkIndex 
 	return n > 0, err
 }
 
+var ErrEconomicReserveExhausted = errors.New("economic extra-task reserve exhausted or work is no longer pre-charge")
+
+func consumeEconomicReserveTx(ctx context.Context, tx pgx.Tx, jobID uuid.UUID) (buyerCharge, supplierPayout float64, err error) {
+	err = tx.QueryRow(ctx, `
+		UPDATE job_economic_reserves r
+		   SET consumed_tasks=consumed_tasks+1,updated_at=now()
+		  FROM job_economic_plans p,jobs j
+		 WHERE r.job_id=$1 AND p.job_id=r.job_id AND j.id=r.job_id
+		   AND r.consumed_tasks < r.reserved_tasks
+		   AND j.status IN ('queued','running','verifying')
+		   AND j.charge_status='not_attempted'
+		   AND (j.max_usd IS NULL
+		        OR p.buyer_charge_per_task_usd * (p.initial_task_count+r.consumed_tasks+1)
+		             + p.sla_premium_usd <= j.max_usd)
+		   AND (p.firm_quote_max_usd IS NULL
+		        OR p.buyer_charge_per_task_usd * (p.initial_task_count+r.consumed_tasks+1)
+		             + p.sla_premium_usd <= p.firm_quote_max_usd)
+		RETURNING p.buyer_charge_per_task_usd::float8,p.supplier_payout_per_task_usd::float8`, jobID).
+		Scan(&buyerCharge, &supplierPayout)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, 0, ErrEconomicReserveExhausted
+	}
+	return buyerCharge, supplierPayout, err
+}
+
 // InsertTiebreakTask inserts a third-opinion redundancy task for a chunk, pinned
 // (pre-claimed, not yet started) to a chosen same-class peer so only that worker
 // runs it, carrying hedged_from = the primary task and the chunk's input_ref +
@@ -2695,22 +5183,71 @@ func (s *Store) InsertTiebreakTask(ctx context.Context, jobID, primaryTaskID, pe
 		return uuid.Nil, err
 	}
 	defer tx.Rollback(ctx)
+	buyerCharge, supplierPayout, err := consumeEconomicReserveTx(ctx, tx, jobID)
+	if err != nil {
+		if errors.Is(err, ErrEconomicReserveExhausted) {
+			// A retry may arrive after the first creator consumed the final slot.
+			// Return that durable task idempotently; do not turn a successful prior
+			// authorization into a spurious reserve error.
+			var existing uuid.UUID
+			qerr := tx.QueryRow(ctx, `
+				SELECT id FROM tasks
+				 WHERE job_id=$1 AND COALESCE(chunk_index,0)=$2
+				   AND hedged_from IS NOT NULL AND is_redundancy=true
+				 ORDER BY created_at LIMIT 1`, jobID, chunkIndex).Scan(&existing)
+			if qerr == nil {
+				return existing, nil
+			}
+			if !errors.Is(qerr, pgx.ErrNoRows) {
+				return uuid.Nil, qerr
+			}
+		}
+		return uuid.Nil, err
+	}
+	// The reserve-row UPDATE above serializes dynamic creators for this job. A
+	// concurrent identical creator is now visible; return its id and roll back our
+	// tentative reserve consumption instead of duplicating work.
+	var existing uuid.UUID
+	err = tx.QueryRow(ctx, `
+		SELECT id FROM tasks
+		 WHERE job_id=$1 AND COALESCE(chunk_index,0)=$2
+		   AND hedged_from IS NOT NULL AND is_redundancy=true
+		 ORDER BY created_at LIMIT 1`, jobID, chunkIndex).Scan(&existing)
+	if err == nil {
+		return existing, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, err
+	}
+	frozenClass, err := frozenTiebreakClassForAnchorTx(ctx, tx, primaryTaskID)
+	if err != nil {
+		return uuid.Nil, err
+	}
 
 	id := uuid.New()
 	resultKey := fmt.Sprintf("jobs/%s/tiebreak/%s/result.json", jobID, id)
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO tasks
 		   (id, job_id, status, is_honeypot, is_redundancy, retry_count,
-		    input_ref, result_key, chunk_index, hedged_from,
-		    claimed_by, claimed_at, visible_at)
-		 VALUES ($1,$2,'queued',false,true,0,$3,$4,$5,$6,$7, now(), now())`,
-		id, jobID, inputRef, resultKey, chunkIndex, primaryTaskID, peerWorker,
+		    input_ref, result_key, chunk_index, hedged_from,expected_output_records,
+		    verification_hw_class,verification_engine,verification_build_hash,
+		    claimed_by, claimed_at, visible_at,
+		    economic_buyer_charge_usd,economic_supplier_payout_usd)
+		 VALUES ($1,$2,'queued',false,true,0,$3,$4,$5,$6,
+		         (SELECT expected_output_records FROM tasks WHERE id=$6),
+		         $7,$8,$9,$10,now(),now(),$11,$12)`,
+		id, jobID, inputRef, resultKey, chunkIndex, primaryTaskID,
+		frozenClass.HWClass, frozenClass.Engine, frozenClass.BuildHash,
+		peerWorker, buyerCharge, supplierPayout,
 	); err != nil {
 		return uuid.Nil, err
 	}
 	// One more opinion to wait for before the job is "all tasks done".
 	if _, err := tx.Exec(ctx,
-		`UPDATE jobs SET task_count = task_count + 1 WHERE id = $1`, jobID); err != nil {
+		`UPDATE jobs
+		    SET task_count = task_count + 1,
+		        status = CASE WHEN status='verifying' THEN 'running' ELSE status END
+		  WHERE id = $1`, jobID); err != nil {
 		return uuid.Nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -2743,73 +5280,109 @@ func (s *Store) InsertLedgerEntries(ctx context.Context, entries []LedgerEntry) 
 }
 
 // ClawbackTaskCredit reverses the supplier credit already written for a task on
-// confirmed fraud. It sums the supplier's prior credit for that task and writes
-// a matching negative clawback row via clawbackEntry, then marks the original
-// credit rows clawed_back so they no longer count toward the balance. No-op (no
-// error) if there was no prior credit.
+// confirmed fraud. Liability reversal and cash recovery are deliberately
+// different states: a held/ready credit becomes clawed_back, while a transfer
+// already released, exported, or in flight becomes reversal_required. Nothing in
+// this function pretends a provider reversal exists.
 func (s *Store) ClawbackTaskCredit(ctx context.Context, supplierID, taskID uuid.UUID) error {
-	var credited float64
-	err := s.pool.QueryRow(ctx,
-		`SELECT COALESCE(SUM(amount_usd),0) FROM ledger_entries
-		 WHERE supplier_id = $1 AND task_id = $2 AND kind = 'supplier_credit'
-		   AND amount_usd > 0`,
-		supplierID, taskID,
-	).Scan(&credited)
-	if err != nil {
-		return err
-	}
-	if credited <= 0 {
-		return nil // nothing to claw back
-	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
 
-	cb := clawbackEntry(supplierID, taskID, credited)
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO ledger_entries
+	var (
+		creditID       uuid.UUID
+		credited       float64
+		creditState    string
+		payoutRef      string
+		outcomeUnknown bool
+	)
+	err = tx.QueryRow(ctx, `
+		SELECT le.id,le.amount_usd::float8,le.payout_status,
+		       COALESCE(le.payout_ref,''),COALESCE(op.outcome_unknown,false)
+		  FROM ledger_entries le
+		  LEFT JOIN supplier_payout_operations op ON op.ledger_entry_id=le.id
+		 WHERE le.supplier_id=$1 AND le.task_id=$2
+		   AND le.kind='supplier_credit' AND le.amount_usd>0
+		 ORDER BY le.created_at,le.id LIMIT 1
+		 FOR UPDATE OF le`, supplierID, taskID).
+		Scan(&creditID, &credited, &creditState, &payoutRef, &outcomeUnknown)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if err == nil && credited > 0 {
+		cb := clawbackEntry(supplierID, taskID, credited)
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO ledger_entries
 		   (kind, supplier_id, task_id, amount_usd, payout_status)
 		 VALUES ($1,$2,$3,$4,$5)
 		 ON CONFLICT (task_id, kind) DO NOTHING`,
-		cb.Kind, cb.SupplierID, cb.TaskID, cb.AmountUSD, cb.PayoutStatus,
-	); err != nil {
+			cb.Kind, cb.SupplierID, cb.TaskID, cb.AmountUSD, cb.PayoutStatus,
+		); err != nil {
+			return err
+		}
+		reversalRequired := payoutRef != "" || outcomeUnknown ||
+			creditState == PayoutSending || creditState == PayoutOutcomeUnknown ||
+			creditState == PayoutReleased || creditState == PayoutExported ||
+			creditState == PayoutReversalRequired
+		nextState := PayoutClawedBack
+		if reversalRequired {
+			nextState = PayoutReversalRequired
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE ledger_entries SET payout_status=$2 WHERE id=$1`, creditID, nextState); err != nil {
+			return err
+		}
+		opState := nextState
+		if _, err := tx.Exec(ctx, `
+			UPDATE supplier_payout_operations
+			   SET status=$2,updated_at=now(),
+			       last_error=CASE WHEN $2='reversal_required'
+			                       THEN 'confirmed clawback requires external recovery'
+			                       ELSE last_error END
+			 WHERE ledger_entry_id=$1`, creditID, opState); err != nil {
+			return err
+		}
+	}
+	// The money reversal and the buyer-facing durable verdict move together. A
+	// task with no previously scheduled credit still records the corrected verdict.
+	if _, err := tx.Exec(ctx,
+		`UPDATE tasks SET verification_outcome='clawed_back', verified_at=now() WHERE id=$1`, taskID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx,
-		`UPDATE ledger_entries SET payout_status = 'clawed_back'
-		 WHERE supplier_id = $1 AND task_id = $2 AND kind = 'supplier_credit'`,
-		supplierID, taskID,
-	); err != nil {
+		`INSERT INTO task_verdict_resolutions (effect_id,task_id,source_task_id,kind)
+		 VALUES ($1,$2,$2,'clawed_back') ON CONFLICT (effect_id) DO NOTHING`,
+		verificationResolutionID(taskID, "clawed_back", taskID), taskID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
 }
 
-// WorkerEarnings sums a supplier's released balance and lifetime credits for
-// GET /v1/worker/earnings. Balance = released-but-not-clawed credits; lifetime
-// = all positive supplier credits ever. LastPayout*/NextPayoutAt are Supplier
-// onboarding & safety 7->8's real payout proof for the menu-bar trust panel:
-// last = the most recent row whose hold has actually expired (payout_status IN
-// ('released','ready') — 'ready' is the honest "owed, queued, no rail yet" state
-// releasePayouts uses when the stub Payout errs, and its release_at is just as
-// real as a fully 'released' row's), keyed by release_at (the real timestamp
-// splitCharge computed as now()+holdSecs, and the exact instant releasePayouts
-// acts on — never a fabricated "paid at" column this table doesn't have); next =
-// the soonest still-'held' row's release_at. Both nil when there is no such row
-// (a fresh or never-paid supplier), never a fabricated zero time.
+// WorkerEarnings separates accrued credit from proved supplier cash for
+// GET /v1/worker/earnings. Lifetime = all positive supplier credits ever.
+// Balance and LastPayout* require a durable payout operation with cash_moved=true;
+// `awaiting_funding`/`ready` are debt, `outcome_unknown` is possible cash,
+// `exported` is coordination, and `reversal_required` is unresolved recovery, so
+// none may render as a paid balance or "last payout" in the app.
+// NextPayoutAt remains the soonest held credit's scheduled attempt time.
 func (s *Store) WorkerEarnings(ctx context.Context, supplierID uuid.UUID) (Earnings, error) {
 	var e Earnings
 	err := s.pool.QueryRow(ctx,
 		`SELECT
-		   COALESCE(SUM(amount_usd) FILTER (
-		     WHERE payout_status = 'released' AND amount_usd > 0), 0),
-		   COALESCE(SUM(amount_usd) FILTER (WHERE amount_usd > 0), 0)
-		 FROM ledger_entries
-		 WHERE supplier_id = $1 AND kind = 'supplier_credit'`,
+		   COALESCE(SUM(op.sent_cents) FILTER (
+		     WHERE le.payout_status = 'released' AND op.cash_moved = true
+		       AND op.sent_cents > 0), 0)::float8 / 100.0,
+		   COALESCE(SUM(le.amount_usd) FILTER (WHERE le.amount_usd > 0), 0),
+		   COALESCE(SUM(mu.remainder_microusd) FILTER (
+		     WHERE le.payout_status NOT IN ('clawed_back','reversal_required')),0)::float8 / 1000000.0
+		 FROM ledger_entries le
+		 LEFT JOIN supplier_payout_operations op ON op.ledger_entry_id=le.id
+		 LEFT JOIN supplier_minor_unit_settlements mu ON mu.ledger_entry_id=le.id
+		 WHERE le.supplier_id = $1 AND le.kind = 'supplier_credit'`,
 		supplierID,
-	).Scan(&e.BalanceUSD, &e.LifetimeUSD)
+	).Scan(&e.BalanceUSD, &e.LifetimeUSD, &e.CarriedUSD)
 	if err != nil {
 		return e, err
 	}
@@ -2817,10 +5390,12 @@ func (s *Store) WorkerEarnings(ctx context.Context, supplierID uuid.UUID) (Earni
 	var lastAmt float64
 	var lastAt time.Time
 	err = s.pool.QueryRow(ctx,
-		`SELECT amount_usd, release_at FROM ledger_entries
-		  WHERE supplier_id = $1 AND kind = 'supplier_credit'
-		    AND payout_status IN ('released','ready') AND release_at IS NOT NULL
-		  ORDER BY release_at DESC LIMIT 1`,
+		`SELECT op.sent_cents::float8 / 100.0,op.updated_at
+		   FROM ledger_entries le
+		   JOIN supplier_payout_operations op ON op.ledger_entry_id=le.id
+		  WHERE le.supplier_id=$1 AND le.kind='supplier_credit'
+		    AND le.payout_status='released' AND op.cash_moved=true
+		  ORDER BY op.updated_at DESC,le.id DESC LIMIT 1`,
 		supplierID,
 	).Scan(&lastAmt, &lastAt)
 	switch {
@@ -2829,7 +5404,7 @@ func (s *Store) WorkerEarnings(ctx context.Context, supplierID uuid.UUID) (Earni
 		t := lastAt.Unix()
 		e.LastPayoutAt = &t
 	case errors.Is(err, pgx.ErrNoRows):
-		// No released/ready credit yet — leave both nil, not zero.
+		// No durable cash payout yet — leave both nil, not zero.
 	default:
 		return e, err
 	}
@@ -2994,21 +5569,112 @@ func (s *Store) GetModel(ctx context.Context, id string) (*ModelRow, error) {
 
 // --- webhooks ---
 
-// InsertWebhook persists a completion-webhook registration for a job.
-func (s *Store) InsertWebhook(ctx context.Context, buyerID uuid.UUID, jobID *uuid.UUID, url string) (uuid.UUID, error) {
+var (
+	errWebhookLeaseLost   = errors.New("webhook delivery lease lost")
+	errWebhookJobRequired = errors.New("webhook job id is required")
+	errWebhookLimit       = errors.New("webhook registration limit reached for job")
+)
+
+const webhookRegistrationLimitPerJob = 32
+
+// InsertWebhook persists a completion-webhook registration. Job-scoped hooks are
+// ownership-checked and inserted in the same transaction, so a leaked job UUID can
+// never register a callback for a different buyer. The composite FK installed by
+// Migrate is a second, database-level enforcement of the same invariant.
+func (s *Store) InsertWebhook(ctx context.Context, buyerID uuid.UUID, jobID *uuid.UUID, url string) (WebhookRegistration, error) {
+	if buyerID == uuid.Nil {
+		return WebhookRegistration{}, errors.New("webhook buyer id is required")
+	}
+	if jobID == nil || *jobID == uuid.Nil {
+		return WebhookRegistration{}, errWebhookJobRequired
+	}
+	url = strings.TrimSpace(url)
+	if len(url) == 0 || len(url) > webhookURLMaxBytes {
+		return WebhookRegistration{}, fmt.Errorf("webhook url must be between 1 and %d bytes", webhookURLMaxBytes)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return WebhookRegistration{}, err
+	}
+	defer tx.Rollback(ctx)
+	var owned bool
+	err = tx.QueryRow(ctx,
+		`SELECT true FROM jobs WHERE id=$1 AND buyer_id=$2 FOR UPDATE`,
+		*jobID, buyerID).Scan(&owned)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return WebhookRegistration{}, errNotFound
+	}
+	if err != nil {
+		return WebhookRegistration{}, err
+	}
+	var existing uuid.UUID
+	var existingSealed string
+	err = tx.QueryRow(ctx,
+		`SELECT id,COALESCE(signing_secret_sealed,'')
+		   FROM webhooks
+		  WHERE buyer_id=$1 AND job_id=$2 AND url=$3
+		  FOR UPDATE`,
+		buyerID, *jobID, url).Scan(&existing, &existingSealed)
+	if err == nil {
+		secret, openErr := openWebhookSigningSecret(existingSealed)
+		if openErr != nil {
+			// Exact re-registration is the explicit migration path for a legacy or
+			// unreadable row. The receiver learns the new key in this response and
+			// a pending/dead row is re-armed; no unsigned delivery ever occurs.
+			var sealed string
+			secret, sealed, err = newWebhookSigningSecret()
+			if err != nil {
+				return WebhookRegistration{}, err
+			}
+			if _, err = tx.Exec(ctx, `
+				UPDATE webhooks
+				   SET signing_secret_sealed=$2,
+				       attempts=0,next_attempt_at=now(),
+				       lease_token=NULL,lease_expires_at=NULL,
+				       dead_lettered_at=NULL,last_attempt_at=NULL,last_error=NULL
+				 WHERE id=$1`, existing, sealed); err != nil {
+				return WebhookRegistration{}, err
+			}
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return WebhookRegistration{}, err
+		}
+		return WebhookRegistration{ID: existing, Secret: secret}, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return WebhookRegistration{}, err
+	}
+	var registrations int
+	if err := tx.QueryRow(ctx,
+		`SELECT count(*) FROM webhooks WHERE buyer_id=$1 AND job_id=$2`,
+		buyerID, *jobID).Scan(&registrations); err != nil {
+		return WebhookRegistration{}, err
+	}
+	if registrations >= webhookRegistrationLimitPerJob {
+		return WebhookRegistration{}, errWebhookLimit
+	}
+	secret, sealed, err := newWebhookSigningSecret()
+	if err != nil {
+		return WebhookRegistration{}, err
+	}
 	id := uuid.New()
-	_, err := s.pool.Exec(ctx,
-		`INSERT INTO webhooks (id, buyer_id, job_id, url) VALUES ($1,$2,$3,$4)`,
-		id, buyerID, jobID, url)
-	return id, err
+	if _, err = tx.Exec(ctx,
+		`INSERT INTO webhooks (id,buyer_id,job_id,url,signing_secret_sealed)
+		 VALUES ($1,$2,$3,$4,$5)`,
+		id, buyerID, jobID, url, sealed); err != nil {
+		return WebhookRegistration{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return WebhookRegistration{}, err
+	}
+	return WebhookRegistration{ID: id, Secret: secret}, nil
 }
 
-// JobWebhooks returns the registered webhook URLs for a job (job-scoped plus the
-// buyer's catch-all webhooks with a NULL job_id).
+// JobWebhooks returns the buyer-owned webhook URLs registered for one job.
 func (s *Store) JobWebhooks(ctx context.Context, jobID, buyerID uuid.UUID) ([]string, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT url FROM webhooks
-		 WHERE job_id = $1 OR (job_id IS NULL AND buyer_id = $2)`,
+		 WHERE job_id = $1 AND buyer_id = $2`,
 		jobID, buyerID)
 	if err != nil {
 		return nil, err
@@ -3027,27 +5693,56 @@ func (s *Store) JobWebhooks(ctx context.Context, jobID, buyerID uuid.UUID) ([]st
 
 // PendingWebhook is one undelivered completion webhook for a complete job.
 type PendingWebhook struct {
-	ID     uuid.UUID
-	JobID  uuid.UUID
-	URL    string
-	Status string
+	ID                  uuid.UUID
+	JobID               uuid.UUID
+	URL                 string
+	Status              string
+	SigningSecretSealed string
+	LeaseToken          uuid.UUID
+	Attempts            int
 }
 
-// PendingWebhooks returns webhooks whose job has reached a terminal state
-// (complete, failed, or cancelled — a watchdog stuck-cancel is a terminal outcome
-// the buyer registered to hear about) but that have not yet been delivered
-// (delivered_at IS NULL — the single flag that governs exactly-once firing).
-// Job-scoped webhooks only — a webhook without a job_id is a buyer catch-all with
-// no single terminal event to fire.
-func (s *Store) PendingWebhooks(ctx context.Context, limit int) ([]PendingWebhook, error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT wh.id, wh.job_id, wh.url, j.status
-		 FROM webhooks wh JOIN jobs j ON j.id = wh.job_id
-		 WHERE wh.delivered_at IS NULL
-		   AND wh.job_id IS NOT NULL
-		   AND j.status IN ('complete','failed','cancelled')
-		 ORDER BY j.created_at ASC LIMIT $1`,
-		limit)
+// ClaimPendingWebhooks leases due, terminal job-scoped deliveries. The ownership
+// predicate is repeated in both the candidate and returned-row joins: even a
+// malformed legacy row predating the composite FK can never receive another
+// buyer's result URL. SKIP LOCKED makes this safe when more than one sweep process
+// is enabled, while next_attempt_at and dead_lettered_at keep poison rows out of
+// subsequent pages.
+func (s *Store) ClaimPendingWebhooks(ctx context.Context, limit int, lease time.Duration) ([]PendingWebhook, error) {
+	if limit <= 0 || lease <= 0 {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+		WITH candidates AS (
+		  SELECT wh.id
+		    FROM webhooks wh
+		    JOIN jobs j ON j.id=wh.job_id AND j.buyer_id=wh.buyer_id
+		   WHERE wh.delivered_at IS NULL
+		     AND wh.dead_lettered_at IS NULL
+		     AND wh.job_id IS NOT NULL
+		     AND wh.next_attempt_at <= now()
+		     AND (wh.lease_expires_at IS NULL OR wh.lease_expires_at <= now())
+		     AND j.status IN ('complete','failed','cancelled')
+		   ORDER BY wh.next_attempt_at,j.created_at,wh.created_at,wh.id
+		   FOR UPDATE OF wh SKIP LOCKED
+		   LIMIT $1
+		), claimed AS (
+		  UPDATE webhooks wh
+		     SET lease_token=gen_random_uuid(),
+		         lease_expires_at=now() + make_interval(secs => $2),
+		         last_attempt_at=now()
+		    FROM candidates c
+		   WHERE wh.id=c.id
+		   RETURNING wh.id,wh.job_id,wh.buyer_id,wh.url,
+		             COALESCE(wh.signing_secret_sealed,'') AS signing_secret_sealed,
+		             wh.lease_token,wh.attempts,
+		             wh.next_attempt_at,wh.created_at
+		)
+		SELECT c.id,c.job_id,c.url,j.status,c.signing_secret_sealed,c.lease_token,c.attempts
+		  FROM claimed c
+		  JOIN jobs j ON j.id=c.job_id AND j.buyer_id=c.buyer_id
+		 ORDER BY c.next_attempt_at,c.created_at,c.id`,
+		limit, int64(lease/time.Second))
 	if err != nil {
 		return nil, err
 	}
@@ -3055,7 +5750,9 @@ func (s *Store) PendingWebhooks(ctx context.Context, limit int) ([]PendingWebhoo
 	var out []PendingWebhook
 	for rows.Next() {
 		var p PendingWebhook
-		if err := rows.Scan(&p.ID, &p.JobID, &p.URL, &p.Status); err != nil {
+		if err := rows.Scan(
+			&p.ID, &p.JobID, &p.URL, &p.Status, &p.SigningSecretSealed, &p.LeaseToken, &p.Attempts,
+		); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -3063,30 +5760,312 @@ func (s *Store) PendingWebhooks(ctx context.Context, limit int) ([]PendingWebhoo
 	return out, rows.Err()
 }
 
-// MarkWebhookDelivered stamps delivered_at so the sweep does not re-fire it.
-func (s *Store) MarkWebhookDelivered(ctx context.Context, id uuid.UUID) error {
-	_, err := s.pool.Exec(ctx,
-		`UPDATE webhooks SET delivered_at = now() WHERE id = $1`, id)
-	return err
+// MarkWebhookDelivered completes only the exact live lease. A provider may have
+// accepted the POST before this write fails; leaving the lease to expire causes a
+// safe at-least-once replay with the same stable delivery_id, never a false success.
+func (s *Store) MarkWebhookDelivered(ctx context.Context, id, leaseToken uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE webhooks
+		   SET delivered_at=now(),lease_token=NULL,lease_expires_at=NULL,last_error=NULL
+		 WHERE id=$1 AND lease_token=$2 AND delivered_at IS NULL AND dead_lettered_at IS NULL`,
+		id, leaseToken)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return errWebhookLeaseLost
+	}
+	return nil
+}
+
+// MarkWebhookFailed advances durable backoff or dead-letters a permanent/exhausted
+// delivery. The lease token fences a late HTTP response from changing a row already
+// reclaimed by another process.
+func (s *Store) MarkWebhookFailed(
+	ctx context.Context,
+	id, leaseToken uuid.UUID,
+	failure error,
+	permanent bool,
+	retryAfter time.Duration,
+	maxAttempts int,
+) (attempts int, deadLettered bool, err error) {
+	if retryAfter < 0 {
+		retryAfter = 0
+	}
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	message := "webhook delivery failed"
+	if failure != nil {
+		message = failure.Error()
+	}
+	runes := []rune(message)
+	if len(runes) > 2048 {
+		message = string(runes[:2048])
+	}
+	err = s.pool.QueryRow(ctx, `
+		UPDATE webhooks
+		   SET attempts=attempts+1,
+		       last_error=$3,
+		       dead_lettered_at=CASE WHEN $4 OR attempts+1 >= $6 THEN now() ELSE NULL END,
+		       next_attempt_at=CASE
+		         WHEN $4 OR attempts+1 >= $6 THEN next_attempt_at
+		         ELSE now() + make_interval(secs => $5)
+		       END,
+		       lease_token=NULL,lease_expires_at=NULL
+		 WHERE id=$1 AND lease_token=$2 AND delivered_at IS NULL AND dead_lettered_at IS NULL
+		 RETURNING attempts,dead_lettered_at IS NOT NULL`,
+		id, leaseToken, message, permanent, int64(retryAfter/time.Second), maxAttempts,
+	).Scan(&attempts, &deadLettered)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, errWebhookLeaseLost
+	}
+	return attempts, deadLettered, err
 }
 
 // --- background-worker support ---
 
 // DueHeldEntry is a supplier credit whose hold has expired and is due for payout.
 type DueHeldEntry struct {
-	ID         uuid.UUID
-	SupplierID uuid.UUID
-	AmountUSD  float64
+	ID               uuid.UUID
+	SupplierID       uuid.UUID
+	AmountUSD        float64 // exact provider amount after ClaimPayout
+	LiabilityMicros  int64   // immutable six-decimal internal liability
+	RequestedCents   int64
+	RemainderMicros  int64
+	SettlementPolicy string
+	Currency         string
+}
+
+const (
+	payoutFundingBuyerCollection = "buyer_collection"
+	payoutFundingPlatformSubsidy = "platform_subsidy"
+)
+
+// persistMinorUnitSettlement freezes the exact relationship between one internal
+// six-decimal liability and its provider-minor-unit cash request. The row is
+// append-only in the schema. Identical retries reuse it; any changed amount or
+// policy fails before funding or a provider call.
+func persistMinorUnitSettlement(
+	ctx context.Context,
+	tx pgx.Tx,
+	entryID uuid.UUID,
+	liabilityMicros int64,
+) (cashCents, remainderMicros int64, err error) {
+	cashCents, remainderMicros, err = splitSupplierLiabilityMicros(liabilityMicros)
+	if err != nil {
+		return 0, 0, err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO supplier_minor_unit_settlements
+		  (ledger_entry_id,policy,liability_microusd,cash_cents,remainder_microusd,currency)
+		VALUES ($1,$2,$3,$4,$5,'usd')
+		ON CONFLICT (ledger_entry_id) DO NOTHING`,
+		entryID, supplierSettlementPolicyFloorCentCarryV1, liabilityMicros, cashCents, remainderMicros,
+	); err != nil {
+		return 0, 0, err
+	}
+	var existingPolicy, currency string
+	var existingLiability, existingCash, existingRemainder int64
+	if err := tx.QueryRow(ctx, `
+		SELECT policy,liability_microusd,cash_cents,remainder_microusd,currency
+		  FROM supplier_minor_unit_settlements WHERE ledger_entry_id=$1`, entryID,
+	).Scan(&existingPolicy, &existingLiability, &existingCash, &existingRemainder, &currency); err != nil {
+		return 0, 0, err
+	}
+	if existingPolicy != supplierSettlementPolicyFloorCentCarryV1 ||
+		existingLiability != liabilityMicros || existingCash != cashCents ||
+		existingRemainder != remainderMicros || currency != "usd" {
+		return 0, 0, fmt.Errorf(
+			"minor-unit settlement for ledger entry %s changed: policy=%s liability=%d cash=%d remainder=%d currency=%s",
+			entryID, existingPolicy, existingLiability, existingCash, existingRemainder, currency)
+	}
+	return cashCents, remainderMicros, nil
+}
+
+// reservePayoutFunding binds one supplier liability to exact incoming card cash.
+// The caller already owns the supplier-credit row lock. This function additionally
+// locks the standalone job or shared charge-batch cash pool before checking its
+// remaining integer cents, so concurrent payout workers cannot over-allocate one
+// PaymentIntent. An existing reservation is reused unchanged across rail retries.
+// A pre-authorized platform subsidy is already a reservation and is accepted here;
+// this function never manufactures one implicitly.
+func reservePayoutFunding(
+	ctx context.Context,
+	tx pgx.Tx,
+	entryID uuid.UUID,
+	taskID *uuid.UUID,
+	requestedCents int64,
+	currency string,
+) (uuid.UUID, bool, error) {
+	var (
+		existingID       uuid.UUID
+		existingSource   string
+		existingAmount   int64
+		existingCurrency string
+		existingState    string
+	)
+	err := tx.QueryRow(ctx, `
+		SELECT f.id,f.source_kind,f.amount_cents,f.currency,
+		       COALESCE(fs.status,'available')
+		  FROM supplier_payout_funding f
+		  LEFT JOIN supplier_payout_funding_state fs ON fs.funding_id=f.id
+		 WHERE f.ledger_entry_id=$1
+		 FOR UPDATE OF f`, entryID,
+	).Scan(&existingID, &existingSource, &existingAmount, &existingCurrency, &existingState)
+	if err == nil {
+		if existingAmount != requestedCents || existingCurrency != currency ||
+			(existingSource != payoutFundingBuyerCollection && existingSource != payoutFundingPlatformSubsidy) {
+			return uuid.Nil, false, fmt.Errorf(
+				"payout funding for ledger entry %s does not match liability: source=%s amount=%d %s liability=%d %s",
+				entryID, existingSource, existingAmount, existingCurrency, requestedCents, currency)
+		}
+		// A refund/dispute can invalidate an immutable reservation while an
+		// earlier provider attempt is in flight. Never reuse that reservation for
+		// a new send; reconciliation owns any cash that may already have moved.
+		if existingState == "compromised" {
+			return existingID, false, nil
+		}
+		return existingID, true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, false, err
+	}
+	if taskID == nil {
+		// A job-level supplier credit has no causal buyer collection to follow.
+		// It can move only after AuthorizePayoutSubsidy creates an explicit row.
+		return uuid.Nil, false, nil
+	}
+
+	var (
+		jobID                                     uuid.UUID
+		buyerID                                   uuid.UUID
+		chargeStatus, paymentIntent, cashCurrency string
+		batchID                                   *uuid.UUID
+		cashRequested, cashReceived               int64
+	)
+	if err := tx.QueryRow(ctx, `
+		SELECT j.id,j.buyer_id,j.charge_status,j.charge_batch_id,
+		       COALESCE(j.stripe_pi,''),COALESCE(j.charge_requested_cents,0),
+		       COALESCE(j.charge_received_cents,0),COALESCE(j.charge_currency,'')
+		  FROM tasks t JOIN jobs j ON j.id=t.job_id
+		 WHERE t.id=$1
+		 FOR UPDATE OF j`, *taskID,
+	).Scan(&jobID, &buyerID, &chargeStatus, &batchID, &paymentIntent,
+		&cashRequested, &cashReceived, &cashCurrency); err != nil {
+		return uuid.Nil, false, err
+	}
+	if chargeStatus != "charged" {
+		return uuid.Nil, false, nil
+	}
+
+	sourceKind := "job"
+	if batchID != nil {
+		sourceKind = "batch"
+		var batchBuyer uuid.UUID
+		var batchStatus string
+		if err := tx.QueryRow(ctx, `
+			SELECT buyer_id,status,COALESCE(stripe_pi,''),
+			       COALESCE(charge_requested_cents,0),COALESCE(charge_received_cents,0),
+			       COALESCE(charge_currency,'')
+			  FROM charge_batches WHERE id=$1 FOR UPDATE`, *batchID,
+		).Scan(&batchBuyer, &batchStatus, &paymentIntent, &cashRequested, &cashReceived, &cashCurrency); err != nil {
+			return uuid.Nil, false, err
+		}
+		if batchBuyer != buyerID || batchStatus != "charged" {
+			return uuid.Nil, false, nil
+		}
+	}
+	if strings.TrimSpace(paymentIntent) == "" || cashRequested <= 0 ||
+		cashReceived != cashRequested || cashCurrency != currency {
+		return uuid.Nil, false, nil
+	}
+
+	// Lock and revalidate the canonical cross-source record. This is the shared
+	// allocation mutex: all task liabilities funded by one batch serialize here.
+	var canonicalBuyer uuid.UUID
+	var canonicalRequested, canonicalReceived int64
+	var canonicalCurrency, canonicalChargeID string
+	if sourceKind == "job" {
+		err = tx.QueryRow(ctx, `
+			SELECT buyer_id,requested_cents,received_cents,currency,COALESCE(charge_id,'')
+			  FROM buyer_cash_collections
+			 WHERE payment_intent=$1 AND source_kind='job' AND job_id=$2
+			 FOR UPDATE`, paymentIntent, jobID,
+		).Scan(&canonicalBuyer, &canonicalRequested, &canonicalReceived, &canonicalCurrency, &canonicalChargeID)
+	} else {
+		err = tx.QueryRow(ctx, `
+			SELECT buyer_id,requested_cents,received_cents,currency,COALESCE(charge_id,'')
+			  FROM buyer_cash_collections
+			 WHERE payment_intent=$1 AND source_kind='batch' AND charge_batch_id=$2
+			 FOR UPDATE`, paymentIntent, *batchID,
+		).Scan(&canonicalBuyer, &canonicalRequested, &canonicalReceived, &canonicalCurrency, &canonicalChargeID)
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, false, nil
+	}
+	if err != nil {
+		return uuid.Nil, false, err
+	}
+	if canonicalBuyer != buyerID || canonicalRequested != cashRequested ||
+		canonicalReceived != cashReceived || canonicalCurrency != cashCurrency {
+		return uuid.Nil, false, fmt.Errorf("canonical buyer cash %s disagrees with its %s source", paymentIntent, sourceKind)
+	}
+	// Legacy collections without the Stripe Charge id cannot be safely matched to
+	// a dispute whose payment_intent is null. They remain owed but unfundable until
+	// an operator reconciles the real charge binding.
+	if strings.TrimSpace(canonicalChargeID) == "" {
+		return uuid.Nil, false, nil
+	}
+
+	unavailable, err := stripeCollectionUnavailableCents(ctx, tx, paymentIntent, cashReceived)
+	if err != nil {
+		return uuid.Nil, false, err
+	}
+	available := cashReceived - unavailable
+	if available < 0 {
+		return uuid.Nil, false, fmt.Errorf("stripe cash state for %s exceeds collected cash", paymentIntent)
+	}
+
+	var reserved int64
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(sum(amount_cents),0)::bigint
+		  FROM supplier_payout_funding
+		 WHERE source_kind='buyer_collection' AND collection_payment_intent=$1`, paymentIntent,
+	).Scan(&reserved); err != nil {
+		return uuid.Nil, false, err
+	}
+	if reserved < 0 || reserved > available || requestedCents > available-reserved {
+		return uuid.Nil, false, nil
+	}
+
+	var fundingID uuid.UUID
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO supplier_payout_funding
+		  (ledger_entry_id,source_kind,liability_job_id,collection_payment_intent,
+		   amount_cents,currency)
+		VALUES ($1,'buyer_collection',$2,$3,$4,$5)
+		RETURNING id`, entryID, jobID, paymentIntent, requestedCents, currency,
+	).Scan(&fundingID); err != nil {
+		return uuid.Nil, false, err
+	}
+	return fundingID, true, nil
 }
 
 // DuePayouts returns held supplier credits with release_at <= now(): the set the
-// payout-release loop should attempt to send.
+// payout-release loop should attempt to send. ClaimPayout moves a row with no
+// exact cash reservation to awaiting_funding, so a bounded oldest-first page
+// always makes progress and cannot be permanently occupied by the same debt.
 func (s *Store) DuePayouts(ctx context.Context, limit int) ([]DueHeldEntry, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, supplier_id, amount_usd FROM ledger_entries
-		 WHERE kind = 'supplier_credit' AND payout_status = 'held'
-		   AND release_at IS NOT NULL AND release_at <= now()
-		 ORDER BY release_at ASC LIMIT $1`, limit)
+		`SELECT le.id, le.supplier_id, le.amount_usd
+		 FROM ledger_entries le LEFT JOIN tasks t ON t.id=le.task_id
+		 WHERE le.kind = 'supplier_credit' AND le.payout_status = 'held'
+		   AND le.release_at IS NOT NULL AND le.release_at <= now()
+		   -- A provisional pass_with_penalty is visible to the buyer but cannot
+		   -- leave the platform as supplier money until an unqualified durable pass.
+		   AND (le.task_id IS NULL OR t.verification_outcome = 'pass')
+		 ORDER BY le.release_at ASC,le.id ASC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -3102,9 +6081,484 @@ func (s *Store) DuePayouts(ctx context.Context, limit int) ([]DueHeldEntry, erro
 	return out, rows.Err()
 }
 
-// MarkPayout sets a ledger entry's payout_status (and optional payout_ref). Used
-// by the payout-release loop: 'released' with a ref on a real transfer, or
-// 'ready' (no ref) when the rail is unconfigured and the transfer is deferred.
+// ClaimPayout is the local half of the payout outbox. It locks one due credit,
+// creates or resumes its durable operation, and CASes held -> sending in the
+// same transaction. A clawback that wins the row lock first makes claimed=false;
+// no provider call occurs. A concurrent release worker likewise cannot claim it
+// twice. The operation id is stable through retries, as is the rail idempotency
+// key (the ledger entry id).
+func (s *Store) ClaimPayout(ctx context.Context, entryID uuid.UUID) (DueHeldEntry, bool, error) {
+	var out DueHeldEntry
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return out, false, err
+	}
+	defer tx.Rollback(ctx)
+
+	var (
+		status          string
+		releaseAt       *time.Time
+		verdict         string
+		taskID          *uuid.UUID
+		liabilityMicros int64
+	)
+	err = tx.QueryRow(ctx, `
+		SELECT le.id,le.supplier_id,le.amount_usd::float8,
+		       (le.amount_usd*1000000)::bigint,le.payout_status,
+		       le.release_at,COALESCE(t.verification_outcome,''),le.task_id
+		  FROM ledger_entries le LEFT JOIN tasks t ON t.id=le.task_id
+		 WHERE le.id=$1 AND le.kind='supplier_credit'
+		 FOR UPDATE OF le`, entryID).
+		Scan(&out.ID, &out.SupplierID, &out.AmountUSD, &liabilityMicros, &status, &releaseAt, &verdict, &taskID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return out, false, errNotFound
+	}
+	if err != nil {
+		return out, false, err
+	}
+	if status != PayoutHeld || releaseAt == nil || releaseAt.After(time.Now()) ||
+		(taskID != nil && verdict != string(OutcomePass)) {
+		return out, false, nil
+	}
+	out.LiabilityMicros = liabilityMicros
+	out.SettlementPolicy = supplierSettlementPolicyFloorCentCarryV1
+	out.Currency = "usd"
+	out.RequestedCents, out.RemainderMicros, err = persistMinorUnitSettlement(
+		ctx, tx, entryID, liabilityMicros)
+	if err != nil {
+		return out, false, err
+	}
+	if out.RequestedCents == 0 {
+		ct, err := tx.Exec(ctx,
+			`UPDATE ledger_entries SET payout_status=$2 WHERE id=$1 AND payout_status=$3`,
+			entryID, PayoutCarried, PayoutHeld)
+		if err != nil {
+			return out, false, err
+		}
+		if ct.RowsAffected() != 1 {
+			return out, false, nil
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return out, false, err
+		}
+		return out, false, nil
+	}
+	// The provider receives exactly the frozen integer-cent amount. The original
+	// six-decimal liability stays in LiabilityMicros and reconciles through the
+	// append-only settlement row; passing it to a rail would round a second time.
+	out.AmountUSD = float64(out.RequestedCents) / 100
+	fundingID, funded, err := reservePayoutFunding(
+		ctx, tx, entryID, taskID, out.RequestedCents, out.Currency)
+	if err != nil {
+		return out, false, err
+	}
+	if !funded {
+		// Persist the deterministic split even while cash remains unavailable. This
+		// does not create an operation or cross the provider boundary. Move the row
+		// out of the bounded due page so old unfunded debt cannot starve later
+		// payable work; an exact collection fact or explicit subsidy re-arms it.
+		if _, err := tx.Exec(ctx,
+			`UPDATE ledger_entries SET payout_status=$2
+			  WHERE id=$1 AND payout_status=$3`,
+			entryID, PayoutAwaitingFunding, PayoutHeld); err != nil {
+			return out, false, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return out, false, err
+		}
+		return out, false, nil
+	}
+
+	var opID uuid.UUID
+	err = tx.QueryRow(ctx, `
+		INSERT INTO supplier_payout_operations
+		  (ledger_entry_id,funding_id,supplier_id,requested_cents,currency,status,last_error)
+		VALUES ($1,$2,$3,$4,$5,'sending',NULL)
+		ON CONFLICT (ledger_entry_id) DO UPDATE SET
+		  funding_id=EXCLUDED.funding_id,status='sending',last_error=NULL,updated_at=now()
+		WHERE supplier_payout_operations.status='ready'
+		  AND (supplier_payout_operations.funding_id IS NULL
+		       OR supplier_payout_operations.funding_id=EXCLUDED.funding_id)
+		  AND supplier_payout_operations.supplier_id=EXCLUDED.supplier_id
+		  AND supplier_payout_operations.requested_cents=EXCLUDED.requested_cents
+		  AND supplier_payout_operations.currency=EXCLUDED.currency
+		RETURNING id`, out.ID, fundingID, out.SupplierID, out.RequestedCents, out.Currency).Scan(&opID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return out, false, fmt.Errorf("payout operation for ledger entry %s is not retryable", entryID)
+	}
+	if err != nil {
+		return out, false, err
+	}
+	ct, err := tx.Exec(ctx,
+		`UPDATE ledger_entries SET payout_status=$2 WHERE id=$1 AND payout_status=$3`,
+		entryID, PayoutSending, PayoutHeld)
+	if err != nil {
+		return out, false, err
+	}
+	if ct.RowsAffected() != 1 {
+		return out, false, nil
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return out, false, err
+	}
+	return out, true, nil
+}
+
+// RecoverStalePayoutOperations conservatively marks durable sending rows whose
+// worker lease expired without a terminal provider result as outcome_unknown.
+// A crash could have occurred before OR after the provider crossed its cash
+// boundary, so stale work must never become the definitely-not-sent ready state.
+// The original updated_at is preserved so the unknown resolver can immediately
+// lease an already-expired row with the same payout key and funding reservation.
+func (s *Store) RecoverStalePayoutOperations(ctx context.Context, lease time.Duration, limit int) (int, error) {
+	if limit <= 0 {
+		return 0, nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+
+	rows, err := tx.Query(ctx, `
+		SELECT op.ledger_entry_id
+		  FROM supplier_payout_operations op
+		  JOIN ledger_entries le ON le.id=op.ledger_entry_id
+		 WHERE op.status='sending' AND le.payout_status='sending'
+		   AND NOT op.cash_moved AND op.transfer_ref IS NULL
+		   AND op.updated_at <= $1
+		 ORDER BY op.updated_at,op.ledger_entry_id
+		 FOR UPDATE OF op,le SKIP LOCKED
+		 LIMIT $2`, time.Now().Add(-lease), limit)
+	if err != nil {
+		return 0, err
+	}
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	for _, id := range ids {
+		if _, err := tx.Exec(ctx, `
+			UPDATE supplier_payout_operations
+			   SET status='outcome_unknown',outcome_unknown=true,
+			       last_error='sending lease expired; provider outcome unknown'
+			 WHERE ledger_entry_id=$1 AND status='sending'
+			   AND NOT cash_moved AND transfer_ref IS NULL`, id); err != nil {
+			return 0, err
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE ledger_entries SET payout_status='outcome_unknown'
+			 WHERE id=$1 AND payout_status='sending'`, id); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return len(ids), nil
+}
+
+// ClaimOutcomeUnknownPayouts leases unresolved provider attempts for an exact-key
+// replay. The ledger and operation remain outcome_unknown (or reversal_required
+// after a clawback) during the network call, so every concurrent reader stays
+// conservative. Rows older than retryWindow are never POSTed automatically: the
+// provider may have pruned its idempotency key, and a read-only/operator resolver
+// is required instead.
+func (s *Store) ClaimOutcomeUnknownPayouts(
+	ctx context.Context,
+	lease time.Duration,
+	retryWindow time.Duration,
+	limit int,
+) ([]DueHeldEntry, error) {
+	if limit <= 0 || lease < 0 || retryWindow <= 0 {
+		return nil, nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	now := time.Now()
+	rows, err := tx.Query(ctx, `
+		SELECT op.ledger_entry_id,op.supplier_id,
+		       op.requested_cents::float8 / 100.0,
+		       settlement.liability_microusd,op.requested_cents,
+		       settlement.remainder_microusd,settlement.policy,op.currency
+		  FROM supplier_payout_operations op
+		  JOIN ledger_entries le ON le.id=op.ledger_entry_id
+		  JOIN supplier_minor_unit_settlements settlement
+		    ON settlement.ledger_entry_id=le.id
+		 WHERE op.outcome_unknown=true AND NOT op.cash_moved
+		   AND op.transfer_ref IS NULL
+		   AND op.status IN ('outcome_unknown','reversal_required')
+		   AND le.payout_status IN ('outcome_unknown','reversal_required')
+		   AND op.updated_at <= $1 AND op.created_at >= $2
+		 ORDER BY op.updated_at,op.ledger_entry_id
+		 FOR UPDATE OF op SKIP LOCKED
+		 LIMIT $3`, now.Add(-lease), now.Add(-retryWindow), limit)
+	if err != nil {
+		return nil, err
+	}
+	var out []DueHeldEntry
+	for rows.Next() {
+		var e DueHeldEntry
+		if err := rows.Scan(&e.ID, &e.SupplierID, &e.AmountUSD,
+			&e.LiabilityMicros, &e.RequestedCents, &e.RemainderMicros,
+			&e.SettlementPolicy, &e.Currency); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, e := range out {
+		if _, err := tx.Exec(ctx, `
+			UPDATE supplier_payout_operations SET updated_at=$2
+			 WHERE ledger_entry_id=$1 AND outcome_unknown=true
+			   AND NOT cash_moved AND transfer_ref IS NULL`, e.ID, now); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// MarkPayoutOutcomeUnknown preserves an ambiguous provider result. The flag is
+// sticky across retries and clawback: only an exact successful provider result
+// may clear it. If a clawback already won, both rows remain reversal_required.
+func (s *Store) MarkPayoutOutcomeUnknown(ctx context.Context, entryID uuid.UUID, cause error) (string, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
+	var ledgerStatus, opStatus string
+	var cashMoved bool
+	var transferRef *string
+	if err := tx.QueryRow(ctx, `
+		SELECT le.payout_status,op.status,op.cash_moved,op.transfer_ref
+		  FROM ledger_entries le
+		  JOIN supplier_payout_operations op ON op.ledger_entry_id=le.id
+		 WHERE le.id=$1 FOR UPDATE OF le,op`, entryID,
+	).Scan(&ledgerStatus, &opStatus, &cashMoved, &transferRef); err != nil {
+		return "", err
+	}
+	if cashMoved || transferRef != nil {
+		return "", fmt.Errorf("payout %s already has provider cash evidence", entryID)
+	}
+	if ledgerStatus != PayoutSending && ledgerStatus != PayoutOutcomeUnknown &&
+		ledgerStatus != PayoutReversalRequired {
+		return ledgerStatus, fmt.Errorf("payout %s cannot become outcome_unknown from ledger=%s operation=%s",
+			entryID, ledgerStatus, opStatus)
+	}
+	errText := "provider outcome unknown"
+	if cause != nil {
+		errText = truncate(cause.Error(), 500)
+	}
+	next := PayoutOutcomeUnknown
+	if ledgerStatus == PayoutReversalRequired || opStatus == PayoutReversalRequired {
+		next = PayoutReversalRequired
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE supplier_payout_operations
+		   SET status=$2,outcome_unknown=true,last_error=$3,updated_at=now()
+		 WHERE ledger_entry_id=$1 AND NOT cash_moved AND transfer_ref IS NULL`,
+		entryID, next, errText); err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE ledger_entries SET payout_status=$2 WHERE id=$1`, entryID, next); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return next, nil
+}
+
+// DeferPayout moves only an in-flight sending operation to ready. If a clawback
+// raced and changed the row to reversal_required, both records remain there; this
+// function deliberately cannot overwrite that state.
+func (s *Store) DeferPayout(ctx context.Context, entryID uuid.UUID, cause error) (string, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
+	var status string
+	var outcomeUnknown bool
+	if err := tx.QueryRow(ctx, `
+		SELECT le.payout_status,COALESCE(op.outcome_unknown,false)
+		  FROM ledger_entries le
+		  LEFT JOIN supplier_payout_operations op ON op.ledger_entry_id=le.id
+		 WHERE le.id=$1 FOR UPDATE OF le`, entryID).Scan(&status, &outcomeUnknown); err != nil {
+		return "", err
+	}
+	if outcomeUnknown {
+		return status, fmt.Errorf("payout %s has an unresolved provider outcome and cannot be deferred to ready", entryID)
+	}
+	if status != PayoutSending {
+		return status, tx.Commit(ctx)
+	}
+	errText := ""
+	if cause != nil {
+		errText = truncate(cause.Error(), 500)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE supplier_payout_operations
+		    SET status='ready',last_error=NULLIF($2,''),updated_at=now()
+		  WHERE ledger_entry_id=$1 AND status='sending'`, entryID, errText); err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE ledger_entries SET payout_status=$2 WHERE id=$1 AND payout_status=$3`,
+		entryID, PayoutReady, PayoutSending); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return PayoutReady, nil
+}
+
+// FinalizePayout records what crossed the provider boundary. A cash result must
+// exactly match the operation's frozen cents/currency. If a clawback changed the
+// state while the provider request was in flight, the transfer reference is still
+// persisted but BOTH records remain reversal_required; no completion write can
+// relabel the cash as recovered or safely released.
+func (s *Store) FinalizePayout(ctx context.Context, entryID uuid.UUID, result PayoutResult) (string, error) {
+	if strings.TrimSpace(result.Ref) == "" {
+		return "", errors.New("payout result has no durable reference")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
+
+	var ledgerStatus, opStatus, currency, fundingCurrency, settlementPolicy string
+	var requested, fundingAmount, liabilityMicros, settlementCash, remainderMicros int64
+	err = tx.QueryRow(ctx, `
+		SELECT le.payout_status,op.status,op.requested_cents,op.currency,
+		       funding.amount_cents,funding.currency,
+		       (le.amount_usd*1000000)::bigint,settlement.policy,
+		       settlement.cash_cents,settlement.remainder_microusd
+		  FROM ledger_entries le
+		  JOIN supplier_payout_operations op ON op.ledger_entry_id=le.id
+		  JOIN supplier_payout_funding funding
+		    ON funding.id=op.funding_id AND funding.ledger_entry_id=le.id
+		  JOIN supplier_minor_unit_settlements settlement
+		    ON settlement.ledger_entry_id=le.id
+		 WHERE le.id=$1
+		 FOR UPDATE OF le,op,funding`, entryID).
+		Scan(&ledgerStatus, &opStatus, &requested, &currency, &fundingAmount, &fundingCurrency,
+			&liabilityMicros, &settlementPolicy, &settlementCash, &remainderMicros)
+	if err != nil {
+		return "", err
+	}
+	if requested != fundingAmount || currency != fundingCurrency {
+		return "", fmt.Errorf(
+			"payout %s operation/funding mismatch: operation=%d %s funding=%d %s",
+			entryID, requested, currency, fundingAmount, fundingCurrency)
+	}
+	if settlementPolicy != supplierSettlementPolicyFloorCentCarryV1 ||
+		requested != settlementCash || liabilityMicros != settlementCash*microUSDPerCent+remainderMicros {
+		return "", fmt.Errorf(
+			"payout %s minor-unit reconciliation mismatch: policy=%s liability=%d requested=%d settlement=%d remainder=%d",
+			entryID, settlementPolicy, liabilityMicros, requested, settlementCash, remainderMicros)
+	}
+	if result.CashMoved {
+		if result.SentCents != requested || result.Currency != currency {
+			return "", fmt.Errorf(
+				"payout %s cash mismatch: requested=%d %s sent=%d %s",
+				entryID, requested, currency, result.SentCents, result.Currency)
+		}
+		finalStatus := PayoutReleased
+		if ledgerStatus == PayoutReversalRequired || ledgerStatus == PayoutClawedBack ||
+			opStatus == PayoutReversalRequired || opStatus == PayoutClawedBack {
+			finalStatus = PayoutReversalRequired
+		} else if !((ledgerStatus == PayoutSending && opStatus == PayoutSending) ||
+			(ledgerStatus == PayoutOutcomeUnknown && opStatus == PayoutOutcomeUnknown)) {
+			return "", fmt.Errorf("payout %s cannot complete from ledger=%s operation=%s", entryID, ledgerStatus, opStatus)
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE supplier_payout_operations
+			   SET status=$2,sent_cents=$3,currency=$4,cash_moved=true,
+			       outcome_unknown=false,transfer_ref=$5,last_error=NULL,updated_at=now()
+			 WHERE ledger_entry_id=$1`,
+			entryID, finalStatus, result.SentCents, result.Currency, result.Ref); err != nil {
+			return "", err
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE ledger_entries SET payout_status=$2,payout_ref=$3 WHERE id=$1`,
+			entryID, finalStatus, result.Ref); err != nil {
+			return "", err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return "", err
+		}
+		return finalStatus, nil
+	}
+
+	// A manual export is coordination only. It may resolve an ambiguous synced-file
+	// response with the same payout key, but it never satisfies supplier cash. A
+	// clawback that already won remains reversal_required because the out-of-band
+	// instruction may still need cancellation.
+	if ledgerStatus == PayoutReversalRequired || opStatus == PayoutReversalRequired {
+		if _, err := tx.Exec(ctx, `
+			UPDATE supplier_payout_operations
+			   SET status='reversal_required',outcome_unknown=false,
+			       transfer_ref=$2,last_error='manual export requires external cancellation',updated_at=now()
+			 WHERE ledger_entry_id=$1`, entryID, result.Ref); err != nil {
+			return "", err
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE ledger_entries SET payout_status='reversal_required',payout_ref=$2 WHERE id=$1`,
+			entryID, result.Ref); err != nil {
+			return "", err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return "", err
+		}
+		return PayoutReversalRequired, nil
+	}
+	if !((ledgerStatus == PayoutSending && opStatus == PayoutSending) ||
+		(ledgerStatus == PayoutOutcomeUnknown && opStatus == PayoutOutcomeUnknown)) {
+		return "", fmt.Errorf("non-cash payout %s cannot complete from ledger=%s operation=%s", entryID, ledgerStatus, opStatus)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE supplier_payout_operations
+		   SET status='exported',cash_moved=false,outcome_unknown=false,
+		       transfer_ref=$2,last_error=NULL,updated_at=now()
+		 WHERE ledger_entry_id=$1`, entryID, result.Ref); err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE ledger_entries SET payout_status=$2,payout_ref=$3 WHERE id=$1`,
+		entryID, PayoutExported, result.Ref); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return PayoutExported, nil
+}
+
 // SetChargeStatus records the outcome of a job's off-session buyer charge
 // (not_attempted|charged|failed|no_payment_method) so charging state is queryable
 // rather than log-only. Best-effort: a failure here never blocks the lifecycle.
@@ -3114,19 +6568,17 @@ func (s *Store) SetChargeStatus(ctx context.Context, jobID uuid.UUID, status str
 }
 
 // RecordVerificationEvent appends one row to the append-only verification_events
-// receipt log. It is BEST-EFFORT and must NEVER block the verify/money path: a write
-// failure is logged and swallowed (return nil) so a flaky receipt insert can never
-// fail a reputation dock or a payout. kind is one of the closed set
+// receipt log. It is DURABLE and fail-closed: verification callers propagate a
+// write error, so settlement cannot proceed without the fact its buyer receipt
+// depends on. The task/kind unique index makes retries idempotent. kind is one of the closed set
 // {honeypot_pass|honeypot_fail|redundancy_match|redundancy_mismatch|tiebreak_win|
 // tiebreak_loss}; taskID/supplierID may be uuid.Nil when not known, stored as NULL.
 func (s *Store) RecordVerificationEvent(ctx context.Context, jobID, taskID, supplierID uuid.UUID, kind string) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO verification_events (job_id, task_id, supplier_id, kind) VALUES ($1,$2,$3,$4)`,
+		`INSERT INTO verification_events (job_id, task_id, supplier_id, kind)
+		 VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`,
 		jobID, nullUUID(taskID), nullUUID(supplierID), kind)
-	if err != nil {
-		log.Printf("verification event (job %s kind %s): %v", jobID, kind, err)
-	}
-	return nil
+	return err
 }
 
 // JobVerification aggregates a job's verification_events log into the buyer-facing
@@ -3182,6 +6634,28 @@ func (s *Store) JobVerification(ctx context.Context, jobID uuid.UUID) (Verificat
 	if err := rows.Err(); err != nil {
 		return v, err
 	}
+	// Per-deliverable coverage. Independent evidence may be recorded on the
+	// redundancy/tiebreak task rather than the primary, so coverage joins events
+	// back to the shared chunk_index and counts distinct chunks. Honeypots are
+	// supplier audits, not buyer-output verification, and never enter either side.
+	if err := s.pool.QueryRow(ctx,
+		`SELECT
+		   (SELECT COUNT(DISTINCT COALESCE(t.chunk_index,0))
+		      FROM tasks t
+		     WHERE t.job_id=$1 AND t.status='complete'
+		       AND t.is_honeypot=false AND t.is_redundancy=false),
+		   (SELECT COUNT(DISTINCT COALESCE(et.chunk_index,0))
+		      FROM verification_events ve
+		      JOIN tasks et ON et.id=ve.task_id
+		     WHERE ve.job_id=$1 AND et.job_id=$1
+		       AND ve.kind IN ('redundancy_match','tiebreak_win'))`, jobID,
+	).Scan(&v.DeliveredChunks, &v.VerifiedChunks); err != nil {
+		return v, err
+	}
+	if v.VerifiedChunks > v.DeliveredChunks {
+		v.VerifiedChunks = v.DeliveredChunks
+	}
+	v.UnverifiedChunks = v.DeliveredChunks - v.VerifiedChunks
 	// Latest dispute for the job ('' when none). A no-row scan is the normal "no
 	// dispute" case, not an error.
 	var disputeStatus string
@@ -3245,8 +6719,10 @@ func (s *Store) SupplierVerification(ctx context.Context, supplierID uuid.UUID) 
 // (unknown build) maps to "" via classKey. Read-only.
 func (s *Store) JobVerificationClasses(ctx context.Context, jobID uuid.UUID) ([]string, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT DISTINCT COALESCE(w.engine,''), COALESCE(w.build_hash,'')
-		 FROM tasks t JOIN workers w ON w.id = t.worker_id
+		`SELECT DISTINCT COALESCE(vw.input_snapshot->>'engine',t.execution_engine,''),
+		                 COALESCE(vw.input_snapshot->>'build_hash',t.execution_build_hash,'')
+		 FROM tasks t
+		 LEFT JOIN verification_work vw ON vw.task_id=t.id AND vw.attempt=t.retry_count
 		 WHERE t.job_id = $1 AND t.status = 'complete' AND t.is_honeypot = false`,
 		jobID)
 	if err != nil {
@@ -3271,10 +6747,15 @@ func (s *Store) JobVerificationClasses(ctx context.Context, jobID uuid.UUID) ([]
 func (s *Store) JobTaskReceipts(ctx context.Context, jobID uuid.UUID) ([]TaskReceipt, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT COALESCE(t.chunk_index,0), t.status, t.is_honeypot,
-		        COALESCE(w.engine,''), COALESCE(w.build_hash,''),
+		        COALESCE(vw.input_snapshot->>'engine',t.execution_engine,''),
+		        COALESCE(vw.input_snapshot->>'build_hash',t.execution_build_hash,''),
 		        COALESCE((SELECT ve.kind FROM verification_events ve
-		                  WHERE ve.task_id = t.id ORDER BY ve.created_at DESC LIMIT 1), '')
-		 FROM tasks t LEFT JOIN workers w ON w.id = t.worker_id
+		                  WHERE ve.task_id = t.id ORDER BY ve.created_at DESC LIMIT 1), ''),
+		        COALESCE(t.verification_outcome,''),
+		        COALESCE(t.runtime_cell_id,''), COALESCE(t.runtime_id,''),
+		        COALESCE(t.runtime_matrix_sha256,''), COALESCE(t.model_kind,'')
+		 FROM tasks t
+		 LEFT JOIN verification_work vw ON vw.task_id=t.id AND vw.attempt=t.retry_count
 		 WHERE t.job_id = $1
 		 ORDER BY COALESCE(t.chunk_index,0), t.id`,
 		jobID)
@@ -3285,16 +6766,20 @@ func (s *Store) JobTaskReceipts(ctx context.Context, jobID uuid.UUID) ([]TaskRec
 	var out []TaskReceipt
 	for rows.Next() {
 		var (
-			chunk         int
-			status        string
-			isHoneypot    bool
-			engine, build string
-			kind          string
+			chunk                        int
+			status                       string
+			isHoneypot                   bool
+			engine, build                string
+			kind, verdict                string
+			cellID, runtimeID, matrixSHA string
+			modelKind                    string
 		)
-		if err := rows.Scan(&chunk, &status, &isHoneypot, &engine, &build, &kind); err != nil {
+		if err := rows.Scan(&chunk, &status, &isHoneypot, &engine, &build, &kind, &verdict,
+			&cellID, &runtimeID, &matrixSHA, &modelKind); err != nil {
 			return nil, err
 		}
-		out = append(out, taskReceiptRow(chunk, status, isHoneypot, engine, build, kind))
+		out = append(out, taskReceiptRowWithRuntime(chunk, status, isHoneypot, engine, build,
+			kind, verdict, cellID, runtimeID, matrixSHA, modelKind))
 	}
 	return out, rows.Err()
 }
@@ -3415,6 +6900,7 @@ func (s *Store) TaskHasClawback(ctx context.Context, taskID uuid.UUID) (bool, er
 	return exists, err
 }
 
+// MarkPayout records the terminal provider status and reference for a ledger entry.
 func (s *Store) MarkPayout(ctx context.Context, entryID uuid.UUID, status, ref string) error {
 	// Invariant (BLACKHOLE: never fake a transfer): a credit may only be marked
 	// 'released' WITH a real rail reference. Enforced here and, structurally, by the
@@ -3422,15 +6908,25 @@ func (s *Store) MarkPayout(ctx context.Context, entryID uuid.UUID, status, ref s
 	if status == PayoutReleased && ref == "" {
 		return fmt.Errorf("refusing to mark ledger entry %s 'released' without a payout reference", entryID)
 	}
-	if ref == "" {
-		_, err := s.pool.Exec(ctx,
-			`UPDATE ledger_entries SET payout_status = $2 WHERE id = $1`, entryID, status)
+	switch status {
+	case PayoutReady:
+		_, err := s.DeferPayout(ctx, entryID, nil)
 		return err
+	case PayoutReleased:
+		var cents int64
+		var currency string
+		if err := s.pool.QueryRow(ctx,
+			`SELECT requested_cents,currency FROM supplier_payout_operations WHERE ledger_entry_id=$1`,
+			entryID).Scan(&cents, &currency); err != nil {
+			return err
+		}
+		_, err := s.FinalizePayout(ctx, entryID, PayoutResult{
+			Ref: ref, SentCents: cents, Currency: currency, CashMoved: true,
+		})
+		return err
+	default:
+		return fmt.Errorf("unsupported payout transition to %q; use the durable payout operation", status)
 	}
-	_, err := s.pool.Exec(ctx,
-		`UPDATE ledger_entries SET payout_status = $2, payout_ref = $3 WHERE id = $1`,
-		entryID, status, ref)
-	return err
 }
 
 // StaleTask is a running task whose claim has outlived its timeout.
@@ -3440,11 +6936,10 @@ type StaleTask struct {
 	RetryCount int16
 }
 
-// StaleRunningTasks finds tasks stuck in 'running' whose claim is older than
-// timeout — the worker claimed but never committed (crash, network loss). The
-// timeout is a single grace window applied uniformly; per-job max_duration lives
-// in the manifest, not a queryable column, so this is the honest queue-level
-// reaper. Returns the set to requeue or fail.
+// StaleRunningTasks finds tasks stuck in running before any durable upload.
+// Verifying tasks are owned by verification_work and its expiring fenced lease;
+// blindly requeueing one by claimed_at would discard a sealed upload while its
+// recovery processor was working or after the request process died.
 func (s *Store) StaleRunningTasks(ctx context.Context, timeout time.Duration, limit int) ([]StaleTask, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, job_id, retry_count FROM tasks
@@ -3668,16 +7163,81 @@ func (s *Store) BusyWorkerIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UU
 // counted, and "first commit wins" (the merge dedupes per chunk; the loser is
 // cancelled on the winner's commit). Returns the new task id.
 func (s *Store) InsertHedgeTask(ctx context.Context, jobID, primaryTaskID, peerWorker uuid.UUID, inputRef string, chunkIndex int) (uuid.UUID, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	buyerCharge, supplierPayout, err := consumeEconomicReserveTx(ctx, tx, jobID)
+	if err != nil {
+		if errors.Is(err, ErrEconomicReserveExhausted) {
+			var existing uuid.UUID
+			qerr := tx.QueryRow(ctx, `
+				SELECT id FROM tasks
+				 WHERE job_id=$1 AND hedged_from=$2 AND is_redundancy=false
+				 ORDER BY created_at LIMIT 1`, jobID, primaryTaskID).Scan(&existing)
+			if qerr == nil {
+				return existing, nil
+			}
+			if !errors.Is(qerr, pgx.ErrNoRows) {
+				return uuid.Nil, qerr
+			}
+		}
+		return uuid.Nil, err
+	}
+
+	// Serialize against FinalizeTaskVerification on the original. A hedge is only
+	// admissible while that original is still live; otherwise a creator racing the
+	// winning commit could insert fresh work after the winner had already settled.
+	var primaryStatus string
+	err = tx.QueryRow(ctx, `
+		SELECT status FROM tasks
+		 WHERE id=$1 AND job_id=$2 AND is_redundancy=false
+		 FOR UPDATE`, primaryTaskID, jobID).Scan(&primaryStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, ErrEconomicReserveExhausted
+	}
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if primaryStatus != "running" && primaryStatus != "verifying" {
+		return uuid.Nil, ErrEconomicReserveExhausted
+	}
+
+	// The reserve update serialized creators for the job and the original-row
+	// lock serialized them with settlement. Recheck now, inside both locks, so a
+	// concurrent endgame sweep returns the one existing hedge without consuming
+	// a second reserve slot.
+	var existing uuid.UUID
+	err = tx.QueryRow(ctx, `
+		SELECT id FROM tasks
+		 WHERE job_id=$1 AND hedged_from=$2 AND is_redundancy=false
+		 ORDER BY created_at LIMIT 1`, jobID, primaryTaskID).Scan(&existing)
+	if err == nil {
+		return existing, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, err
+	}
+
 	id := uuid.New()
 	resultKey := fmt.Sprintf("jobs/%s/hedge/%s/result.json", jobID, id)
-	_, err := s.pool.Exec(ctx,
+	_, err = tx.Exec(ctx,
 		`INSERT INTO tasks
 		   (id, job_id, status, is_honeypot, is_redundancy, retry_count,
-		    input_ref, result_key, chunk_index, hedged_from,
-		    claimed_by, claimed_at, visible_at)
-		 VALUES ($1,$2,'queued',false,false,0,$3,$4,$5,$6,$7, now(), now())`,
-		id, jobID, inputRef, resultKey, chunkIndex, primaryTaskID, peerWorker)
+		    input_ref, result_key, chunk_index, hedged_from,expected_output_records,
+		    claimed_by, claimed_at, visible_at,
+		    economic_buyer_charge_usd,economic_supplier_payout_usd)
+		 VALUES ($1,$2,'queued',false,false,0,$3,$4,$5,$6,
+		         (SELECT expected_output_records FROM tasks WHERE id=$6),
+		         $7, now(), now(),$8,$9)`,
+		id, jobID, inputRef, resultKey, chunkIndex, primaryTaskID, peerWorker,
+		buyerCharge, supplierPayout)
 	if err != nil {
+		return uuid.Nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return uuid.Nil, err
 	}
 	return id, nil
@@ -3725,15 +7285,20 @@ func (s *Store) CancelStragglerSiblings(ctx context.Context, jobID uuid.UUID, ch
 	return err
 }
 
-// RequeueStaleTask pushes a stale running task back to the queue with a backoff:
+// RequeueStaleTask pushes a stale pre-upload running task back to the queue with a backoff:
 // clears the claim, increments retry_count, and sets visible_at = now()+backoff.
 func (s *Store) RequeueStaleTask(ctx context.Context, taskID uuid.UUID, backoff time.Duration) error {
 	_, err := s.pool.Exec(ctx,
-		`UPDATE tasks
+		`WITH requeued AS (
+		 UPDATE tasks
 		   SET status = 'queued', claimed_by = NULL, claimed_at = NULL,
 		       worker_id = NULL, retry_count = retry_count + 1,
 		       visible_at = now() + make_interval(secs => $2)
-		 WHERE id = $1 AND status = 'running'`,
+		 WHERE id = $1 AND status = 'running'
+		 RETURNING job_id
+		)
+		UPDATE jobs SET status = 'running'
+		 WHERE id IN (SELECT job_id FROM requeued) AND status = 'verifying'`,
 		taskID, backoff.Seconds())
 	return err
 }
@@ -3750,9 +7315,14 @@ func (s *Store) FailTaskAndSettleJob(ctx context.Context, taskID, jobID uuid.UUI
 	}
 	defer tx.Rollback(ctx)
 
-	if _, err := tx.Exec(ctx,
-		`UPDATE tasks SET status = 'failed' WHERE id = $1`, taskID); err != nil {
+	ct, err := tx.Exec(ctx,
+		`UPDATE tasks SET status = 'failed'
+		  WHERE id = $1 AND job_id=$2 AND status='running'`, taskID, jobID)
+	if err != nil {
 		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return nil // the upload/verdict path or another reaper won the task race
 	}
 	if _, err := failJobAndSettleOnce(ctx, tx, jobID); err != nil {
 		return err
@@ -3799,14 +7369,24 @@ func (s *Store) TaskJobID(ctx context.Context, taskID uuid.UUID) (uuid.UUID, err
 // with ZERO delivered chunks honestly settles at $0 (nothing charged, nothing owed)
 // with no refund row needed.
 func failJobAndSettleOnce(ctx context.Context, tx pgx.Tx, jobID uuid.UUID) (flipped bool, err error) {
-	ct, err := tx.Exec(ctx,
-		`UPDATE jobs SET status = 'failed' WHERE id = $1 AND status NOT IN ('complete','cancelled','failed')`,
-		jobID)
+	status, pending, err := jobTerminalTransitionStateTx(ctx, tx, jobID)
 	if err != nil {
 		return false, err
 	}
-	if ct.RowsAffected() == 0 {
+	if status == "complete" || status == "cancelled" || status == "failed" {
 		return false, nil // already terminal — nothing to settle again
+	}
+	if pending {
+		return false, ErrJobVerificationPending
+	}
+	ct, err := tx.Exec(ctx,
+		`UPDATE jobs SET status = 'failed'
+		  WHERE id = $1 AND status NOT IN ('complete','cancelled','failed')`, jobID)
+	if err != nil {
+		return false, err
+	}
+	if ct.RowsAffected() != 1 {
+		return false, nil
 	}
 	// Settle at completed work (the tx-scoped twin of SetJobActualUSD).
 	if _, err := tx.Exec(ctx,
@@ -3975,7 +7555,7 @@ type DeadClaim struct {
 // the 30-min stale reaper or the job-level watchdog.
 func (s *Store) DeadClaimedTasks(ctx context.Context, olderThan time.Duration, limit int) ([]DeadClaim, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT t.id, t.job_id, w.id, w.supplier_id, j.job_type
+		`SELECT t.id,t.job_id,t.execution_worker_id,t.execution_supplier_id,j.job_type
 		 FROM tasks t
 		 JOIN workers w ON w.id = t.claimed_by
 		 JOIN jobs j ON j.id = t.job_id
@@ -3983,6 +7563,8 @@ func (s *Store) DeadClaimedTasks(ctx context.Context, olderThan time.Duration, l
 		   AND t.claimed_at IS NOT NULL
 		   AND t.claimed_at < now() - make_interval(secs => $1)
 		   AND (w.last_seen_at IS NULL OR w.last_seen_at < now() - make_interval(secs => $1))
+		   AND t.execution_worker_id IS NOT NULL
+		   AND t.execution_supplier_id IS NOT NULL
 		   AND j.status = 'running'
 		 ORDER BY t.claimed_at ASC
 		 LIMIT $2`,
@@ -4086,11 +7668,28 @@ func (s *Store) RecordEtaCalibration(ctx context.Context, jobID uuid.UUID) (pred
 // went terminal (or progressed) between selection and here, in which case nothing
 // is touched.
 func (s *Store) CancelStuckJob(ctx context.Context, jobID uuid.UUID) (flipped bool, err error) {
+	status, pending, err := s.jobTerminalTransitionState(ctx, jobID)
+	if err != nil {
+		return false, err
+	}
+	if status != "running" || pending {
+		return false, nil
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockUnfinishedJobTasksTx(ctx, tx, jobID); err != nil {
+		return false, err
+	}
+	status, pending, err = jobTerminalTransitionStateTx(ctx, tx, jobID)
+	if err != nil {
+		return false, err
+	}
+	if status != "running" || pending {
+		return false, nil
+	}
 	ct, err := tx.Exec(ctx,
 		`UPDATE jobs SET status = 'cancelled' WHERE id = $1 AND status = 'running'`, jobID)
 	if err != nil {
@@ -4159,16 +7758,93 @@ func (s *Store) MarkJobComplete(ctx context.Context, jobID uuid.UUID) error {
 	return err
 }
 
-// MarkResultsMerged stamps the results-merge watermark (results_merged_at =
-// now()) right after a real successful merge writes the buyer-ready artifact.
+// CompleteJobEconomics publishes completion, records the once-only SLA premium,
+// and projects actual_usd in one transaction. Keeping these together prevents a
+// transient premium insert failure from leaving an already-complete job outside
+// FinalizableJobs forever with revenue missing from its charge basis.
+func (s *Store) CompleteJobEconomics(ctx context.Context, jobID uuid.UUID) error {
+	return s.completeJobEconomics(ctx, jobID, nil)
+}
+
+// completeJobEconomics is the crash-testable production implementation. The
+// public wrapper keeps ordinary callers probe-free; a subprocess integration
+// test injects a probe to prove rollback before commit and idempotent replay
+// after commit at every status/SLA/actual-cost edge.
+func (s *Store) completeJobEconomics(
+	ctx context.Context,
+	jobID uuid.UUID,
+	probe recoveryBoundaryProbe,
+) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx,
+		`UPDATE jobs SET status='complete'
+		  WHERE id=$1 AND status IN ('running','verifying','complete')`, jobID); err != nil {
+		return err
+	}
+	reachRecoveryBoundary(ctx, probe, BoundaryCompleteAfterJobProjection)
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO ledger_entries (kind,buyer_id,amount_usd,payout_status,payout_ref)
+		SELECT 'buyer_charge',j.buyer_id,-p.sla_premium_usd,'released',$2
+		  FROM jobs j JOIN job_economic_plans p ON p.job_id=j.id
+		 WHERE j.id=$1 AND j.status='complete' AND p.sla_premium_usd > 0
+		ON CONFLICT DO NOTHING`, jobID, slaPremiumChargeRef(jobID)); err != nil {
+		return err
+	}
+	reachRecoveryBoundary(ctx, probe, BoundaryCompleteAfterSLAPremium)
+	if _, err := tx.Exec(ctx,
+		`UPDATE jobs SET actual_usd = COALESCE((
+		   SELECT SUM(-amount_usd) FROM ledger_entries
+		   WHERE kind='buyer_charge'
+		     AND (task_id IN (SELECT id FROM tasks WHERE job_id=$1)
+		          OR payout_ref=$2)
+		 ),0)
+		 WHERE id=$1`, jobID, slaPremiumChargeRef(jobID)); err != nil {
+		return err
+	}
+	reachRecoveryBoundary(ctx, probe, BoundaryCompleteAfterActualUSD)
+	reachRecoveryBoundary(ctx, probe, BoundaryCompleteBeforeDBCommit)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	reachRecoveryBoundary(ctx, probe, BoundaryCompleteAfterDBCommit)
+	return nil
+}
+
+// MarkResultsMerged stamps the results-merge watermark and the exact units of
+// the buyer-ready artifact right after a real successful merge writes it.
 // handleJobResults reads this to skip the re-merge on every poll once it is
 // set (Data Transfer & Artifact I/O 4.5->5, "Stop paying for every poll
 // twice") — it is set unconditionally (not COALESCE-guarded) so a later real
-// merge (e.g. by the completion-sweep fallback) always advances it.
-func (s *Store) MarkResultsMerged(ctx context.Context, jobID uuid.UUID) error {
+// merge (e.g. by the completion-sweep fallback) always advances it and refreshes
+// the exact counters from the bytes that were actually written.
+func (s *Store) MarkResultsMerged(ctx context.Context, jobID uuid.UUID, outputRecords, outputBytes int64) error {
 	_, err := s.pool.Exec(ctx,
-		`UPDATE jobs SET results_merged_at = now() WHERE id = $1`,
-		jobID)
+		`UPDATE jobs
+		    SET results_merged_at = now(),
+		        economic_output_records = $2,
+		        economic_output_bytes = $3,
+		        economic_output_source = $4
+		  WHERE id = $1`,
+		jobID, outputRecords, outputBytes, economicOutputSourceMergedArtifact)
+	return err
+}
+
+func slaPremiumChargeRef(jobID uuid.UUID) string { return "sla-premium-" + jobID.String() }
+
+// EnsureJobSLAPremiumCharge records the bound SLA premium exactly once, only for
+// a successfully completed job. It is buyer revenue only: no task_id means it can
+// never create supplier liability. A failed/partial job never receives the charge.
+func (s *Store) EnsureJobSLAPremiumCharge(ctx context.Context, jobID uuid.UUID) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO ledger_entries (kind,buyer_id,amount_usd,payout_status,payout_ref)
+		SELECT 'buyer_charge',j.buyer_id,-p.sla_premium_usd,'released',$2
+		  FROM jobs j JOIN job_economic_plans p ON p.job_id=j.id
+		 WHERE j.id=$1 AND j.status='complete' AND p.sla_premium_usd > 0
+		ON CONFLICT DO NOTHING`, jobID, slaPremiumChargeRef(jobID))
 	return err
 }
 
@@ -4179,43 +7855,38 @@ func (s *Store) SetJobActualUSD(ctx context.Context, jobID uuid.UUID) error {
 		`UPDATE jobs SET actual_usd = COALESCE((
 		   SELECT SUM(-amount_usd) FROM ledger_entries
 		   WHERE kind = 'buyer_charge'
-		     AND task_id IN (SELECT id FROM tasks WHERE job_id = $1)
+		     AND (task_id IN (SELECT id FROM tasks WHERE job_id = $1)
+		          OR payout_ref = $2)
 		 ),0)
-		 WHERE id = $1`, jobID)
+		 WHERE id = $1`, jobID, slaPremiumChargeRef(jobID))
 	return err
 }
 
-// JobResultKeys returns the result object keys of a job's completed primary
-// tasks — the buyer's actual deliverable, excluding honeypot probes and
-// redundancy clones (which exist for verification, not delivery). Ordered by
-// completion so the list reads in a stable order.
+// JobResultKeys returns the exact per-chunk object keys selected for the buyer.
+// A majority resolution overrides the provisional primary/hedge winner; a
+// provisional resolution overrides the legacy task projection. Jobs predating
+// durable verification resolution fall back explicitly to the first completed
+// primary for that chunk.
 func (s *Store) JobResultKeys(ctx context.Context, jobID uuid.UUID) ([]string, error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT result_ref FROM tasks
-		 WHERE job_id = $1 AND status = 'complete'
-		   AND is_honeypot = false AND is_redundancy = false
-		   AND result_ref IS NOT NULL AND result_ref <> ''
-		 ORDER BY completed_at ASC NULLS LAST, id ASC`,
-		jobID)
+	info, err := s.JobMergeInputs(ctx, jobID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var k string
-		if err := rows.Scan(&k); err != nil {
-			return nil, err
-		}
-		out = append(out, k)
+	out := make([]string, len(info.Results))
+	for i := range info.Results {
+		out[i] = info.Results[i].ResultRef
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // PrimaryResult is one completed primary task's result location, in input order.
 type PrimaryResult struct {
 	ChunkIndex int
 	ResultRef  string
+	// Artifact is non-nil only when an append-only chunk resolution selected a
+	// terminal server-sealed verification artifact. Nil is an explicit legacy
+	// result_ref fallback used for jobs created before this authority existed.
+	Artifact *VerificationArtifact
 }
 
 // JobMergeInfo carries what MergeJobResults needs: the job's type + output key
@@ -4241,18 +7912,33 @@ func (s *Store) JobMergeInputs(ctx context.Context, jobID uuid.UUID) (*JobMergeI
 	if err != nil {
 		return nil, err
 	}
-	// One result per chunk_index: the FIRST completed primary (or its winning
-	// straggler hedge — a hedge is a duplicate primary, is_redundancy=false). The
-	// DISTINCT ON dedupes the case where both the original and its hedge complete
-	// ("first commit wins"). Honeypots and verification redundancy are excluded.
+	// One base result per chunk_index is the first completed primary/economic
+	// hedge winner. Overlay the append-only authority for that chunk, preferring a
+	// later majority fact over its provisional winner. The base task projection is
+	// retained only as an explicit legacy fallback when no resolution exists.
 	rows, err := s.pool.Query(ctx,
-		`SELECT DISTINCT ON (COALESCE(chunk_index,0))
-		        COALESCE(chunk_index,0), result_ref
-		 FROM tasks
-		 WHERE job_id = $1 AND status = 'complete'
-		   AND is_honeypot = false AND is_redundancy = false
-		   AND result_ref IS NOT NULL AND result_ref <> ''
-		 ORDER BY COALESCE(chunk_index,0) ASC, completed_at ASC NULLS LAST, id ASC`,
+		`WITH primary_results AS (
+		   SELECT DISTINCT ON (COALESCE(chunk_index,0))
+		          COALESCE(chunk_index,0) AS chunk_index,result_ref
+		     FROM tasks
+		    WHERE job_id=$1 AND status='complete'
+		      AND is_honeypot=false AND is_redundancy=false
+		      AND result_ref IS NOT NULL AND result_ref<>''
+		    ORDER BY COALESCE(chunk_index,0),completed_at ASC NULLS LAST,id ASC
+		 ), selected_resolution AS (
+		   SELECT DISTINCT ON (chunk_index)
+		          chunk_index,artifact_key,artifact_sha256,artifact_bytes
+		     FROM chunk_artifact_resolutions
+		    WHERE job_id=$1
+		    ORDER BY chunk_index,
+		             CASE basis WHEN 'majority' THEN 0 ELSE 1 END,
+		             created_at DESC,effect_id DESC
+		 )
+		 SELECT p.chunk_index,COALESCE(r.artifact_key,p.result_ref),
+		        r.artifact_key,r.artifact_sha256,r.artifact_bytes
+		   FROM primary_results p
+		   LEFT JOIN selected_resolution r USING (chunk_index)
+		  ORDER BY p.chunk_index`,
 		jobID)
 	if err != nil {
 		return nil, err
@@ -4260,8 +7946,16 @@ func (s *Store) JobMergeInputs(ctx context.Context, jobID uuid.UUID) (*JobMergeI
 	defer rows.Close()
 	for rows.Next() {
 		var pr PrimaryResult
-		if err := rows.Scan(&pr.ChunkIndex, &pr.ResultRef); err != nil {
+		var artifactKey, artifactSHA *string
+		var artifactBytes *int64
+		if err := rows.Scan(&pr.ChunkIndex, &pr.ResultRef, &artifactKey, &artifactSHA, &artifactBytes); err != nil {
 			return nil, err
+		}
+		if artifactKey != nil || artifactSHA != nil || artifactBytes != nil {
+			if artifactKey == nil || artifactSHA == nil || artifactBytes == nil {
+				return nil, fmt.Errorf("chunk %d has an incomplete resolved artifact tuple", pr.ChunkIndex)
+			}
+			pr.Artifact = &VerificationArtifact{Key: *artifactKey, SHA256: *artifactSHA, Bytes: *artifactBytes}
 		}
 		info.Results = append(info.Results, pr)
 	}

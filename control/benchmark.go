@@ -20,9 +20,10 @@ import (
 // sustained-vs-peak throughput on fanless Apple Silicon" 4→5 — also a re-rank
 // penalty in Match, never a filter: a throttling worker is still real, usable
 // supply). Only workers seen within the last 60s are returned (Match re-checks, but
-// filtering in SQL keeps the candidate set small on the hot path). modelRef may be
-// "" (no model requirement) → Warm is false for everyone and the ranking is
-// unchanged.
+// filtering in SQL keeps the candidate set small on the hot path). An exact
+// current-matrix (jobType, modelRef) capability is mandatory; legacy array-only
+// workers are not candidates. modelRef may be "" only if such a production cell
+// exists; Warm is then false.
 func (s *Store) CandidateWorkers(ctx context.Context, jobType, modelRef string, minMemGB float32) ([]MatchWorker, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT w.id, w.supplier_id, COALESCE(w.hw_class,''),
@@ -54,8 +55,15 @@ func (s *Store) CandidateWorkers(ctx context.Context, jobType, modelRef string, 
 		   AND COALESCE(w.effective_memory_gb, w.memory_gb, 0) >= $2
 		   -- exclude workers pausing for memory pressure (no unsafe peer/hedge).
 		   AND NOT COALESCE(w.throttled, false)
-		   AND s.status = 'active'`,
-		jobType, minMemGB, modelRef,
+		   AND s.status = 'active'
+		   AND EXISTS (
+		     SELECT 1 FROM worker_authorized_capabilities wac
+		      WHERE wac.worker_id = w.id
+		        AND wac.job_type = $1
+		        AND wac.model_ref = $3
+		        AND wac.matrix_sha256 = $4
+		   )`,
+		jobType, minMemGB, modelRef, generatedRuntimeMatrixSHA256,
 	)
 	if err != nil {
 		return nil, err
@@ -90,7 +98,7 @@ func (s *Store) CandidateWorkers(ctx context.Context, jobType, modelRef string, 
 // read at planning time before this wave; 0 = no measurement, the planner
 // substitutes its documented default). Row eligibility mirrors the claim
 // path's hard filter (live <60s, supplier active, not throttled, effective
-// memory, supported job + model) so the planner never plans onto a worker the
+// memory, exact current-matrix job/model cell) so the planner never plans onto a worker the
 // scheduler could not actually dispatch to.
 type FleetRateRow struct {
 	WorkerID  uuid.UUID
@@ -127,9 +135,14 @@ func (s *Store) FleetRateSnapshot(ctx context.Context, jobType, modelRef string,
 		   AND s.status = 'active'
 		   AND NOT COALESCE(w.throttled, false)
 		   AND COALESCE(w.effective_memory_gb, w.memory_gb, 0) >= $3
-		   AND COALESCE(w.supported_jobs,'{}') @> ARRAY[$1::text]
-		   AND ($2 = '' OR COALESCE(w.supported_models,'{}') @> ARRAY[$2::text])`,
-		jobType, modelRef, minMemGB,
+		   AND EXISTS (
+		     SELECT 1 FROM worker_authorized_capabilities wac
+		      WHERE wac.worker_id = w.id
+		        AND wac.job_type = $1
+		        AND wac.model_ref = $2
+		        AND wac.matrix_sha256 = $4
+		   )`,
+		jobType, modelRef, minMemGB, generatedRuntimeMatrixSHA256,
 	)
 	if err != nil {
 		return nil, err

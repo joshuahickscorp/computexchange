@@ -306,8 +306,6 @@ dependencies = [
 [[package]]
 name = "candle-metal-kernels"
 version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b6b5a4cae6b4e1ab0efcee4dc05272d11b374a3d1ba121b3a961e36be54ab60"
 dependencies = [
  "half",
  "objc2",
@@ -603,9 +601,9 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-epoch"
-version = "0.9.18"
+version = "0.9.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+checksum = "2d6914041f254d6e9176c01941b21115dcfb7089e55135a35411081bd106ef3f"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -695,6 +693,7 @@ dependencies = [
  "candle-nn",
  "candle-transformers",
  "clap",
+ "cx-spec-engine",
  "flate2",
  "hf-hub",
  "hound",
@@ -709,12 +708,21 @@ dependencies = [
  "sha2",
  "sysinfo",
  "thiserror 1.0.69",
+ "token-spec-poc",
  "tokenizers 0.23.1",
  "tokio",
  "toml",
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "cx-spec-engine"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3036,6 +3044,15 @@ name = "tinyvec_macros"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
+
+[[package]]
+name = "token-spec-poc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "tokenizers"

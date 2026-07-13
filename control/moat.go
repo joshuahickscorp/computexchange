@@ -39,10 +39,12 @@ func (s *Store) MoatCounters(ctx context.Context) (MoatCounters, error) {
 	var m MoatCounters
 	if err := s.pool.QueryRow(ctx, `
 		SELECT count(*) FROM (
-			SELECT supplier_id FROM ledger_entries
-			WHERE kind = 'supplier_credit' AND payout_status = 'released' AND supplier_id IS NOT NULL
-			GROUP BY supplier_id
-			HAVING count(DISTINCT date_trunc('day', created_at)) >= 2
+			SELECT le.supplier_id FROM ledger_entries le
+			JOIN supplier_payout_operations op ON op.ledger_entry_id=le.id
+			WHERE le.kind='supplier_credit' AND le.payout_status='released'
+			  AND op.cash_moved AND le.supplier_id IS NOT NULL
+			GROUP BY le.supplier_id
+			HAVING count(DISTINCT date_trunc('day', op.updated_at)) >= 2
 		) retained`).Scan(&m.SuppliersRetained); err != nil {
 		return m, err
 	}
@@ -140,7 +142,7 @@ func rateOrNil(numerator, denominator int64) *float64 {
 
 // SupplierReliability computes the per-(supplier, job_type) reliability view from
 // the real tasks + verification_events tables. Three independent aggregates — task
-// completion (tasks → workers.supplier_id), honeypot outcomes, and redundancy
+// completion (tasks.execution_supplier_id), honeypot outcomes, and redundancy
 // outcomes (both from verification_events.supplier_id) — are each grouped by
 // (supplier, job_type) and FULL-OUTER-joined on that key, so a cell appears if a
 // supplier has ANY of the three kinds of history for a job type (a supplier that
@@ -155,15 +157,14 @@ func rateOrNil(numerator, denominator int64) *float64 {
 func (s *Store) SupplierReliability(ctx context.Context) ([]SupplierReliability, error) {
 	rows, err := s.pool.Query(ctx, `
 		WITH task_outcomes AS (
-			SELECT w.supplier_id AS supplier_id, j.job_type AS job_type,
+			SELECT t.execution_supplier_id AS supplier_id, j.job_type AS job_type,
 			       count(*) FILTER (WHERE t.status = 'complete') AS completed,
 			       count(*) FILTER (WHERE t.status = 'failed')   AS failed
 			FROM tasks t
-			JOIN jobs j    ON j.id = t.job_id
-			JOIN workers w ON w.id = t.worker_id
-			WHERE w.supplier_id IS NOT NULL
+			JOIN jobs j ON j.id = t.job_id
+			WHERE t.execution_supplier_id IS NOT NULL
 			  AND t.status IN ('complete','failed')
-			GROUP BY w.supplier_id, j.job_type
+			GROUP BY t.execution_supplier_id, j.job_type
 		),
 		hp AS (
 			SELECT ve.supplier_id AS supplier_id, j.job_type AS job_type,

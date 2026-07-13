@@ -17,7 +17,8 @@ import (
 //            apple_silicon_ultra | cpu
 // tier:      batch | priority | trusted
 // job type:  embed | batch_infer | audio_transcribe | image_gen | eval | lora_finetune |
-//            batch_classification | json_extraction | rerank | custom
+//            batch_classification | json_extraction | rerank | custom |
+//            render_speculative_preview (typed scaffold; not production-admitted)
 // task status: queued | running | complete | failed | retrying
 // job status:  queued | running | verifying | complete | failed | cancelled
 
@@ -87,6 +88,11 @@ var validJobTypes = map[string]bool{
 	"image_gen": true, "eval": true, "lora_finetune": true,
 	"batch_classification": true, "json_extraction": true, "rerank": true,
 	"custom": true,
+	// Recognized wire contract only. createJob validates then rejects it before
+	// storage because the ordinary lifecycle structurally requires positive task
+	// economics and verified buyer-artifact finalization. It is never advertised
+	// by the production runtime matrix.
+	"render_speculative_preview": true,
 }
 
 // JobType is the tagged job descriptor. The wire form is the serde-tagged enum
@@ -132,6 +138,28 @@ type JobType struct {
 	// on the GPU in a locked-down sandbox (agent/src/sandbox.rs).
 	Image   *string  `json:"image,omitempty"`
 	Command []string `json:"command,omitempty"`
+	// Closed speculative-Cycles PREVIEW scaffold. False honesty bits use pointers
+	// so an explicitly supplied false survives `omitempty` and round-trips through
+	// jobs.job_type_spec; nil is distinguishable from false and therefore fails the
+	// preview validator. No executable path or buyer-selected code is carried.
+	SchemaVersion           uint32 `json:"schema_version,omitempty"`
+	PreviewOnly             *bool  `json:"preview_only,omitempty"`
+	BillingEligible         *bool  `json:"billing_eligible,omitempty"`
+	ProductionReady         *bool  `json:"production_ready,omitempty"`
+	ReceiptTrust            string `json:"receipt_trust,omitempty"`
+	DriverSHA256            string `json:"driver_sha256,omitempty"`
+	BackendSHA256           string `json:"backend_sha256,omitempty"`
+	ControllerCoreSHA256    string `json:"controller_core_sha256,omitempty"`
+	ControllerAdapterSHA256 string `json:"controller_adapter_sha256,omitempty"`
+	BlenderSHA256           string `json:"blender_sha256,omitempty"`
+	ScenePath               string `json:"scene_path,omitempty"`
+	SceneSHA256             string `json:"scene_sha256,omitempty"`
+	Width                   uint32 `json:"width,omitempty"`
+	Height                  uint32 `json:"height,omitempty"`
+	Frame                   uint32 `json:"frame,omitempty"`
+	DraftSamples            uint32 `json:"draft_samples,omitempty"`
+	VerifySamples           uint32 `json:"verify_samples,omitempty"`
+	RepairSamples           uint32 `json:"repair_samples,omitempty"`
 }
 
 // ModelRef references a model. Wire: {"kind":"gguf"|"hf"|"mlx","ref":"..."}.
@@ -247,8 +275,15 @@ type WorkerCapability struct {
 // shape plus a top-level "partial": true marker); the final commit is unchanged,
 // and old agents ignore the field.
 type TaskDispatch struct {
-	TaskID           uuid.UUID   `json:"task_id"`
-	JobID            uuid.UUID   `json:"job_id"`
+	TaskID uuid.UUID `json:"task_id"`
+	JobID  uuid.UUID `json:"job_id"`
+	// Runtime authority is selected by ClaimTask from the server-generated exact
+	// capability projection and frozen on the task attempt. The agent verifies all
+	// three values before executing, so a stale/malformed control-plane dispatch
+	// cannot silently fall through to a merely compatible local runner.
+	RuntimeCellID    string      `json:"runtime_cell_id"`
+	RuntimeID        string      `json:"runtime_id"`
+	RuntimeMatrixSHA string      `json:"runtime_matrix_sha256"`
 	Manifest         JobManifest `json:"manifest"`
 	InputURL         string      `json:"input_url"`
 	OutputURL        string      `json:"output_url"`
@@ -314,6 +349,7 @@ type Heartbeat struct {
 type Earnings struct {
 	BalanceUSD    float64  `json:"balance_usd"`
 	LifetimeUSD   float64  `json:"lifetime_usd"`
+	CarriedUSD    float64  `json:"carried_usd"` // exact sub-cent remainder still owed, never reported as cash
 	LastPayoutUSD *float64 `json:"last_payout_usd,omitempty"`
 	LastPayoutAt  *int64   `json:"last_payout_at,omitempty"` // unix seconds
 	NextPayoutAt  *int64   `json:"next_payout_at,omitempty"` // unix seconds
@@ -341,6 +377,7 @@ type JobSubmitResponse struct {
 	EstimatedUSD        float64   `json:"estimated_usd"`
 	ETASecs             int       `json:"eta_secs"`
 	EstimatedCompletion string    `json:"estimated_completion"` // RFC3339
+	TierSemantics       string    `json:"tier_semantics"`
 	// Routing is the SUBSTRATE-ROUTING decision (Speed Lane road-to-ten rubric
 	// dimension 5, control/routing.go + quote.go): which substrate this job's
 	// SHAPE favors — fleet, a lit GPU lane, or an honest GPU recommendation — with
@@ -350,7 +387,12 @@ type JobSubmitResponse struct {
 	// other shape gets NO block rather than an unmeasured guess). It is a routing
 	// STATEMENT, never a refusal: a gpu_recommend job still runs on the fleet at
 	// the quoted eta_secs — the eta_secs, pricing, and SLA above are unchanged.
-	Routing *QuoteRouting `json:"routing,omitempty"`
+	Routing    *QuoteRouting        `json:"routing,omitempty"`
+	AudioInput *AudioUploadMetadata `json:"audio_input,omitempty"`
+	// WebhookSecret is returned only when this submission registered a webhook.
+	// It is a one-time bearer verifier value; only an AES-GCM sealed copy persists.
+	WebhookID     string `json:"webhook_id,omitempty"`
+	WebhookSecret string `json:"webhook_secret,omitempty"`
 }
 
 // JobStatus is the GET /v1/jobs/{id} body. ETASecs is the submit-time
@@ -399,10 +441,14 @@ type JobStatus struct {
 // count is sourced from the append-only verification_events log (control/store.go
 // JobVerification), so it reflects what actually happened · a skipped/sampled-out
 // check is simply absent, never reported as a pass. dispute_status is the latest
-// dispute's status for the job (” when none). label is DERIVED from the counts:
-//   - "verified"         when a real cross-check settled it (redundancy_matched>0 OR tiebreaks>0)
-//   - "honeypot-checked"  when only known-answer probes ran (checked>0)
-//   - "unverified"        when nothing was checked
+// dispute's status for the job (empty when none). label is DERIVED from delivered
+// chunk coverage, not merely from the existence of one event:
+//   - "fully-verified"    when every delivered primary chunk has an independent check
+//   - "sampled-verified"  when some, but not all, delivered chunks were checked
+//   - "honeypot-checked"  when only known-answer probes ran
+//   - "unverified"        when no delivered chunk was independently checked
+//
+// Legacy event-only projections with no delivered-task rows may use "verified".
 type Verification struct {
 	Checked              int `json:"checked"`
 	HoneypotsPassed      int `json:"honeypots_passed"`
@@ -415,9 +461,15 @@ type Verification struct {
 	SameSupplier int `json:"same_supplier_matches"`
 	// CrossClassSkipped counts chunks whose peer was in a DIFFERENT verification class,
 	// so a byte-exact comparison could not run (a coverage gap, not a defect) (item 9).
-	CrossClassSkipped int    `json:"cross_class_skipped"`
-	DisputeStatus     string `json:"dispute_status"`
-	Label             string `json:"label"`
+	CrossClassSkipped int `json:"cross_class_skipped"`
+	// Coverage is per delivered primary chunk, not per event. This prevents one
+	// independently checked chunk from labeling an otherwise unchecked job fully
+	// verified.
+	DeliveredChunks  int    `json:"delivered_chunks"`
+	VerifiedChunks   int    `json:"verified_chunks"`
+	UnverifiedChunks int    `json:"unverified_chunks"`
+	DisputeStatus    string `json:"dispute_status"`
+	Label            string `json:"label"`
 }
 
 // deriveVerificationLabel returns the honest label for a verification aggregate,
@@ -425,9 +477,14 @@ type Verification struct {
 // store and any future caller agree.
 func deriveVerificationLabel(v Verification) string {
 	switch {
-	case v.RedundancyMatched > 0 || v.Tiebreaks > 0:
+	case v.DeliveredChunks > 0 && v.VerifiedChunks >= v.DeliveredChunks:
+		return "fully-verified"
+	case v.DeliveredChunks > 0 && v.VerifiedChunks > 0:
+		return "sampled-verified"
+	case v.DeliveredChunks == 0 && (v.RedundancyMatched > 0 || v.Tiebreaks > 0):
 		// A real INDEPENDENT cross-check settled at least one chunk (a different
-		// supplier's matching result, or a tiebreak vote).
+		// supplier's matching result, or a tiebreak vote) in a legacy/event-only
+		// projection that predates per-chunk task coverage.
 		return "verified"
 	case v.Checked > 0:
 		// Known-answer (honeypot) probes ran, or a mismatch was detected, but no
@@ -460,11 +517,12 @@ type JobResults struct {
 
 // ModelInfo is one entry in GET /v1/models.
 type ModelInfo struct {
-	ID            string  `json:"id"`
-	Kind          string  `json:"kind"`
-	MinMemoryGB   float32 `json:"min_memory_gb"`
-	PricePer1KUSD float64 `json:"price_per_1k_usd"`
-	JobType       string  `json:"job_type"`
+	ID                     string  `json:"id"`
+	Kind                   string  `json:"kind"`
+	MinMemoryGB            float32 `json:"min_memory_gb"`
+	PricePer1KUSD          float64 `json:"price_per_1k_usd,omitempty"`
+	PricePerAudioMinuteUSD float64 `json:"price_per_audio_minute_usd,omitempty"`
+	JobType                string  `json:"job_type"`
 }
 
 // PriceEstimate is the GET /v1/price-estimate body.

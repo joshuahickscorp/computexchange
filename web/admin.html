@@ -474,7 +474,7 @@ async function loadSummary(){
     '<b>'+(w.throttled??0)+'</b> throttled'+(cls?' <span class="sep">·</span> '+cls:'');
 
   const p=s.payouts_by_status||{};
-  const dotFor = st => /released/.test(st) ? 'green' : (/clawed/.test(st) ? 'red' : 'gold');
+  const dotFor = st => /released/.test(st) ? 'green' : (/(clawed|reversal|unknown)/.test(st) ? 'red' : 'gold');
   const pParts=Object.entries(p).map(([st,agg])=>
     '<span class="dot '+dotFor(st)+'"></span> '+esc(st)+' <b>'+usd(agg.usd)+'</b> <span class="ash">('+agg.count+')</span>');
   $('l-payouts').innerHTML = pParts.length ? pParts.join(' <span class="sep">·</span> ') : '<span class="muted">no supplier credit yet</span>';
@@ -569,7 +569,7 @@ async function runExplain(){
 async function loadActions(){
   try{
     const a = await api('/admin/actions'); $('a-actions-err').textContent='';
-    $('a-actions').textContent = a.length ? JSON.stringify(a, null, 2) : '(no admin actions recorded yet)';
+    $('a-actions').textContent = a.items?.length ? JSON.stringify(a, null, 2) : '(no admin actions recorded yet)';
   }catch(e){ $('a-actions').textContent=''; $('a-actions-err').textContent=e.message; }
 }
 

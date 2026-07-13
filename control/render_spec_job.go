@@ -20,9 +20,9 @@ package main
 //   - an honesty boundary at the edge: a shot OUTSIDE the measured envelope gets
 //     the tier contract but NO speedup band, exactly as an embed job gets no
 //     routing block;
-//   - a pure receipt projection that returns nil at the honesty boundary, never
-//     re-decides, and carries the receipt's OWN measured-vs-modeled labels
-//     through to the buyer (mirror: receiptRouting(inv)).
+//   - a checked receipt projection that returns nil,nil for absent/non-render
+//     input, rejects malformed render rows, and parks naked worker evidence until
+//     authoritative server attestation exists (mirror: receiptRouting(inv)).
 //
 // The load-bearing honesty invariants (docs/research/CONSOLIDATION_PLAN_2026-07-09.md):
 //
@@ -30,14 +30,16 @@ package main
 //     ledger; there is deliberately no field, const, or code path that
 //     multiplies two lanes' (or two tiles') multipliers. The quote carries a
 //     BAND of real same-discipline measurements, never a synthesized figure.
-//  2. The ONLY sellable render tier today is the 0.95/preview band — the only
-//     tier the integrated ledger has delivered at >1x. Strict delivery
-//     (worst-tile >= 0.95, = SpecTierDelivery) is STILL OPEN: RUN 3 self-pruned
-//     at it (worst-tile 0.9095 < 0.95). So QuoteRenderSpec NEVER emits a
-//     delivery/strict promise — QuotedTier is always "preview" and
-//     StrictDeliveryPromised is a compile-time-constant false.
+//  2. Strict delivery is MEASURED on two exact recipes, but it is not generalized:
+//     the untuned 1080p scene sweep cleared 1/3 scenes. RenderSpecParams binds
+//     shape only, not scene content or the repair-policy/build digest. Therefore
+//     QuoteRenderSpec never turns those bound receipts into an UNBOUND promise:
+//     QuotedTier remains "preview", StrictDeliveryPromised remains false, and an
+//     unbound request receives no projected speedup band.
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -49,7 +51,8 @@ import (
 // docs/research/CONSOLIDATION_PLAN_2026-07-09.md (the staged table) and
 // docs/speed-lane-reports/spec-lab/integrated_spec_render_token_ledger.jsonl.
 
-// The representative-scene MEASURED speedup band: standalone renders at the
+// Historical standalone-render context only. These are not an integrated
+// product band and are never attached to a shape-only quote: standalone renders at the
 // delivery gate (g>=0.98, worst-tile>=0.95), draft 8–32 spp vs a 4096-spp
 // reference, on an L40S and RE-EXPRESSED device-correct through the render
 // adapter (CONSOLIDATION_PLAN table: many_glass 3.87x / sphere_bump 4.59x /
@@ -59,19 +62,27 @@ import (
 // same-discipline measurements; it is NEVER interpolated to a per-shot point
 // (that would invent a number the ledger does not contain).
 const (
-	renderSpecBandLowX  = 3.87 // many_glass — the hardest representative scene measured
-	renderSpecBandHighX = 7.87 // cube_volume — the easiest NON-forgiving scene measured
+	renderSpecStandaloneLowX  = 3.87 // many_glass — hardest representative scene measured
+	renderSpecStandaloneHighX = 7.87 // cube_volume — easiest non-forgiving scene measured
 )
 
-// The integrated 4K headline anchor: REAL RUN 3 (A100 SECURE, classroom
+// The integrated 4K preview/no-repair anchor: REAL RUN 3 (A100 SECURE, classroom
 // 3840x2160, ref 4096 / draft 512, keyframe_every=1, zero reprojection) —
-// 5.561x @ global 0.9854 / p5 0.9664 / worst-tile 0.9095, MEASURED end-to-end.
+// 4546.761007 / 817.567636 = 5.561327x @ global 0.9854 / p5 0.9664 /
+// worst-tile 0.9095, MEASURED integrated product time.
 // It self-pruned at the STRICT delivery gate (worst-tile 0.91 < 0.95) but
 // CLEARS the historically-published 0.95/preview tier and reproduces the banked
 // 5.84x product number within 5% on different silicon. It sits inside the
 // representative band above and is carried as an explicit reference point, never
 // as a promise for a shot that is not this exact config.
-const renderSpec4KAnchorX = 5.561
+const renderSpec4KPreviewAnchorX = 5.561327
+
+// The strict-delivery 4K anchor: H100 classroom, the bound aov_edge +
+// match-reference repair recipe. 2770.964385 / 1130.593241 = 2.450894x,
+// global 0.9902 / p5 0.9738 / worst-tile 0.9501. The untuned 1080p sweep then
+// cleared strict on only pavilion (1.658801x), pruning classroom and bmw27;
+// these are historical measured facts, not a universal interval.
+const renderSpec4KStrictAnchorX = 2.450894
 
 // The MEASURED envelope. Outside it there is no honest band to quote (the
 // routing precedent: "the sweep measured generative decode only, so every other
@@ -97,14 +108,14 @@ const (
 // It names the banked receipts, states that the band is a projection of prior
 // MEASURED runs (not a measurement of THIS shot), and that it excludes
 // provisioning — so the conservatism points the right way.
-const renderSpecQuoteBasis = "speedup_band [MODELED] — a projection of MEASURED banked receipts onto this shot's shape, NOT a measurement of this job and NOT a product of any lane/tile multipliers: the representative-scene band 3.87x-7.87x (standalone delivery-tier renders, device-correct) and the integrated 4K anchor 5.561x (REAL RUN 3, A100, classroom 3840x2160, ref 4096/draft 512, keyframe_every=1 — measured 4546.76s reference vs 817.36s spec, self-pruned at the STRICT delivery gate but clearing the 0.95/preview tier). Source: docs/speed-lane-reports/spec-lab/integrated_spec_render_token_ledger.jsonl + docs/research/CONSOLIDATION_PLAN_2026-07-09.md. Excludes provisioning/queue time."
+const renderSpecQuoteBasis = "NO PER-JOB SPEED FORECAST — this shape-only request does not bind scene content or the repair-policy/build digest. Historical MEASURED context only, never multiplied or projected: integrated 4K classroom preview/no-repair 5.561327x (4546.761007s / 817.567636s); integrated 4K classroom strict delivery 2.450894x (2770.964385s / 1130.593241s, global 0.9902, worst-tile 0.9501); untuned 1080p strict sweep passed 1/3 scenes (pavilion 1.658801x) and pruned classroom/bmw27. Standalone-render context 3.87x-7.87x is not an integrated-product band. Sources: docs/speed-lane-reports/spec-lab/integrated_spec_render_token_ledger.jsonl and scene_sweep_ledger.jsonl. Excludes provisioning/queue time."
 
 // Tier vocabulary echoed from spec_receipt.go (SpecTier*): the render quote may
-// only ever offer "preview". "delivery" (= the strict worst-tile>=0.95 gate) is
-// accepted as an ASK but is never QUOTED — no integrated receipt has cleared it.
+// only ever offer an unbound "preview". "delivery" is accepted as an ask but
+// is never quoted without scene/config/policy binding; exact recipes have cleared it.
 const (
-	renderSpecTierPreview  = SpecTierPreview  // the only sellable tier today
-	renderSpecTierDelivery = SpecTierDelivery // acceptable as a target, never a promise
+	renderSpecTierPreview  = SpecTierPreview
+	renderSpecTierDelivery = SpecTierDelivery // exact-recipe target, never an unbound promise
 )
 
 // --- (a) the advisory quote --------------------------------------------------
@@ -120,7 +131,7 @@ type RenderSpecParams struct {
 	RefSPP        int    // reference (full-quality) samples per pixel
 	DraftSPP      int    // draft (speculative) samples per pixel; must be < RefSPP
 	KeyframeEvery int    // 1 = all-anchor (measured-safe); >1 = the reprojection lever
-	RequestedTier string // "" | "preview" | "delivery"  (delivery is an ask, never a quote)
+	RequestedTier string // "" | "preview" | "delivery" (delivery needs evidence binding)
 }
 
 // Validate enforces the range/enum contract on the shot params. Like
@@ -154,39 +165,35 @@ func (p RenderSpecParams) Validate() error {
 }
 
 // RenderSpecQuote is the advisory block QuoteRenderSpec attaches (the render
-// analog of QuoteRouting). Every speedup field is [MODELED] via Basis. The band
-// pointers are nil when the shot is outside the measured envelope — the tier
-// contract still stands, but there is no honest speedup to quote.
+// analog of QuoteRouting). Shape alone is not evidence binding, so the retained
+// speedup fields stay nil until scene and policy/build digests exist.
 type RenderSpecQuote struct {
 	Modality string `json:"modality"` // always "render"
-	// QuotedTier is the tier the product will SELL at — always "preview", the
-	// only tier the integrated ledger delivers at >1x today.
+	// QuotedTier is the unbound tier this shape-only surface can offer. Strict
+	// delivery exists, but only for evidence-bound recipes this type cannot name.
 	QuotedTier string `json:"quoted_tier"`
 	// RequestedTier echoes the ask so the receipt can later show promised-vs-asked.
 	RequestedTier string `json:"requested_tier,omitempty"`
-	// StrictDeliveryPromised is ALWAYS false — the structural guarantee that this
-	// surface never sells the still-open strict-delivery tier (invariant #2).
+	// StrictDeliveryPromised is always false: this surface cannot bind the scene
+	// and verifier/repair policy needed to reproduce a strict receipt.
 	StrictDeliveryPromised bool `json:"strict_delivery_promised"`
-	// InEnvelope reports whether the shot sits inside the MEASURED envelope; when
-	// false the band pointers are nil.
+	// InEnvelope is false until the request is evidence-bound.
 	InEnvelope bool `json:"in_envelope"`
-	// The [MODELED] representative band and the 4K reference anchor. Nil out of
-	// envelope. omitempty keeps an out-of-envelope quote clean (tier + reason only).
+	// Deprecated shape-projection fields, retained for additive wire compatibility.
 	SpeedupBandLowX  *float64 `json:"speedup_band_low_x,omitempty"`
 	SpeedupBandHighX *float64 `json:"speedup_band_high_x,omitempty"`
 	Anchor4KSpeedupX *float64 `json:"anchor_4k_speedup_x,omitempty"`
 	// Reason is the plain-english why, quote-warnings voice — names the envelope
-	// decision and, always, that delivery is a target not a promise.
+	// decision and why an exact-recipe result is not an unbound promise.
 	Reason string `json:"reason"`
 	// Basis welds the honesty label to every number (renderSpecQuoteBasis).
 	Basis string `json:"basis"`
 }
 
 // QuoteRenderSpec reads a shot's shape and produces the advisory render-spec
-// quote. PURE and DETERMINISTIC: identical inputs yield an identical quote, and
-// there is no path — for any input, including RequestedTier="delivery" — by
-// which it emits a strict-delivery promise (QuotedTier stays "preview",
-// StrictDeliveryPromised stays false). Returns an error only for params that
+// quote. PURE and DETERMINISTIC: identical inputs yield an identical quote. No
+// input can emit an unbound strict-delivery promise or a scene-agnostic speedup
+// forecast. Returns an error only for params that
 // fail Validate; a valid-but-out-of-envelope shot is NOT an error, it is a quote
 // with no band.
 func QuoteRenderSpec(p RenderSpecParams) (RenderSpecQuote, error) {
@@ -196,37 +203,30 @@ func QuoteRenderSpec(p RenderSpecParams) (RenderSpecQuote, error) {
 
 	q := RenderSpecQuote{
 		Modality:               "render",
-		QuotedTier:             renderSpecTierPreview, // never "delivery"
+		QuotedTier:             renderSpecTierPreview,
 		RequestedTier:          p.RequestedTier,
 		StrictDeliveryPromised: false, // structural invariant #2
 		Basis:                  renderSpecQuoteBasis,
 	}
 
-	// The delivery-is-a-target clause rides EVERY quote, in or out of envelope:
-	// even when the buyer asked for delivery we quote preview and say why.
+	// A delivery ask is acknowledged against current evidence, not the stale
+	// pre-GROW claim that strict had never cleared.
 	deliveryClause := ""
 	if p.RequestedTier == renderSpecTierDelivery {
-		deliveryClause = " you asked for the delivery tier: it is a target, NOT a promise — no integrated receipt has cleared the strict gate (RUN 3 self-pruned at worst-tile 0.91 < 0.95), so this quote is for the preview tier only."
+		deliveryClause = " delivery was requested: strict delivery has been demonstrated on exact measured recipes, but this shape-only request does not bind scene content or repair policy; the untuned scene sweep cleared 1 of 3 scenes, so this quote makes no unbound strict-delivery promise."
 	}
 
 	inEnv, envReason := renderSpecInEnvelope(p)
 	q.InEnvelope = inEnv
-	if inEnv {
-		lo, hi, anchor := renderSpecBandLowX, renderSpecBandHighX, renderSpec4KAnchorX
-		q.SpeedupBandLowX, q.SpeedupBandHighX, q.Anchor4KSpeedupX = &lo, &hi, &anchor
-		q.Reason = strings.TrimSpace(fmt.Sprintf(
-			"quoting the preview tier at a [modeled] %.2fx-%.2fx speedup band (4k anchor %.3fx): %s.%s",
-			renderSpecBandLowX, renderSpecBandHighX, renderSpec4KAnchorX, envReason, deliveryClause))
-	} else {
-		q.Reason = strings.TrimSpace(fmt.Sprintf(
-			"quoting the preview tier with NO speedup band: %s — outside the measured envelope we state the tier contract but never invent a speedup.%s",
-			envReason, deliveryClause))
-	}
+	q.Reason = strings.TrimSpace(fmt.Sprintf(
+		"quoting the preview tier with NO per-job speedup band: %s — historical receipts remain context, never a projection onto an unbound shot.%s",
+		envReason, deliveryClause))
 	return q, nil
 }
 
-// renderSpecInEnvelope decides whether a shot is close enough to the MEASURED
-// runs to carry the banked band, and returns the plain-english why either way.
+// renderSpecInEnvelope decides whether a request carries enough evidence to
+// project a speedup. Shape checks remain for precise diagnostics, but the
+// answer stays false until scene and policy/build digests are part of params.
 // The gates, each a real ledger boundary (see the const block):
 //   - keyframe_every must be 1. kf>1 is the reprojection lever whose ONLY
 //     integrated measurement (RUN 1, kf=4) quality-FAILED (worst-tile 0.164) —
@@ -256,8 +256,8 @@ func renderSpecInEnvelope(p RenderSpecParams) (bool, string) {
 			"ref/draft spp ratio %.1fx (ref %d / draft %d) is outside the measured [%.0fx, %.0fx] span; that draft coarseness is unmeasured",
 			ratio, p.RefSPP, p.DraftSPP, renderSpecMinSPPRatio, renderSpecMaxSPPRatio)
 	}
-	return true, fmt.Sprintf(
-		"%dx%d, %d frame(s), ref %d / draft %d spp (%.1fx), keyframe_every=1 sits inside the measured envelope",
+	return false, fmt.Sprintf(
+		"shape is inside prior measurements (%dx%d, %d frame(s), ref %d / draft %d spp, %.1fx, keyframe_every=1), but scene content and repair-policy/build digests are unbound",
 		p.Width, p.Height, p.Frames, p.RefSPP, p.DraftSPP, ratio)
 }
 
@@ -274,6 +274,10 @@ type RenderSpecReceipt struct {
 	QualityTier string `json:"quality_tier"`
 	// Delivered is true when the lane cleared a sellable tier (preview or better).
 	Delivered bool `json:"delivered"`
+	// DeliveryEligible is derived from measured evidence + a cleared tier. A
+	// synthetic/modeled/imported row remains visible but parks and cannot bill.
+	DeliveryEligible bool `json:"delivery_eligible"`
+	Parked           bool `json:"parked"`
 	// SelfPruned is true when QualityTier == fail: the lane rejected its own
 	// output and the buyer got the reference-path render (billed as a plain
 	// render, not spec-lane seconds — design §3.5). The honest attempt still shows.
@@ -296,30 +300,75 @@ type RenderSpecReceipt struct {
 	// const basis, a receipt's honesty is per-row: it depends on evidence +
 	// baseline_source + tier). Built by renderSpecReceiptBasis.
 	Basis string `json:"basis"`
-	// Details passes the SSIM triple / scene / device / selector_recall through
-	// untouched (omitempty so an empty bag stays off the wire).
+	// Details carries the SSIM triple / scene / device / selector_recall through
+	// a bounded deep clone (omitempty so an empty bag stays off the wire).
 	Details map[string]any `json:"details,omitempty"`
 }
 
+// boundedRenderDetailsBuffer prevents a direct in-memory receipt from making
+// projection allocate an encoded details blob larger than the receipt ingress
+// limit. Encoder.Encode adds one trailing newline, which is intentionally
+// charged to this conservative cap.
+type boundedRenderDetailsBuffer struct {
+	bytes.Buffer
+}
+
+func (w *boundedRenderDetailsBuffer) Write(p []byte) (int, error) {
+	if len(p) > maxSpecReceiptBytes-w.Len() {
+		return 0, fmt.Errorf("details JSON exceeds %d-byte receipt limit", maxSpecReceiptBytes)
+	}
+	return w.Buffer.Write(p)
+}
+
+// cloneRenderSpecDetails accepts only the same JSON-compatible tree the receipt
+// ingress accepts, enforces the same byte and nesting bounds, and returns a
+// structurally independent map. JSON encoding fails cleanly on NaN/Inf,
+// unsupported values and reference cycles.
+func cloneRenderSpecDetails(details map[string]any) (map[string]any, error) {
+	if len(details) == 0 {
+		return nil, nil
+	}
+	var encoded boundedRenderDetailsBuffer
+	if err := json.NewEncoder(&encoded).Encode(details); err != nil {
+		return nil, fmt.Errorf("encode details: %w", err)
+	}
+	payload := bytes.TrimSpace(encoded.Bytes())
+	if err := rejectDuplicateSpecJSONKeys(payload); err != nil {
+		return nil, fmt.Errorf("validate details: %w", err)
+	}
+	var cloned map[string]any
+	if err := json.Unmarshal(payload, &cloned); err != nil {
+		return nil, fmt.Errorf("decode details clone: %w", err)
+	}
+	return cloned, nil
+}
+
 // receiptRenderSpec projects a landed SpecReceipt onto the buyer-facing render
-// block — the pure twin of receiptRouting(inv). It returns nil at the honesty
-// boundary: a nil receipt, or one whose modality is not the render lane (a
-// token-only receipt has no render surface to project onto). It NEVER
-// re-decides or re-scores — it restates the receipt's own measured facts and
-// labels. The caller is expected to have obtained r via ParseSpecReceipt (which
-// validates at the door), exactly as receiptRouting trusts the persisted
-// columns; a defensive Validate() here would mask a corrupt row the caller
-// should have failed loudly on.
-func receiptRenderSpec(r *SpecReceipt) *RenderSpecReceipt {
+// block — the pure twin of receiptRouting(inv). It returns nil,nil at the
+// honesty boundary (nil or non-render), but a malformed render row is an
+// explicit error and can never masquerade as an absent block.
+func receiptRenderSpec(r *SpecReceipt) (*RenderSpecReceipt, error) {
 	if r == nil || r.Modality != "render" {
-		return nil
+		return nil, nil
+	}
+	if err := r.Validate(); err != nil {
+		return nil, fmt.Errorf("render spec receipt: %w", err)
+	}
+	var speedup *float64
+	if r.SpeedupVsBaseline != nil {
+		value := *r.SpeedupVsBaseline
+		speedup = &value
 	}
 	out := &RenderSpecReceipt{
-		Modality:           r.Modality,
-		QualityTier:        r.QualityTier,
-		Delivered:          r.QualityTier == SpecTierPreview || r.QualityTier == SpecTierDelivery,
+		Modality:    r.Modality,
+		QualityTier: r.QualityTier,
+		// A naked worker receipt is evidence, not server attestation. Keep every
+		// non-fail row parked until job/input/artifact/policy binding is verified.
+		Delivered:          false,
+		DeliveryEligible:   false,
+		Parked:             r.QualityTier != SpecTierFail,
 		SelfPruned:         r.QualityTier == SpecTierFail,
-		SpeedupVsBaseline:  r.SpeedupVsBaseline, // verbatim; nil stays nil
+		SpeedupVsBaseline:  speedup, // value copied; nil stays nil
 		TotalProductTimeS:  r.TotalProductTimeS,
 		BaselineTotalTimeS: r.BaselineTotalTimeS,
 		Units:              r.Units,
@@ -330,16 +379,14 @@ func receiptRenderSpec(r *SpecReceipt) *RenderSpecReceipt {
 		BaselineSource:     r.BaselineSource,
 	}
 	if len(r.Details) > 0 {
-		// Shallow copy so the projection never aliases (or mutates) the receipt's
-		// own details map.
-		d := make(map[string]any, len(r.Details))
-		for k, v := range r.Details {
-			d[k] = v
+		details, err := cloneRenderSpecDetails(r.Details)
+		if err != nil {
+			return nil, fmt.Errorf("render spec receipt details: %w", err)
 		}
-		out.Details = d
+		out.Details = details
 	}
 	out.Basis = renderSpecReceiptBasis(r)
-	return out
+	return out, nil
 }
 
 // renderSpecReceiptBasis composes the per-receipt honesty sentence a buyer
@@ -349,14 +396,26 @@ func receiptRenderSpec(r *SpecReceipt) *RenderSpecReceipt {
 // and, when there is no baseline, that no speedup is claimed.
 func renderSpecReceiptBasis(r *SpecReceipt) string {
 	var b strings.Builder
+	parkReason := func() string {
+		if r.DeliveryEligible() {
+			return "its emitter-local proof is not bound to authoritative server attestation"
+		}
+		if !r.ArtifactVerified {
+			return "the final artifact lacks authoritative verification proof"
+		}
+		if r.Evidence != SpecEvidenceMeasured {
+			return fmt.Sprintf("its evidence is %s, not measured", r.Evidence)
+		}
+		return "it did not clear the validated delivery contract"
+	}
 
 	switch r.QualityTier {
 	case SpecTierFail:
-		b.WriteString("self-pruned at the quality gate: the spec lane rejected its own output and you received the reference-path render (billed as a plain render, not spec-lane seconds); the attempt is shown honestly.")
+		b.WriteString("self-pruned at the quality gate: the speculative artifact was rejected. This naked receipt does not prove which fallback artifact was ultimately delivered or how it was billed; authoritative delivery requires bound server attestation.")
 	case SpecTierPreview:
-		b.WriteString("delivered at the preview tier (the sellable 0.95 band).")
+		b.WriteString(fmt.Sprintf("preview quality was recorded, but the receipt is PARKED because %s; it is not delivery-eligible or billable.", parkReason()))
 	case SpecTierDelivery:
-		b.WriteString("delivered at the strict delivery tier.")
+		b.WriteString(fmt.Sprintf("delivery-tier quality was recorded, but the receipt is PARKED because %s; it is not delivery-eligible or billable.", parkReason()))
 	default:
 		b.WriteString(fmt.Sprintf("delivered at tier %q.", r.QualityTier))
 	}

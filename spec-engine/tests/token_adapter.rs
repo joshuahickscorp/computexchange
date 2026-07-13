@@ -38,13 +38,15 @@ fn token_batch_partial_acceptance_is_sum_m_over_sum_k() {
     // worst-wins over [Delivery(8/8), Preview(5/8), Fail(3/8)] => Fail.
     assert_eq!(receipt.quality_tier, QualityTier::Fail);
 
-    let sp = receipt.speedup_vs_baseline.expect("modeled baseline => Some");
+    let sp = receipt
+        .speedup_vs_baseline
+        .expect("modeled baseline => Some");
     assert!((sp - 0.05 / receipt.total_product_time_s).abs() < 1e-9);
 
     // Under Absent baseline the SAME batch reports None (never fabricated).
     let (_outs2, receipt_absent) = pipe.run_batch(
         &windows,
-        0.05,
+        0.0,
         BaselineSource::Absent,
         Evidence::Synthetic,
         Details::new(),

@@ -3,12 +3,15 @@
 # their signing secrets into .env, so the whole webhook step is one command instead
 # of a hand-click in the Stripe dashboard.
 #
-# It creates (idempotently — reuses an existing endpoint at the same URL):
-#   1. https://$HOST/v1/stripe/webhook          → setup_intent.succeeded,
-#                                                   payment_method.attached
-#        → STRIPE_WEBHOOK_SECRET   (enables the auto-charge once a card is saved;
-#          control/billing.go handleStripeWebhook)
-#   2. https://$HOST/v1/stripe/connect-webhook   → account.updated
+# It creates endpoints idempotently and refreshes an existing endpoint's event
+# subscriptions to the exact safety set below:
+#   1. https://$HOST/v1/stripe/webhook          → saved-card events plus
+#          payment_intent.succeeded, charge.refunded, and the dispute
+#          created/withdrawn/reinstated/closed
+#          lifecycle. STRIPE_WEBHOOK_SECRET authenticates all of them; cash
+#          events block impaired collections from funding new supplier payouts.
+#   2. https://$HOST/v1/stripe/connect-webhook   → account.updated, registered
+#        with connect=true so it receives events from connected accounts
 #        → CX_CONNECT_WEBHOOK_SECRET  (flips a supplier's payouts_enabled when Stripe
 #          finishes KYC; control/suppliers.go handleConnectWebhook)
 #
@@ -83,22 +86,30 @@ stripe_api() {
   echo "$resp"
 }
 
-# find_endpoint_id URL — id of an existing enabled endpoint at URL, or "".
+# find_endpoint_id URL CONNECT_SCOPE — id of an existing endpoint at the URL in
+# the requested account/Connect scope, or "". URL alone is not sufficient: an
+# account-scoped endpoint at the Connect URL never receives account.updated for
+# connected accounts.
 find_endpoint_id() {
-  local url="$1"
+  local url="$1" connect_scope="$2"
   stripe_api GET "webhook_endpoints?limit=100" \
-    | jq -r --arg u "$url" '.data[] | select(.url==$u) | .id' | head -1
+    | jq -r --arg u "$url" --argjson c "$connect_scope" \
+      '.data[] | select(.url==$u and ((.connect // false)==$c)) | .id' | head -1
 }
 
-# ensure_endpoint URL ENVKEY EVENT[,EVENT…] — create the endpoint if absent; on a
-# fresh create, write its whsec_ secret to ENVKEY in .env. Returns via globals.
+# ensure_endpoint URL ENVKEY EVENT[,EVENT…] CONNECT_SCOPE — create the endpoint
+# if absent; on a fresh create, write its whsec_ secret to ENVKEY in .env.
 ensure_endpoint() {
-  local url="$1" envkey="$2" events="$3"
+  local url="$1" envkey="$2" events="$3" connect_scope="$4"
   hr "$url"
   local existing
-  existing="$(find_endpoint_id "$url")"
+  existing="$(find_endpoint_id "$url" "$connect_scope")"
   if [ -n "$existing" ]; then
-    info "endpoint already exists ($existing) — NOT recreating."
+    local update_args=() update_ev
+    IFS=',' read -ra EVS <<< "$events"
+    for update_ev in "${EVS[@]}"; do update_args+=(-d "enabled_events[]=$update_ev"); done
+    stripe_api POST "webhook_endpoints/$existing" "${update_args[@]}" >/dev/null
+    info "endpoint already exists ($existing) — refreshed events: $events"
     if [ -n "$(envval "$envkey")" ]; then
       info "$envkey is already set in .env — leaving it."
     else
@@ -109,7 +120,7 @@ ensure_endpoint() {
     return 0
   fi
   # Build the -d event args.
-  local args=(-d "url=$url")
+  local args=(-d "url=$url" -d "connect=$connect_scope")
   local ev; IFS=',' read -ra EVS <<< "$events"
   for ev in "${EVS[@]}"; do args+=(-d "enabled_events[]=$ev"); done
   args+=(-d "description=computexchange $envkey")
@@ -127,8 +138,8 @@ ensure_endpoint() {
   fi
 }
 
-ensure_endpoint "https://$HOST/v1/stripe/webhook"         "STRIPE_WEBHOOK_SECRET"     "setup_intent.succeeded,payment_method.attached"
-ensure_endpoint "https://$HOST/v1/stripe/connect-webhook" "CX_CONNECT_WEBHOOK_SECRET" "account.updated"
+ensure_endpoint "https://$HOST/v1/stripe/webhook"         "STRIPE_WEBHOOK_SECRET"     "setup_intent.succeeded,payment_method.attached,payment_intent.succeeded,charge.refunded,charge.dispute.created,charge.dispute.funds_withdrawn,charge.dispute.funds_reinstated,charge.dispute.closed" false
+ensure_endpoint "https://$HOST/v1/stripe/connect-webhook" "CX_CONNECT_WEBHOOK_SECRET" "account.updated" true
 
 hr "done"
 info "If secrets were written to .env, restart the control plane so it loads them:"

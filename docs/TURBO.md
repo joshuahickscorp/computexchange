@@ -1,3 +1,4 @@
+<!-- CLAIM-SCOPE: internal-engineering-non-authoritative -->
 # Computexchange Turbo — upgrade summary
 
 > **Proven.** Every claim below is grounded in code read directly from this repo
@@ -28,19 +29,25 @@ sharpened. Five threads:
 ## 1. Scheduler V2 — `control/scheduler.go`, `control/api.go`
 
 ### Hard-filter claim (the headline)
-The claim query in `Store.ClaimTask` (`scheduler.go:185`) enforces, **in SQL**,
-that a worker can never claim a task it cannot run. The `next` CTE joins the
-claiming worker and its supplier and rejects on every dimension at once
+The claim query in `Store.ClaimTask` enforces the stored worker/resource
+constraints **in SQL**. The `next` CTE joins the claiming worker and its supplier
+and rejects on every currently persisted dimension at once
 (`scheduler.go:226–262`):
 
 - supplier active (quarantine gate): `s.status = 'active'`
 - memory: `COALESCE(j.min_memory_gb,0) <= COALESCE(w.memory_gb,0)`
 - hardware: `j.hw_classes IS NULL OR w.hw_class = ANY(j.hw_classes)`
-- job type: `w.supported_jobs @> ARRAY[j.job_type]`
-- model: job has no `model_ref` OR `w.supported_models @> ARRAY[j.model_ref]`
+- runtime capability: an exact current-matrix row exists in
+  `worker_authorized_capabilities` for `(worker, job_type, model_ref)`
 - data residency: `j.data_residency IS NULL OR s.data_country = ANY(j.data_residency)`
 - trusted-tier gate: `j.tier <> 'trusted' OR $2 >= 2` (supplier tier ≥ 2)
 - **min-payout gate:** `COALESCE(j.offered_rate_usd_hr,1e9) >= COALESCE(w.min_payout_usd_hr,0)`
+
+`supported_jobs` and `supported_models` remain wire/debug compatibility roll-ups,
+not authority. Registration intersects them with generated production cells and
+atomically replaces normalized rows carrying the matrix SHA. Claim, quote, planner,
+and routing queries all require that exact row; legacy array-only workers remain
+inert until re-registration.
 
 The queue itself is Postgres, not NATS: `SELECT … FOR UPDATE SKIP LOCKED LIMIT 1`
 (`scheduler.go:248`) so concurrent pollers each grab a different row. Ordering is

@@ -21,8 +21,8 @@ func TestAssembleClearingReceipt(t *testing.T) {
 	verif := Verification{RedundancyMatched: 2, Checked: 2, Label: "verified", DisputeStatus: "resolved"}
 	classes := []string{"candle|abc123"}
 	tasks := []TaskReceipt{
-		taskReceiptRow(0, "complete", false, "candle", "abc123", "redundancy_match"),
-		taskReceiptRow(0, "complete", true, "candle", "abc123", "honeypot_pass"),
+		taskReceiptRow(0, "complete", false, "candle", "abc123", "redundancy_match", "pass"),
+		taskReceiptRow(0, "complete", true, "candle", "abc123", "honeypot_pass", "pass"),
 	}
 
 	routing := &QuoteRouting{
@@ -55,7 +55,7 @@ func TestAssembleClearingReceipt(t *testing.T) {
 	if len(rc.Classes) != 1 || rc.Classes[0] != "candle|abc123" {
 		t.Fatal("receipt must carry the verification CLASS")
 	}
-	if len(rc.Tasks) != 2 || rc.Tasks[0].WorkerClass != "candle|abc123" || rc.Tasks[0].VerificationKind != "redundancy_match" {
+	if len(rc.Tasks) != 2 || rc.Tasks[0].WorkerClass != "candle|abc123" || rc.Tasks[0].VerificationKind != "redundancy_match" || rc.Tasks[0].Verdict != "pass" {
 		t.Fatalf("receipt must carry the per-task drilldown with worker class + event; got %+v", rc.Tasks)
 	}
 }
@@ -64,7 +64,7 @@ func TestAssembleClearingReceipt(t *testing.T) {
 // answer. A honeypot TaskReceipt shows it was a probe + its pass/fail, but its JSON
 // contains no answer/result field.
 func TestTaskReceiptNeverLeaksHoneypotAnswer(t *testing.T) {
-	tr := taskReceiptRow(3, "complete", true, "candle", "h1", "honeypot_pass")
+	tr := taskReceiptRow(3, "complete", true, "candle", "h1", "honeypot_pass", "pass")
 	if !tr.IsHoneypot || tr.VerificationKind != "honeypot_pass" || tr.WorkerClass != "candle|h1" {
 		t.Fatalf("honeypot task receipt should show the probe + class + outcome; got %+v", tr)
 	}

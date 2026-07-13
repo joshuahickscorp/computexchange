@@ -228,9 +228,18 @@ if [ "$MODE" != "attached" ]; then
   export LISTEN_ADDR=":$DCONTROL_PORT"
   # Hermetic money: never touch a live rail (same rationale as prove-local).
   unset STRIPE_SECRET_KEY STRIPE_PUBLISHABLE_KEY STRIPE_WEBHOOK_SECRET CX_CONNECT_WEBHOOK_SECRET 2>/dev/null || true
+  # The production server deliberately has no implicit economic defaults. This
+  # isolated no-Stripe harness still needs an explicit, versioned schedule so
+  # quote/submit exercises the same fail-closed path without claiming a processor
+  # contract or changing real prices.
+  export CX_ECON_SCHEDULE_VERSION="doc-as-test-hermetic-v1"
+  export CX_PROCESSOR_PERCENT_BPS="0"
+  export CX_PROCESSOR_FIXED_USD="0"
+  export CX_CONTROL_PLANE_PER_TASK_USD="0"
+  export CX_TARGET_MARGIN_BPS="0"
 
   say "applying schema + seeding demo buyer/worker"
-  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/schema.sql >/dev/null 2>&1 || die "schema apply failed"
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction -f db/schema.sql >/dev/null 2>&1 || die "schema apply failed"
   (cd control && go build -o "$ART/control" .) || die "control build failed"
   "$ART/control" seed >/dev/null 2>&1 || die "seed failed"
   ( "$ART/control" ) >"$CONTROL_LOG" 2>&1 &
@@ -271,12 +280,13 @@ say "building the real cx CLI (cli/) to exercise the documented CLI lane"
 (cd cli && go build -o "$CX_BIN" .) || die "cx CLI build failed"
 
 # ── Rewrite doc placeholders → the local stack ───────────────────────────────
-# The doc points at https://computexchange.net with a cx_live_… placeholder key.
+# The doc points at the deliberately non-routable https://cx.example.invalid with
+# a cx_live_… placeholder key.
 # We rewrite ONLY the host + key so the exact documented COMMAND SHAPE runs against
 # the local control plane. Everything else (endpoints, JSON shape, SDK method names,
 # CLI flags) is executed verbatim as the doc wrote it.
 localize() {
-  sed -e "s#https://computexchange.net#$CONTROL_URL#g" \
+  sed -e "s#https://cx.example.invalid#$CONTROL_URL#g" \
       -e "s#cx_live_…#$API_KEY#g" \
       -e "s#cx_live_...#$API_KEY#g"
 }
@@ -326,12 +336,21 @@ fi
 say "$(b 'Lane 2 — the documented Python SDK commands')"
 PY_BLOCK="$(extract_block 'Python' python 1)"
 [ -n "$PY_BLOCK" ] || die "could not extract the Python block from QUICKSTART.md"
-# The SDK is run from the repo (the doc says `pip install ./sdk/python`; here we use
-# PYTHONPATH to the same package so we exercise the exact shipped code without
-# mutating the CI Python env). The doc's `Client(...)`, `submit_job`, `wait`,
-# `results_text`, and `embeddings` calls are run verbatim (localized).
+# Install the SDK exactly as the doc says, into a disposable venv. Running from
+# $WORK without PYTHONPATH proves packaging metadata and imports work for a fresh
+# user rather than accidentally importing straight from the checkout. The doc's
+# `Client(...)`, `submit_job`, `wait`, `results_text`, and `embeddings` calls are
+# then run verbatim (localized).
+SDK_VENV="$WORK/sdk-venv"
+python3 -m venv "$SDK_VENV"
+SDK_PY="$SDK_VENV/bin/python"
+if ! "$SDK_PY" -m pip install --disable-pip-version-check --quiet "$ROOT/sdk/python" \
+    >"$WORK/sdk-install.txt" 2>&1; then
+  lose "Python SDK lane: documented 'pip install ./sdk/python' failed — see $WORK/sdk-install.txt"
+  cat "$WORK/sdk-install.txt" >&2 || true
+fi
 printf '%s\n' "$PY_BLOCK" | localize >"$WORK/py-lane.py"
-if PYTHONPATH="$ROOT/sdk/python" python3 "$WORK/py-lane.py" >"$WORK/py-out.txt" 2>&1; then
+if (cd "$WORK" && PYTHONNOUSERSITE=1 "$SDK_PY" "$WORK/py-lane.py") >"$WORK/py-out.txt" 2>&1; then
   # The doc's script prints the merged result text and the first 5 embedding floats.
   # A working run produces non-empty output on both prints.
   if [ -s "$WORK/py-out.txt" ]; then
@@ -392,7 +411,7 @@ BROKEN_PY="$WORK/py-broken.py"
   printf '\n# (injected) a documented-but-removed method a stale doc might still show:\n'
   printf 'cx.this_method_was_removed_from_the_sdk("all-minilm-l6-v2")\n'
 } >"$BROKEN_PY"
-if PYTHONPATH="$ROOT/sdk/python" python3 "$BROKEN_PY" >"$WORK/py-broken-out.txt" 2>&1; then
+if (cd "$WORK" && PYTHONNOUSERSITE=1 "$SDK_PY" "$BROKEN_PY") >"$WORK/py-broken-out.txt" 2>&1; then
   lose "self-test: a broken documented command RAN CLEAN — the harness would NOT catch doc drift"
 else
   pass "self-test: a broken documented command was caught (non-zero exit, as a stale doc must be)"

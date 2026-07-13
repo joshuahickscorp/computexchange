@@ -272,8 +272,8 @@ func TestCanonicalJSON(t *testing.T) {
 }
 
 // --- the hard filter (item A): a worker can NEVER be matched/claimed for work it
-// cannot run. Match enforces hw_class / memory / tier here; supported_jobs /
-// supported_models / min_payout / data_residency are enforced in ClaimTask's SQL
+// cannot run. Match enforces hw_class / memory / tier here; exact normalized
+// capability / min_payout / data_residency are enforced in ClaimTask's SQL
 // and proven by the integration test TestClaimHardFilter. ---
 
 func TestMatchHardFilterNeverReturnsIneligible(t *testing.T) {
@@ -581,8 +581,8 @@ func TestSplitCharge(t *testing.T) {
 	if sc.PayoutStatus != PayoutHeld {
 		t.Fatalf("supplier_credit payout_status = %q, want held", sc.PayoutStatus)
 	}
-	if sc.ReleaseAt == nil || !sc.ReleaseAt.Equal(now.Add(600*time.Second)) {
-		t.Fatalf("supplier_credit release_at = %v, want now+600s", sc.ReleaseAt)
+	if sc.ReleaseAt == nil || !sc.ReleaseAt.Equal(now.Add(minimumPayoutHold)) {
+		t.Fatalf("supplier_credit release_at = %v, want server floor %s", sc.ReleaseAt, minimumPayoutHold)
 	}
 	wantPlatform := charge - charge*supplierShareRate
 	pt, ok := byKind[KindPlatformTake]
@@ -1168,14 +1168,14 @@ func TestTierMultiplier(t *testing.T) {
 
 // TestPollDispatchManifestShape is a regression guard for a contract bug found in
 // the first live end-to-end run: the Rust agent decodes TaskDispatch.manifest, so
-// model.kind must be a valid backend ("gguf") and inputs must marshal as an empty
+// model.kind must be the canonical backend ("hf") and inputs must marshal as an empty
 // array, never null — a nil slice or empty kind makes the agent fail to decode the
 // poll response and the task never executes.
 func TestPollDispatchManifestShape(t *testing.T) {
 	disp := TaskDispatch{
 		Manifest: JobManifest{
 			JobType: JobType{Type: "embed"},
-			Model:   ModelRef{Kind: "gguf", Ref: "all-minilm-l6-v2"},
+			Model:   ModelRef{Kind: "hf", Ref: "all-minilm-l6-v2"},
 			Inputs:  []InputRef{},
 			Tier:    "batch",
 		},
@@ -1186,8 +1186,8 @@ func TestPollDispatchManifestShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(b)
-	if !strings.Contains(s, `"kind":"gguf"`) {
-		t.Errorf("model.kind must be present and gguf, got: %s", s)
+	if !strings.Contains(s, `"kind":"hf"`) {
+		t.Errorf("model.kind must be present and hf, got: %s", s)
 	}
 	if strings.Contains(s, `"inputs":null`) {
 		t.Errorf("inputs must marshal as [] not null, got: %s", s)
@@ -1260,7 +1260,10 @@ func TestClaimTaskSQLIsTheSharedConstant(t *testing.T) {
 		"WHERE w.id = $1",
 		"eligible_jobs AS MATERIALIZED (",
 		"cheaper_class_online",
-		"FROM jobs j, me",
+		"FROM jobs j",
+		"CROSS JOIN me",
+		"CROSS JOIN LATERAL (",
+		"runtime_authority.cell_id AS runtime_cell_id",
 		"JOIN eligible_jobs ej ON ej.job_id = t.job_id",
 		"worker_tps",
 		"warm_for_task",
@@ -1271,6 +1274,10 @@ func TestClaimTaskSQLIsTheSharedConstant(t *testing.T) {
 		// 8->9), not a correlated subquery re-scanning benchmark_results per row.
 		"FROM worker_tps_cache wtc",
 		"wtc.worker_id = $1 AND wtc.job_type = j.job_type",
+		"FROM worker_authorized_capabilities wac",
+		"wac.matrix_sha256 = $4",
+		"wac.model_kind",
+		"FROM worker_authorized_capabilities wac2",
 		"worker_model_state wms",
 		"private_pool_members m",
 		"ledger_entries le",
@@ -1281,7 +1288,11 @@ func TestClaimTaskSQLIsTheSharedConstant(t *testing.T) {
 		// Verification-requeue worker exclusion (Scheduling & Matching Engine 8->9):
 		// the failed worker is skipped for the exclusion window on the claim path.
 		"t.excluded_worker <> $1",
-		"ORDER BY (t.claimed_by = $1) DESC, (ej.tier = 'priority') DESC,",
+		"ORDER BY (t.claimed_by = $1) DESC,",
+		"CASE WHEN ej.priority_claim_streak >= 3",
+		"THEN (ej.tier = 'batch')",
+		"ELSE (ej.tier = 'priority')",
+		"(ej.tier = 'priority') DESC,",
 		"cheaper_class_online ASC, worker_tps DESC, warm_for_task DESC,",
 		"job_dispatched_count ASC, t.created_at ASC",
 		"FOR UPDATE OF t SKIP LOCKED",
@@ -1293,6 +1304,11 @@ func TestClaimTaskSQLIsTheSharedConstant(t *testing.T) {
 		}
 		if !strings.Contains(pinned, want) {
 			t.Errorf("ClaimTaskSQL(pinned) missing expected fragment: %q", want)
+		}
+	}
+	for _, forbidden := range []string{"SELECT m.kind FROM models", "WHEN 'embed' THEN 'hf'", "WHEN 'whisper' THEN 'hf'"} {
+		if strings.Contains(general, forbidden) || strings.Contains(pinned, forbidden) {
+			t.Errorf("ClaimTaskSQL must use generated model kind, found live-catalog mapping fragment %q", forbidden)
 		}
 	}
 
@@ -1310,5 +1326,40 @@ func TestClaimTaskSQLIsTheSharedConstant(t *testing.T) {
 	// dishonesty this rung removes.
 	if strings.Contains(general, "enable_seqscan") {
 		t.Errorf("ClaimTaskSQL must not embed a forced planner GUC")
+	}
+	if strings.Contains(general, "supported_jobs") || strings.Contains(general, "supported_models") {
+		t.Errorf("ClaimTaskSQL must not authorize work from legacy capability arrays")
+	}
+}
+
+// TestClaimedTaskConstraintsPreserved proves the poll response projects the
+// persisted buyer contract instead of emitting JobConstraints' zero value. The
+// copy check prevents a later response mutation from aliasing claim state.
+func TestClaimedTaskConstraintsPreserved(t *testing.T) {
+	c := &ClaimedTask{
+		MinMemoryGB:     23.5,
+		HWClasses:       []string{"nvidia_80g", "apple_silicon_ultra"},
+		MaxDurationSecs: 7_321,
+		DataResidency:   []string{"CA", "US"},
+	}
+	got := claimedTaskConstraints(c)
+	if got.MinMemoryGB != c.MinMemoryGB || got.MaxDurationSecs != c.MaxDurationSecs {
+		t.Fatalf("scalar constraints changed: got %+v, claim %+v", got, c)
+	}
+	if len(got.HWClasses) != 2 || got.HWClasses[0] != "nvidia_80g" || got.HWClasses[1] != "apple_silicon_ultra" {
+		t.Fatalf("hardware constraints changed: %#v", got.HWClasses)
+	}
+	if len(got.DataResidency) != 2 || got.DataResidency[0] != "CA" || got.DataResidency[1] != "US" {
+		t.Fatalf("residency constraints changed: %#v", got.DataResidency)
+	}
+	got.HWClasses[0] = "mutated"
+	got.DataResidency[0] = "mutated"
+	if c.HWClasses[0] != "nvidia_80g" || c.DataResidency[0] != "CA" {
+		t.Fatal("dispatch constraint slices alias ClaimedTask state")
+	}
+
+	zero := claimedTaskConstraints(&ClaimedTask{})
+	if zero.HWClasses != nil || zero.DataResidency != nil {
+		t.Fatalf("unrestricted legacy constraints must stay null, got %+v", zero)
 	}
 }

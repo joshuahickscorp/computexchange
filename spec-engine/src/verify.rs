@@ -3,6 +3,7 @@
 
 use crate::receipt::QualityTier;
 use crate::unit::SpecUnit;
+use std::fmt;
 
 /// What a [`crate::traits::Verifier`] returns: a comparable score, and
 /// OPTIONALLY the authoritative truth.
@@ -41,6 +42,24 @@ pub struct Acceptance {
 }
 
 impl Acceptance {
+    /// Reject malformed adapter output before it can steer the accept/repair
+    /// branch. Written so NaN and infinities fail closed.
+    pub fn validate(&self) -> Result<(), AcceptanceError> {
+        if !self.drafted.is_finite() || self.drafted <= 0.0 {
+            return Err(AcceptanceError(format!(
+                "drafted must be finite and > 0, got {:?}",
+                self.drafted
+            )));
+        }
+        if !self.accepted.is_finite() || self.accepted < 0.0 || self.accepted > self.drafted {
+            return Err(AcceptanceError(format!(
+                "accepted must be finite in [0,drafted], got {:?} for drafted {:?}",
+                self.accepted, self.drafted
+            )));
+        }
+        Ok(())
+    }
+
     /// True when the whole draft is accepted as-is — the engine takes the cheap
     /// accept path (no repair cost) exactly when this holds.
     pub fn is_full(&self) -> bool {
@@ -57,3 +76,15 @@ impl Acceptance {
         }
     }
 }
+
+/// Invalid quantity output from a modality adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptanceError(pub String);
+
+impl fmt::Display for AcceptanceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for AcceptanceError {}

@@ -1,10 +1,20 @@
-# Computexchange — Release-Candidate Status
+# Historical Release-Candidate Inventory (non-authoritative)
 
-This file is the honest line between **what is proven locally** and **what is left**.
-The dividing rule: everything that can be built, tested, fuzzed, simulated, or
-benchmarked on one machine is **done and proven**; everything that remains
-genuinely requires the outside world — real money rails, a lawyer, a notarization
-identity, more than one physical machine, or a paying customer.
+<!-- CLAIM-SCOPE: historical-non-authoritative -->
+
+> This file preserves an earlier capability inventory and contains stale counts,
+> payout assumptions, and “everything local is done” language. It is not current
+> release status and must not be used for product, money, runtime, or launch claims.
+> Canonical status is [`proof/5x5-gates.json`](proof/5x5-gates.json), rendered by
+> `python3 scripts/five-by-five.py`; proof ledgers count only when
+> `scripts/verify_proof_ledger.py` accepts their terminal source-bound envelope.
+> In particular, a local two-process run is not two physical suppliers, transfer
+> code is not real money movement, and a generator/build is not a product outcome.
+
+The text below is retained for history. Its old local-versus-external dividing rule
+was too coarse: substantial local work remains in attempt-level economics, crash
+recovery, runtime authority, enrollment, API contracts, artifact lanes, claim
+conformance, and operational drills.
 
 Run the proof yourself:
 
@@ -112,7 +122,8 @@ real release checklist.
       credentials + supplier-onboarding task with **no code left** — without a key
       the honest stub keeps credits at `ready` (owed), never `released`.
 - [ ] Production Postgres + object storage (S3/R2) with real credentials, backups, TLS.
-- [ ] Supplier tax-identity collection at signup (TIN/W-8/W-9) — Trolley covers most.
+- [ ] Hosted supplier tax/KYC onboarding through the approved payout provider;
+      verify full tax identifiers never enter CX fields, logs, stores, or backups.
 
 ### Legal & compliance (require a professional)
 - [ ] **FINTRAC** opinion: does buyer→rail→supplier flow trigger MSB registration?

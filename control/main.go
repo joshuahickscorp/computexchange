@@ -31,6 +31,104 @@ import (
 // starting the server, so a human can obtain an api_key + worker_token to drive
 // the system end to end.
 
+func validateHardeningSecretConfig(
+	cxEnv, stripeSecret, tokenKey, verificationSampleSecret string,
+) (bool, error) {
+	tokenKeyUnsafe := len(tokenKey) < 32
+	verificationSecretUnsafe := len(verificationSampleSecret) < 32 ||
+		verificationSampleSecret == insecureDevelopmentSamplingSecret
+	missing := tokenKeyUnsafe || verificationSecretUnsafe
+	if !missing {
+		return false, nil
+	}
+	liveStripe := strings.HasPrefix(stripeSecret, "sk_live_")
+	if strings.EqualFold(cxEnv, "production") || strings.EqualFold(cxEnv, "prod") || liveStripe {
+		reason := "CX_ENV=" + cxEnv
+		if liveStripe {
+			reason = "STRIPE_SECRET_KEY is a LIVE key (sk_live_...)"
+		}
+		return true, fmt.Errorf(
+			"CX_TOKEN_KEY and/or CX_VERIFICATION_SAMPLE_SECRET missing or unsafe with %s — refusing to start: OAuth token storage, webhook signing-secret storage, or verification sampling would be unhardened; set both to at least 32 unpredictable bytes",
+			reason,
+		)
+	}
+	return true, nil
+}
+
+const (
+	defaultDBMaxConns int32 = 20
+	maxDBMaxConns     int64 = 1000
+)
+
+func parseDBMaxConns(raw string) (int32, error) {
+	if raw == "" {
+		return defaultDBMaxConns, nil
+	}
+	n, err := strconv.ParseInt(raw, 10, 32)
+	if err != nil || n <= 0 || n > maxDBMaxConns {
+		return 0, fmt.Errorf("DB_MAX_CONNS must be an integer from 1 to %d", maxDBMaxConns)
+	}
+	return int32(n), nil
+}
+
+func validateSeedAllowed(cxEnv, stripeSecret string) error {
+	production := strings.EqualFold(cxEnv, "production") || strings.EqualFold(cxEnv, "prod")
+	if production || strings.HasPrefix(stripeSecret, "sk_live_") {
+		return fmt.Errorf("control seed is disabled in production/live-money mode; refusing to install public development credentials")
+	}
+	return nil
+}
+
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       5 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    64 << 10,
+	}
+}
+
+// validateLiveMoneyConfig fails closed before the process opens a database or
+// starts serving when the deployment itself says real money is in scope. Quote
+// and submission handlers also validate the economic schedule, but waiting for
+// the first customer request would let /readyz stay green on a deployment that
+// cannot quote, save a card, or learn that a supplier completed Connect KYC.
+//
+// Stripe signs each separately registered webhook endpoint with its own secret.
+// Reusing one value for both routes is therefore rejected as configuration drift,
+// not treated as a convenient fallback. Error text names variables only and never
+// includes secret material.
+func validateLiveMoneyConfig(cxEnv, stripeSecret, billingWebhookSecret, connectWebhookSecret string) error {
+	liveStripe := strings.HasPrefix(stripeSecret, "sk_live_")
+	production := strings.EqualFold(cxEnv, "production") || strings.EqualFold(cxEnv, "prod")
+	if !production && !liveStripe {
+		return nil
+	}
+
+	missing := make([]string, 0, 3)
+	if production && strings.TrimSpace(stripeSecret) == "" {
+		missing = append(missing, "STRIPE_SECRET_KEY")
+	}
+	if strings.TrimSpace(billingWebhookSecret) == "" {
+		missing = append(missing, "STRIPE_WEBHOOK_SECRET")
+	}
+	if strings.TrimSpace(connectWebhookSecret) == "" {
+		missing = append(missing, "CX_CONNECT_WEBHOOK_SECRET")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("live money configuration invalid: %s required; refusing to start", strings.Join(missing, ", "))
+	}
+	if billingWebhookSecret == connectWebhookSecret {
+		return fmt.Errorf("live money configuration invalid: STRIPE_WEBHOOK_SECRET and CX_CONNECT_WEBHOOK_SECRET must be distinct endpoint secrets; refusing to start")
+	}
+	if _, err := LoadEconomicScheduleFromEnv(); err != nil {
+		return fmt.Errorf("live money configuration invalid: economic schedule: %w; refusing to start", err)
+	}
+	return nil
+}
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
 	log.SetPrefix("control: ")
@@ -45,9 +143,9 @@ func main() {
 		debug.SetMemoryLimit(300 << 20) // 300 MiB
 	}
 
-	// `control healthcheck`: in-container liveness probe against the running server's
-	// /healthz — the distroless image has no shell/curl for a Docker HEALTHCHECK. It
-	// asks the already-running server, so it needs no DB. Exit 0 = healthy, 1 = not.
+	// `control healthcheck`: in-container readiness probe against the running server's
+	// /readyz — the distroless image has no shell/curl for a Docker HEALTHCHECK. It
+	// asks the already-running server, including DB + owned-sweep liveness.
 	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
 		os.Exit(runHealthcheck())
 	}
@@ -91,11 +189,15 @@ func main() {
 		addr = ":8080"
 	}
 
-	// Hardening secrets: without these, OAuth tokens are stored unencrypted and OAuth
-	// state is unsigned (CSRF-open). In production this is unacceptable, so a missing
-	// secret is FATAL — a prod deploy must never silently run unhardened. Outside
+	// Hardening secrets: without these, OAuth tokens are stored unencrypted,
+	// customer webhook registration cannot safely persist its independent signing
+	// key, or verification sampling is predictable. OAuth state is independently
+	// random, hash-at-rest, single-use, expiry-bound, and cookie-bound, with no reusable
+	// environment secret. In production, either missing/unsafe hardening key is FATAL —
+	// a prod deploy must never silently run unhardened. Outside
 	// production (CX_ENV unset or any other value) local dev + tests run without them
-	// by design, so we only surface the insecure state loudly. Production sets both in .env.
+	// by design, so we only surface the insecure state loudly. Production sets both
+	// in .env.
 	//
 	// Security Posture 6.5->7 (docs/internal/CREED_AND_PATH_TO_TEN.md): CX_ENV requires
 	// the operator to have ALSO remembered to set that separate flag correctly — a real
@@ -105,17 +207,27 @@ func main() {
 	// "sk_live_", real money is on the line regardless of what CX_ENV says, so the same
 	// FATAL gate applies — an operator cannot accidentally ship live payments unhardened
 	// just by forgetting one env var when a different one already says the stakes.
-	if os.Getenv("CX_TOKEN_KEY") == "" || os.Getenv("CX_STATE_SECRET") == "" {
-		cxEnv := os.Getenv("CX_ENV")
-		liveStripe := strings.HasPrefix(stripeKey(), "sk_live_")
-		if strings.EqualFold(cxEnv, "production") || strings.EqualFold(cxEnv, "prod") || liveStripe {
-			reason := "CX_ENV=" + cxEnv
-			if liveStripe {
-				reason = "STRIPE_SECRET_KEY is a LIVE key (sk_live_...)"
-			}
-			log.Fatal("CX_TOKEN_KEY and/or CX_STATE_SECRET unset with " + reason + " — refusing to start: OAuth tokens would be stored UNENCRYPTED and OAuth state UNSIGNED; set both")
-		}
-		log.Print("WARNING: CX_TOKEN_KEY and/or CX_STATE_SECRET unset — OAuth tokens stored UNENCRYPTED and OAuth state UNSIGNED; set both before production")
+	missingHardeningSecret, hardeningErr := validateHardeningSecretConfig(
+		os.Getenv("CX_ENV"), stripeKey(), os.Getenv("CX_TOKEN_KEY"),
+		os.Getenv("CX_VERIFICATION_SAMPLE_SECRET"),
+	)
+	if hardeningErr != nil {
+		log.Fatal(hardeningErr)
+	}
+	if missingHardeningSecret {
+		log.Print("WARNING: CX_TOKEN_KEY and/or CX_VERIFICATION_SAMPLE_SECRET missing or unsafe — OAuth token/webhook-secret storage or verification sampling is unhardened; set both to at least 32 unpredictable bytes before production")
+	}
+	if err := validateLiveMoneyConfig(
+		os.Getenv("CX_ENV"), stripeKey(), os.Getenv("STRIPE_WEBHOOK_SECRET"),
+		os.Getenv("CX_CONNECT_WEBHOOK_SECRET"),
+	); err != nil {
+		log.Fatal(err)
+	}
+	if err := validateLiveConnectURLConfig(
+		os.Getenv("CX_ENV"), stripeKey(), os.Getenv("CX_CONNECT_RETURN_URL"),
+		os.Getenv("CX_CONNECT_REFRESH_URL"), os.Getenv("SITE_HOST"),
+	); err != nil {
+		log.Fatal(err)
 	}
 
 	// Open the pool with bounded sizing so a request burst can't exhaust Postgres
@@ -126,11 +238,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("invalid DATABASE_URL: %v", err)
 	}
-	poolCfg.MaxConns = 20
-	if v := os.Getenv("DB_MAX_CONNS"); v != "" {
-		if n, perr := strconv.Atoi(v); perr == nil && n > 0 {
-			poolCfg.MaxConns = int32(n)
-		}
+	poolCfg.MaxConns, err = parseDBMaxConns(os.Getenv("DB_MAX_CONNS"))
+	if err != nil {
+		log.Fatalf("invalid database pool configuration: %v", err)
 	}
 	poolCfg.MaxConnLifetime = 30 * time.Minute
 	poolCfg.MaxConnIdleTime = 5 * time.Minute
@@ -154,6 +264,9 @@ func main() {
 	// actually exists for a real worker to fetch; see seed.go's seedDemo doc
 	// comment). Stable demo UUIDs + ON CONFLICT DO NOTHING make it re-runnable.
 	if len(os.Args) > 1 && os.Args[1] == "seed" {
+		if err := validateSeedAllowed(os.Getenv("CX_ENV"), stripeKey()); err != nil {
+			log.Fatal(err)
+		}
 		seedStorage, serr := NewStorage(ctx)
 		if serr != nil {
 			log.Printf("seed: object storage unavailable (%v) — honeypot input object will NOT be uploaded; DB-only seed", serr)
@@ -183,6 +296,13 @@ func main() {
 	} else if n > 0 {
 		log.Printf("repricing from supplier economics: %d catalogue price(s) updated from measured throughput", n)
 	}
+	// A generated production runtime cell is a promise that its model is priced,
+	// resolvable, and memory-gated in the live DB catalog. Refuse to start when the
+	// duplicated schema/seed rows drift below that promise; pending catalog rows are
+	// allowed but never become production authority merely by existing.
+	if err := store.ValidateAdvertisedRuntimeCatalog(ctx); err != nil {
+		log.Fatalf("runtime catalog validation failed: %v", err)
+	}
 
 	// Object storage is mandatory: a missing/unreachable store is fatal here, not
 	// a silent degradation of the job lifecycle.
@@ -193,7 +313,7 @@ func main() {
 
 	// Payout rail: real Stripe Connect (STRIPE_SECRET_KEY), else the alpha manual
 	// export (CX_PAYOUT_EXPORT — owed credits appended to a CSV for out-of-band
-	// settlement), else the honest stub (credits reach 'ready'/owed, never
+	// settlement), else the honest stub (funded credits reach 'ready'/owed, never
 	// 'released' without a real transfer). One selection, shared by the server and
 	// the background release worker.
 	var payout Payout = stubPayout{}
@@ -204,7 +324,7 @@ func main() {
 		payout = newManualExportPayout(path)
 		log.Printf("payout rail: manual export (alpha) → %s — owed credits appended for out-of-band settlement", path)
 	} else {
-		log.Print("payout rail: none configured — credits reach 'ready' (owed), never 'released'")
+		log.Print("payout rail: none configured — funded credits reach 'ready' (owed), never 'released'")
 	}
 
 	server := NewServer(store, storage, NewVerifier(store).WithStorage(storage), payout)
@@ -215,16 +335,16 @@ func main() {
 	workersCtx, stopWorkers := context.WithCancel(ctx)
 	defer stopWorkers()
 	workers := NewWorkers(store, storage, payout)
-	// In a multi-instance (HA) deployment exactly ONE instance may run the background
-	// loops: the payout/dispute/reconcile sweeps are NOT safe to run concurrently from
-	// two processes (the manual-export payout rail appends non-idempotently, and a
-	// lock-free sweep could double-pay). Set CX_RUN_WORKERS=false on the secondary
-	// instance(s); they then serve API only and register no tickers (so /readyz stays
-	// green there). Default (unset) runs the workers, so single-instance is unchanged.
+	// Every eligible replica enters PostgreSQL-backed leader election. Exactly one
+	// holds the session lock and runs side-effecting sweeps; standbys keep serving API
+	// traffic and take over automatically when that session/process fails. The env
+	// switch remains an explicit maintenance escape hatch, not the HA mechanism.
 	if os.Getenv("CX_RUN_WORKERS") != "false" {
-		go workers.Run(workersCtx)
+		setWorkerElectionReadinessEnabled(true)
+		go runWorkerLeader(workersCtx, pool, workers)
 	} else {
-		log.Print("CX_RUN_WORKERS=false · background workers disabled on this instance (API-only, for HA secondaries)")
+		setWorkerElectionReadinessEnabled(false)
+		log.Print("CX_RUN_WORKERS=false · background workers explicitly disabled on this instance")
 	}
 	go server.startRateLimitSweeper(workersCtx) // evict idle rate-limit buckets
 	// Wake-on-work (notify.go): runs on EVERY instance regardless of CX_RUN_WORKERS —
@@ -232,11 +352,7 @@ func main() {
 	// not just the primary, so every instance needs its own LISTEN connection.
 	go startTaskWakeListener(workersCtx, pool)
 
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           server.Routes(),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	srv := newHTTPServer(addr, server.Routes())
 
 	// Run the server until a signal arrives.
 	go func() {
@@ -262,9 +378,9 @@ func main() {
 	log.Print("stopped")
 }
 
-// runHealthcheck probes the running control plane's /healthz over loopback and
-// returns a process exit code (0 healthy, 1 not). It backs the distroless image's
-// Docker HEALTHCHECK (no shell/curl available there) and needs no DB of its own.
+// runHealthcheck probes the running control plane's /readyz over loopback and
+// returns a process exit code (0 ready, 1 not). It backs the distroless image's
+// Docker HEALTHCHECK (no shell/curl available there).
 func runHealthcheck() int {
 	addr := os.Getenv("LISTEN_ADDR")
 	if addr == "" {
@@ -279,7 +395,7 @@ func runHealthcheck() int {
 		addr = strings.Replace(addr, "0.0.0.0:", "127.0.0.1:", 1)
 	}
 	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Get("http://" + addr + "/healthz")
+	resp, err := client.Get("http://" + addr + "/readyz")
 	if err != nil {
 		log.Printf("healthcheck: %v", err)
 		return 1

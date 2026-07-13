@@ -39,8 +39,8 @@ fn real_greedy_stream(
     max_new: usize,
 ) -> Result<(Vec<u32>, Vec<u32>, u32)> {
     let dev = device();
-    let mut file = std::fs::File::open(gguf_path)
-        .with_context(|| format!("open gguf {gguf_path}"))?;
+    let mut file =
+        std::fs::File::open(gguf_path).with_context(|| format!("open gguf {gguf_path}"))?;
     let content = gguf_file::Content::read(&mut file).context("read gguf content")?;
     let eos = content
         .metadata
@@ -127,7 +127,7 @@ pub fn measure_real_model(
         s.push(eos); // so the loop can reach EOS naturally if it wants
         s
     });
-    let mut draft = NgramDraft::new(order, 64);
+    let mut draft = NgramDraft::try_new(order, 64).map_err(|e| anyhow::anyhow!(e))?;
     let out = run_spec_decode(&unit, &mut draft, &mut target, k, "token-spec-poc");
     let mut receipt = out.receipt;
     receipt.meta.target_backend = "candle_quantized_llama_1b".to_string();

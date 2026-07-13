@@ -18,13 +18,12 @@ struct ConsentRecord: Codable, Equatable {
     var version: Int
     var acceptedAt: TimeInterval
 
-    // Bumped 2→3 (Security Posture 8→9): the sandbox line changed MATERIALLY — the
-    // cx-agent child is now launched under a real macOS seatbelt sandbox that
-    // contains its filesystem blast radius (v2 accurately said it was UNsandboxed;
-    // that is no longer true). A supplier who accepted v2's "runs as an ordinary
-    // process" wording is asked to re-accept the corrected, now-more-protective
-    // terms rather than having stale consent silently carry over.
-    static let currentVersion = 3
+    // Bumped 3→4 because the network disclosure was materially corrected: model
+    // files come from approved model hosts (currently Hugging Face), and job I/O may
+    // use object storage. Version 3's "control plane only" sentence was false. A
+    // supplier must see the real outbound boundary rather than inheriting stale
+    // consent. (The prior 2→3 bump covered the seatbelt sandbox change.)
+    static let currentVersion = 4
 }
 
 /// The fixed terms presented at first run. Kept here (not hard-coded in the view)
@@ -59,7 +58,7 @@ enum ConsentTerms {
         "Power: by default the agent only works while on AC power and pauses on battery.",
         "Quiet hours: you can set hours when the agent never accepts work.",
         "You can stop the agent at any time from this menu; stopping is immediate.",
-        "The agent makes outbound network connections to the Computexchange control plane only. It does not use your microphone, camera, or location.",
+        "The agent makes outbound network connections to the Computexchange control plane, job object storage, and approved model hosts (currently Hugging Face for model downloads). It does not use your microphone, camera, or location.",
     ]
 }
 

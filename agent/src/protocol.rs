@@ -11,8 +11,8 @@ use reqwest::{Client, Response, StatusCode};
 use uuid::Uuid;
 
 use crate::types::{
-    ConnectStatus, Earnings, FailReport, Heartbeat, SupplierVerification, TaskCommit,
-    TaskDispatch, WorkerCapability,
+    ConnectStatus, Earnings, FailReport, Heartbeat, SupplierVerification, TaskCommit, TaskDispatch,
+    WorkerCapability,
 };
 
 /// Long-poll budget. Slightly above the server's ~30s poll window so we don't
@@ -20,6 +20,15 @@ use crate::types::{
 const POLL_TIMEOUT: Duration = Duration::from_secs(35);
 /// Timeout for ordinary (non-poll) requests.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+
+// A result object is already durably uploaded before commit_task runs. Losing a
+// single commit response must therefore not abandon that uploaded work until the
+// stale-task reaper fires. Rebuild the same authenticated JSON request a bounded
+// number of times on transport failures, 429, and 5xx. Four total attempts with
+// 200/400/800ms delays stay well below the task-recovery horizon while avoiding
+// an unbounded retry loop on an unhealthy control plane.
+const COMMIT_MAX_ATTEMPTS: usize = 4;
+const COMMIT_RETRY_BASE_DELAY: Duration = Duration::from_millis(200);
 
 /// Poll path with the long-poll request (Plane D §7 D1). The control plane holds
 /// the poll open for up to `wait_ms` (it caps the value server-side) before
@@ -203,7 +212,11 @@ impl ControlPlaneClient {
         Ok(())
     }
 
-    /// `POST /v1/worker/task/{id}/commit` — submit the result, expect 204.
+    /// `POST /v1/worker/task/{id}/commit` — submit the result. Any 2xx is
+    /// success. Transport failures, 429, and 5xx are retried with bounded
+    /// exponential backoff; every other 4xx is definitive and returned at once.
+    /// Each attempt rebuilds the same authenticated JSON request, so neither the
+    /// worker token nor the commit body can disappear on retry.
     pub async fn commit_task(
         &self,
         task_id: Uuid,
@@ -211,16 +224,62 @@ impl ControlPlaneClient {
     ) -> Result<(), ProtocolError> {
         let endpoint = "/v1/worker/task/{id}/commit";
         let path = format!("/v1/worker/task/{task_id}/commit");
-        let resp = self
-            .http
-            .post(self.url(&path))
-            .header("X-Worker-Token", &self.token)
-            .json(commit)
-            .send()
-            .await
-            .map_err(|e| Self::transport(endpoint, e))?;
-        Self::expect_status(endpoint, resp, &[StatusCode::NO_CONTENT, StatusCode::OK]).await?;
-        Ok(())
+        let mut delay = COMMIT_RETRY_BASE_DELAY;
+
+        for attempt in 0..COMMIT_MAX_ATTEMPTS {
+            let sent = self
+                .http
+                .post(self.url(&path))
+                .header("X-Worker-Token", &self.token)
+                .json(commit)
+                .send()
+                .await;
+
+            match sent {
+                Ok(resp) if resp.status().is_success() => return Ok(()),
+                Ok(resp) => {
+                    let status = resp.status();
+                    let retryable =
+                        status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
+                    if retryable && attempt + 1 < COMMIT_MAX_ATTEMPTS {
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            max_attempts = COMMIT_MAX_ATTEMPTS,
+                            %status,
+                            delay_ms = delay.as_millis(),
+                            "commit_task: transient status, retrying identical commit"
+                        );
+                        drop(resp);
+                        tokio::time::sleep(delay).await;
+                        delay *= 2;
+                        continue;
+                    }
+
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(ProtocolError::Status {
+                        endpoint: endpoint.to_string(),
+                        status,
+                        body,
+                    });
+                }
+                Err(err) => {
+                    if attempt + 1 == COMMIT_MAX_ATTEMPTS {
+                        return Err(Self::transport(endpoint, err));
+                    }
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max_attempts = COMMIT_MAX_ATTEMPTS,
+                        error = %err,
+                        delay_ms = delay.as_millis(),
+                        "commit_task: transport failure, retrying identical commit"
+                    );
+                    tokio::time::sleep(delay).await;
+                    delay *= 2;
+                }
+            }
+        }
+
+        unreachable!("bounded commit retry loop always returns")
     }
 
     /// `POST /v1/worker/task/{id}/fail` — report a typed failure so the control
@@ -311,6 +370,119 @@ impl ControlPlaneClient {
 mod tests {
     use super::*;
 
+    #[derive(Clone, Copy)]
+    enum MockCommitResponse {
+        DropConnection,
+        Status(u16, &'static str),
+    }
+
+    // Minimal real HTTP server for commit retry tests. It records each complete
+    // request (headers + body), then either drops the connection without a
+    // response (transport failure) or returns the requested status.
+    async fn spawn_commit_server(
+        responses: Vec<MockCommitResponse>,
+    ) -> (String, std::sync::Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let captured = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let captured_by_server = captured.clone();
+        tokio::spawn(async move {
+            for response in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = vec![0u8; 64 * 1024];
+                let mut total = 0usize;
+                let header_end = loop {
+                    let n = socket.read(&mut request[total..]).await.unwrap();
+                    assert!(n > 0, "commit client closed before sending headers");
+                    total += n;
+                    if let Some(pos) = request[..total]
+                        .windows(4)
+                        .position(|window| window == b"\r\n\r\n")
+                    {
+                        break pos + 4;
+                    }
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]).to_lowercase();
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("content-length:")
+                            .map(|value| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                while total < header_end + content_length {
+                    let n = socket.read(&mut request[total..]).await.unwrap();
+                    assert!(n > 0, "commit client closed before sending its JSON body");
+                    total += n;
+                }
+                request.truncate(header_end + content_length);
+                captured_by_server.lock().await.push(request);
+
+                match response {
+                    MockCommitResponse::DropConnection => {
+                        socket.shutdown().await.ok();
+                    }
+                    MockCommitResponse::Status(status, body) => {
+                        let reason = match status {
+                            200 => "OK",
+                            202 => "Accepted",
+                            204 => "No Content",
+                            400 => "Bad Request",
+                            429 => "Too Many Requests",
+                            503 => "Service Unavailable",
+                            _ => "Status",
+                        };
+                        let wire = format!(
+                            "HTTP/1.1 {status} {reason}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        socket.write_all(wire.as_bytes()).await.unwrap();
+                        socket.shutdown().await.ok();
+                    }
+                }
+            }
+        });
+        (format!("http://{addr}"), captured)
+    }
+
+    fn test_commit(task_id: Uuid) -> TaskCommit {
+        TaskCommit {
+            task_id,
+            result_key: format!("jobs/test/tasks/{task_id}/result.json"),
+            duration_ms: 123,
+            tokens_used: 7,
+            result_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_string(),
+            hardware_temp_c: Some(51.5),
+        }
+    }
+
+    fn assert_same_commit_requests(requests: &[Vec<u8>], task_id: Uuid, commit: &TaskCommit) {
+        let expected_body = serde_json::to_value(commit).unwrap();
+        for request in requests {
+            let header_end = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .unwrap()
+                + 4;
+            let headers = String::from_utf8_lossy(&request[..header_end]).to_lowercase();
+            assert!(
+                headers.starts_with(&format!(
+                    "post /v1/worker/task/{task_id}/commit http/1.1\r\n"
+                )),
+                "wrong commit request line: {headers:?}"
+            );
+            assert!(
+                headers.contains("x-worker-token: retry-secret\r\n"),
+                "retry dropped or changed worker auth: {headers:?}"
+            );
+            let body: serde_json::Value = serde_json::from_slice(&request[header_end..]).unwrap();
+            assert_eq!(body, expected_body, "retry changed commit JSON");
+        }
+    }
+
     // The poll path must carry the long-poll request (Plane D §7 D1): an idle worker
     // asks the control plane to hold the poll open for wait_ms rather than spin a
     // local sleep loop. Guards against the query param silently regressing to the
@@ -362,5 +534,77 @@ mod tests {
             ControlPlaneClient::new("http://localhost:8080", ""),
             Err(ProtocolError::MissingToken)
         ));
+    }
+
+    #[tokio::test]
+    async fn commit_retries_5xx_and_429_with_identical_auth_and_body() {
+        let (base, captured) = spawn_commit_server(vec![
+            MockCommitResponse::Status(503, "restart in progress"),
+            MockCommitResponse::Status(429, "slow down"),
+            MockCommitResponse::Status(202, "queued"),
+        ])
+        .await;
+        let task_id = Uuid::new_v4();
+        let commit = test_commit(task_id);
+        let client = ControlPlaneClient::new(base, "retry-secret").unwrap();
+
+        client
+            .commit_task(task_id, &commit)
+            .await
+            .expect("third transient-status attempt should accept the commit");
+
+        let requests = captured.lock().await;
+        assert_eq!(
+            requests.len(),
+            3,
+            "503 and 429 should each trigger one retry"
+        );
+        assert_same_commit_requests(&requests, task_id, &commit);
+    }
+
+    #[tokio::test]
+    async fn commit_retries_transport_drop_then_succeeds() {
+        let (base, captured) = spawn_commit_server(vec![
+            MockCommitResponse::DropConnection,
+            MockCommitResponse::Status(204, ""),
+        ])
+        .await;
+        let task_id = Uuid::new_v4();
+        let commit = test_commit(task_id);
+        let client = ControlPlaneClient::new(base, "retry-secret").unwrap();
+
+        client
+            .commit_task(task_id, &commit)
+            .await
+            .expect("a dropped response should retry the identical commit");
+
+        let requests = captured.lock().await;
+        assert_eq!(requests.len(), 2, "transport loss should trigger one retry");
+        assert_same_commit_requests(&requests, task_id, &commit);
+    }
+
+    #[tokio::test]
+    async fn commit_treats_non_429_4xx_as_definitive() {
+        let (base, captured) =
+            spawn_commit_server(vec![MockCommitResponse::Status(400, "bad commit")]).await;
+        let task_id = Uuid::new_v4();
+        let commit = test_commit(task_id);
+        let client = ControlPlaneClient::new(base, "retry-secret").unwrap();
+
+        let err = client
+            .commit_task(task_id, &commit)
+            .await
+            .expect_err("400 must be returned without retry");
+        match err {
+            ProtocolError::Status { status, body, .. } => {
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert_eq!(body, "bad commit");
+            }
+            other => panic!("expected definitive status error, got {other:?}"),
+        }
+
+        let requests = captured.lock().await;
+        assert_eq!(requests.len(), 1, "definitive 4xx must not be retried");
+        assert_same_commit_requests(&requests, task_id, &commit);
     }
 }

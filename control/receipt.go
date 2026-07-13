@@ -19,7 +19,8 @@ type ClearingReceipt struct {
 	// settlement amounts (supplier credit + platform take).
 	Invoice *InvoiceView `json:"invoice"`
 	// Verification carries the honeypot/redundancy counts, the honest label
-	// (verified / honeypot-checked / no-independent-peer / cross-class-skip / unverified),
+	// (fully-verified / sampled-verified / honeypot-checked /
+	// no-independent-peer / cross-class-skip / unverified),
 	// and the latest dispute status.
 	Verification Verification `json:"verification"`
 	// Classes is the distinct set of (engine|build_hash) verification classes that
@@ -45,19 +46,35 @@ type TaskReceipt struct {
 	ChunkIndex       int    `json:"chunk_index"`
 	Status           string `json:"status"`
 	IsHoneypot       bool   `json:"is_honeypot"`
+	RuntimeCellID    string `json:"runtime_cell_id,omitempty"`
+	RuntimeID        string `json:"runtime_id,omitempty"`
+	RuntimeMatrixSHA string `json:"runtime_matrix_sha256,omitempty"`
+	ModelKind        string `json:"model_kind,omitempty"`
 	WorkerClass      string `json:"worker_class"`      // engine|build_hash (classKey); "" if unknown
 	VerificationKind string `json:"verification_kind"` // latest comparison event kind; "" if none
+	Verdict          string `json:"verdict"`           // durable current task verdict; "" until verified
 }
 
 // taskReceiptRow builds a TaskReceipt from a row's fields. Pure — the WorkerClass is the
 // classKey, and there is no path for the known_answer to enter (it is never queried).
-func taskReceiptRow(chunkIndex int, status string, isHoneypot bool, engine, build, kind string) TaskReceipt {
+func taskReceiptRow(chunkIndex int, status string, isHoneypot bool, engine, build, kind, verdict string) TaskReceipt {
+	return taskReceiptRowWithRuntime(chunkIndex, status, isHoneypot, engine, build, kind, verdict, "", "", "", "")
+}
+
+// taskReceiptRowWithRuntime adds the server-frozen dispatch authority. Empty
+// values identify a legacy/unclaimed task and are omitted rather than invented.
+func taskReceiptRowWithRuntime(chunkIndex int, status string, isHoneypot bool, engine, build, kind, verdict, cellID, runtimeID, matrixSHA, modelKind string) TaskReceipt {
 	return TaskReceipt{
 		ChunkIndex:       chunkIndex,
 		Status:           status,
 		IsHoneypot:       isHoneypot,
+		RuntimeCellID:    cellID,
+		RuntimeID:        runtimeID,
+		RuntimeMatrixSHA: matrixSHA,
+		ModelKind:        modelKind,
 		WorkerClass:      classKey(engine, build),
 		VerificationKind: kind,
+		Verdict:          verdict,
 	}
 }
 

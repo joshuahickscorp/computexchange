@@ -1,0 +1,399 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"math"
+	"unicode"
+	"unicode/utf8"
+)
+
+// runtime_matrix.go is the production admission boundary for the generated
+// capability projection. The JSON source remains the only place where a runtime /
+// hardware / job / model cell is promoted to production; admission, registration,
+// scheduling, quote, and routing paths consume only
+// generatedAdvertisedRuntimeCapabilities, which deliberately excludes every
+// hardware_pending, soak_only, stub, and wire_only cell.
+
+func generatedCapabilityHasHWClass(cap generatedRuntimeCapability, hwClass string) bool {
+	for _, candidate := range cap.HardwareClasses {
+		if candidate == hwClass {
+			return true
+		}
+	}
+	return false
+}
+
+func advertisedRuntimeJobModel(jobType, modelRef string) bool {
+	if jobType == "" || modelRef == "" {
+		return false
+	}
+	for _, cap := range generatedAdvertisedRuntimeCapabilities {
+		if cap.Job == jobType && cap.Model == modelRef {
+			return true
+		}
+	}
+	return false
+}
+
+func advertisedRuntimeModel(modelRef string) bool {
+	if modelRef == "" {
+		return false
+	}
+	for _, cap := range generatedAdvertisedRuntimeCapabilities {
+		if cap.Model == modelRef {
+			return true
+		}
+	}
+	return false
+}
+
+func validateAdvertisedRuntimeJobModel(jobType, modelRef string) error {
+	if advertisedRuntimeJobModel(jobType, modelRef) {
+		return nil
+	}
+	return fmt.Errorf(
+		"runtime capability is not advertised for job_type=%q model=%q (matrix %s)",
+		jobType, modelRef, generatedRuntimeMatrixVersion,
+	)
+}
+
+// generatedRuntimeModelRef projects an internal job/model pair onto the model
+// wire kind owned by the generated runtime matrix. It is a shape helper, not an
+// admission helper: callers still pass through validateAdvertisedRuntimeJobModel.
+// Keeping internal adapters on this helper prevents a new hf/mlx model from being
+// silently stamped as gguf just because an older client field once defaulted so.
+func generatedRuntimeModelRef(jobType, modelRef string) ModelRef {
+	ref := ModelRef{Ref: modelRef}
+	for _, cap := range generatedAdvertisedRuntimeCapabilities {
+		if cap.Job == jobType && cap.Model == modelRef {
+			ref.Kind = cap.ModelKind
+			return ref
+		}
+	}
+	return ref
+}
+
+// normalizeAdvertisedRuntimeModelRef is the buyer-ingress boundary for ModelRef.
+// The generated runtime matrix owns the wire kind for every executable job/model
+// cell: older clients may omit kind, but a client may not override it. Returning
+// the generated value (instead of merely validating the pair) also makes all
+// downstream internal work independent of client defaults.
+func normalizeAdvertisedRuntimeModelRef(jobType string, submitted ModelRef) (ModelRef, error) {
+	if err := validateAdvertisedRuntimeJobModel(jobType, submitted.Ref); err != nil {
+		return ModelRef{}, err
+	}
+	canonical := generatedRuntimeModelRef(jobType, submitted.Ref)
+	if submitted.Kind != "" && submitted.Kind != canonical.Kind {
+		return ModelRef{}, fmt.Errorf(
+			"runtime matrix requires model.kind=%q for job_type=%q model=%q; got %q",
+			canonical.Kind, jobType, submitted.Ref, submitted.Kind,
+		)
+	}
+	return canonical, nil
+}
+
+// projectWorkerRuntimeCapabilities converts the worker's broad wire advertisement
+// into the exact production cells the server is willing to authorize. The worker
+// supplies two independent arrays for compatibility with existing agents, but those
+// arrays are never scheduler authority: only this server-side intersection with the
+// generated production projection is persisted in worker_authorized_capabilities.
+func projectWorkerRuntimeCapabilities(cap WorkerCapability) ([]generatedRuntimeCapability, error) {
+	if err := validateWorkerCapabilityShape(cap); err != nil {
+		return nil, err
+	}
+	lane := make([]generatedRuntimeCapability, 0, len(generatedAdvertisedRuntimeCapabilities))
+	for _, candidate := range generatedAdvertisedRuntimeCapabilities {
+		if candidate.Engine == cap.Engine && generatedCapabilityHasHWClass(candidate, cap.HWClass) {
+			lane = append(lane, candidate)
+		}
+	}
+	if len(lane) == 0 {
+		return nil, fmt.Errorf(
+			"runtime engine=%q hw_class=%q has no advertised production cell (matrix %s)",
+			cap.Engine, cap.HWClass, generatedRuntimeMatrixVersion,
+		)
+	}
+
+	jobs, models := make(map[string]bool), make(map[string]bool)
+	for _, candidate := range lane {
+		jobs[candidate.Job] = true
+		if candidate.Model != "" {
+			models[candidate.Model] = true
+		}
+	}
+	if err := validateUniqueRuntimeStrings("supported_jobs", cap.SupportedJobs); err != nil {
+		return nil, err
+	}
+	if err := validateUniqueRuntimeStrings("supported_models", cap.SupportedModels); err != nil {
+		return nil, err
+	}
+	for _, job := range cap.SupportedJobs {
+		if !jobs[job] {
+			return nil, fmt.Errorf("supported job %q is not advertised for engine=%q hw_class=%q", job, cap.Engine, cap.HWClass)
+		}
+	}
+	for _, model := range cap.SupportedModels {
+		if !models[model] {
+			return nil, fmt.Errorf("supported model %q is not advertised for engine=%q hw_class=%q", model, cap.Engine, cap.HWClass)
+		}
+	}
+
+	projected := make([]generatedRuntimeCapability, 0, len(lane))
+	for _, candidate := range lane {
+		if containsStr(cap.SupportedJobs, candidate.Job) && containsStr(cap.SupportedModels, candidate.Model) {
+			projected = append(projected, candidate)
+		}
+	}
+	if len(projected) == 0 {
+		return nil, fmt.Errorf("worker advertisement projects to zero production capability tuples")
+	}
+
+	if len(cap.Benchmarks) > len(projected) {
+		return nil, fmt.Errorf("benchmarks has %d tuples but this worker projects to only %d exact production cells", len(cap.Benchmarks), len(projected))
+	}
+	seenBenchmarks := make(map[[2]string]bool, len(cap.Benchmarks))
+	for _, benchmark := range cap.Benchmarks {
+		key := [2]string{benchmark.JobType, benchmark.ModelID}
+		if seenBenchmarks[key] {
+			return nil, fmt.Errorf("benchmarks contains duplicate tuple job_type=%q model=%q", benchmark.JobType, benchmark.ModelID)
+		}
+		seenBenchmarks[key] = true
+		if !containsStr(cap.SupportedJobs, benchmark.JobType) || !containsStr(cap.SupportedModels, benchmark.ModelID) {
+			return nil, fmt.Errorf("benchmark tuple job_type=%q model=%q is absent from the worker advertisement", benchmark.JobType, benchmark.ModelID)
+		}
+		matched := false
+		for _, candidate := range projected {
+			if candidate.Job == benchmark.JobType && candidate.Model == benchmark.ModelID {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return nil, fmt.Errorf("benchmark tuple job_type=%q model=%q is not an advertised production cell for this runtime", benchmark.JobType, benchmark.ModelID)
+		}
+	}
+
+	// A worker may advertise multiple cells, but it must have enough total memory
+	// for every model it claims runnable. ClaimTask also checks live effective
+	// memory; this registration check prevents an impossible static claim entering
+	// the fleet catalog in the first place.
+	for _, candidate := range projected {
+		if float64(cap.MemoryGB) < candidate.MinMemoryGB {
+			return nil, fmt.Errorf(
+				"worker memory %.3f GB is below advertised cell %q minimum %.3f GB",
+				cap.MemoryGB, candidate.ID, candidate.MinMemoryGB,
+			)
+		}
+	}
+	return projected, nil
+}
+
+const (
+	maxWorkerBuildHashBytes = 256
+	maxWorkerVersionBytes   = 128
+	maxWorkerOSVersionBytes = 256
+	maxWorkerMemoryGB       = 16 * 1024
+	maxWorkerMemoryBwGbps   = 1_000_000
+	maxWorkerMinPayoutUSDHr = 1_000_000
+	maxBenchmarkRate        = 1_000_000_000
+	maxBenchmarkLoadMS      = uint64(24 * 60 * 60 * 1000)
+	maxBenchmarkP99MS       = uint32(24 * 60 * 60 * 1000)
+)
+
+func validateWorkerTextField(name, value string, maxBytes int) error {
+	if !utf8.ValidString(value) {
+		return fmt.Errorf("%s is not valid UTF-8", name)
+	}
+	if len(value) > maxBytes {
+		return fmt.Errorf("%s exceeds %d bytes", name, maxBytes)
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("%s contains a control character", name)
+		}
+	}
+	return nil
+}
+
+func finiteFloat32(value float32) bool {
+	v := float64(value)
+	return !math.IsNaN(v) && !math.IsInf(v, 0)
+}
+
+func benchmarkLoadMSForStore(loadMS uint64) (int64, error) {
+	if loadMS > maxBenchmarkLoadMS {
+		return 0, fmt.Errorf("benchmark load_ms=%d exceeds the 24-hour operational maximum", loadMS)
+	}
+	return int64(loadMS), nil
+}
+
+func validateWorkerCapabilityShape(cap WorkerCapability) error {
+	for _, field := range []struct {
+		name  string
+		value string
+		max   int
+	}{
+		{"build_hash", cap.BuildHash, maxWorkerBuildHashBytes},
+		{"agent_version", cap.AgentVersion, maxWorkerVersionBytes},
+		{"os_version", cap.OSVersion, maxWorkerOSVersionBytes},
+	} {
+		if err := validateWorkerTextField(field.name, field.value, field.max); err != nil {
+			return err
+		}
+	}
+	if !finiteFloat32(cap.MemoryGB) || cap.MemoryGB <= 0 || cap.MemoryGB > maxWorkerMemoryGB {
+		return fmt.Errorf("memory_gb must be finite and in (0,%d]", maxWorkerMemoryGB)
+	}
+	if !finiteFloat32(cap.MemoryBwGbps) || cap.MemoryBwGbps < 0 || cap.MemoryBwGbps > maxWorkerMemoryBwGbps {
+		return fmt.Errorf("memory_bw_gbps must be finite and in [0,%d]", maxWorkerMemoryBwGbps)
+	}
+	if !finiteFloat32(cap.MinPayoutUsdHr) || cap.MinPayoutUsdHr < 0 || cap.MinPayoutUsdHr > maxWorkerMinPayoutUSDHr {
+		return fmt.Errorf("min_payout_usd_hr must be finite and in [0,%d]", maxWorkerMinPayoutUSDHr)
+	}
+	for _, benchmark := range cap.Benchmarks {
+		if !finiteFloat32(benchmark.TPS) || !finiteFloat32(benchmark.EPS) ||
+			benchmark.TPS < 0 || benchmark.EPS < 0 {
+			return fmt.Errorf("benchmark tuple job_type=%q model=%q has non-finite or negative throughput", benchmark.JobType, benchmark.ModelID)
+		}
+		if benchmark.TPS > maxBenchmarkRate || benchmark.EPS > maxBenchmarkRate {
+			return fmt.Errorf("benchmark tuple job_type=%q model=%q exceeds the plausible throughput maximum", benchmark.JobType, benchmark.ModelID)
+		}
+		rate := benchmark.TPS
+		if benchmark.JobType == "embed" {
+			rate = benchmark.EPS
+		}
+		if rate <= 0 {
+			return fmt.Errorf("benchmark tuple job_type=%q model=%q has no positive measured throughput", benchmark.JobType, benchmark.ModelID)
+		}
+		if benchmark.P99MS > maxBenchmarkP99MS {
+			return fmt.Errorf("benchmark tuple job_type=%q model=%q p99_ms exceeds the 24-hour operational maximum", benchmark.JobType, benchmark.ModelID)
+		}
+		if _, err := benchmarkLoadMSForStore(benchmark.LoadMS); err != nil {
+			return fmt.Errorf("benchmark tuple job_type=%q model=%q: %w", benchmark.JobType, benchmark.ModelID, err)
+		}
+	}
+	return nil
+}
+
+// validateWorkerRuntimeProjection is the HTTP admission check. UpsertWorker calls
+// projectWorkerRuntimeCapabilities again inside the store boundary before opening
+// its transaction, so a future non-HTTP caller cannot accidentally restore the old
+// array-as-authority behavior.
+func validateWorkerRuntimeProjection(cap WorkerCapability) error {
+	_, err := projectWorkerRuntimeCapabilities(cap)
+	return err
+}
+
+func validateUniqueRuntimeStrings(field string, values []string) error {
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		if value == "" {
+			return fmt.Errorf("%s contains a blank value", field)
+		}
+		if seen[value] {
+			return fmt.Errorf("%s contains duplicate value %q", field, value)
+		}
+		seen[value] = true
+	}
+	return nil
+}
+
+func validateHeartbeatRuntimeModels(models []string) error {
+	if err := validateUniqueRuntimeStrings("loaded_models", models); err != nil {
+		return err
+	}
+	for _, model := range models {
+		if !advertisedRuntimeModel(model) {
+			return fmt.Errorf("loaded model %q is not in the advertised production runtime projection", model)
+		}
+	}
+	return nil
+}
+
+// validateAdvertisedRuntimeCatalogRows checks the live DB rows needed by every
+// advertised production cell. Extra catalog rows may exist for pending work, but
+// they do not become buyer-visible or admissible merely by existing in Postgres.
+func validateAdvertisedRuntimeCatalogRows(rows []ModelRow) error {
+	byID := make(map[string]ModelRow, len(rows))
+	for _, row := range rows {
+		byID[row.ID] = row
+	}
+	requiredMemory := map[string]float64{}
+	requiredWireKind := map[string]string{}
+	for _, cap := range generatedAdvertisedRuntimeCapabilities {
+		if cap.Model != "" && cap.MinMemoryGB > requiredMemory[cap.Model] {
+			requiredMemory[cap.Model] = cap.MinMemoryGB
+		}
+		if cap.Model != "" {
+			if previous := requiredWireKind[cap.Model]; previous != "" && previous != cap.ModelKind {
+				return fmt.Errorf("runtime matrix gives model %q conflicting wire kinds %q and %q", cap.Model, previous, cap.ModelKind)
+			}
+			requiredWireKind[cap.Model] = cap.ModelKind
+		}
+	}
+	for modelID, minMemory := range requiredMemory {
+		row, ok := byID[modelID]
+		if !ok {
+			return fmt.Errorf("runtime matrix advertises model %q but the DB catalog has no row", modelID)
+		}
+		price := modelPrice(row)
+		if row.JobType == audioUploadJobType {
+			price = row.PricePerUnit
+		}
+		if math.IsNaN(price) || math.IsInf(price, 0) || price <= 0 {
+			return fmt.Errorf("runtime matrix advertises model %q but its DB price is not positive", modelID)
+		}
+		if row.Kind == "" || row.HFRepo == "" {
+			return fmt.Errorf("runtime matrix advertises model %q but its DB kind/repository metadata is incomplete", modelID)
+		}
+		wireKind, err := runtimeWireModelKind(row.Kind)
+		if err != nil {
+			return fmt.Errorf("runtime matrix advertises model %q with unusable catalog kind: %w", modelID, err)
+		}
+		if expected := requiredWireKind[modelID]; wireKind != expected {
+			return fmt.Errorf(
+				"runtime matrix requires wire kind %q for model %q but catalog kind %q maps to %q",
+				expected, modelID, row.Kind, wireKind,
+			)
+		}
+		if float64(row.MinMemoryGB) < minMemory {
+			return fmt.Errorf(
+				"runtime matrix requires %.3f GB for model %q but the DB catalog advertises only %.3f GB",
+				minMemory, modelID, row.MinMemoryGB,
+			)
+		}
+	}
+	return nil
+}
+
+// runtimeWireModelKind maps the catalog's storage/runner family to the closed
+// ModelRef wire vocabulary understood by the agent. Embedding and Whisper weights
+// are fetched from Hugging Face even though their catalog family names are
+// "embed"/"whisper"; GGUF and MLX retain their native wire tags. This mapping is
+// used only to validate that the mutable catalog still agrees with the generated
+// wire kind. ClaimTask reads the generated kind persisted with the exact worker
+// capability row and never re-derives dispatch authority from the live catalog.
+func runtimeWireModelKind(catalogKind string) (string, error) {
+	switch catalogKind {
+	case "gguf":
+		return "gguf", nil
+	case "mlx":
+		return "mlx", nil
+	case "hf", "embed", "whisper":
+		return "hf", nil
+	default:
+		return "", fmt.Errorf("catalog kind %q has no agent wire mapping", catalogKind)
+	}
+}
+
+// ValidateAdvertisedRuntimeCatalog is a startup fail-closed check: production
+// cannot serve a generated capability whose priced catalog row is absent or less
+// conservative than the matrix cell.
+func (s *Store) ValidateAdvertisedRuntimeCatalog(ctx context.Context) error {
+	rows, err := s.ListModels(ctx)
+	if err != nil {
+		return fmt.Errorf("reading model catalog for runtime-matrix validation: %w", err)
+	}
+	return validateAdvertisedRuntimeCatalogRows(rows)
+}

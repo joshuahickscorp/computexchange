@@ -84,10 +84,10 @@ spirit: the per-run numbers hold, but the campaign-level $ needs the contingency
 
 Reproduce: `python3 scripts/spec-lab/runpod_cost_quote.py` (markdown) or `--json`
 (full per-run attribution); tests: `python3 scripts/spec-lab/test_runpod_cost_quote.py` (17/17).
-NOTE: the optional `control/render_spec_job.go` quote-basis refresh was SKIPPED per the
-friction rule — that file's basis is a speedup-band prose constant welded to "delivery is
-never quoted" semantics (now stale post-GROW), so updating it is a behavior change (quote
-tier + tests), not a constant swap; it needs its own owned change.
+UPDATE: the `control/render_spec_job.go` refresh is now landed as part of the hardening wave.
+It acknowledges the 2.450894x bound strict pass and 1/3 scene-sweep transfer result, preserves
+preview as the unbound quote tier, and withholds all per-job speed bands until scene content and
+repair-policy/build digests can be bound. See `SPEC_ENGINE_HARDENING_2026-07-10.md`.
 
 ## Wave branches (all LOCAL build+verify; disjoint write paths)
 

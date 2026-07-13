@@ -301,6 +301,32 @@ func (s *Storage) PutObjectStream(ctx context.Context, key string, r io.Reader, 
 	return nil
 }
 
+// PutObjectReadSeeker uploads a disk-backed artifact with a known size and can
+// safely retry because every attempt seeks back to byte zero.  Result merging
+// uses this after assembling into a temporary file: the control plane retains at
+// most one bounded input chunk in RAM, while preserving the ordinary fixed-key
+// idempotence and transient-store retry behavior of PutObject.
+func (s *Storage) PutObjectReadSeeker(ctx context.Context, key string, r io.ReadSeeker, size int64, contentType string) error {
+	if size < 0 {
+		return fmt.Errorf("put object %q: negative size %d", key, size)
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	return s.withRetry(ctx, func() (bool, error) {
+		if _, err := r.Seek(0, io.SeekStart); err != nil {
+			return false, fmt.Errorf("rewind object %q: %w", key, err)
+		}
+		started := time.Now()
+		if _, err := s.internal.PutObject(ctx, s.bucket, key, r, size,
+			minio.PutObjectOptions{ContentType: contentType}); err != nil {
+			return true, fmt.Errorf("put object %q: %w", key, err)
+		}
+		observeTransfer("put", int(size), time.Since(started))
+		return false, nil
+	})
+}
+
 // GetObjectReader opens a streaming reader on the object at key, WITHOUT reading
 // it into memory (Data Transfer & Artifact I/O 7->8, "Stream the control-plane
 // storage layer end to end"). Unlike GetObject/withRetry, a transient mid-stream

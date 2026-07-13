@@ -13,15 +13,32 @@ fn main() {
     // --- render lane: whole-unit accept, truth=None, exact=false ---
     let render = synth_render::pipeline("cx_synth_render_demo");
     let tiles = vec![
-        RenderTile { id: 0, residual: 0.00 }, // Delivery (ship draft)
-        RenderTile { id: 1, residual: 0.05 }, // Preview  (ship draft as preview)
-        RenderTile { id: 2, residual: 0.40 }, // Fail     (re-render at reference)
+        RenderTile {
+            id: 0,
+            residual: 0.00,
+        }, // Delivery (ship draft)
+        RenderTile {
+            id: 1,
+            residual: 0.05,
+        }, // Preview  (ship draft as preview)
+        RenderTile {
+            id: 2,
+            residual: 0.40,
+        }, // Fail     (re-render at reference)
     ];
     let mut rdetails = Details::new();
     rdetails.insert("scene".into(), serde_json::json!("cube_volume"));
-    rdetails.insert("draft_spp".into(), serde_json::json!(synth_render::DRAFT_SPP));
-    let (_r_out, r_receipt) =
-        render.run_batch(&tiles, 1.0, BaselineSource::Modeled, Evidence::Synthetic, rdetails);
+    rdetails.insert(
+        "draft_spp".into(),
+        serde_json::json!(synth_render::DRAFT_SPP),
+    );
+    let (_r_out, r_receipt) = render.run_batch(
+        &tiles,
+        1.0,
+        BaselineSource::Modeled,
+        Evidence::Synthetic,
+        rdetails,
+    );
     println!("// render lane receipt");
     println!("{}", serde_json::to_string_pretty(&r_receipt).unwrap());
 
@@ -34,14 +51,24 @@ fn main() {
     ];
     let mut tdetails = Details::new();
     tdetails.insert("prompt_class".into(), serde_json::json!("repeat"));
-    let (_t_out, t_receipt) =
-        token.run_batch(&windows, 0.02, BaselineSource::Modeled, Evidence::Synthetic, tdetails);
+    let (_t_out, t_receipt) = token.run_batch(
+        &windows,
+        0.02,
+        BaselineSource::Modeled,
+        Evidence::Synthetic,
+        tdetails,
+    );
     println!("\n// token lane receipt");
     println!("{}", serde_json::to_string_pretty(&t_receipt).unwrap());
 
     // --- honesty: no baseline => speedup is null, never fabricated ---
-    let (_t_out2, t_absent) =
-        token.run_batch(&windows, 0.0, BaselineSource::Absent, Evidence::Synthetic, Details::new());
+    let (_t_out2, t_absent) = token.run_batch(
+        &windows,
+        0.0,
+        BaselineSource::Absent,
+        Evidence::Synthetic,
+        Details::new(),
+    );
     println!("\n// token lane, no baseline supplied (speedup_vs_baseline is null)");
     println!(
         "speedup_vs_baseline = {}",

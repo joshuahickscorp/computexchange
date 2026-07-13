@@ -92,7 +92,7 @@ services:
     entrypoint: >
       /bin/sh -c "
       set -e;
-      psql -v ON_ERROR_STOP=1 -h postgres -U cx -d cx -f /schema.sql;
+      psql -v ON_ERROR_STOP=1 --single-transaction -h postgres -U cx -d cx -f /schema.sql;
       echo 'schema applied';
       "
     restart: "no"
@@ -127,13 +127,13 @@ services:
       - "8080:8080"
     restart: unless-stopped
     healthcheck:
-      # The control image is distroless (no shell/curl); use the Go binary's own
-      # reachability by hitting /healthz via a tiny wget-less check is impossible
-      # without a shell, so we let Docker TCP-probe the port via CMD is also
-      # unavailable. Instead rely on start ordering + the app's own startup ping
-      # (main.go fatals if the DB is unreachable). No fake healthcheck is better
-      # than a lying one (BLACKHOLE: surface every failure).
-      disable: true
+      # The distroless image has no shell/curl. The binary's healthcheck command
+      # probes /readyz, including DB reachability and owned-worker liveness.
+      test: ["CMD", "/control", "healthcheck"]
+      interval: 10s
+      timeout: 4s
+      retries: 5
+      start_period: 15s
 
 volumes:
   pgdata:

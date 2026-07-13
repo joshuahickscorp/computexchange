@@ -491,6 +491,8 @@ def decide_prefix_accept_row(
 ) -> str:
     if not row.get("exact") or not row.get("quality_gate"):
         return "kill_correctness"
+    if not promotion_attested(row):
+        return "park"
     speedup = float(row.get("speedup_x") or 0.0)
     accepted = float(row.get("accepted_fraction") or 0.0)
     call_reduction = float(row.get("target_call_reduction_x") or 0.0)
@@ -499,6 +501,15 @@ def decide_prefix_accept_row(
     if speedup < 1.0 or accepted < 0.08 or call_reduction <= 1.0:
         return "prune"
     return "park"
+
+
+def promotion_attested(row: dict[str, Any]) -> bool:
+    """Only current, measured, explicitly verified rows may be promoted."""
+    return (
+        row.get("evidence") == "measured"
+        and row.get("baseline_source") == "measured"
+        and row.get("artifact_verified") is True
+    )
 
 
 def run_token_unit_branch(
@@ -941,7 +952,6 @@ def run_token_prefix_accept_adaptive_branch(
     outputs: list[list[int]] = []
     pos = prefix_len
     accepted_tokens = 0
-    repaired_tokens = 0
     reject_events = 0
     attempted_tokens = 0
     fallback_token_calls = 0
@@ -1035,7 +1045,6 @@ def run_token_prefix_accept_adaptive_branch(
             emitted = truth
         else:
             reject_events += 1
-            repaired_tokens += 1
             start = time.perf_counter()
             emitted = truth[: accepted + 1]
             repair_s += time.perf_counter() - start
@@ -1052,13 +1061,16 @@ def run_token_prefix_accept_adaptive_branch(
     output = flatten(outputs)
     exact = output == baseline_output
     generated_tokens = len(baseline_output)
+    drafted_rejected_tokens = attempted_tokens - accepted_tokens
     receipt = cx.SpecReceipt(
         branch_id=branch_id,
         modality="token",
-        units=generated_tokens,
+        # Canonical units are proposal/fallback work units, not unique output
+        # positions: rejected draft tails can be retried by a later round.
+        units=attempted_tokens + fallback_token_calls,
         accepted_units=accepted_tokens,
-        repaired_units=repaired_tokens,
-        rejected_units=reject_events,
+        repaired_units=reject_events,
+        rejected_units=drafted_rejected_tokens,
         draft_s=draft_s,
         verify_s=verify_s,
         repair_s=repair_s,
@@ -1156,7 +1168,11 @@ def measured_render_gates() -> list[dict]:
     return gates
 
 
-def render_branch_action(tier: str | None, speedup_x: float) -> str:
+def render_branch_action(row: dict[str, Any]) -> str:
+    tier = row.get("meta", {}).get("tier")
+    speedup_x = float(row.get("speedup_x") or 0.0)
+    if tier in {"delivery", "preview"} and not promotion_attested(row):
+        return "park"
     if tier == "delivery" and speedup_x >= HARD_RENDER_FLOOR_X:
         return "grow"
     if tier in {"delivery", "preview"}:
@@ -1198,6 +1214,7 @@ def render_gate_to_receipt(gate: dict) -> dict:
         speedup_x=speedup_x,
         exact=False,
         quality_gate=tier == "delivery",
+        evidence="imported",
         attempted_units=tile_count,
         fallback_units=0,
         meta={
@@ -1217,7 +1234,7 @@ def render_gate_to_receipt(gate: dict) -> dict:
         },
     )
     row = receipt.to_dict()
-    row["branch_action"] = render_branch_action(tier, receipt.speedup_x)
+    row["branch_action"] = render_branch_action(row)
     return row
 
 

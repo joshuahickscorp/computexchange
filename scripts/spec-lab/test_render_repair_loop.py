@@ -452,7 +452,8 @@ def _make_fake_run_blender_frame(borders_map):
              frame, nframes, cam_motion, seed, bounces, device_pref, timeout_s,
              adaptive=False, adaptive_thr=0.01, adaptive_min=16, denoiser="none",
              guides=False, light_tree=False, match_reference=False, require_gpu=False,
-             borders=None, out_pattern=None):
+             borders=None, out_pattern=None, expected_device_identity=None):
+        del expected_device_identity
         if borders is not None:
             wall = 12.0 + 2.0 * len(borders)
             paths = []
@@ -517,6 +518,15 @@ def run_stubbed(params, module_name="ers_stub", read_anchor_normal_fake=None,
     mod.ensure_system_libs = lambda: None
     mod.ensure_pydeps = lambda: None
     mod.ensure_blender = lambda url: "/fake/blender"
+    mod.reference_cache_identity = lambda *a, **k: {
+        "schema": mod.REF_CACHE_IDENTITY_SCHEMA,
+        "hardware": {"system": "test", "machine": "fake", "cpu_model": "fake"},
+        "blender": {"identity_kind": "test", "build_hash": "fake"},
+        "device": {
+            "render_device": "GPU/FAKE",
+            "physical_devices": [{"name": "fake", "type": "FAKE"}],
+        },
+    }
     mod.resolve_scene = lambda s: ("/fake/scene.blend", "classroom", "")
     mod.require_gpu_probe = lambda *a, **k: "GPU/FAKE"
     borders_map = {}
@@ -888,7 +898,9 @@ class AdapterRepairPathTest(unittest.TestCase):
         return m
 
     def test_repair_receipt_uses_real_tile_fractions_no_double_charge(self):
-        rec = rsa.RenderSpecAdapter().from_stack_metrics(self._metrics())
+        rec = rsa.RenderSpecAdapter().from_stack_metrics(
+            self._metrics(), artifact_verified=True
+        )
         self.assertEqual(rec.units, 4 * 64)
         self.assertEqual(rec.repaired_units, 12)
         self.assertEqual(rec.accepted_units, 4 * 64 - 12)

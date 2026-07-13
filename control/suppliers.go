@@ -12,69 +12,173 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// suppliers.go — self-serve SUPPLIER onboarding (the buyer side is accounts.go).
+// suppliers.go — authenticated, self-serve supplier onboarding.
 //
-// A prospective supplier has no credential yet, so these two handlers are unauthed
-// and keyed by email (the worker-token Connect flow in connect.go is the
-// authenticated counterpart once a supplier has a worker):
+// All three buyer-facing routes are scoped by the AuthResult installed by
+// authBuyer. The request never supplies an email, supplier id, or tax identifier:
 //
-//   POST /v1/supplier/onboard {"email","tax_id","tax_country"}
-//       -> {"onboarding_url", ...}    (Stripe Connect account-link)
-//       -> 503                        (honest, when STRIPE_SECRET_KEY is unset)
-//   GET  /v1/supplier/status?email=…  -> {"connect_status","payouts_enabled","tax_on_file"}
+//   POST /v1/supplier/onboard {}       -> Stripe-hosted Connect onboarding URL
+//   GET  /v1/supplier/status           -> this account's Connect status
+//   POST /v1/supplier/worker-tokens {} -> one token for a new machine
 //
-// Tax info (W-9/W-8BEN/T4A identifiers) is captured at onboard and persisted on the
-// supplier row BEFORE any Stripe call, so the tax record exists even if Stripe is
-// unconfigured (the boundary is honest: we tell the supplier payouts are not wired
-// yet, but their tax + account intent is recorded). The Connect account-link and
-// the account.updated webhook that flips payouts_enabled mirror billing.go's
-// gating exactly — every Stripe path returns the same errBillingUnconfigured 503
-// when the key is unset, NEVER a faked account or transfer (BLACKHOLE).
+// suppliers.owner_buyer_id is the authorization boundary. The supplier email is a
+// display/contact value copied from the authenticated buyer account when the row is
+// first created, never a lookup credential. Stripe Connect hosts identity, KYC, and
+// tax collection; CX deliberately stores none of those plaintext identifiers.
 
-// --- store layer: supplier upsert + tax + payout readiness ---
+// --- store layer: account ownership + payout readiness ---
 
-// UpsertSupplierByEmail finds or creates a supplier by email and records its tax
-// identifiers (tax_id / tax_country) — the W-9/W-8BEN/T4A info collected at
-// onboarding. Idempotent on email (UNIQUE): a returning supplier updates its tax
-// fields, a new one is created 'pending'. Returns the supplier id.
-func (s *Store) UpsertSupplierByEmail(ctx context.Context, email, taxID, taxCountry string) (uuid.UUID, error) {
-	var id uuid.UUID
-	err := s.pool.QueryRow(ctx,
-		`INSERT INTO suppliers (email, tax_id, tax_country, status)
-		 VALUES (lower($1), NULLIF($2,''), NULLIF($3,''), 'pending')
-		 ON CONFLICT (email) DO UPDATE SET
-		   tax_id      = COALESCE(NULLIF(EXCLUDED.tax_id,''), suppliers.tax_id),
-		   tax_country = COALESCE(NULLIF(EXCLUDED.tax_country,''), suppliers.tax_country)
-		 RETURNING id`,
-		email, taxID, taxCountry,
-	).Scan(&id)
-	return id, err
-}
+var (
+	errSupplierAccountRequired   = errors.New("supplier routes require a self-serve buyer account")
+	errSupplierOwnershipConflict = errors.New("supplier ownership conflict")
+	errSupplierBodyMustBeEmpty   = errors.New("supplier request must not contain identity or KYC fields")
+)
 
-// SupplierStatusByEmail returns a supplier's Connect/tax state for the status
-// endpoint: whether a Connect account exists, the cached payouts_enabled flag, and
-// whether tax info is on file. errNotFound when no supplier has that email.
-func (s *Store) SupplierStatusByEmail(ctx context.Context, email string) (acct string, payoutsEnabled, taxOnFile bool, err error) {
-	var (
-		acctP *string
-		taxP  *string
-	)
-	err = s.pool.QueryRow(ctx,
-		`SELECT stripe_acct, tax_id, COALESCE(payouts_enabled,false)
-		   FROM suppliers WHERE email = lower($1)`,
-		email,
-	).Scan(&acctP, &taxP, &payoutsEnabled)
+// EnsureSupplierForBuyer returns the one supplier owned by buyerID, creating it
+// from the buyer account's canonical email when necessary. It never claims an
+// unowned legacy supplier at request time: the schema migration backfills only
+// unambiguous one-to-one matches, while anything left unowned requires an explicit
+// operator decision. That fail-closed rule prevents an account from taking over a
+// historical supplier merely by presenting the same email string.
+func (s *Store) EnsureSupplierForBuyer(ctx context.Context, buyerID uuid.UUID) (uuid.UUID, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	var email string
+	err = tx.QueryRow(ctx,
+		`SELECT lower(email) FROM buyers WHERE id = $1 FOR SHARE`, buyerID,
+	).Scan(&email)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", false, false, errNotFound
+		return uuid.Nil, errSupplierAccountRequired
 	}
 	if err != nil {
-		return "", false, false, err
+		return uuid.Nil, err
+	}
+	if !looksLikeEmail(email) {
+		return uuid.Nil, errSupplierAccountRequired
+	}
+
+	// The owner id is authoritative even if a future account-email migration changes
+	// the display email. Locking the row also serializes duplicate onboard/token calls.
+	var supplierID uuid.UUID
+	err = tx.QueryRow(ctx,
+		`SELECT id FROM suppliers WHERE owner_buyer_id = $1 FOR UPDATE`, buyerID,
+	).Scan(&supplierID)
+	if err == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return uuid.Nil, err
+		}
+		return supplierID, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, err
+	}
+
+	// An existing case-insensitive email match that was not safely backfilled is
+	// intentionally not claimable here. This also catches a supplier owned elsewhere.
+	var existingOwner *uuid.UUID
+	err = tx.QueryRow(ctx,
+		`SELECT id, owner_buyer_id
+		   FROM suppliers
+		  WHERE lower(email) = lower($1)
+		  ORDER BY created_at, id
+		  LIMIT 1
+		  FOR UPDATE`, email,
+	).Scan(&supplierID, &existingOwner)
+	if err == nil {
+		if existingOwner != nil && *existingOwner == buyerID {
+			if err := tx.Commit(ctx); err != nil {
+				return uuid.Nil, err
+			}
+			return supplierID, nil
+		}
+		return uuid.Nil, errSupplierOwnershipConflict
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, err
+	}
+
+	err = tx.QueryRow(ctx,
+		`INSERT INTO suppliers (email, owner_buyer_id, status)
+		 VALUES ($1, $2, 'pending')
+		 ON CONFLICT DO NOTHING
+		 RETURNING id`, email, buyerID,
+	).Scan(&supplierID)
+	if err == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return uuid.Nil, err
+		}
+		return supplierID, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, err
+	}
+
+	// A concurrent request may have won either unique constraint while this
+	// transaction waited. Only the same owner may reuse that result.
+	err = tx.QueryRow(ctx,
+		`SELECT id FROM suppliers WHERE owner_buyer_id = $1`, buyerID,
+	).Scan(&supplierID)
+	if err == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return uuid.Nil, err
+		}
+		return supplierID, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, err
+	}
+	return uuid.Nil, errSupplierOwnershipConflict
+}
+
+// SupplierStatusForBuyer returns only the supplier owned by buyerID. A valid
+// account with no supplier is errNotFound; a legacy/API-key identity with no buyer
+// account row is errSupplierAccountRequired.
+func (s *Store) SupplierStatusForBuyer(ctx context.Context, buyerID uuid.UUID) (supplierID uuid.UUID, acct string, payoutsEnabled bool, err error) {
+	var acctP *string
+	err = s.pool.QueryRow(ctx,
+		`SELECT COALESCE(s.id, '00000000-0000-0000-0000-000000000000'::uuid),
+		        s.stripe_acct,
+		        COALESCE(s.payouts_enabled, false)
+		   FROM buyers b
+		   LEFT JOIN suppliers s ON s.owner_buyer_id = b.id
+		  WHERE b.id = $1`, buyerID,
+	).Scan(&supplierID, &acctP, &payoutsEnabled)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, "", false, errSupplierAccountRequired
+	}
+	if err != nil {
+		return uuid.Nil, "", false, err
+	}
+	if supplierID == uuid.Nil {
+		return uuid.Nil, "", false, errNotFound
 	}
 	if acctP != nil {
 		acct = *acctP
 	}
-	taxOnFile = taxP != nil && *taxP != ""
-	return acct, payoutsEnabled, taxOnFile, nil
+	return supplierID, acct, payoutsEnabled, nil
+}
+
+// CreateWorkerTokenForBuyer adds a defense-in-depth ownership check immediately
+// before minting. The handler already obtained supplierID through
+// EnsureSupplierForBuyer, but this prevents a future caller from turning the raw
+// CreateWorkerToken primitive into a cross-account route by mistake.
+func (s *Store) CreateWorkerTokenForBuyer(ctx context.Context, buyerID, workerID, supplierID uuid.UUID) (string, error) {
+	var owned bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (
+		   SELECT 1 FROM suppliers WHERE id = $1 AND owner_buyer_id = $2
+		 )`, supplierID, buyerID,
+	).Scan(&owned); err != nil {
+		return "", err
+	}
+	if !owned {
+		return "", errSupplierOwnershipConflict
+	}
+	return s.CreateWorkerToken(ctx, workerID, supplierID)
 }
 
 // SetSupplierPayoutsEnabledByAcct flips the cached payouts_enabled flag for the
@@ -88,42 +192,60 @@ func (s *Store) SetSupplierPayoutsEnabledByAcct(ctx context.Context, acct string
 
 // --- HTTP handlers ---
 
-// supplierOnboardRequest is the POST /v1/supplier/onboard body.
-type supplierOnboardRequest struct {
-	Email      string `json:"email"`
-	TaxID      string `json:"tax_id"`
-	TaxCountry string `json:"tax_country"`
+// decodeEmptySupplierBody accepts an omitted body or one empty JSON object. Any
+// field is rejected so old clients cannot accidentally send email/tax identifiers
+// that CX must not receive or retain.
+func decodeEmptySupplierBody(r *http.Request) error {
+	if r.Body == nil {
+		return nil
+	}
+	dec := json.NewDecoder(io.LimitReader(r.Body, 4097))
+	var body map[string]json.RawMessage
+	if err := dec.Decode(&body); errors.Is(err, io.EOF) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if body == nil || len(body) != 0 {
+		return errSupplierBodyMustBeEmpty
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("supplier request must contain one JSON object")
+		}
+		return err
+	}
+	return nil
 }
 
-// handleSupplierOnboard captures a supplier's email + tax identifiers, creates (or
-// reuses) a Stripe Connect Express account, persists stripe_acct, and returns a
-// hosted onboarding_url to complete KYC. The tax fields are recorded BEFORE the
-// Stripe call so the record stands even when Stripe is unconfigured; in that case
-// every Connect call returns the honest 503 (errBillingUnconfigured), never a faked
-// account or link (BLACKHOLE).
+func writeSupplierStoreError(w http.ResponseWriter, action string, err error) {
+	switch {
+	case errors.Is(err, errSupplierAccountRequired):
+		writeErr(w, http.StatusForbidden, errSupplierAccountRequired.Error())
+	case errors.Is(err, errSupplierOwnershipConflict):
+		writeErr(w, http.StatusConflict, "supplier ownership requires operator review")
+	default:
+		writeErr(w, http.StatusInternalServerError, action+": "+err.Error())
+	}
+}
+
+// handleSupplierOnboard creates (or reuses) this buyer account's supplier, creates
+// a Stripe Connect Express account, and returns Stripe's hosted onboarding URL.
+// CX never receives KYC or tax identifiers. With no Stripe key, the owned supplier
+// intent remains recorded and the Connect boundary returns an honest 503.
 func (s *Server) handleSupplierOnboard(w http.ResponseWriter, r *http.Request) {
-	var req supplierOnboardRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid onboard json: "+err.Error())
+	if err := decodeEmptySupplierBody(r); err != nil {
+		writeErr(w, http.StatusBadRequest, "supplier identity comes from the authenticated account and KYC is collected by Stripe; send an empty JSON object")
 		return
 	}
-	email := normalizeEmail(req.Email)
-	if !looksLikeEmail(email) {
-		writeErr(w, http.StatusBadRequest, "a valid email is required")
-		return
-	}
-
-	// Persist the supplier + tax info first (independent of Stripe). This is the
-	// durable tax record; it exists even if the Connect call below 503s.
-	supplierID, err := s.store.UpsertSupplierByEmail(r.Context(), email, req.TaxID, req.TaxCountry)
+	auth := r.Context().Value(ctxBuyer).(*AuthResult)
+	supplierID, err := s.store.EnsureSupplierForBuyer(r.Context(), auth.BuyerID)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "recording supplier: "+err.Error())
+		writeSupplierStoreError(w, "recording supplier", err)
 		return
 	}
 
-	// Connect account + onboarding link (reuses connect.go's helpers, which are
-	// gated on STRIPE_SECRET_KEY). With no key these return errBillingUnconfigured,
-	// surfaced as the honest 503 — the supplier's tax + intent are still recorded.
 	acct, err := ensureConnectAccount(r.Context(), s.store, supplierID)
 	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, err.Error())
@@ -141,43 +263,26 @@ func (s *Server) handleSupplierOnboard(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// workerTokenRequest is the body for POST /v1/supplier/worker-tokens.
-type workerTokenRequest struct {
-	Email string `json:"email"`
-}
-
-// handleCreateWorkerToken mints a real, self-serve worker token for a supplier's
-// NEW machine — the missing piece docs/CREED_AND_PATH_TO_TEN.md ("Supplier
-// onboarding & safety" 4.5→5) named as the hard break in the onboarding funnel:
-// CreateWorkerToken existed with zero real callers, so a stranger could never
-// obtain a worker token without the dev seed. Call this once per Mac you want to
-// add — unlike /v1/supplier/onboard (one-time tax/Connect setup), this can be
-// called repeatedly to mint additional tokens for additional machines under the
-// same supplier account. UpsertSupplierByEmail is idempotent and safe to call here
-// even for a supplier who has not done Connect/tax onboarding yet (empty tax
-// fields never overwrite ones already on file — see its ON CONFLICT clause): the
-// agent can run and accrue held credits immediately, and payouts release once
-// Connect is completed separately via /v1/supplier/onboard.
+// handleCreateWorkerToken mints one worker token for a new machine under the
+// authenticated account's supplier. It may create that supplier first, but cannot
+// select or mutate one by email or supplier id supplied by the caller.
 func (s *Server) handleCreateWorkerToken(w http.ResponseWriter, r *http.Request) {
-	var req workerTokenRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid worker-token json: "+err.Error())
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	if err := decodeEmptySupplierBody(r); err != nil {
+		writeErr(w, http.StatusBadRequest, "supplier identity comes from the authenticated account; send an empty JSON object")
 		return
 	}
-	email := normalizeEmail(req.Email)
-	if !looksLikeEmail(email) {
-		writeErr(w, http.StatusBadRequest, "a valid email is required")
-		return
-	}
-	supplierID, err := s.store.UpsertSupplierByEmail(r.Context(), email, "", "")
+	auth := r.Context().Value(ctxBuyer).(*AuthResult)
+	supplierID, err := s.store.EnsureSupplierForBuyer(r.Context(), auth.BuyerID)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "recording supplier: "+err.Error())
+		writeSupplierStoreError(w, "recording supplier", err)
 		return
 	}
 	workerID := uuid.New()
-	token, err := s.store.CreateWorkerToken(r.Context(), workerID, supplierID)
+	token, err := s.store.CreateWorkerTokenForBuyer(r.Context(), auth.BuyerID, workerID, supplierID)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "minting worker token: "+err.Error())
+		writeSupplierStoreError(w, "minting worker token", err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
@@ -187,25 +292,23 @@ func (s *Server) handleCreateWorkerToken(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-// handleSupplierStatus reports a supplier's onboarding state by email. connect_status
-// is "none" (no account yet), "pending" (account exists, not yet payout-ready), or
-// "enabled" (Stripe says it can receive transfers). payouts_enabled is the cached
-// webhook-driven flag; tax_on_file reflects whether tax identifiers are recorded.
-// When Stripe is configured AND an account exists, we also refresh live so the
-// status reflects completion even before the webhook lands.
+// handleSupplierStatus reports only the authenticated account's supplier.
+// connect_status is "none" (no Connect account), "pending" (account exists but is
+// not payout-ready), or "enabled". When Stripe is configured, the cached readiness
+// is refreshed live. No email selector or local "tax on file" claim exists.
 func (s *Server) handleSupplierStatus(w http.ResponseWriter, r *http.Request) {
-	email := normalizeEmail(r.URL.Query().Get("email"))
-	if !looksLikeEmail(email) {
-		writeErr(w, http.StatusBadRequest, "a valid ?email= is required")
+	if _, supplied := r.URL.Query()["email"]; supplied {
+		writeErr(w, http.StatusBadRequest, "email is not accepted; supplier status is scoped to the authenticated account")
 		return
 	}
-	acct, payoutsEnabled, taxOnFile, err := s.store.SupplierStatusByEmail(r.Context(), email)
+	auth := r.Context().Value(ctxBuyer).(*AuthResult)
+	supplierID, acct, payoutsEnabled, err := s.store.SupplierStatusForBuyer(r.Context(), auth.BuyerID)
 	if errors.Is(err, errNotFound) {
-		writeErr(w, http.StatusNotFound, "no supplier with that email")
+		writeErr(w, http.StatusNotFound, "no supplier for this account")
 		return
 	}
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "supplier status: "+err.Error())
+		writeSupplierStoreError(w, "supplier status", err)
 		return
 	}
 
@@ -230,9 +333,10 @@ func (s *Server) handleSupplierStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
+		"supplier_id":     supplierID,
 		"connect_status":  status,
 		"payouts_enabled": payoutsEnabled,
-		"tax_on_file":     taxOnFile,
+		"kyc_provider":    "stripe_connect",
 	})
 }
 

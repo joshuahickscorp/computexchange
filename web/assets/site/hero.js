@@ -85,9 +85,18 @@ export function mountHero(canvas, opts) {
   scene.add(desk);
 
   // Device groups for hover: everything whose name starts mac-studio / dgx-spark / tub.
-  const groups = { 'mac-studio': new THREE.Group(), 'dgx-spark': new THREE.Group() };
-  scene.add(groups['mac-studio'], groups['dgx-spark']);
+  // gpu-rig is the six-card exposed rig · it has no geometry in oracles.glb yet, so it is a
+  // procedural brushed-edge STAND-IN built here and slotted at desk plane. The bridge shift
+  // (docs/BRIDGE-SHIFT-PLAN.md) bakes the photoreal rig into the glb and drops it into this
+  // same group with the same beat, no choreography change.
+  const groups = {
+    'mac-studio': new THREE.Group(),
+    'dgx-spark': new THREE.Group(),
+    'gpu-rig': new THREE.Group(),
+  };
+  scene.add(groups['mac-studio'], groups['dgx-spark'], groups['gpu-rig']);
   const baseEmissive = new WeakMap();
+  buildRigStandIn(groups['gpu-rig'], baseEmissive);
 
   let loaded = false;
   const loader = new GLTFLoader();
@@ -137,16 +146,18 @@ export function mountHero(canvas, opts) {
   // each beat's text column, including under max drag-yaw at rest.
   const STUDIO_X = -0.135, SPARK_X = 0.159; // the frozen contract anchors (documentation)
   void STUDIO_X; void SPARK_X;
-  const FADE_START = 0.86;                 // beat 5: canvas opacity eases to 0 by p=1
-  // E2 · dwell plateaus. Beat rests in raw p, and per-beat plateau half-widths (arrival
-  // and earn hold wider, monument tighter). The camera sits exactly at rest across each
-  // plateau (drag available) and travels only between them.
-  const RESTS = [0, 1/6, 2/6, 3/6, 4/6, 5/6, 1];
+  const FADE_START = 0.90;                 // release beat: canvas opacity eases to 0 by p=1
+  // E2 · dwell plateaus. Beat rests in raw p, and per-beat plateau half-widths (the three
+  // device beats and the rig hold wider so the eye lands and reads; monument tighter). The
+  // camera sits exactly at rest across each plateau (drag available) and travels only between.
+  // S10 · owner asked for a heavier, more deliberate scroll — the plateaus are widened across
+  // the board so each beat COMMITS (the shot holds longer before it releases to the next).
+  const RESTS = [0, 1/7, 2/7, 3/7, 4/7, 5/7, 6/7, 1];
   // S9 · how it works grew taller (it now carries the receipts), which pushes the price and
   // earn section centres a little past their rests. Widen those two plateaus so the camera is
   // still exactly on their pose when the section is centred (the offset is absorbed, no rest
   // recompute · the earlier beats and the how rest itself stay dead-on). price holds longest.
-  const DWELL = [0.045, 0.04, 0.04, 0.04, 0.06, 0.05, 0.04];
+  const DWELL = [0.050, 0.050, 0.050, 0.058, 0.048, 0.062, 0.052, 0.040];
   // S5 · the bisected procession (owner direction): models move INDEPENDENTLY in the
   // left band, the text is a vertical column on the right, always. The page opens on
   // the STUDIO alone (the Spark parked off-frame left, stDX/spDX are per-device lateral
@@ -155,16 +166,23 @@ export function mountHero(canvas, opts) {
   // release with the scene faded and the download beside the footer. Per-beat camera
   // yaw (9th column). Text may pass over the models during travel (owner sanctioned);
   // every held rest is verified clean in the projection harness incl. damped drag.
+  // S10 · the procession now walks Studio → Spark → the six-card RIG → all together. Each
+  // device owns the frame in turn (the others park off-frame · Studio/Spark to the left,
+  // the rig to the right so nothing crosses through anything else during a swap). rgDX is
+  // the 12th column · the rig's lateral park offset, mirroring stDX/spDX.
+  const RIG_PARK = 1.6;  // rig parked off-frame RIGHT (Studio/Spark park left at -0.9)
   const BEATS = [
-    // p,    tx,     ty,    tz,  dist, pitch, exp,  ds,   yaw,   stDX, spDX  · on screen
-    [0.000, -0.030,  0.045, 0.0, 0.58, 0.45, 1.00, 0.40, -0.60,  0.0, -0.9], // 1 arrival · the Studio alone
-    [1/6,    0.100,  0.035, 0.0, 0.50, 0.40, 1.00, 0.35, -0.90,  0.0, -0.9], // 2 studio  · closer, its specs
-    [2/6,    0.300,  0.020, 0.0, 0.46, 0.42, 1.00, 0.35, -0.85, -0.9,  0.0], // 3 spark   · the swap · Spark in
-    [3/6,    0.280,  0.050, 0.0, 0.95, 0.52, 1.00, 0.50, -0.25,  0.0,  0.0], // 4 how     · side by side
-    [4/6,    0.200,  0.240, 0.0, 1.15, 0.79, 0.32, 0.30,  0.00,  0.0,  0.0], // 5 price   · sink + dim
-    [5/6,    0.250,  0.040, 0.0, 0.72, 0.48, 1.00, 0.50, -0.35,  0.0,  0.0], // 6 earn    · close pair, low
-    [1.000,  0.150,  0.300, 0.0, 2.20, 0.95, 0.85, 0.15,  0.00,  0.0,  0.0], // 7 release · recede + fade out
+    // p,    tx,     ty,    tz,  dist, pitch, exp,  ds,   yaw,   stDX, spDX, rgDX  · on screen
+    [0.000, -0.030,  0.045, 0.0, 0.58, 0.45, 1.00, 0.40, -0.60,  0.0, -0.9,  1.6], // 1 arrival · the Studio alone
+    [1/7,    0.100,  0.035, 0.0, 0.50, 0.40, 1.00, 0.35, -0.90,  0.0, -0.9,  1.6], // 2 studio  · closer, its specs
+    [2/7,    0.300,  0.020, 0.0, 0.46, 0.42, 1.00, 0.35, -0.85, -0.9,  0.0,  1.6], // 3 spark   · the swap · Spark in
+    [3/7,    0.220,  0.180, 0.0, 1.40, 0.52, 1.00, 0.42, -0.30, -0.9, -0.9,  0.0], // 4 rig     · the six-card rig alone (framed + verified headless)
+    [4/7,    0.280,  0.050, 0.0, 0.95, 0.52, 1.00, 0.50, -0.25,  0.0,  0.0,  1.6], // 5 how     · side by side
+    [5/7,    0.200,  0.240, 0.0, 1.15, 0.79, 0.32, 0.30,  0.00,  0.0,  0.0,  1.6], // 6 price   · sink + dim
+    [6/7,    0.250,  0.040, 0.0, 0.72, 0.48, 1.00, 0.50, -0.35,  0.0,  0.0,  1.6], // 7 earn    · close pair, low
+    [1.000,  0.150,  0.300, 0.0, 2.20, 0.95, 0.85, 0.15,  0.00,  0.0,  0.0,  1.6], // 8 release · recede + fade out
   ];
+  void RIG_PARK;
 
   let scrollTarget = 0;                  // raw scroll fraction (set by the listener)
   let scrollP = 0;                       // smoothed/displayed fraction, glided toward the target
@@ -179,7 +197,10 @@ export function mountHero(canvas, opts) {
   // the release exhale (longer than drag); veil is any alpha the engine drives.
   // S6 raised scroll 260 to 320 for more cinematic heft (owner asked for more smoothing) and
   // added view for the page content, which used to track raw scroll with no inertia at all.
-  const TAU = { scroll: 320, view: 260, drag: 70, settle: 200, veil: 140 };
+  // S10 raised scroll 320 to 430 and view 260 to 320 — the owner wants the scroll to feel
+  // RESISTANT and important, so the camera carries more mass (it settles into each shot a beat
+  // after the wheel stops) and the copy trails with matched momentum. Drag stays direct.
+  const TAU = { scroll: 430, view: 320, drag: 70, settle: 240, veil: 150 };
   let dragYaw = 0, dragPitch = 0;        // drag target offsets · set to 0 on release
   let dispYaw = 0, dispPitch = 0;        // displayed offsets, glided toward the target
   let dragging = false, lastX = 0, lastY = 0;
@@ -193,7 +214,7 @@ export function mountHero(canvas, opts) {
   const camT = new THREE.Vector3();      // reused, no per-frame allocation
 
   // written into a reused object · zero per-frame allocation
-  const _st = { tx: 0, ty: 0, tz: 0, dist: 0, pitch: 0, exp: 1, ds: 1, yaw: 0, stDX: 0, spDX: 0 };
+  const _st = { tx: 0, ty: 0, tz: 0, dist: 0, pitch: 0, exp: 1, ds: 1, yaw: 0, stDX: 0, spDX: 0, rgDX: 0 };
   function beatState(p) {
     // find the segment and interpolate LINEARLY · dwellRemap (E2) owns the easing, so a
     // second smoothstep here would double-ease. The plateaus give zero velocity at rests.
@@ -212,6 +233,7 @@ export function mountHero(canvas, opts) {
     _st.yaw = a[8] + (b[8] - a[8]) * s;   // per-beat camera azimuth (S4) · an angle, linear
     _st.stDX = a[9] + (b[9] - a[9]) * s;  // per-device lateral offsets (S5) · the models
     _st.spDX = a[10] + (b[10] - a[10]) * s; // move independently, parking off-frame left
+    _st.rgDX = a[11] + (b[11] - a[11]) * s; // the rig parks off-frame right (S10)
     return _st;
   }
 
@@ -233,9 +255,11 @@ export function mountHero(canvas, opts) {
     // device groups. The shadow map is frozen (R1), so any frame a device actually moves
     // re-bakes it once · zero cost at rest, correct shadows in motion.
     if (Math.abs(groups['mac-studio'].position.x - st.stDX) > 1e-4
-     || Math.abs(groups['dgx-spark'].position.x - st.spDX) > 1e-4) {
+     || Math.abs(groups['dgx-spark'].position.x - st.spDX) > 1e-4
+     || Math.abs(groups['gpu-rig'].position.x - st.rgDX) > 1e-4) {
       groups['mac-studio'].position.x = st.stDX;
       groups['dgx-spark'].position.x = st.spDX;
+      groups['gpu-rig'].position.x = st.rgDX;
       renderer.shadowMap.needsUpdate = true;
     }
     // drag is damped per beat (ds): full orbit at arrival, restrained where the
@@ -323,12 +347,12 @@ export function mountHero(canvas, opts) {
     ndc.y = -((cy - rect.top) / rect.height) * 2 + 1;
     ray.setFromCamera(ndc, camera);
     let hit = null;
-    for (const k of ['mac-studio', 'dgx-spark']) {
+    for (const k of ['mac-studio', 'dgx-spark', 'gpu-rig']) {
       if (ray.intersectObject(groups[k], true).length) { hit = k; break; }
     }
     if (hit !== hovered) {
       hovered = hit;
-      for (const k of ['mac-studio', 'dgx-spark']) {
+      for (const k of ['mac-studio', 'dgx-spark', 'gpu-rig']) {
         const on = k === hit;
         setLift(groups[k], on);
         if (labelEls[k]) labelEls[k].classList.toggle('on', on);
@@ -470,6 +494,41 @@ function dwellRemap(p, rests, w) {
     }
   }
   return rests[rests.length - 1];
+}
+
+// The six-card exposed rig · a PROCEDURAL STAND-IN (oracles.glb has no rig geometry yet).
+// It reads as the money shot the owner tuned in render/build_rack.py: six brushed-metal card
+// edges (the 1:1 side) standing proud of a dark anodized chassis, on the desk plane. Metric,
+// metres. The bridge-shift bake (docs/BRIDGE-SHIFT-PLAN.md) replaces this with the photoreal
+// rig in the same group · nothing in the choreography changes. Materials pick up
+// scene.environment automatically, so the brushed edges catch the same soft tone as the glb.
+function buildRigStandIn(group, baseEmissive) {
+  const W = 0.38, D = 0.30;                 // footprint (owner-measured rig frame)
+  const brushed = new THREE.MeshStandardMaterial({ color: 0xb9bdc4, metalness: 0.94, roughness: 0.33 });
+  const chassis = new THREE.MeshStandardMaterial({ color: 0x161718, metalness: 0.55, roughness: 0.52 });
+  const rail = new THREE.MeshStandardMaterial({ color: 0x202225, metalness: 0.70, roughness: 0.42 });
+  const add = (geo, mat, x, y, z, name) => {
+    const m = new THREE.Mesh(geo, mat);
+    m.position.set(x, y, z);
+    m.castShadow = true; m.receiveShadow = true;
+    m.name = name;
+    // register a zero base-emissive so the shared hover-lift path (setLift) works on the rig too
+    baseEmissive.set(mat, (mat.emissive && mat.emissive.clone()) || new THREE.Color(0, 0, 0));
+    group.add(m);
+    return m;
+  };
+  // dark base tray + back panel + two end rails read as an open chassis (front left open so
+  // the card edges are exposed · exactly the exposed-side look the owner asked to display).
+  add(new THREE.BoxGeometry(W, 0.055, D), chassis, 0, 0.028, 0, 'gpu-rig-base');
+  add(new THREE.BoxGeometry(W, 0.40, 0.020), chassis, 0, 0.20, -D / 2 + 0.010, 'gpu-rig-back');
+  add(new THREE.BoxGeometry(0.020, 0.40, D), rail, -W / 2 + 0.010, 0.20, 0, 'gpu-rig-rail-l');
+  add(new THREE.BoxGeometry(0.020, 0.40, D), rail, W / 2 - 0.010, 0.20, 0, 'gpu-rig-rail-r');
+  add(new THREE.BoxGeometry(W, 0.028, D), rail, 0, 0.40, 0, 'gpu-rig-top');
+  // six brushed card edges standing proud of the tray · the exposed 1:1 side facing the camera.
+  const n = 6, span = W - 0.09, pitch = span / (n - 1), x0 = -span / 2;
+  for (let i = 0; i < n; i++) {
+    add(new THREE.BoxGeometry(0.013, 0.335, D - 0.055), brushed, x0 + i * pitch, 0.055 + 0.335 / 2, 0.008, 'gpu-rig-card-' + i);
+  }
 }
 
 // A dark abstract gradient environment (metals reflect tone, not a studio).

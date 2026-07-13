@@ -1,3 +1,4 @@
+<!-- CLAIM-SCOPE: internal-engineering-non-authoritative -->
 # token-spec-poc — CX-owned lossless token speculative-decode lane
 
 Branch C of `docs/research/CONSOLIDATION_PLAN_2026-07-09.md`. Recon verdict + full

@@ -16,6 +16,7 @@ const (
 	EventTimeout          ReputationEvent = "timeout"
 	EventThermalThrottle  ReputationEvent = "thermal_throttle"
 	EventResultCorrupt    ReputationEvent = "result_corrupt"
+	EventArtifactOversize ReputationEvent = "artifact_oversize"
 	EventSpoofingDetected ReputationEvent = "spoofing_detected"
 )
 
@@ -36,7 +37,7 @@ func reputationDelta(event ReputationEvent) float32 {
 		return -0.020
 	case EventThermalThrottle:
 		return -0.005
-	case EventResultCorrupt:
+	case EventResultCorrupt, EventArtifactOversize:
 		return -0.200
 	case EventSpoofingDetected:
 		return -1.000 // instant ban threshold

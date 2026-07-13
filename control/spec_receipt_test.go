@@ -23,8 +23,10 @@ package main
 // as-is, exactly as the ledger recorded them.
 
 import (
+	"bytes"
 	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -232,8 +234,8 @@ func TestSpecReceiptCanonicalRoundTrip(t *testing.T) {
 		"run4":  specRun4Render,
 	}
 	spine := []string{
-		"branch_id", "modality",
-		"draft_cost_s", "verify_cost_s", "repair_cost_s", "total_product_time_s",
+		"schema_version", "branch_id", "modality",
+		"draft_cost_s", "verify_cost_s", "repair_cost_s", "overhead_cost_s", "total_product_time_s",
 		"baseline_total_time_s", "baseline_source",
 		"units", "accepted_fraction", "repaired_fraction", "exact",
 		"quality_tier", "speedup_vs_baseline", "evidence", "details",
@@ -275,20 +277,17 @@ func TestSpecReceiptCanonicalRoundTrip(t *testing.T) {
 	}
 }
 
-// TestSpecReceiptAliasPrecedence pins the documented divergence from serde:
-// when a canonical key and an alias are both present, the canonical key wins
-// (serde would error on the duplicate; no real emitter sends both).
-func TestSpecReceiptAliasPrecedence(t *testing.T) {
+// Ambiguous canonical+alias input is rejected exactly like serde. No emitter has
+// a legitimate reason to send two values for one accounting field.
+func TestSpecReceiptAliasConflictRejected(t *testing.T) {
 	blob := `{"branch_id":"p","modality":"token","units":1,
 		"draft_cost_s": 1.0, "draft_s": 99.0,
 		"verify_cost_s": 0.0, "repair_cost_s": 0.0,
 		"total_product_time_s": 1.0, "baseline_total_time_s": 2.0,
 		"accepted_fraction": 1.0, "repaired_fraction": 0.0, "exact": true}`
-	r, err := ParseSpecReceipt([]byte(blob))
-	if err != nil {
-		t.Fatalf("ParseSpecReceipt: %v", err)
+	if _, err := ParseSpecReceipt([]byte(blob)); err == nil {
+		t.Fatalf("canonical+alias conflict must be rejected")
 	}
-	specClose(t, "canonical-over-alias draft_cost_s", r.DraftCostS, 1.0)
 }
 
 // TestSpecReceiptRequiredFields: the receipt.rs required spine (no
@@ -314,15 +313,18 @@ func TestSpecReceiptValidateRanges(t *testing.T) {
 	base := func() SpecReceipt {
 		s := 1.5
 		return SpecReceipt{
-			BranchID: "v", Modality: "render",
+			SchemaVersion: specReceiptSchemaVersion,
+			BranchID:      "v", Modality: "render",
 			DraftCostS: 1, VerifyCostS: 0.1, RepairCostS: 0, TotalProductTimeS: 1.1,
 			BaselineTotalTimeS: 2, BaselineSource: SpecBaselineMeasured,
 			Units: 4, AcceptedFraction: 0.75, RepairedFraction: 0.25,
-			Exact: false, QualityTier: SpecTierDelivery,
-			SpeedupVsBaseline: &s, Evidence: SpecEvidenceMeasured,
+			Exact: false, ArtifactVerified: false, QualityTier: SpecTierDelivery,
+			SpeedupVsBaseline: &s, Evidence: SpecEvidenceImported,
 			Details: map[string]any{},
 		}
 	}
+	// Imported keeps this fixture's historical independently-rounded speedup;
+	// strict canonical arithmetic is covered below.
 	if err := base().Validate(); err != nil {
 		t.Fatalf("base receipt must validate, got: %v", err)
 	}
@@ -341,6 +343,10 @@ func TestSpecReceiptValidateRanges(t *testing.T) {
 		{"unknown quality tier", func(r *SpecReceipt) { r.QualityTier = "gold" }},
 		{"unknown evidence", func(r *SpecReceipt) { r.Evidence = "vibes" }},
 		{"unknown baseline source", func(r *SpecReceipt) { r.BaselineSource = "guessed" }},
+		{"zero measured baseline", func(r *SpecReceipt) {
+			r.BaselineTotalTimeS = 0
+			r.SpeedupVsBaseline = nil
+		}},
 		{"absent baseline with a speedup", func(r *SpecReceipt) { r.BaselineSource = SpecBaselineAbsent }},
 	}
 	for _, tc := range cases {
@@ -357,6 +363,7 @@ func TestSpecReceiptValidateRanges(t *testing.T) {
 	// (a receipt without a baseline simply claims no speedup)...
 	ok := base()
 	ok.BaselineSource = SpecBaselineAbsent
+	ok.BaselineTotalTimeS = 0
 	ok.SpeedupVsBaseline = nil
 	if err := ok.Validate(); err != nil {
 		t.Errorf("absent baseline with null speedup must validate, got: %v", err)
@@ -367,5 +374,127 @@ func TestSpecReceiptValidateRanges(t *testing.T) {
 	pruned.QualityTier = SpecTierFail
 	if err := pruned.Validate(); err != nil {
 		t.Errorf("a self-pruned fail-tier receipt must validate, got: %v", err)
+	}
+}
+
+func TestSpecReceiptValidateCanonicalArithmeticAndFiniteValues(t *testing.T) {
+	speed := 2.0
+	base := SpecReceipt{
+		SchemaVersion: specReceiptSchemaVersion,
+		BranchID:      "strict", Modality: "render",
+		DraftCostS: 1, VerifyCostS: 0.2, RepairCostS: 0.3, OverheadCostS: 0.1,
+		TotalProductTimeS: 1.6, BaselineTotalTimeS: 3.2,
+		BaselineSource: SpecBaselineMeasured, Units: 1,
+		AcceptedFraction: 0, RepairedFraction: 1, Exact: false,
+		ArtifactVerified: true,
+		QualityTier:      SpecTierDelivery, SpeedupVsBaseline: &speed,
+		Evidence: SpecEvidenceMeasured, Details: map[string]any{},
+	}
+	if err := base.Validate(); err != nil {
+		t.Fatalf("strict canonical base must validate: %v", err)
+	}
+	for name, mutate := range map[string]func(*SpecReceipt){
+		"infinite time":  func(r *SpecReceipt) { r.DraftCostS = math.Inf(1) },
+		"infinite ratio": func(r *SpecReceipt) { x := math.Inf(1); r.SpeedupVsBaseline = &x },
+		"phase lie":      func(r *SpecReceipt) { r.TotalProductTimeS = 1.0 },
+		"long hidden phase cost": func(r *SpecReceipt) {
+			r.DraftCostS = 3593
+			r.TotalProductTimeS = 3600
+			r.BaselineTotalTimeS = 7200
+		},
+		"ratio lie":       func(r *SpecReceipt) { x := 99.0; r.SpeedupVsBaseline = &x },
+		"empty id":        func(r *SpecReceipt) { r.BranchID = " " },
+		"excessive units": func(r *SpecReceipt) { r.Units = maxSpecReceiptUnits + 1 },
+		"synthetic verification proof": func(r *SpecReceipt) {
+			r.Evidence = SpecEvidenceSynthetic
+		},
+		"failed verification proof": func(r *SpecReceipt) {
+			r.QualityTier = SpecTierFail
+		},
+		"empty receipt claims work": func(r *SpecReceipt) {
+			r.Units = 0
+			r.AcceptedFraction = 0
+			r.RepairedFraction = 0
+			r.Exact = false
+			r.ArtifactVerified = false
+			r.QualityTier = SpecTierFail
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := base
+			mutate(&r)
+			if err := r.Validate(); err == nil {
+				t.Fatalf("must reject %s", name)
+			}
+		})
+	}
+}
+
+func TestSpecReceiptParserBoundsDuplicatesAndLegacyFalseGate(t *testing.T) {
+	tooLarge := make([]byte, maxSpecReceiptBytes+1)
+	for i := range tooLarge {
+		tooLarge[i] = ' '
+	}
+	if _, err := ParseSpecReceipt(tooLarge); err == nil {
+		t.Fatal("oversized receipt must fail")
+	}
+	invalidUTF8 := []byte(specLane2Render)
+	branch := bytes.Index(invalidUTF8, []byte(`"branch_id": "render"`))
+	if branch < 0 {
+		t.Fatal("test fixture is missing branch_id")
+	}
+	invalidUTF8[branch+len(`"branch_id": "`)] = 0xff
+	if _, err := ParseSpecReceipt(invalidUTF8); err == nil || !strings.Contains(err.Error(), "UTF-8") {
+		t.Fatalf("invalid UTF-8 must fail before JSON normalization, got %v", err)
+	}
+	duplicate := `{"branch_id":"x","branch_id":"y"}`
+	if _, err := ParseSpecReceipt([]byte(duplicate)); err == nil {
+		t.Fatal("duplicate JSON keys must fail")
+	}
+	for name, blob := range map[string]string{
+		"required number null": strings.Replace(specLane2Render, `"draft_cost": 4.0`, `"draft_cost": null`, 1),
+		"required bool null":   strings.Replace(specLane2Render, `"exact": false`, `"exact": null`, 1),
+		"optional enum null":   strings.Replace(specLane2Render, `"evidence": "synthetic"`, `"evidence": null`, 1),
+		"quality gate null":    strings.Replace(specLane2Render, `"quality_gate": true`, `"quality_gate": null`, 1),
+		"details null":         strings.Replace(specLane2Render, `"meta": {"quality_gate_spec": "g>=0.98,wt>=0.95"}`, `"meta": null`, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseSpecReceipt([]byte(blob)); err == nil {
+				t.Fatal("explicit null must not be treated as an absent/zero value")
+			}
+		})
+	}
+	legacyFalse := `{"branch_id":"old","modality":"render","units":1,
+		"draft_s":1,"verify_s":0,"repair_s":0,"speculative_s":1,"baseline_s":2,
+		"accepted_fraction":1,"repaired_fraction":0,"exact":false,"quality_gate":false}`
+	r, err := ParseSpecReceipt([]byte(legacyFalse))
+	if err != nil {
+		t.Fatalf("legacy false-gate row must migrate: %v", err)
+	}
+	if r.QualityTier != SpecTierFail {
+		t.Fatalf("legacy quality_gate=false migrated to %q, want fail", r.QualityTier)
+	}
+	for name, blob := range map[string]string{
+		"string gate":                strings.Replace(specLane2Render, `"quality_gate": true`, `"quality_gate": "true"`, 1),
+		"false contradicts delivery": strings.Replace(specLane2Render, `"quality_gate": true`, `"quality_gate": false`, 1),
+		"true contradicts fail":      strings.Replace(specRun3Render, `"quality_gate": false`, `"quality_gate": true`, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseSpecReceipt([]byte(blob)); err == nil {
+				t.Fatal("invalid or contradictory quality_gate must fail strict ingress")
+			}
+		})
+	}
+	legacyMeasuredDelivery := `{"branch_id":"old-delivery","modality":"transcode","units":1,
+		"draft_cost_s":1,"verify_cost_s":0,"repair_cost_s":0,"total_product_time_s":1,
+		"baseline_total_time_s":2,"baseline_source":"measured","accepted_fraction":1,
+		"repaired_fraction":0,"exact":false,"quality_tier":"delivery",
+		"delivery_verified":true,"evidence":"measured","speedup_vs_baseline":2}`
+	parked, err := ParseSpecReceipt([]byte(legacyMeasuredDelivery))
+	if err != nil {
+		t.Fatalf("legacy delivery row must remain inspectable: %v", err)
+	}
+	if parked.ArtifactVerified || parked.DeliveryEligible() {
+		t.Fatalf("legacy row without schema_version must park, got %+v", parked)
 	}
 }

@@ -214,4 +214,9 @@ fi
 hr "result"
 echo "  passed: $pass   failed: $fail"
 echo "  bundle: $OUT"
-[ "$fail" -eq 0 ] && { echo "  GPU BENCHMARK OK ✅"; exit 0; } || { echo "  benchmark had failures ✗"; exit 1; }
+if [ "$fail" -eq 0 ]; then
+  echo "  GPU BENCHMARK OK ✅"
+  exit 0
+fi
+echo "  benchmark had failures ✗"
+exit 1

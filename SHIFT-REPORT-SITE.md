@@ -1,3 +1,4 @@
+<!-- CLAIM-SCOPE: internal-engineering-non-authoritative -->
 # SHIFT-REPORT-SITE · the narrative shift · one stop
 
 Branch `worktree-worktree-site-narrative`, off main at f8dc90d. Held at this stop;

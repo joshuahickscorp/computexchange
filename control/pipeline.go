@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
+	"math"
 	"net/http"
 	"strconv"
 
@@ -26,9 +28,10 @@ import (
 // pipelineStage is one composed step. From selects the stage's input: "input" (or "") runs
 // it on the pipeline's source data; "previous" chains it onto the prior stage's output.
 type pipelineStage struct {
-	Op    string `json:"op"`
-	Model string `json:"model"`
-	From  string `json:"from"`
+	Op             string          `json:"op"`
+	Model          string          `json:"model"`
+	From           string          `json:"from"`
+	LaunchContract *LaunchContract `json:"launch_contract,omitempty"`
 }
 
 // pipelineOps is the workload allowlist the builder offers. createJob remains the authority
@@ -36,7 +39,6 @@ type pipelineStage struct {
 var pipelineOps = map[string]bool{
 	"embed":                true,
 	"batch_classification": true,
-	"audio_transcribe":     true,
 	"json_extraction":      true,
 }
 
@@ -102,7 +104,19 @@ func (s *Server) handleCreatePipeline(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "a pipeline needs input (inline JSONL or an s3_key)")
 		return
 	}
+	if math.IsNaN(req.MaxUSD) || math.IsInf(req.MaxUSD, 0) || req.MaxUSD < 0 {
+		writeErr(w, http.StatusBadRequest, "max_usd must be a finite non-negative aggregate pipeline cap")
+		return
+	}
+	if req.QuoteID != "" && len(req.Stages) > 1 {
+		writeErr(w, http.StatusBadRequest, "one quote_id cannot bind multiple pipeline stages; submit per-stage jobs or omit quote_id")
+		return
+	}
 	for i, st := range req.Stages {
+		if st.Op == audioUploadJobType {
+			writeErr(w, http.StatusBadRequest, "stage "+strconv.Itoa(i)+": "+audioUploadBoundaryError)
+			return
+		}
 		if !pipelineOps[st.Op] {
 			writeErr(w, http.StatusBadRequest, "stage "+strconv.Itoa(i)+": unknown op "+st.Op)
 			return
@@ -119,49 +133,116 @@ func (s *Server) handleCreatePipeline(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "stage 0 must read the source input, not a previous stage")
 			return
 		}
+		if err := validateAdvertisedRuntimeJobModel(st.Op, st.Model); err != nil {
+			writeErr(w, http.StatusBadRequest, "stage "+strconv.Itoa(i)+": "+err.Error())
+			return
+		}
 	}
 
-	spec, _ := json.Marshal(req.Stages)
+	// Price every stage before any write or job creation. The quote weights let one
+	// aggregate buyer cap be split into disjoint per-job caps; copying the whole cap
+	// to each stage would multiply the buyer's exposure by the stage count.
+	schedule, err := LoadEconomicScheduleFromEnv()
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "economic schedule unavailable: "+err.Error())
+		return
+	}
+	inputReader, _, err := s.resolveInput(r.Context(), auth.BuyerID, req.Input)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "resolving pipeline input: "+err.Error())
+		return
+	}
+	inputBytes, err := readSynchronousInput(inputReader)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, errSynchronousInputTooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeErr(w, status, "reading pipeline input: "+err.Error())
+		return
+	}
+
+	baseContract := LaunchContract{
+		QuoteID:       req.QuoteID,
+		MinReputation: req.MinReputation,
+		PrivatePool:   req.PrivatePool,
+		Verification:  req.Verification,
+	}
+	stageQuotes := make([]Quote, len(req.Stages))
+	weights := make([]float64, len(req.Stages))
+	for i, st := range req.Stages {
+		q := s.buildQuoteWithSchedule(r.Context(), auth.BuyerID, baseContract.applyTo(jobSubmit{
+			JobType: JobType{Type: st.Op},
+			Model:   generatedRuntimeModelRef(st.Op, st.Model),
+			Tier:    "batch",
+			Input:   req.Input,
+		}), inputBytes, schedule)
+		if !q.Economics.Executable {
+			writeErr(w, http.StatusConflict, "stage "+strconv.Itoa(i)+" quote is not executable: "+q.Economics.BlockReason)
+			return
+		}
+		stageQuotes[i] = q
+		weights[i] = q.Cost.MaxUSD
+	}
+	requiredMaxUSD := composeQuotes(stageQuotes).TotalCost.MaxUSD
+	aggregateMaxUSD, err := resolveAggregateMaxUSD(req.MaxUSD, requiredMaxUSD)
+	if err != nil {
+		writeErr(w, http.StatusConflict, "pipeline budget unavailable: "+err.Error())
+		return
+	}
+	stageCaps, err := allocateAggregateMaxUSD(aggregateMaxUSD, weights)
+	if err != nil {
+		writeErr(w, http.StatusConflict, "pipeline budget unavailable: "+err.Error())
+		return
+	}
+	for i := range req.Stages {
+		contract := baseContract
+		contract.MaxUSD = stageCaps[i]
+		req.Stages[i].LaunchContract = &contract
+	}
+
+	spec, err := json.Marshal(req.Stages)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "could not persist pipeline launch contract")
+		return
+	}
 	pipeID, err := s.store.CreatePipeline(r.Context(), auth.BuyerID, req.Name, spec)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "could not create pipeline")
 		return
 	}
 
-	// LaunchContract (items 1, 3): stamp the buyer's budget/verification/routing onto
-	// every stage, so a pipelined job carries the SAME guarantees as a direct submission.
-	contract := LaunchContract{
-		QuoteID:       req.QuoteID,
-		MaxUSD:        req.MaxUSD,
-		MinReputation: req.MinReputation,
-		PrivatePool:   req.PrivatePool,
-		Verification:  req.Verification,
-	}
 	var launched []map[string]any
 	for i, st := range req.Stages {
 		if st.From == "previous" {
 			continue // advancePipeline submits this when stage i-1 completes
 		}
-		resp, herr := s.createJob(r.Context(), auth.BuyerID, contract.applyTo(jobSubmit{
+		resp, herr := s.createJob(r.Context(), auth.BuyerID, st.LaunchContract.applyTo(jobSubmit{
 			JobType: JobType{Type: st.Op},
-			Model:   ModelRef{Kind: "gguf", Ref: st.Model},
+			Model:   generatedRuntimeModelRef(st.Op, st.Model),
 			Tier:    "batch",
 			Input:   req.Input,
 		}))
 		if herr != nil {
+			_ = s.store.SetPipelineStatus(r.Context(), pipeID, "failed")
 			writeErr(w, herr.status, "stage "+strconv.Itoa(i)+": "+herr.msg)
 			return
 		}
 		if lerr := s.store.LinkPipelineJob(r.Context(), resp.JobID, pipeID, i); lerr != nil {
 			log.Printf("pipeline %s: linking stage %d job %s: %v", pipeID, i, resp.JobID, lerr)
+			_ = s.store.SetPipelineStatus(r.Context(), pipeID, "failed")
+			writeErr(w, http.StatusInternalServerError, "linking pipeline stage: "+lerr.Error())
+			return
 		}
 		launched = append(launched, map[string]any{"stage": i, "op": st.Op, "job_id": resp.JobID})
 	}
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
-		"pipeline_id": pipeID.String(),
-		"stages":      len(req.Stages),
-		"launched":    launched,
+		"pipeline_id":   pipeID.String(),
+		"stages":        len(req.Stages),
+		"launched":      launched,
+		"max_usd":       aggregateMaxUSD,
+		"stage_max_usd": stageCaps,
 	})
 }
 
@@ -243,6 +324,14 @@ func (s *Server) advancePipeline(ctx context.Context, jobID uuid.UUID) {
 	if stages[next].From != "previous" {
 		return
 	}
+	unlock, err := s.store.LockWorkflowStage(ctx, pipelineStageLockNamespace, pipeID, next)
+	if err != nil {
+		log.Printf("pipeline %s: locking stage %d: %v", pipeID, next, err)
+		return
+	}
+	defer unlock()
+	// Re-check only after obtaining the cross-replica lock. Two completion workers
+	// may enter concurrently; exactly one may create and link the downstream job.
 	if s.store.PipelineStageSubmitted(ctx, pipeID, next) {
 		return
 	}
@@ -250,9 +339,15 @@ func (s *Server) advancePipeline(ctx context.Context, jobID uuid.UUID) {
 	if err != nil || ref == "" {
 		return
 	}
-	out, err := s.storage.GetObject(ctx, ref)
+	outReader, err := s.storage.GetObjectReader(ctx, ref)
 	if err != nil {
-		log.Printf("pipeline %s: fetching stage %d output %q: %v", pipeID, stageIdx, ref, err)
+		log.Printf("pipeline %s: opening stage %d output %q: %v", pipeID, stageIdx, ref, err)
+		return
+	}
+	out, err := readSynchronousInput(outReader)
+	if err != nil {
+		log.Printf("pipeline %s: reading bounded stage %d output %q: %v", pipeID, stageIdx, ref, err)
+		_ = s.store.SetPipelineStatus(ctx, pipeID, "failed")
 		return
 	}
 	buyerID, err := s.store.PipelineBuyer(ctx, pipeID)
@@ -260,13 +355,18 @@ func (s *Server) advancePipeline(ctx context.Context, jobID uuid.UUID) {
 		return
 	}
 	st := stages[next]
+	if st.LaunchContract == nil || st.LaunchContract.MaxUSD <= 0 {
+		log.Printf("pipeline %s: stage %d has no persisted positive launch contract; refusing uncapped chained execution", pipeID, next)
+		_ = s.store.SetPipelineStatus(ctx, pipeID, "failed")
+		return
+	}
 	inputJSON, _ := json.Marshal(string(out)) // a JSON string IS the inline JSONL
-	resp, herr := s.createJob(ctx, buyerID, jobSubmit{
+	resp, herr := s.createJob(ctx, buyerID, st.LaunchContract.applyTo(jobSubmit{
 		JobType: JobType{Type: st.Op},
-		Model:   ModelRef{Kind: "gguf", Ref: st.Model},
+		Model:   generatedRuntimeModelRef(st.Op, st.Model),
 		Tier:    "batch",
 		Input:   inputJSON,
-	})
+	}))
 	if herr != nil {
 		log.Printf("pipeline %s: chaining to stage %d (%s) failed: %s", pipeID, next, st.Op, herr.msg)
 		_ = s.store.SetPipelineStatus(ctx, pipeID, "failed")

@@ -31,6 +31,18 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+# A production image is attributable to one committed source tree. Refuse a dirty
+# checkout: labeling uncommitted bytes with HEAD would make /version confidently
+# wrong, which is worse than having no provenance endpoint at all.
+if [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
+  die "worktree is dirty — commit or stash changes before a provenance-bearing deploy"
+fi
+
+CX_BUILD_COMMIT="$(git -C "$ROOT" rev-parse HEAD)"
+export CX_BUILD_VERSION="${CX_BUILD_VERSION:-$(git -C "$ROOT" describe --tags --always --dirty=+dirty)}"
+CX_BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+export CX_BUILD_COMMIT CX_BUILD_DATE
+
 command -v docker >/dev/null 2>&1 || die "docker not found"
 [ -f "$ROOT/.env" ] || die ".env not found at $ROOT/.env — copy .env.example and fill it in."
 
@@ -45,6 +57,7 @@ log "validate compose config"
 dc config -q || die "compose config invalid — fix before deploying."
 
 log "build images"
+log "build identity: version=$CX_BUILD_VERSION commit=$CX_BUILD_COMMIT date=$CX_BUILD_DATE"
 dc build || die "build failed."
 
 log "roll the stack (up -d, recreate changed)"
@@ -80,6 +93,15 @@ if command -v curl >/dev/null 2>&1; then
   log "smoke OK (200)"
 else
   log "curl not present; skipping external smoke (verify https://$SITE_HOST/healthz manually)"
+fi
+
+# Provenance gate: health is not enough if Caddy is still serving an older image.
+# Require the public build endpoint to report the exact commit we just built.
+if command -v curl >/dev/null 2>&1; then
+  version_json="$(curl -fsS "https://$SITE_HOST/version" || true)"
+  reported_commit="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("commit", ""))' <<<"$version_json" 2>/dev/null || true)"
+  [ "$reported_commit" = "$CX_BUILD_COMMIT" ] || die "provenance smoke FAILED: /version commit '$reported_commit' != deployed '$CX_BUILD_COMMIT'"
+  log "provenance OK ($reported_commit)"
 fi
 
 log "deploy complete."

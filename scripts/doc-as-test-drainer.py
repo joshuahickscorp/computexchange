@@ -51,6 +51,37 @@ def _req(method, url, data=None, headers=None, timeout=30):
     return urllib.request.urlopen(r, timeout=timeout)
 
 
+def register():
+    """Create the exact generated-matrix authority that production workers obtain
+    at startup. The seed is intentionally inert, so polling before this handshake
+    must never claim a task."""
+    capability = json.dumps(
+        {
+            "hw_class": "apple_silicon_max",
+            "engine": "candle",
+            "memory_gb": 64,
+            "memory_bw_gbps": 400,
+            "supported_jobs": ["embed"],
+            "supported_models": ["all-minilm-l6-v2"],
+            "min_payout_usd_hr": 0,
+            "benchmarks": [],
+            "agent_version": "doc-as-test-stand-in",
+            "os_version": "hermetic-ci",
+        }
+    ).encode()
+    with _req(
+        "POST",
+        CONTROL + "/v1/worker/register",
+        data=capability,
+        headers={"X-Worker-Token": TOKEN, "Content-Type": "application/json"},
+    ) as resp:
+        if resp.status != 200:
+            raise RuntimeError(f"worker registration returned HTTP {resp.status}")
+        echoed = json.loads(resp.read())
+    if echoed.get("supported_jobs") != ["embed"]:
+        raise RuntimeError("worker registration did not echo the admitted capability")
+
+
 def embed_result(n_rows):
     """A well-formed embed artifact: one distinct unit vector per row (mirrors the
     integration suite's embedResultJSON)."""
@@ -61,6 +92,25 @@ def embed_result(n_rows):
         vecs.append(v)
     return json.dumps(
         {"job_type": "embed", "model": "all-minilm-l6-v2", "dim": DIM, "count": len(vecs), "vectors": vecs}
+    ).encode()
+
+
+def honeypot_embed_result():
+    """Wrap the measured known vector in the current validated embed artifact.
+    The stored known answer intentionally contains only vectors for semantic cosine
+    comparison; workers still have to submit the full production result envelope."""
+    known = json.loads(HONEYPOT_EMBED_ANSWER)
+    vectors = known.get("vectors")
+    if not isinstance(vectors, list) or len(vectors) != 1:
+        raise ValueError("seeded honeypot answer is not one embedding vector")
+    return json.dumps(
+        {
+            "job_type": "embed",
+            "model": "all-minilm-l6-v2",
+            "dim": DIM,
+            "count": 1,
+            "vectors": vectors,
+        }
     ).encode()
 
 
@@ -106,7 +156,7 @@ def drain_once():
     # honeypot's real known answer, or the verifier correctly requeues it forever and
     # the job never finalizes.
     if HONEYPOT_EMBED_ANSWER and HONEYPOT_EMBED_TEXT and HONEYPOT_EMBED_TEXT in input_body:
-        body = HONEYPOT_EMBED_ANSWER.encode()
+        body = honeypot_embed_result()
         n = -1  # signals "honeypot" in the log line below
     else:
         n = input_rows(input_body)
@@ -142,6 +192,7 @@ def drain_once():
 def main():
     # Tight loop with a short poll interval so the quickstart's tiny jobs complete in
     # a couple of seconds. Runs until killed by doc-as-test.sh's cleanup.
+    register()
     while True:
         did = drain_once()
         time.sleep(0.25 if did else 0.75)

@@ -1,6 +1,11 @@
-# Quickstart
+# Development client walkthrough
 
-Run your first job on computexchange in under a minute. Get a buyer key from Settings · API keys, then pick the path that fits: a raw `curl` against the native `/v1/jobs` API, the Python SDK, or the `cx` CLI. Every path runs the same job against the same control plane — an `embed` job over three short strings — and reads back the merged result. Swap `cx_live_…` for your real key.
+This walkthrough assumes an operator has already provided a running control URL,
+a buyer key, and eligible supply for the exact runtime/job/model tuple. There is no
+public-availability or time-to-result claim here; package publication, self-serve
+activation, physical supply, and stranger testing remain separate gates. The
+reserved `cx.example.invalid` host below is intentionally non-routable: replace it
+with the operator-provided URL and replace `cx_live_…` with the issued key.
 
 Every example below submits a native job, then polls until it's done. There is no separate synchronous `/v1/embeddings` endpoint — `/v1/embeddings` and `/v1/chat/completions` are OpenAI-Batch-API endpoint *labels* you route to inside a batch file (see `docs/RUNBOOKS.md` / `control/openai.go` for that flow); for a first job, `POST /v1/jobs` is the direct, simplest path.
 
@@ -8,38 +13,84 @@ Every example below submits a native job, then polls until it's done. There is n
 
 ```bash
 # submit an embed job for three rows, then poll for the result.
-JOB=$(curl -s https://computexchange.net/v1/jobs \
+JOB=$(curl -s https://cx.example.invalid/v1/jobs \
   -H "Authorization: Bearer cx_live_…" \
   -H "Content-Type: application/json" \
   -d '{
         "job_type": {"type": "embed"},
-        "model": {"kind": "gguf", "ref": "all-minilm-l6-v2"},
+        "model": {"kind": "hf", "ref": "all-minilm-l6-v2"},
         "tier": "batch",
         "verification": {"redundancy_frac": 0, "honeypot_frac": 0, "payout_hold_secs": 0},
         "input": "{\"id\":\"a\",\"text\":\"first row\"}\n{\"id\":\"b\",\"text\":\"second row\"}\n{\"id\":\"c\",\"text\":\"third row\"}\n"
       }' | python3 -c 'import sys,json; print(json.load(sys.stdin)["job_id"])')
 
 # poll until complete (a real job usually finishes in a few seconds on a warm worker)
-curl -s "https://computexchange.net/v1/jobs/$JOB" \
+curl -s "https://cx.example.invalid/v1/jobs/$JOB" \
   -H "Authorization: Bearer cx_live_…"
 
 # once status is "complete", fetch the merged result
-curl -s "https://computexchange.net/v1/jobs/$JOB/results" \
+curl -s "https://cx.example.invalid/v1/jobs/$JOB/results" \
   -H "Authorization: Bearer cx_live_…"
 ```
 
+### Audio transcription foundation
+
+Audio does not use the generic JSON job endpoint. The control plane must derive
+duration and pricing from the uploaded bytes, so quote and submit both use the
+dedicated multipart boundary:
+
+```bash
+# Required WAV contract: PCM16 integer, mono, 16 kHz, nonempty, at most 30 s
+# and at most 1 MiB. Convert other local formats before upload if necessary.
+ffmpeg -i source.m4a -ac 1 -ar 16000 -c:a pcm_s16le clip.wav
+
+QUOTE=$(curl -s -X POST https://cx.example.invalid/v1/audio/jobs/quote \
+  -H "Authorization: Bearer cx_live_…" \
+  -F "file=@clip.wav;type=audio/wav" \
+  -F "model=whisper-tiny" \
+  -F "tier=batch")
+
+QUOTE_ID=$(printf '%s' "$QUOTE" | python3 -c \
+  'import json,sys; print(json.load(sys.stdin)["quote_id"])')
+
+JOB=$(curl -s -X POST https://cx.example.invalid/v1/audio/jobs \
+  -H "Authorization: Bearer cx_live_…" \
+  -F "file=@clip.wav;type=audio/wav" \
+  -F "model=whisper-tiny" \
+  -F "tier=batch" \
+  -F "quote_id=$QUOTE_ID" | python3 -c \
+  'import json,sys; print(json.load(sys.stdin)["job_id"])')
+```
+
+The server normalizes exactly one audio record, prices the server-derived audio
+minutes, and fixes verification at one primary plus one same-class redundancy
+task. The current runner is explicitly English/no-timestamps. Buyer-supplied
+`language`, `timestamps`, and verification overrides are not accepted because
+the current runner does not implement those controls honestly.
+
+This surface is a hardened development foundation, not a production-retention
+claim. Submission idempotency, durable job-level storage of the pricing authority,
+and deletion/retention policy are still open. Do not automatically retry a submit:
+the same request can currently create a second billable job, and the normalized
+JSONL stored for the job contains the base64-encoded audio.
+
 ## Python
 
+The SDK has no third-party runtime dependencies and is not published on PyPI
+yet. From a repository checkout, install it into a virtual environment:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install ./sdk/python
+```
+
 ```python
-# The SDK is stdlib-only (no `requests` dependency) and not yet on PyPI — for
-# now, install it straight from the repo: pip install ./sdk/python
-# (docs/CREED_AND_PATH_TO_TEN.md tracks the PyPI/Homebrew publish as a
-# separate, in-progress piece of work.)
 from computeexchange import Client
 
 # base_url defaults to http://localhost:8080 — pass the real host explicitly,
 # or a bare Client(api_key=...) call will silently try to reach localhost.
-cx = Client("https://computexchange.net", "cx_live_…")
+cx = Client("https://cx.example.invalid", "cx_live_…")
 
 job = cx.submit_job(
     model="all-minilm-l6-v2",
@@ -60,7 +111,7 @@ print(out["data"][0]["embedding"][:5])
 ```bash
 # The CLI is a single stdlib-only Go binary, not yet published to a tap — for
 # now, build it from the repo: (cd cli && go build -o cx .)
-export CX_API_URL=https://computexchange.net
+export CX_API_URL=https://cx.example.invalid
 export CX_API_KEY=cx_live_…
 
 # --wait polls to completion and prints the merged result for you.

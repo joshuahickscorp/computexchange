@@ -1,3 +1,4 @@
+<!-- CLAIM-SCOPE: internal-engineering-non-authoritative -->
 # PERF · site delivery · measured before/after (Pass 3, Phase 3-4)
 
 Numbers, not claims. Measured on this machine 2026-07-02. The hero is texture-dominated, so the

@@ -14,11 +14,20 @@ mod hardware;
 #[cfg(feature = "metal")]
 mod hawking_metal_kernel; // real Metal kernel port, Hawking port week 2 (docs/HAWKING_PORT_PLAN.md); not yet wired to any runner
 mod models;
+mod paged_kv; // host-side paged KV and namespaced prefix-cache ownership (experimental, not routed)
 mod pool;
 mod protocol;
 mod quantized_llama_batched; // vendored + patched candle quantized_llama (bsz>1 batched prefill)
+mod render_preview; // opt-in, pinned, non-billable generalized render-spec preview seam
+mod resident_engine; // host-side long-lived model actor scheduler (experimental, not routed)
+#[cfg(feature = "resident-spec-shadow")]
+mod resident_spec_shadow; // device-free resident/spec integration proof; never routed or billed
 mod runners;
+mod runtime_matrix_generated;
 mod sandbox; // sandboxed BYO-container execution for the `custom` general-compute lane
+mod slot_speculation; // independent ragged speculative transactions (experimental, not routed)
+#[cfg(feature = "spec-receipt-bridge")]
+mod spec_receipt_bridge; // default-off canonical receipt/conformance seam; never routes or bills
 mod status;
 mod types;
 mod whisper_decoder_kv; // vendored + patched candle whisper decoder (incremental self-attn KV cache)
@@ -64,6 +73,37 @@ const CX_SANDBOXED_ENV: &str = "CX_SANDBOXED";
 /// launch — exactly as the `.app` path already does when it can't resolve the profile.
 const CX_SANDBOX_PROFILE_ENV: &str = "CX_SANDBOX_PROFILE";
 
+/// Fail-closed policy used by the distributed macOS app. Direct development
+/// launches remain possible without it, but an installed supplier app must never
+/// turn a missing/broken sandbox into permission to process buyer work.
+const CX_REQUIRE_SANDBOX_ENV: &str = "CX_REQUIRE_SANDBOX";
+
+#[cfg(target_os = "macos")]
+fn sandbox_required_value(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        )
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn sandbox_required() -> bool {
+    sandbox_required_value(std::env::var(CX_REQUIRE_SANDBOX_ENV).ok().as_deref())
+}
+
+#[cfg(target_os = "macos")]
+fn sandbox_wrap_failed(message: &str) {
+    if sandbox_required() {
+        tracing::error!(
+            "cx-agent refused to start: {message}. {CX_REQUIRE_SANDBOX_ENV}=1 requires the macOS seatbelt sandbox"
+        );
+        std::process::exit(78);
+    }
+    tracing::warn!("cx-agent is running UNSANDBOXED: {message}");
+}
+
 /// On macOS, if this `run` invocation is NOT already under the seatbelt sandbox and a
 /// profile can be located, re-exec the process under `sandbox-exec -f <profile> …` so a
 /// DIRECT binary launch (a supplier's `cargo run`, a hand-rolled LaunchAgent, `make
@@ -77,14 +117,13 @@ const CX_SANDBOX_PROFILE_ENV: &str = "CX_SANDBOX_PROFILE";
 ///   - already sandboxed (`CX_SANDBOXED=1`) — the loop guard; the `.app` launcher and
 ///     our own re-exec both set it, so we never double-wrap;
 ///   - no profile can be resolved (no `CX_SANDBOX_PROFILE`, none beside the binary) —
-///     a bare dev build then runs UNSANDBOXED rather than refusing to start, matching
-///     the app's honest `sandboxActive=false` behavior. We log this loudly so it is
-///     never a silent downgrade.
+///     a bare dev build runs UNSANDBOXED with a warning, while the distributed app
+///     sets `CX_REQUIRE_SANDBOX=1` and fails closed.
 ///
 /// On success it does not return: `execv` replaces the current image with
 /// `sandbox-exec`, which re-launches this same binary (now with `CX_SANDBOXED=1`) under
-/// the profile. Any failure to exec is surfaced (logged) and the agent continues
-/// UNSANDBOXED — a launch is never blocked by a sandbox-wrap failure.
+/// the profile. An exec failure is a hard stop under the app's required policy and
+/// a loud development warning otherwise.
 ///
 /// The `-D KEY=VALUE` params exactly mirror what `cx-agent.sb` references and what the
 /// Swift launcher passes: HOME, MODELCACHE (CX_MODEL_CACHE / HF_HOME / ~/.cache/
@@ -101,21 +140,16 @@ fn reexec_under_sandbox_if_needed() {
     let profile = match resolve_sandbox_profile() {
         Some(p) => p,
         None => {
-            tracing::warn!(
-                "cx-agent is running UNSANDBOXED: no seatbelt profile found (set {CX_SANDBOX_PROFILE_ENV} \
-                 to cx-agent.sb, or launch via the ComputeExchangeAgent .app). A direct-binary launch \
-                 has no macOS sandbox — buyer-payload filesystem/network containment is NOT active."
-            );
+            sandbox_wrap_failed(&format!(
+                "no seatbelt profile found (set {CX_SANDBOX_PROFILE_ENV} to cx-agent.sb, or launch via the ComputeExchangeAgent .app); buyer-payload filesystem/network containment is not active"
+            ));
             return;
         }
     };
 
     const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
     if !std::path::Path::new(SANDBOX_EXEC).exists() {
-        tracing::warn!(
-            "cx-agent is running UNSANDBOXED: {SANDBOX_EXEC} not found (unexpected on macOS). \
-             Continuing without the seatbelt sandbox."
-        );
+        sandbox_wrap_failed(&format!("{SANDBOX_EXEC} not found (unexpected on macOS)"));
         return;
     }
 
@@ -123,7 +157,7 @@ fn reexec_under_sandbox_if_needed() {
     let exe = match std::env::current_exe() {
         Ok(e) => e,
         Err(err) => {
-            tracing::warn!("cx-agent is running UNSANDBOXED: could not resolve current_exe ({err}).");
+            sandbox_wrap_failed(&format!("could not resolve current_exe ({err})"));
             return;
         }
     };
@@ -157,10 +191,7 @@ fn reexec_under_sandbox_if_needed() {
 
     // `exec` replaces this process image; it only returns on failure.
     let err = cmd.exec();
-    tracing::warn!(
-        "cx-agent is running UNSANDBOXED: failed to re-exec under {SANDBOX_EXEC} ({err}). \
-         Continuing without the seatbelt sandbox rather than refusing to launch."
-    );
+    sandbox_wrap_failed(&format!("failed to re-exec under {SANDBOX_EXEC} ({err})"));
 }
 
 /// Non-macOS: seatbelt does not exist, so this is a pure no-op.
@@ -404,6 +435,16 @@ enum Command {
         #[arg(long, default_value_t = 24)]
         max_tokens: u32,
     },
+    /// Run one local, explicitly non-billable generalized render-speculation
+    /// preview request through the SHA-256-pinned Python controller/backend.
+    /// This command does not register, poll, upload, commit, or contact the
+    /// control plane; stdout is the validated preview envelope.  It is the safe
+    /// agent-side proving path before any production/billing contract exists.
+    SpecRenderPreview {
+        /// Strict protocol-v1 JSON request consumed by the pinned preview driver.
+        #[arg(long)]
+        input: PathBuf,
+    },
     /// Print the agent version and exit.
     Version,
 }
@@ -562,6 +603,22 @@ async fn main() -> Result<()> {
         } => {
             init_tracing();
             run_bench_concurrency(&permits, embed_tasks, llama_tasks, &model, max_tokens).await
+        }
+        Command::SpecRenderPreview { input } => {
+            init_tracing();
+            let runner = render_preview::SpecRenderPreviewRunner::from_env()
+                .map_err(anyhow::Error::msg)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                    "spec-render-preview requires CX_SPEC_RENDER_PREVIEW_DRIVER and its SHA-256 pin"
+                )
+                })?;
+            let output = runner.execute_preview_file(&input).await?;
+            use std::io::Write as _;
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(&output)?;
+            stdout.write_all(b"\n")?;
+            Ok(())
         }
         Command::ClusterPlan {
             members_gb,
@@ -780,7 +837,10 @@ fn run_bench_batch(
     // every shorter one's prompts too). The serial baseline runs EACH distinct prompt
     // once — a fair "no batching" reference for the SAME varied traffic the batched
     // path handles — and its per-prompt output seeds the per-row batched==serial gate.
-    let widest = *sizes.iter().max().expect("sizes is non-empty (checked above)");
+    let widest = *sizes
+        .iter()
+        .max()
+        .expect("sizes is non-empty (checked above)");
     let distinct_prompts: Vec<String> = {
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut v = Vec::new();
@@ -1176,7 +1236,9 @@ async fn run_bench_concurrency(
     max_tokens: u32,
 ) -> Result<()> {
     use std::time::Instant;
-    use types::{JobConstraints, JobManifest, JobType, ModelKind, ModelRef, ServiceTier, VerificationPolicy};
+    use types::{
+        JobConstraints, JobManifest, JobType, ModelKind, ModelRef, ServiceTier, VerificationPolicy,
+    };
 
     let permit_sweep: Vec<usize> = permits_arg
         .split(',')
@@ -1350,11 +1412,7 @@ async fn run_bench_concurrency(
                 let t = Instant::now();
                 let res = runners::EmbedRunner.run(&manifest, &input, &pool).await;
                 drop(permit);
-                (
-                    "embed",
-                    t.elapsed().as_secs_f64(),
-                    res.is_ok(),
-                )
+                ("embed", t.elapsed().as_secs_f64(), res.is_ok())
             });
         }
         for _ in 0..llama_tasks {
@@ -1365,13 +1423,11 @@ async fn run_bench_concurrency(
             set.spawn(async move {
                 let permit = sem.acquire_owned().await.expect("semaphore never closed");
                 let t = Instant::now();
-                let res = runners::BatchInferRunner.run(&manifest, &input, &pool).await;
+                let res = runners::BatchInferRunner
+                    .run(&manifest, &input, &pool)
+                    .await;
                 drop(permit);
-                (
-                    "batch_infer",
-                    t.elapsed().as_secs_f64(),
-                    res.is_ok(),
-                )
+                ("batch_infer", t.elapsed().as_secs_f64(), res.is_ok())
             });
         }
 
@@ -1380,7 +1436,9 @@ async fn run_bench_concurrency(
         while let Some(joined) = set.join_next().await {
             let (kind, dt, ok) = joined.expect("bench task panicked");
             if !ok {
-                anyhow::bail!("a {kind} task failed during the concurrency sweep at permits={permits}");
+                anyhow::bail!(
+                    "a {kind} task failed during the concurrency sweep at permits={permits}"
+                );
             }
             match kind {
                 "embed" => embed_wall_s += dt,
@@ -1592,6 +1650,29 @@ async fn execute_task(
     max_memory_pct: f32,
 ) -> Result<TaskCommit, RunError> {
     let manifest = &task.manifest;
+    if !runtime_authority_matches(
+        &task.runtime_cell_id,
+        &task.runtime_id,
+        &task.runtime_matrix_sha256,
+        &cap.engine,
+        cap.hw_class,
+        manifest.job_type.tag(),
+        &manifest.model.model_ref,
+        manifest.model.kind,
+    ) {
+        return Err(RunError::Inference {
+            backend: "runtime_authority",
+            msg: format!(
+                "dispatch authority rejected: cell={:?} runtime={:?} matrix={:?} job={:?} model={:?} kind={:?}",
+                task.runtime_cell_id,
+                task.runtime_id,
+                task.runtime_matrix_sha256,
+                manifest.job_type.tag(),
+                manifest.model.model_ref,
+                manifest.model.kind,
+            ),
+        });
+    }
     let runner = dispatch(manifest, cap, runners).await?;
     tracing::info!(task = %task.task_id, backend = runner.backend_name(), "executing task");
 
@@ -1621,26 +1702,27 @@ async fn execute_task(
     // also stops starting new slices instead of running to a real OOM.
     let mem_headroom_gb = memory_headroom_gb;
     let mem_max_pct = max_memory_pct;
-    let ckpt = runners::Checkpointer::new(task.partial_put_url.clone(), checkpoint_secs, s3.clone())
-        .with_preempt_check(move || {
-            let snap = hardware::read_memory_snapshot();
-            let headroom = mem_headroom_gb.max(0.0);
-            let effective = (snap.available_gb - headroom).max(0.0);
-            let used_pct = snap.used_pct();
-            if mem_max_pct > 0.0 && used_pct >= mem_max_pct {
-                Some(format!(
-                    "memory pressure: {used_pct:.0}% used >= {mem_max_pct:.0}% ceiling"
-                ))
-            } else if headroom > 0.0 && snap.available_gb <= headroom {
-                Some(format!(
-                    "reserved headroom: {:.1} GB available <= {headroom:.1} GB headroom",
-                    snap.available_gb
-                ))
-            } else {
-                let _ = effective; // computed for parity with evaluate_memory_throttle; unused when not throttled
-                None
-            }
-        });
+    let ckpt =
+        runners::Checkpointer::new(task.partial_put_url.clone(), checkpoint_secs, s3.clone())
+            .with_preempt_check(move || {
+                let snap = hardware::read_memory_snapshot();
+                let headroom = mem_headroom_gb.max(0.0);
+                let effective = (snap.available_gb - headroom).max(0.0);
+                let used_pct = snap.used_pct();
+                if mem_max_pct > 0.0 && used_pct >= mem_max_pct {
+                    Some(format!(
+                        "memory pressure: {used_pct:.0}% used >= {mem_max_pct:.0}% ceiling"
+                    ))
+                } else if headroom > 0.0 && snap.available_gb <= headroom {
+                    Some(format!(
+                        "reserved headroom: {:.1} GB available <= {headroom:.1} GB headroom",
+                        snap.available_gb
+                    ))
+                } else {
+                    let _ = effective; // computed for parity with evaluate_memory_throttle; unused when not throttled
+                    None
+                }
+            });
 
     // 2. Run the model through the WARM pool. On failure, still wipe input first.
     let output = match runner
@@ -1708,6 +1790,62 @@ async fn execute_task(
     // commit built.
     wipe(&mut result);
     Ok(commit)
+}
+
+/// Fail-closed mirror of the server's exact-cell claim authority. This consumes
+/// only generated production cells and the worker capability already registered
+/// with the control plane; compatibility arrays and local runner availability are
+/// deliberately insufficient. A stale matrix therefore stops before input bytes
+/// are fetched or model work begins.
+#[allow(clippy::too_many_arguments)]
+fn runtime_authority_matches(
+    cell_id: &str,
+    runtime_id: &str,
+    matrix_sha256: &str,
+    engine: &str,
+    hw_class: types::HardwareClass,
+    job: &str,
+    model: &str,
+    model_kind: types::ModelKind,
+) -> bool {
+    runtime_authority_matches_for(
+        cell_id,
+        runtime_id,
+        matrix_sha256,
+        engine,
+        hw_class,
+        models::device_label(),
+        job,
+        model,
+        model_kind,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn runtime_authority_matches_for(
+    cell_id: &str,
+    runtime_id: &str,
+    matrix_sha256: &str,
+    engine: &str,
+    hw_class: types::HardwareClass,
+    device: &str,
+    job: &str,
+    model: &str,
+    model_kind: types::ModelKind,
+) -> bool {
+    matrix_sha256 == runtime_matrix_generated::RUNTIME_MATRIX_SHA256
+        && runtime_matrix_generated::ADVERTISED_RUNTIME_CAPABILITIES
+            .iter()
+            .any(|cell| {
+                cell.id == cell_id
+                    && cell.runtime == runtime_id
+                    && cell.engine == engine
+                    && cell.device == device
+                    && cell.hardware_classes.contains(&hw_class.as_wire_str())
+                    && cell.job == job
+                    && cell.model == Some(model)
+                    && cell.model_kind == Some(model_kind.as_wire_str())
+            })
 }
 
 /// Overwrite a buffer's bytes with zeros and drop its capacity. Best-effort
@@ -2188,7 +2326,7 @@ async fn run_agent(mut cfg: AgentConfig) -> Result<()> {
         client: Arc::new(client),
         cap: Arc::new(cap),
         runners: Arc::new({
-            let mut rs = default_runners();
+            let mut rs = default_runners().map_err(anyhow::Error::msg)?;
             // Serving-lane seams: only when the operator opts in. Each is inserted right
             // AFTER ClusterRunner (index 0) so a giant cluster model still routes to the
             // Plane B seam, but BEFORE the Candle generative runners so lane jobs route
@@ -2582,6 +2720,99 @@ async fn poll_and_spawn(
 mod tests {
     use super::*;
 
+    #[test]
+    fn dispatch_runtime_authority_is_exact_and_fail_closed() {
+        let sha = runtime_matrix_generated::RUNTIME_MATRIX_SHA256;
+        assert!(runtime_authority_matches_for(
+            "candle-metal-minilm-embed",
+            "candle_metal",
+            sha,
+            "candle",
+            types::HardwareClass::AppleSiliconPro,
+            "metal",
+            "embed",
+            "all-minilm-l6-v2",
+            types::ModelKind::Hf,
+        ));
+        for rejected in [
+            runtime_authority_matches_for(
+                "candle-metal-minilm-embed",
+                "candle_metal",
+                &"0".repeat(64),
+                "candle",
+                types::HardwareClass::AppleSiliconPro,
+                "metal",
+                "embed",
+                "all-minilm-l6-v2",
+                types::ModelKind::Hf,
+            ),
+            runtime_authority_matches_for(
+                "candle-cuda-minilm-embed",
+                "candle_cuda",
+                sha,
+                "candle",
+                types::HardwareClass::Nvidia80g,
+                "cuda",
+                "embed",
+                "all-minilm-l6-v2",
+                types::ModelKind::Hf,
+            ),
+            runtime_authority_matches_for(
+                "candle-metal-minilm-embed",
+                "candle_metal",
+                sha,
+                "candle",
+                types::HardwareClass::AppleSiliconPro,
+                "metal",
+                "batch_infer",
+                "all-minilm-l6-v2",
+                types::ModelKind::Hf,
+            ),
+            runtime_authority_matches_for(
+                "candle-metal-minilm-embed",
+                "candle_metal",
+                sha,
+                "candle",
+                types::HardwareClass::AppleSiliconPro,
+                "cpu",
+                "embed",
+                "all-minilm-l6-v2",
+                types::ModelKind::Hf,
+            ),
+            runtime_authority_matches_for(
+                "candle-metal-minilm-embed",
+                "candle_metal",
+                sha,
+                "candle",
+                types::HardwareClass::AppleSiliconPro,
+                "metal",
+                "embed",
+                "all-minilm-l6-v2",
+                types::ModelKind::Gguf,
+            ),
+        ] {
+            assert!(!rejected);
+        }
+    }
+
+    #[test]
+    fn spec_render_preview_cli_requires_an_explicit_local_input() {
+        let cli = Cli::try_parse_from([
+            "cx-agent",
+            "spec-render-preview",
+            "--input",
+            "/tmp/preview.json",
+        ])
+        .expect("preview subcommand parses");
+        match cli.command {
+            Command::SpecRenderPreview { input } => {
+                assert_eq!(input, PathBuf::from("/tmp/preview.json"));
+            }
+            _ => panic!("wrong subcommand parsed"),
+        }
+        assert!(Cli::try_parse_from(["cx-agent", "spec-render-preview"]).is_err());
+    }
+
     // ── self-re-exec sandbox profile discovery (macOS) ──────────────────────
     // The self-re-exec (reexec_under_sandbox_if_needed) re-launches a DIRECT binary
     // start under `sandbox-exec` so a `cargo run`/hand-rolled launch is contained too,
@@ -2626,7 +2857,10 @@ mod tests {
             pick_sandbox_profile(None, Some(sib.clone()), sibling_exists),
             Some(sib.clone())
         );
-        assert_eq!(pick_sandbox_profile(None, Some(sib), |_: &Path| false), None);
+        assert_eq!(
+            pick_sandbox_profile(None, Some(sib), |_: &Path| false),
+            None
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -2635,7 +2869,21 @@ mod tests {
         // Must match config.rs's default data_dir and the Swift launcher's
         // AgentPaths.dataDir so the profile's DATADIR param scopes the same directory
         // the agent actually writes status.json/prefs into.
-        assert_eq!(sandbox_data_dir("/Users/alice"), "/Users/alice/.compute-exchange");
+        assert_eq!(
+            sandbox_data_dir("/Users/alice"),
+            "/Users/alice/.compute-exchange"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sandbox_requirement_parser_is_explicit() {
+        for enabled in ["1", "true", "TRUE", " yes "] {
+            assert!(sandbox_required_value(Some(enabled)), "{enabled:?}");
+        }
+        for disabled in [None, Some(""), Some("0"), Some("false"), Some("maybe")] {
+            assert!(!sandbox_required_value(disabled));
+        }
     }
 
     #[test]
@@ -2661,7 +2909,11 @@ mod tests {
             "identical mode must repeat the stem verbatim in every row"
         );
         let distinct: std::collections::HashSet<_> = prompts.iter().collect();
-        assert_eq!(distinct.len(), 1, "identical mode: exactly one distinct prompt");
+        assert_eq!(
+            distinct.len(),
+            1,
+            "identical mode: exactly one distinct prompt"
+        );
     }
 
     #[test]
@@ -2688,7 +2940,9 @@ mod tests {
         // EXTEND a shared stem, they don't replace it, so serial and batched decode
         // the same underlying request, just longer or shorter.
         assert!(
-            prompts.iter().all(|p| p.starts_with("Write about the ocean:")),
+            prompts
+                .iter()
+                .all(|p| p.starts_with("Write about the ocean:")),
             "every mixed prompt must extend the shared stem"
         );
     }
@@ -2849,7 +3103,10 @@ mod tests {
             "sustained should be the mean of the last 25% (3 of 12 windows), got {sustained}"
         );
         // 140 -> ~95.33 is a real, substantial gap; must land well above 20%.
-        assert!(gap > 25.0, "expected a real double-digit throttling gap, got {gap}%");
+        assert!(
+            gap > 25.0,
+            "expected a real double-digit throttling gap, got {gap}%"
+        );
     }
 
     #[test]
@@ -2861,7 +3118,10 @@ mod tests {
         let (peak, sustained, gap) = sustained_summary(&windows);
         assert_eq!(peak, 100.0);
         assert_eq!(sustained, 100.0);
-        assert!(gap.abs() < 1e-9, "rising-then-flat curve should show ~0% gap, got {gap}%");
+        assert!(
+            gap.abs() < 1e-9,
+            "rising-then-flat curve should show ~0% gap, got {gap}%"
+        );
     }
 
     #[test]
@@ -3111,8 +3371,10 @@ mod tests {
     async fn s3_get_transparently_decodes_a_real_gzip_response() {
         use std::io::Write;
         let plaintext = b"hello compressed world, this is the real input body";
-        let mut encoder =
-            flate2_test_helper::GzEncoder::new(Vec::new(), flate2_test_helper::Compression::default());
+        let mut encoder = flate2_test_helper::GzEncoder::new(
+            Vec::new(),
+            flate2_test_helper::Compression::default(),
+        );
         encoder.write_all(plaintext).unwrap();
         let gz_bytes = encoder.finish().unwrap();
 

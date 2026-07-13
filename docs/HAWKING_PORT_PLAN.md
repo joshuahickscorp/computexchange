@@ -1,3 +1,4 @@
+<!-- CLAIM-SCOPE: internal-engineering-non-authoritative -->
 # Hawking continuous-batch scheduler — port plan
 
 > The plan-of-record for porting the founder's Hawking continuous-batching scheduler as

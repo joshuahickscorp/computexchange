@@ -42,7 +42,8 @@ func TestSupplierReliabilityView(t *testing.T) {
 	ensureExtraDemoSuppliers(t, ctx)
 
 	// A second worker on the SECOND supplier, so task outcomes attribute to two
-	// distinct suppliers (task completion is keyed by tasks.worker_id -> supplier).
+	// distinct suppliers (task completion is keyed by frozen
+	// tasks.execution_supplier_id, never a mutable worker lookup).
 	worker2 := uuid.New()
 	if _, err := itPool.Exec(ctx,
 		`INSERT INTO workers (id, supplier_id, hw_class, memory_gb, last_seen_at, version)
@@ -69,8 +70,10 @@ func TestSupplierReliabilityView(t *testing.T) {
 	}
 	mkTask := func(jobID, worker uuid.UUID, status string) {
 		if _, err := itPool.Exec(ctx,
-			`INSERT INTO tasks (id, job_id, worker_id, status, input_ref, result_key, chunk_index)
-			 VALUES ($1,$2,$3,$4,'in','out',0)`,
+			`INSERT INTO tasks (id,job_id,worker_id,status,input_ref,result_key,chunk_index,
+			                    execution_worker_id,execution_supplier_id,execution_hw_class,execution_engine,execution_build_hash)
+			 SELECT $1,$2,$3,$4,'in','out',0,w.id,w.supplier_id,w.hw_class,w.engine,w.build_hash
+			   FROM workers w WHERE w.id=$3`,
 			uuid.New(), jobID, worker, status); err != nil {
 			t.Fatal(err)
 		}
@@ -423,6 +426,8 @@ func TestNoPeerWatchdogRequeuesWedgedTask(t *testing.T) {
 			peer, demoSupplier2UUID); err != nil {
 			t.Fatal(err)
 		}
+		replaceWorkerAuthorizationsForTest(t, ctx, peer,
+			[2]string{"embed", "all-minilm-l6-v2"})
 		taskID := insertWedgedTask(t, ctx, "embed", "all-minilm-l6-v2", demoWorkerUUID)
 
 		before := metrics.noPeerRequeues.Load()
@@ -468,6 +473,8 @@ func insertStragglerFixture(t *testing.T, ctx context.Context, jobType, modelRef
 		peer, demoSupplier2UUID, jobType, modelRef); err != nil {
 		t.Fatal(err)
 	}
+	replaceWorkerAuthorizationsForTest(t, ctx, peer,
+		[2]string{jobType, modelRef})
 	jobID := uuid.New()
 	if _, err := itPool.Exec(ctx,
 		`INSERT INTO jobs (id, buyer_id, status, job_type, model_ref, input_ref, tier, task_count, tasks_done, min_memory_gb)
@@ -475,13 +482,16 @@ func insertStragglerFixture(t *testing.T, ctx context.Context, jobType, modelRef
 		jobID, demoBuyerUUID, jobType, modelRef); err != nil {
 		t.Fatal(err)
 	}
+	economicPlan := installRawFixtureEconomicPlan(t, ctx, jobID, 1, 1)
 	taskID := uuid.New()
 	// started_at just past hedgeAfter (a straggler), but well within coldModelLoadAllowance.
 	startedAt := time.Now().Add(-hedgeAfter - 5*time.Second)
 	if _, err := itPool.Exec(ctx,
-		`INSERT INTO tasks (id, job_id, status, worker_id, claimed_by, claimed_at, started_at, input_ref, result_key, chunk_index, visible_at)
-		 VALUES ($1,$2,'running',$3,$3,$4,$4,'in','out',0,$4)`,
-		taskID, jobID, demoWorkerUUID, startedAt); err != nil {
+		`INSERT INTO tasks (id, job_id, status, worker_id, claimed_by, claimed_at, started_at, input_ref, result_key, chunk_index, visible_at,
+		                    economic_buyer_charge_usd,economic_supplier_payout_usd)
+		 VALUES ($1,$2,'running',$3,$3,$4,$4,'in','out',0,$4,$5,$6)`,
+		taskID, jobID, demoWorkerUUID, startedAt,
+		economicPlan.BuyerChargePerTaskUSD, economicPlan.SupplierPayoutPerTaskUSD); err != nil {
 		t.Fatal(err)
 	}
 	if holderWarm {

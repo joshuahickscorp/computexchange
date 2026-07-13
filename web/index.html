@@ -1,7 +1,7 @@
 <!doctype html>
-<!-- computexchange · the public page · a verified spot market for compute.
-     Every factual sentence traces to a path:line receipt in docs/SITE-CLAIMS.md
-     (scope audit: docs/SITE-REBUILD-T0.md). DESKTOP-ONLY: under 900px the page is a
+<!-- computexchange · development-preview page, not a launch or market attestation.
+     Current claim state comes from proof/5x5-gates.json and source-bound artifacts;
+     docs/SITE-CLAIMS.md is historical only. DESKTOP-ONLY: under 900px the page is a
      hand-off screen that sends the link to a Mac. The hero is a LIVE Three.js scene
      of the two devices (oracles.glb, built by render/build_scene.py, same geometry as
      the Cycles stills); on WebGL failure it swaps to the Cycles still, which is the
@@ -19,11 +19,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>computexchange</title>
-<meta name="description" content="a verified spot market for compute · priced before you spend, verified before you pay · closed alpha">
+<meta name="description" content="development preview of a centrally coordinated batch-compute exchange · not a launch or market claim">
 <meta name="theme-color" content="#050505">
 <link rel="icon" href="/favicon.ico" sizes="any">
 <meta property="og:title" content="computexchange">
-<meta property="og:description" content="a verified spot market for compute · priced before you spend, verified before you pay">
+<meta property="og:description" content="development preview · local contracts exist; market, money, hardware, and distribution proof remain open">
 <meta property="og:image" content="https://computexchange.net/assets/site/og-image.png">
 <meta property="og:type" content="website">
 <link rel="preload" href="/assets/site/fonts/geist-mono.woff2" as="font" type="font/woff2" crossorigin>
@@ -243,6 +243,7 @@
   .live .beat-arrival{justify-content:flex-end;padding-bottom:12vh}
   .live .beat-arrival .field{margin-left:70%}
   .live .beat-spark .field{margin-left:65%}
+  .live .beat-rig .field{margin-left:60%}             /* the rig is wide · hold the copy right */
   .live .beat-how{justify-content:flex-start;padding-top:12vh}
   .live .beat-how .field{margin-left:53%}             /* the console runs wide */
   .live .beat-earn{justify-content:flex-end;padding-bottom:12vh}
@@ -290,6 +291,7 @@
 <div class="site">
 <header class="masthead">
   <span class="mark"><img src="/assets/site/cx-mark-white.png" alt="Cx" width="24" height="24"><b>computexchange</b></span>
+  <span class="label">Development preview</span>
 </header>
 
 <div class="stage" id="stage">
@@ -306,9 +308,9 @@
   <section class="beat beat-arrival" data-beat="0">
     <div class="field"><div class="reveal">
       <span class="beat-index label">01 <b>· arrival</b></span>
-      <p class="thesis">a verified spot market for compute</p>
-      <p class="ash-line">inference · embeddings · transcription · priced before you spend, verified before you pay</p>
-      <p class="ash-line">no sign-in screen · the device provisions itself · a payment method is the only credential you connect</p>
+      <p class="thesis">a development-stage exchange implementation</p>
+      <p class="ash-line">Current advertised runtime projection: Candle/Metal on Apple Silicon only · exact supported job/model cells come from the runtime matrix.</p>
+      <p class="ash-line">No live-money, market-liquidity, signed-distribution, or physical-fleet claim. The demo and local validators are prerequisites, not product proof.</p>
     </div></div>
   </section>
 
@@ -317,7 +319,7 @@
     <div class="field"><div class="reveal">
       <span class="beat-index label">02 <b>· the studio</b></span>
       <h2 class="display">Studio</h2>
-      <p class="ash-line">apple silicon on metal · the verified market work runs on the gpu by default, from a machine you already own</p>
+      <p class="ash-line">apple silicon on metal · this is the only currently advertised production runtime projection; physical fleet and sustained-performance gates remain open</p>
     </div></div>
   </section>
 
@@ -326,14 +328,23 @@
     <div class="field"><div class="reveal">
       <span class="beat-index label">03 <b>· the spark</b></span>
       <h2 class="display">Spark</h2>
-      <p class="ash-line">nvidia on cuda · the same verified work with more headroom, plus a locked-down container lane only a cuda host can run</p>
+      <p class="ash-line">nvidia on cuda · experimental benchmark and sandbox work exists, but CUDA supply is not currently advertised as production</p>
     </div></div>
   </section>
 
-  <!-- 04 · how it works · the instrument, wide · side by side on the left -->
-  <section class="beat beat-how" data-beat="3">
+  <!-- 04 · the rig · the six-card exposed rig, alone in frame -->
+  <section class="beat beat-rig" data-beat="3">
+    <div class="field"><div class="reveal">
+      <span class="beat-index label">04 <b>· the rig</b></span>
+      <h2 class="display">Rig</h2>
+      <p class="ash-line">six RTX 5090 cards mounted edge-out · a reference chassis modeled for the exposed-edge display, not a deployed or advertised physical fleet</p>
+    </div></div>
+  </section>
+
+  <!-- 05 · how it works · the instrument, wide · side by side on the left -->
+  <section class="beat beat-how" data-beat="4">
     <div class="field">
-      <span class="beat-index label reveal">04 <b>· how it works</b></span>
+      <span class="beat-index label reveal">05 <b>· how it works</b></span>
       <div class="console">
         <div class="row reveal"><span class="lens" aria-hidden="true"></span><span class="k">drop</span>
           <span class="stmt">drop a workload · the pipeline is detected</span><span class="state">detected</span></div>
@@ -344,19 +355,21 @@
         <div class="row reveal"><span class="lens" aria-hidden="true"></span><span class="k">audit</span>
           <span class="stmt">honeypot known-answer tasks · N-way majority votes</span><span class="state">0.25 floor</span></div>
         <div class="row reveal"><span class="lens" aria-hidden="true"></span><span class="k">payout</span>
-          <span class="stmt">payouts are real Stripe Connect transfers</span><span class="state">3% take</span></div>
+          <span class="stmt">Stripe Connect transfer code exists; a real charge, payout, fee, refund or reversal, and reconciliation remain unproven</span><span class="state">external gate</span></div>
         <div class="row reveal"><span class="lens green" aria-hidden="true"></span><span class="k">proof</span>
-          <span class="stmt">results come back verified · every run ends in a receipt</span><span class="state">184 / 184 pass</span></div>
+          <span class="stmt">source-bound local contracts cover narrow mechanisms; unchecked chunks, physical hardware, money, and market outcomes stay explicitly open</span><span class="state">see 5x5 registry</span></div>
       </div>
       <div class="console receipts-block">
         <div class="row reveal"><span class="lens" aria-hidden="true"></span><span class="k">backends</span>
-          <span class="stmt">one candle in pure rust · metal by default on apple silicon, cuda as a build flag on nvidia</span><span class="state">both</span></div>
+          <span class="stmt">Candle/Metal on Apple Silicon is the current advertised projection; a CUDA build flag and old benchmarks do not create production CUDA supply</span><span class="state">metal only</span></div>
         <div class="row reveal"><span class="lens" aria-hidden="true"></span><span class="k">executors</span>
           <span class="stmt">embeddings, inference, transcription, classification, extraction, rerank · classification and extraction are real llama passes</span><span class="state">six verified</span></div>
         <div class="row reveal"><span class="lens" aria-hidden="true"></span><span class="k">headroom</span>
-          <span class="stmt">the 7b batch model is gated by a 40gb memory floor, not the backend · our candle backend's batched-vs-serial decode is about 1.5x on an m3 pro, up to 9.6x on an a100</span><span class="state">by memory</span></div>
+          <span class="stmt">memory floors and historical benchmark observations are development inputs; current physical apples-to-apples, thermal, and buyer-workload gates remain open</span><span class="state">evidence pending</span></div>
         <div class="row reveal"><span class="lens" aria-hidden="true"></span><span class="k">sandbox</span>
           <span class="stmt">your own container in a locked-down gpu sandbox · cuda-only, no network, read-only root, a hard timeout · reputation-trusted</span><span class="state">road ahead</span></div>
+        <div class="row reveal"><span class="lens" aria-hidden="true"></span><span class="k">rig</span>
+          <span class="stmt">a six-card RTX 5090 reference rig is modeled edge-out for the exposed-side display · no physical multi-GPU fleet is deployed or advertised as supply</span><span class="state">render only</span></div>
       </div>
       <div class="receipts-line reveal">
         <button class="receipts-btn" id="open-receipts">the full ledger</button>
@@ -364,33 +377,33 @@
     </div>
   </section>
 
-  <!-- 05 · the price monument · flush-left, bleeding off the right edge, on a plinth -->
-  <section class="beat beat-price" data-beat="4">
+  <!-- 06 · the price monument · flush-left, bleeding off the right edge, on a plinth -->
+  <section class="beat beat-price" data-beat="5">
     <div class="monument reveal">
       <span class="cap-top label">embeddings</span>
       <p class="fig"><span class="dollar">$</span><span class="price">0.001</span></p>
       <div class="plinth"></div>
-      <span class="cap-bot label">usd · per 1,000 units · <span class="proof">verified</span></span>
+      <span class="cap-bot label">usd · per 1,000 units · catalogue price, not a competitive-price or margin claim</span>
     </div>
   </section>
 
-  <!-- 06 · earn -->
-  <section class="beat beat-earn" data-beat="5">
+  <!-- 07 · earn -->
+  <section class="beat beat-earn" data-beat="6">
     <div class="field"><div class="reveal">
-      <span class="beat-index label">06 <b>· earn</b></span>
+      <span class="beat-index label">07 <b>· earn</b></span>
       <h2 class="display display-max">earn</h2>
       <div class="earn">
         <img src="/assets/site/knob-off@3x.png" alt="" loading="lazy" width="104" height="104">
-        <p class="lede">flip your device online and it earns while it idles · quiet hours are enforced on the device itself</p>
+        <p class="lede">the agent can contribute eligible work while enabled · real supplier earnings and net hourly value have not been demonstrated</p>
       </div>
       <p class="road"><a href="/demo">try the buyer console at /demo</a> · no install, same-origin, runs the same job pipeline as the API</p>
     </div></div>
   </section>
 
-  <!-- 07 · release / download -->
-  <section class="beat beat-release download" data-beat="6">
+  <!-- 08 · release / download -->
+  <section class="beat beat-release download" data-beat="7">
     <div class="field"><div class="reveal">
-      <span class="beat-index label">07 <b>· release</b></span>
+      <span class="beat-index label">08 <b>· release</b></span>
       <h2 class="display">download</h2>
       <span class="flag label">closed alpha</span>
       <p>There is no public download yet. The supplier agent installs with one command from the alpha build · the macOS menu bar app builds today, and the notarized public release is the next step.</p>
@@ -405,7 +418,7 @@
         <button type="submit" class="hand-key">request access</button>
       </form>
       <p id="alpha-status" class="road" aria-live="polite"></p>
-      <p class="road">the verified catalogue ships today · a metered general-compute lane for opaque GPU-second work like simulation and rendering runs your own container in a sandbox, and is the road ahead</p>
+      <p class="road">the development catalogue is not public distribution · a metered general-compute lane remains road-ahead work</p>
     </div></div>
   </section>
 </main>
@@ -421,20 +434,20 @@
       <span class="title">computexchange · claims ledger</span>
       <button class="close" id="close-receipts">close</button>
     </div>
-    <div class="ledger-stat"><span><b>184</b> pass</span><span>0 skip</span><span>0 fail</span><span class="gen">make prove-local · proven 2026-07-05T20:36:46Z · f8dc90d6c22d</span></div>
-    <div class="claim"><span class="k">proof</span><span class="v">make prove-local · <b>184 pass · 0 skip · 0 fail</b> · a matrix-only run, tallied by grep over its own ledger · proven 2026-07-05T20:36:46Z · f8dc90d6c22d</span></div>
+    <div class="ledger-stat"><span><b>development</b> preview</span><span>no static proof counter</span><span class="gen">current state: proof/5x5-gates.json</span></div>
+    <div class="claim"><span class="k">proof</span><span class="v">Only a terminally passing ledger whose source fingerprint matches the current source may support a narrow local contract claim. Local tests do not establish market, live-money, physical-fleet, legal, or production-SLO outcomes.</span></div>
     <div class="claim"><span class="k">queue</span><span class="v">the job queue is a plain Postgres table claimed with FOR UPDATE SKIP LOCKED · no Kafka, RabbitMQ, NATS, or Redis in the dependency tree</span></div>
     <div class="claim"><span class="k">binaries</span><span class="v">two binaries at the core · a Rust supplier agent and a Go control plane · the buyer CLI and macOS menu bar app are optional layers on top</span></div>
-    <div class="claim"><span class="k">executors</span><span class="v">six verified executors ship today · embeddings, batch inference, transcription, classification, extraction, rerank · real Candle in pure Rust, Metal by default on Apple Silicon, CUDA as a build flag</span></div>
+    <div class="claim"><span class="k">executors</span><span class="v">the current generated projection contains seven exact job/model cells on Candle/Metal for Apple Silicon · build flags, stubs, soak-only lanes, and pending models are excluded from advertised supply</span></div>
     <div class="claim"><span class="k">general compute</span><span class="v">the sandbox that runs your own container is built and hardened · no network, read-only root, all capabilities dropped, non-root, a hard timeout · reputation-trusted, not output-verified, and CUDA-only · Linux with Docker and the NVIDIA Container Toolkit · metering it per GPU-second and opening the lane is the road ahead</span></div>
     <div class="claim"><span class="k">scheduler</span><span class="v">tasks are sized for a 45 second runtime target · five hard filters gate every claim · quiet hours are enforced by the agent on the device itself</span></div>
     <div class="claim"><span class="k">verification</span><span class="v">honeypot known-answer tasks, within-class redundancy, N-way majority votes · a 0.25 audit floor, so even the most trusted supplier is spot-checked about one task in four · a failed honeypot docks reputation, claws back the credit, and quarantines the supplier</span></div>
     <div class="claim"><span class="k">quote</span><span class="v">a quote before any spend at POST /v1/quote · the max_usd cap set at submission is enforced at dispatch, pausing the job before the cap is breached · $0.002 per 1,000 units of Llama 3.2 1B, from $0.004 per audio minute of Whisper</span></div>
-    <div class="claim"><span class="k">payouts</span><span class="v">credits are held, then released against a real transfer reference or marked ready when owed · a read-only pass reconciles against Stripe every 15 minutes and never moves money · the platform take defaults to 3%</span></div>
-    <div class="claim"><span class="k">api</span><span class="v">an OpenAI-compatible Batch API at /v1/files and /v1/batches · the Python SDK is one file and imports only the standard library</span></div>
-    <div class="claim"><span class="k">rails</span><span class="v">payouts are real Stripe Connect transfers when the key is configured · an unconfigured deployment keeps credits marked owed and never fakes a paid transfer</span></div>
-    <div class="claim"><span class="k">identity</span><span class="v">there is no sign-in screen · on first use the console silently provisions a device-local account, and the only credential a person ever connects by hand is a payment method</span></div>
-    <p class="ledger-foot">every sentence above traces to a path and line in the source tree · the ledger is <span class="path">docs/SITE-CLAIMS.md</span> · what could not be evidenced was not softened, it was killed</p>
+    <div class="claim"><span class="k">payouts</span><span class="v">held-credit, transfer, and reconciliation code exists; no real charge, supplier payout, processor fee, refund or reversal has been accepted as evidence.</span></div>
+    <div class="claim"><span class="k">api</span><span class="v">an OpenAI-shaped Batch API subset exists at /v1/files and /v1/batches · synchronous and streaming inference compatibility are absent.</span></div>
+    <div class="claim"><span class="k">rails</span><span class="v">configured Stripe code is not proof that money moved. Production-money evidence remains an external gate.</span></div>
+    <div class="claim"><span class="k">identity</span><span class="v">the browser demo can provision a local account silently; complete buyer recovery, export, deletion, and stranger activation remain open.</span></div>
+    <p class="ledger-foot">current claim state is generated from <span class="path">proof/5x5-gates.json</span> and source-bound artifacts · the old line-number ledger is historical only</p>
   </div>
 </dialog>
 </div>
@@ -459,8 +472,8 @@
   // smoothed viewFrac the engine hands back, so the copy moves with the camera's momentum.
   const warp = [document.querySelector('.beats'), document.querySelector('footer')].filter(Boolean);
   let isLive = false, lastView = 0;
-  // index + 6 flow rows + 4 receipt rows + the ledger button = 12 staggered reveals · ~60pct overlap
-  const HOW_GATE = [0.10, 0.16, 0.23, 0.29, 0.36, 0.42, 0.48, 0.55, 0.61, 0.67, 0.74, 0.80];
+  // index + 6 flow rows + 5 receipt rows (incl. the rig) + the ledger button = 13 staggered reveals · ~60pct overlap
+  const HOW_GATE = [0.10, 0.16, 0.22, 0.28, 0.34, 0.40, 0.46, 0.52, 0.58, 0.63, 0.69, 0.74, 0.80];
   const GATE_W = 0.16;
   function setRev(el, o) { el.style.opacity = o; el.style.transform = o > 0.999 ? 'none' : 'translateY(' + ((1 - o) * 12).toFixed(2) + 'px)'; }
 
@@ -499,7 +512,7 @@
     for (const m of metrics) {
       const centerInVp = m.center - vy;
       const align = clamp(1 - (Math.abs(centerInVp - mid) / vh - 0.14) / 0.5, 0, 1);
-      if (m.idx === 3) {   // how · the console rows stagger (beat 4 of 7)
+      if (m.idx === 4) {   // how · the console rows stagger (beat 5 of 8)
         const top = centerInVp - m.h / 2;
         const ep = clamp((vh * 0.86 - top) / (vh * 0.92), 0, 1);
         for (let i = 0; i < m.revs.length; i++) {

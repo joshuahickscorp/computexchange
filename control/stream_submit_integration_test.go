@@ -113,7 +113,7 @@ func TestLargeSubmissionStreamsWithoutFullBuffering(t *testing.T) {
 	start := time.Now()
 	body := map[string]any{
 		"job_type":     map[string]any{"type": "embed"},
-		"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"model":        map[string]any{"kind": "hf", "ref": "all-minilm-l6-v2"},
 		"params":       map[string]any{"split_size": 256},
 		"constraints":  map[string]any{"min_memory_gb": 2},
 		"verification": map[string]any{"redundancy_frac": 0, "honeypot_frac": 0, "skip_verification_floor": true},
@@ -180,7 +180,7 @@ func TestLargeSubmissionStreamsWithoutFullBuffering(t *testing.T) {
 // over a small TEST-scoped override of the real cap (env var, see main.go/
 // resolveInput's requestBodyLimit) would require reworking a constant into a
 // var for one test — instead this proves the mechanism directly by exercising
-// the deployed 2 GiB constant is honored: a real net/http client streams a body
+// the deployed decoder-safe constant is honored: a real net/http client streams a body
 // larger than the cap and MUST see the connection closed / a 413, and the
 // control-plane process (this test binary) must still be alive and answering
 // requests immediately afterward — the "never crash the process" half of the
@@ -192,9 +192,9 @@ func TestOversizedSubmitRejectedCleanly(t *testing.T) {
 	// without ever fully buffering it in THIS test either — an io.Reader that
 	// synthesizes bytes on demand, so proving the 413 doesn't itself require
 	// allocating gigabytes in the test process.
-	over := int64(maxJobSubmitBodyBytes) + (16 << 20) // cap + 16 MiB, comfortably over
+	over := int64(maxJobSubmitBodyBytes) + (1 << 20) // cap + 1 MiB, comfortably over
 	body := io.MultiReader(
-		strings.NewReader(`{"job_type":{"type":"embed"},"model":{"kind":"gguf","ref":"all-minilm-l6-v2"},"constraints":{"min_memory_gb":2},"tier":"batch","input":"`),
+		strings.NewReader(`{"job_type":{"type":"embed"},"model":{"kind":"hf","ref":"all-minilm-l6-v2"},"constraints":{"min_memory_gb":2},"tier":"batch","input":"`),
 		io.LimitReader(zeroFiller{}, over),
 	)
 	r, err := http.NewRequest("POST", itHTTP.URL+"/v1/jobs", body)

@@ -59,6 +59,16 @@ candle-nn = "0.10"
 candle-transformers = "0.10"
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 hf-hub = { version = "0.5", default-features = false, features = ["ureq", "rustls-tls"] }
+# CX-owned lossless speculative-decode core and rolling n-gram proposer. The
+# default feature set is pure Rust, so the agent remains the sole owner of its
+# Candle/device stack and we do not compile a second copy of Candle here.
+token-spec-poc = { path = "../token-spec-poc" }
+# Default-off bridge from completed, target-authoritative Candle speculation
+# observations into the canonical cross-modality receipt. Keeping this optional
+# prevents the common receipt crate (and its serde feature set) from changing the
+# ordinary production binary until a durable, independently verified artifact
+# binding exists.
+cx-spec-engine = { path = "../spec-engine", optional = true }
 hound = "3.5"
 # Raw Metal kernel dispatch for the Hawking continuous-batch multi-seq decode
 # port (hawking_metal_kernel.rs, docs/HAWKING_PORT_PLAN.md week 2). Same exact
@@ -96,6 +106,13 @@ metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal", "d
 # runners call models::device() and are device-agnostic, so this is a device
 # branch, not a rewrite.
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+# Receipt/conformance seam only. This does not enable speculative inference,
+# route a request, attach a receipt to a result, or change settlement behavior.
+spec-receipt-bridge = ["dep:cx-spec-engine"]
+# Device-free integration proof for the resident scheduler plus ragged speculative
+# transaction layer. It remains unrouted and non-billable, but compiling it behind
+# an explicit feature keeps the consolidation seam from silently rotting.
+resident-spec-shadow = []
 
 [dev-dependencies]
 # Only used by the test that proves gzip Accept-Encoding negotiation actually
@@ -108,3 +125,11 @@ flate2 = "1"
 lto = true
 codegen-units = 1
 strip = true
+
+# Keep the Q4_K split-K and skinny-M experiments below Candle's public QTensor
+# API. The patched crate is Candle 0.10.2 plus the opt-in, batch-1, M=2..5
+# Metal dispatches documented in vendor/candle-metal-kernels/CX_PROVENANCE.md.
+# Because candle-core resolves this same package, its existing qmatmul call site
+# automatically reaches the patched kernel without a candle-core fork.
+[patch.crates-io]
+candle-metal-kernels = { path = "vendor/candle-metal-kernels" }

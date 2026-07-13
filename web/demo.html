@@ -4,11 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>computexchange</title>
-<link rel="icon" href="favicon.ico" sizes="any">
-<link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
-<link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
-<link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
-<link rel="manifest" href="site.webmanifest">
+<link rel="icon" href="/favicon.ico" sizes="any">
 <meta name="theme-color" content="#060606">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -387,9 +383,8 @@
   .cardmount-err{font-size:12px;line-height:1.6;color:var(--red-core);margin:12px 0 0;display:none}
   .cardmount-err.show{display:block}
 
-  /* ===== SUPPLIER ONBOARDING (Settings · payout): capture tax_id + tax_country, open the
-     Stripe Connect account-link in a new tab, and render connect_status / payouts_enabled /
-     tax_on_file with anodized pips. Honest 503 when STRIPE is unset · never a faked connection. */
+  /* ===== SUPPLIER ONBOARDING (Settings · payout): open Stripe-hosted Connect, where
+     identity, KYC, and tax details are collected. CX stores none of those plaintext fields. */
   .sup-field{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 2px;border-top:1px solid var(--hair-soft)}
   .sup-field:first-of-type{border-top:none}
   .sup-field .sl{color:var(--bone);font-size:13px}
@@ -438,6 +433,9 @@
 </style>
 </head>
 <body>
+<!-- Development simulation. Static runs and earnings are illustrative; this page
+     is not evidence of live money, supplier payouts, public availability, or a
+     completed buyer lifecycle. -->
 <div class="splash" id="splash">
   <div class="mark"><img src="assets/cx-mark-white.png" alt="computexchange"></div>
 </div>
@@ -454,9 +452,10 @@
       <button class="bell" id="bell" aria-label="Notifications"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6"/><path d="M10 19a2 2 0 0 0 4 0"/></svg><span class="badge hide" id="badge"></span></button>
     </div>
     <div class="notif" id="notif"></div>
+    <div class="banner card" style="display:block"><span><strong>Development simulation.</strong> Static runs and earnings are illustrative; connected-server actions still require separately proven credentials, money rails, runtime supply, and receipts.</span></div>
 
     <section class="view on" id="v-launch">
-      <div class="banner card" id="setup" hidden><span>Connect a payment method to run real jobs. It is the only thing we verify · no account, no password.</span><button class="cx-key is-armed" id="add-payment" aria-label="Add payment"><img class="cx-key-metal" src="assets/btn-add-payment-shell@3x.png" alt=""><span class="cx-key-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="5" width="19" height="14" rx="2.5"/><path d="M2.5 9.5h19"/></svg></span></button></div>
+      <div class="banner card" id="setup" hidden><span>A configured server may require a payment method for chargeable jobs. The browser creates an account behind the demo; account recovery and live-money proof are separate gates.</span><button class="cx-key is-armed" id="add-payment" aria-label="Add payment"><img class="cx-key-metal" src="assets/btn-add-payment-shell@3x.png" alt=""><span class="cx-key-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="5" width="19" height="14" rx="2.5"/><path d="M2.5 9.5h19"/></svg></span></button></div>
       <div class="intake" id="intake">
         <input type="file" id="file" hidden>
         <svg class="intake-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h3.5l2 2H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
@@ -613,7 +612,11 @@
   var intake=$('intake'),intakeText=$('intake-text'),btn=$('launch'),jobs=$('jobs'),pipePreview=$('pipePreview');
   var RERUN='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2 5"/><path d="M20 5v6h-6"/></svg>';
   var project=null, curQuote=null, liveFile=null, fileEl=$('file');
-  function refreshArm(){var ok=!!project;btn.disabled=!ok;btn.classList.toggle('is-armed',ok);}
+  function launchableProject(){
+    return !!(project&&project.supported!==false&&project.stages&&project.stages.length&&
+      (!isLive()||project.serverConfirmed===true));
+  }
+  function refreshArm(){var ok=launchableProject();btn.disabled=!ok;btn.classList.toggle('is-armed',ok);}
   function fmtN(n){return n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?Math.round(n/1e3)+'k':''+n;}
   function fmtBytes(b){return b>=1e9?(b/1e9).toFixed(1)+' GB':b>=1e6?Math.round(b/1e6)+' MB':Math.max(1,Math.round(b/1e3))+' KB';}
   function quoteStr(q){return q==null?'metered · GPU-second':'~$'+q.toFixed(2);}
@@ -668,19 +671,28 @@
     renderPipeline(pl.stages);
     refreshArm();
   }
-  function localPipeline(name){var pl=pipelineFor(name); pl.pattern=pl.pattern+' · offline guess'; return pl;}
+  function localPipeline(name){
+    var pl=pipelineFor(name);
+    pl.pattern=pl.pattern+' · offline guess';
+    pl.supported=true;
+    pl.serverConfirmed=false;
+    return pl;
+  }
   function serverDetect(file){
     return fetch('/v1/intake',{method:'POST',headers:{'Authorization':'Bearer '+liveKey,'Content-Type':'application/json'},
         body:JSON.stringify({files:[{path:file.name,size:file.size}]})})
       .then(function(res){return res.ok?res.json():null;})
       .then(function(j){
         var p=j&&j.pipeline;
-        if(p&&p.supported&&p.stages&&p.stages.length){
-          return {pattern:p.pattern, supported:true,
-                  stages:p.stages.map(function(s){return {op:s.op,model:s.model,label:s.detail||s.op};})};
+        if(p&&p.supported&&p.launchable&&p.stages&&p.stages.length){
+          return {pattern:p.pattern, supported:true, serverConfirmed:true,
+                  stages:p.stages.map(function(s){return {op:s.op,model:s.model,label:s.detail||s.op,from:s.from||'input'};})};
         }
-        // Show the server's HONEST verdict (unsupported), never a prettier local guess.
-        return {pattern:(p&&p.pattern?p.pattern:'unknown')+' · not supported by server', supported:false, stages:[]};
+        // Show the server's HONEST verdict (unsupported or not launchable), never a
+        // prettier local guess that could arm a paid action.
+        var why=(p&&p.reason)||((p&&p.supported)?'recognized but not launchable':'not supported');
+        return {pattern:(p&&p.pattern?p.pattern:'unknown')+' · '+why, supported:false,
+                serverConfirmed:true, stages:[]};
       });
   }
   function detectFile(file){
@@ -783,7 +795,7 @@
     },360);
   }
   btn.addEventListener('click',function(){
-    if(btn.disabled||!project)return;
+    if(btn.disabled||!launchableProject())return;
     var pl=project, name=((pl.name||'pipeline').split('/').pop().replace(/\.[^.]+$/,''))||'pipeline';
     btn.disabled=true; btn.classList.remove('is-armed');
     ensureDeviceKey().then(function(){
@@ -1144,65 +1156,54 @@
     });
   }
 
-  // ---- SUPPLIER ONBOARDING (Settings · payout): capture tax_id + tax_country, POST them to
-  //      /v1/supplier/onboard for a Stripe Connect account-link (opened in a new tab), and read
-  //      GET /v1/supplier/status -> {connect_status, payouts_enabled, tax_on_file} as anodized
-  //      pips. STRIPE unset -> honest 503, surfaced plainly · a connection is never faked. ----
+  // ---- SUPPLIER ONBOARDING (Settings · payout): the authenticated account is the identity
+  //      boundary. CX sends an empty object to /v1/supplier/onboard and Stripe Connect collects
+  //      identity, KYC, and tax data on its hosted page. No email or tax identifier crosses this UI. ----
   var supplierEl=$('supplier');
   function renderSupplier(){
     if(!supplierEl)return;
     if(!isLive()){
       supplierEl.innerHTML='<div class="row"><span class="l"><span class="pip idle"></span>Stripe Connect</span><span class="r-meta">connect to a server to onboard for payouts</span></div>'
-        +'<p class="set-note warn">Onboarding opens a Stripe Connect account-link · provide a tax ID and country, then finish in the new tab.</p>';
-      return;
-    }
-    var em=cxEmail();
-    if(!em){
-      supplierEl.innerHTML='<div class="row"><span class="l"><span class="pip idle"></span>Stripe Connect</span><span class="r-meta">device account required to onboard for payouts</span></div>';
+        +'<p class="set-note warn">Onboarding opens Stripe Connect, which collects payout identity and tax details.</p>';
       return;
     }
     supplierEl.innerHTML='<p class="set-note">Loading payout status…</p>';
-    fetch('/v1/supplier/status?email='+encodeURIComponent(em),{headers:authHeaders(false)}).then(function(res){
+    fetch('/v1/supplier/status',{headers:authHeaders(false)}).then(function(res){
       return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});
     }).then(function(r){
       var j={};try{j=JSON.parse(r.t);}catch(e){}
-      supplierEl.innerHTML=supplierStatusHTML(r.ok?j:null,r.ok?null:String((j&&j.error)||r.status))+supplierFormHTML(r.ok?j:null);
+      // A fresh account has no supplier row until it chooses to onboard; that 404 is
+      // a valid "none" state, not a red operational failure.
+      var s=r.ok?j:(r.status===404?{connect_status:'none',payouts_enabled:false}:null);
+      supplierEl.innerHTML=supplierStatusHTML(s,(r.ok||r.status===404)?null:String((j&&j.error)||r.status))+supplierFormHTML(s);
       wireSupplier();
     }).catch(function(e){
       supplierEl.innerHTML='<p class="set-note warn">Network error loading payout status · '+esc(e.message)+'</p>'+supplierFormHTML(null);
       wireSupplier();
     });
   }
-  // Honest tri-state pips. connect_status drives the connect pip (green only when 'complete';
-  // 'pending'/'restricted' stay idle); payouts_enabled + tax_on_file each get their own line.
+  // Honest tri-state pips. The server contract is exactly none | pending | enabled.
   function supplierStatusHTML(s,errMsg){
     if(errMsg)return '<div class="row"><span class="l"><span class="pip red"></span>Stripe Connect</span><span class="r-meta">'+esc(errMsg)+'</span></div>';
-    var cs=(s&&s.connect_status)||'not_started';
-    var csPip=cs==='complete'?'pip':cs==='restricted'||cs==='rejected'?'pip red':'pip idle';
-    var payouts=!!(s&&s.payouts_enabled), tax=!!(s&&s.tax_on_file);
+    var cs=(s&&s.connect_status)||'none';
+    var csPip=cs==='enabled'?'pip':'pip idle';
+    var payouts=!!(s&&s.payouts_enabled);
     return '<div class="row"><span class="l"><span class="'+csPip+'"></span>Stripe Connect</span><span class="r-meta num">'+esc(cs)+'</span></div>'
-      +'<div class="row"><span class="l"><span class="'+(payouts?'pip':'pip idle')+'"></span>Payouts</span><span class="r-meta">'+(payouts?'enabled':'not enabled yet')+'</span></div>'
-      +'<div class="row"><span class="l"><span class="'+(tax?'pip':'pip idle')+'"></span>Tax on file</span><span class="r-meta">'+(tax?'on file':'not provided')+'</span></div>';
+      +'<div class="row"><span class="l"><span class="'+(payouts?'pip':'pip idle')+'"></span>Payouts</span><span class="r-meta">'+(payouts?'enabled':'not enabled yet')+'</span></div>';
   }
   function supplierFormHTML(s){
-    var done=!!(s&&s.connect_status==='complete');
+    var done=!!(s&&s.connect_status==='enabled');
     var cta=done
       ? '<button class="mini" id="supOnboard">Manage payout account</button>'
       : '<button class="pill solid" id="supOnboard">Onboard for payouts</button>';
-    return '<div class="sup-field"><span class="sl">Tax ID</span><input id="supTaxId" class="sup-in" type="text" autocapitalize="off" spellcheck="false" placeholder="EIN / VAT / SSN" aria-label="Tax ID"></div>'
-      +'<div class="sup-field"><span class="sl">Tax country</span><input id="supTaxCountry" class="sup-in short" type="text" maxlength="2" autocapitalize="characters" spellcheck="false" placeholder="US" aria-label="Tax country (ISO 2-letter)"></div>'
-      +'<div style="margin-top:14px">'+cta+'</div>'
-      +'<p class="set-note">Opens a Stripe Connect account-link in a new tab. We never see your full tax ID · it goes straight to Stripe.</p>';
+    return '<div style="margin-top:14px">'+cta+'</div>'
+      +'<p class="set-note">Opens Stripe Connect in a new tab. Stripe collects identity, KYC, and tax details; CX does not receive those plaintext fields.</p>';
   }
   function wireSupplier(){
     var btnEl=$('supOnboard'); if(!btnEl)return;
     btnEl.addEventListener('click',function(){
-      var taxId=($('supTaxId')&&$('supTaxId').value||'').trim();
-      var taxCountry=($('supTaxCountry')&&$('supTaxCountry').value||'').trim().toUpperCase();
-      if(!taxId){toast('Enter your tax ID first');return;}
-      if(taxCountry.length!==2){toast('Tax country must be a 2-letter code, e.g. US');return;}
       btnEl.disabled=true;
-      fetch('/v1/supplier/onboard',{method:'POST',headers:authHeaders(true),body:JSON.stringify({email:cxEmail(),tax_id:taxId,tax_country:taxCountry})}).then(function(res){
+      fetch('/v1/supplier/onboard',{method:'POST',headers:authHeaders(true),body:'{}'}).then(function(res){
         return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});
       }).then(function(r){
         var j={};try{j=JSON.parse(r.t);}catch(e){}
@@ -1230,24 +1231,32 @@
   function qsKey(){return isLive()&&liveKey?liveKey:'cx_live_…';}
   function quickstartHTML(){
     var k=esc(qsKey());
-    var curl='<span class="cm"># embed three strings · same-origin /v1 API</span>\n'
-      +'curl https://compute.exchange/v1/embeddings \\\n'
+    var curl='<span class="cm"># submit an embedding batch through the native jobs API</span>\n'
+      +'curl https://computexchange.net/v1/jobs \\\n'
       +'  -H "Authorization: Bearer <span class="st">'+k+'</span>" \\\n'
       +'  -H "Content-Type: application/json" \\\n'
-      +'  -d \'{"model":"all-minilm-l6-v2",\n'
-      +'       "input":["first row","second row","third row"]}\'';
-    var py='<span class="cm"># pip install computeexchange</span>\n'
+      +'  -d \'{"job_type":{"type":"embed"},\n'
+      +'       "model":{"ref":"all-minilm-l6-v2"},\n'
+      +'       "constraints":{"min_memory_gb":0},\n'
+      +'       "verification":{"redundancy_frac":0,"honeypot_frac":0,"payout_hold_secs":0},\n'
+      +'       "tier":"batch",\n'
+      +'       "input":"{\\"text\\":\\"first row\\"}\\n{\\"text\\":\\"second row\\"}\\n{\\"text\\":\\"third row\\"}\\n",\n'
+      +'       "max_usd":0.10}\'';
+    var py='<span class="cm"># from a repository checkout</span>\n'
+      +'python -m pip install ./sdk/python\n\n'
       +'from computeexchange import Client\n\n'
-      +'client = Client(api_key=<span class="st">"'+k+'"</span>)\n'
+      +'client = Client("https://computexchange.net", <span class="st">"'+k+'"</span>)\n'
       +'res = client.embeddings(\n'
       +'    model="all-minilm-l6-v2",\n'
       +'    input=["first row", "second row", "third row"],\n'
       +')\n'
-      +'print(res.data[0].embedding[:5])';
-    var cli='<span class="cm"># brew install computexchange/tap/cx</span>\n'
+      +'print(res["data"][0]["embedding"][:5])';
+    var cli='<span class="cm"># build the checked-in CLI from a repository checkout</span>\n'
+      +'(cd cli &amp;&amp; go build -o ../cx .)\n'
       +'export CX_API_KEY=<span class="st">'+k+'</span>\n'
-      +'cx embed --model all-minilm-l6-v2 rows.txt\n'
-      +'cx jobs watch   <span class="cm"># follow it to done</span>';
+      +'export CX_API_URL=https://computexchange.net\n'
+      +'printf "%s\\n" \'{"text":"first row"}\' \'{"text":"second row"}\' &gt; rows.jsonl\n'
+      +'./cx submit --model all-minilm-l6-v2 --type embed --input rows.jsonl --wait';
     function pane(id,code){return '<div class="qs-pane'+(id===qsActiveTab?' on':'')+'" data-pane="'+id+'">'
       +'<div class="qs-snip"><button class="qs-copy" data-copy="'+id+'">Copy</button><pre class="qs-code">'+code+'</pre></div></div>';}
     function tab(id,label){return '<button class="qs-tab'+(id===qsActiveTab?' on':'')+'" data-tab="'+id+'">'+label+'</button>';}
@@ -1293,7 +1302,7 @@
     return text.split(/\r?\n/).filter(function(l){return l.trim();}).map(function(l){return JSON.stringify({text:l});}).join('\n');
   }
   function addRun(name,src,status){var run=el(runHTML(name,src,status));jobs.prepend(run);attach(run);return run;}
-  function rearm(){btn.disabled=!project;if(project)btn.classList.add('is-armed');}
+  function rearm(){refreshArm();}
   // Demo: walk the detected stages, lighting each as it runs then completes, then drop a run row.
   function runPipelineDemo(pl,name){
     var run=addRun(name,pl.stages.length+'-step · main@'+sha(),'running'),st=run.querySelector('.st');
@@ -1316,19 +1325,24 @@
     if(f.size>1000000){notify('Large file truncated','only the first 1 MB is sent in this demo');}
     f.slice(0,1000000).text().then(function(text){
       var inputJSONL=toJSONL(f.name,text)+'\n';
-      var spec=pl.stages.map(function(s,i){return {op:s.op,model:s.model,from:i===0?'input':'previous'};});
+      var spec=pl.stages.map(function(s){return {op:s.op,model:s.model,from:s.from||'input'};});
       // Item 5: NO paid launch without a quote. Price the pipeline first (/v1/quote/pipeline),
       // show the buyer the cost band, and require explicit confirmation; the confirmed
       // worst-case total is sent as max_usd so a launch can never exceed what was quoted.
       var qStages=pl.stages.map(function(s){return {op:s.op,model:s.model};});
       return fetch('/v1/quote/pipeline',{method:'POST',headers:{'Authorization':'Bearer '+liveKey,'Content-Type':'application/json'},
-          body:JSON.stringify({input:JSON.stringify(inputJSONL),tier:'batch',stages:qStages})})
-        .then(function(res){return res.ok?res.json():null;})
+          body:JSON.stringify({input:inputJSONL,tier:'batch',stages:qStages})})
+        .then(function(res){return res.text().then(function(t){return{ok:res.ok,status:res.status,t:t};});})
+        .then(function(r){
+          var q={};try{q=JSON.parse(r.t);}catch(e){}
+          if(!r.ok)throw new Error('quote '+r.status+': '+String((q&&q.error)||r.t).slice(0,160));
+          return q;
+        })
         .then(function(q){
-          var cap=q&&q.total_cost?(q.total_cost.max_usd||0):0;
-          var exp=q&&q.total_cost?(q.total_cost.expected_usd||0):0;
-          var msg=q? ('Launch this '+pl.stages.length+'-step pipeline?\n\nExpected ~$'+exp.toFixed(4)+', capped at $'+cap.toFixed(4)+'.\nYou are charged for actual usage, never above the cap.')
-                   : ('Could not price this pipeline. Launch anyway (uncapped)?');
+          var cap=Number(q&&q.total_cost&&q.total_cost.max_usd);
+          var exp=Number(q&&q.total_cost&&q.total_cost.expected_usd);
+          if(!Number.isFinite(cap)||cap<=0||!Number.isFinite(exp))throw new Error('quote returned no enforceable positive aggregate cap');
+          var msg='Launch this '+pl.stages.length+'-step pipeline?\n\nExpected ~$'+exp.toFixed(4)+', aggregate cap $'+cap.toFixed(4)+'.\nThe server allocates this one cap across all stages.';
           if(!window.confirm(msg)){fail('cancelled before paid launch (no charge)');return null;}
           return fetch('/v1/pipelines',{method:'POST',headers:{'Authorization':'Bearer '+liveKey,'Content-Type':'application/json'},
               body:JSON.stringify({name:name,stages:spec,input:inputJSONL,max_usd:cap})});

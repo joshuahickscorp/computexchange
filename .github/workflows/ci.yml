@@ -1,4 +1,4 @@
-# Computexchange — CI. Three independent jobs, each a real gate that fails
+# Computexchange — CI. Independent jobs, each a real gate that fails
 # loudly (no `|| true`, no soft-skip): the Go control plane (build + vet + gofmt
 # + tests against live Postgres & MinIO), the Rust agent (fmt + clippy + build +
 # the non-ignored test set, on macOS for Candle/Metal), and a schema apply that
@@ -48,7 +48,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.4"
+          go-version: "1.26.5"
           cache-dependency-path: control/go.sum
       - name: install psql client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
@@ -64,7 +64,7 @@ jobs:
           docker run --rm --network host -e MC_HOST_local=http://minioadmin:minioadmin@localhost:9000 \
             minio/mc mb -p local/cx-jobs
       - name: apply schema (base tables for the integration suite)
-        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/schema.sql
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction -f db/schema.sql
       - name: build
         run: cd control && go build ./...
       - name: vet
@@ -94,6 +94,37 @@ jobs:
       - name: doc-as-test (QUICKSTART.md is executable truth)
         run: bash scripts/doc-as-test.sh
 
+  # ── Evidence contracts ──────────────────────────────────────────────────────
+  # These are deliberately hardware-free contracts. They prove that evidence is
+  # comparable, source-bound, policy-consistent, and fail-closed; they never turn
+  # synthetic fixtures into Apple/CUDA performance or market proof.
+  proof-contracts:
+    name: proof contracts (python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: source identity contract
+        run: |
+          python3 -m unittest -v \
+            scripts/test_source_fingerprint.py \
+            scripts/test_verify_proof_ledger.py \
+            scripts/test_five_by_five.py \
+            scripts/test_runtime_matrix.py \
+            scripts/test_api_contract.py \
+            scripts/test_release_surface.py
+          python3 scripts/runtime_matrix.py --check
+          python3 scripts/api_contract.py --check
+      - name: registry is valid and attached local contracts pass
+        run: |
+          python3 scripts/five-by-five.py
+          python3 scripts/five-by-five.py --run \
+            --facet performance --facet platform_runtime --facet policy_gtm \
+            --artifact-dir "$RUNNER_TEMP/5x5"
+          python3 -c 'import json,os; p=json.load(open(os.environ["RUNNER_TEMP"]+"/5x5/source.json")); assert p["run_status"] == "PASS" and p["source_stable"] is True'
+
   # ── Supplier agent (Rust) ────────────────────────────────────────────────────
   # macOS so Candle's default `metal` feature compiles (Metal is unavailable on
   # Linux runners). cargo test runs the non-ignored set; the three model-download
@@ -112,7 +143,11 @@ jobs:
       - name: fmt (check)
         run: cd agent && cargo fmt --check
       - name: clippy (deny warnings)
-        run: cd agent && cargo clippy -- -D warnings
+        run: |
+          cd agent
+          cargo clippy --all-targets -- -D warnings
+          cargo clippy --all-targets \
+            --features spec-receipt-bridge,resident-spec-shadow -- -D warnings
       - name: vulnerability scan (RustSec advisory-db, the agent-side twin of the
           control plane's govulncheck step — Security Posture 7->8,
           docs/internal/CREED_AND_PATH_TO_TEN.md)
@@ -123,6 +158,10 @@ jobs:
         run: cd agent && cargo build
       - name: test (non-ignored)
         run: cd agent && cargo test
+      - name: test unrouted consolidation seams
+        run: >-
+          cd agent && cargo test
+          --features spec-receipt-bridge,resident-spec-shadow
       # Mac inference sandbox proof (Security Posture 8->9,
       # docs/internal/CREED_AND_PATH_TO_TEN.md): run the shipped seatbelt profile
       # (macapp/ComputeExchangeAgent/cx-agent.sb) against standalone binaries and
@@ -134,9 +173,97 @@ jobs:
       # which this runner is. The network rows self-skip on an offline runner.
       - name: sandbox profile proof (cx-agent.sb contains the blast radius)
         run: bash macapp/ComputeExchangeAgent/sandbox-profile-test.sh
-      # The menu-bar app (which launches cx-agent under that profile) must compile.
-      - name: macapp compiles (swift build)
-        run: swift build --package-path macapp
+      # The menu-bar app (which launches cx-agent under that profile) must exercise
+      # its P-256/SecKey enrollment, no-redirect exchange, and rollback contract,
+      # then compile the release configuration. Signing/notarization remains an
+      # external release gate.
+      - name: macapp enrollment tests + release build
+        run: |
+          swift test --package-path macapp
+          swift build --package-path macapp -c release
+
+  # ── Modality-general speculative execution substrate ───────────────────────
+  # Linux/CPU gate: canonical Rust engine + token lane + Python render/transcode
+  # adapters. No cloud credentials, model download, Blender, or GPU is involved.
+  speculation:
+    name: speculation (rust + python + ffmpeg)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            spec-engine
+            token-spec-poc
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install ffmpeg for the real local transcode smoke
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: rustfmt (owned hot-path files)
+        run: |
+          rustfmt --edition 2021 --check \
+            spec-engine/src/engine.rs spec-engine/src/receipt.rs spec-engine/src/verify.rs \
+            spec-engine/examples/validate_receipts.rs \
+            token-spec-poc/src/lib.rs token-spec-poc/src/main.rs \
+            token-spec-poc/tests/lossless.rs token-spec-poc/examples/bench_ngram.rs
+      - name: clippy (deny warnings)
+        run: |
+          cd spec-engine && cargo clippy --all-targets -- -D warnings
+          cd ../token-spec-poc && cargo clippy --all-targets -- -D warnings
+      - name: rust tests
+        run: |
+          cd spec-engine && cargo test --all-targets
+          cd ../token-spec-poc && cargo test --all-targets
+      - name: python adapter and adversarial tests
+        run: |
+          python3 scripts/spec-lab/test_cx_speculative_core.py
+          python3 scripts/spec-lab/test_cx_render_spec_adapter.py
+          python3 scripts/spec-lab/test_cx_transcode_spec_adapter.py
+          python3 scripts/spec-lab/test_cx_integrated_speculation.py
+          python3 scripts/spec-lab/test_cx_native_speculation_ladder.py
+      - name: current emitters pass strict Rust ingress
+        run: |
+          python3 scripts/spec-lab/emit_current_spec_receipts.py > "$RUNNER_TEMP/python-spec-receipts.jsonl"
+          cargo run --quiet --manifest-path spec-engine/Cargo.toml --example validate_receipts < "$RUNNER_TEMP/python-spec-receipts.jsonl"
+          (cd token-spec-poc && cargo run --quiet) > "$RUNNER_TEMP/token-spec-receipts.jsonl"
+          sed -n '1p' "$RUNNER_TEMP/token-spec-receipts.jsonl" > "$RUNNER_TEMP/token-spec-first.jsonl"
+          cargo run --quiet --manifest-path spec-engine/Cargo.toml --example validate_receipts < "$RUNNER_TEMP/token-spec-first.jsonl"
+      - name: real ffmpeg transcode smoke (bounded, no network)
+        env:
+          CX_FFMPEG_TIMEOUT_S: "120"
+        run: |
+          python3 scripts/spec-lab/cx_transcode_spec_adapter.py \
+            --codec x264 --mode ssim --duration 2 --segment-time 1 \
+            --size 320x180 --fps 12 --noise 0 --gate 0.90 \
+            --workdir "$RUNNER_TEMP/cx-transcode-smoke" >/tmp/cx-transcode-receipt.json
+          python3 -c 'import json; r=json.load(open("/tmp/cx-transcode-receipt.json")); assert r["evidence"] == "measured"; assert r["units"] > 0'
+          python3 -c 'import json; print(json.dumps(json.load(open("/tmp/cx-transcode-receipt.json")), separators=(",", ":")))' > "$RUNNER_TEMP/cx-transcode-receipt.jsonl"
+          cargo run --quiet --manifest-path spec-engine/Cargo.toml --example validate_receipts < "$RUNNER_TEMP/cx-transcode-receipt.jsonl"
+          python3 scripts/spec-lab/cx_transcode_spec_adapter.py \
+            --codec x264 --mode ssim --duration 2 --segment-time 1 \
+            --size 320x180 --fps 12 --noise 0 --gate 0.90 --skip-baseline \
+            --workdir "$RUNNER_TEMP/cx-transcode-production-smoke" >/tmp/cx-transcode-production.json
+          python3 -c 'import hashlib,json,os; r=json.load(open("/tmp/cx-transcode-production.json")); p=r["details"]["delivered_artifact_path"]; q=r["details"]["parallelism"]; assert r["artifact_verified"] is True; assert r["baseline_source"] == "absent"; assert r["speedup_vs_baseline"] is None; assert p and os.path.isfile(p); assert q["max_concurrent_encode_threads"] <= q["baseline_encode_threads"]; assert r["details"]["concat_stream_compatibility"]["profile"] == "High"; assert r["details"]["delivered_timeline_verification"]["tolerance_s"] == 0.002; assert hashlib.sha256(open(p,"rb").read()).hexdigest() == r["details"]["delivered_artifact_sha256"]'
+          python3 -c 'import json; print(json.dumps(json.load(open("/tmp/cx-transcode-production.json")), separators=(",", ":")))' > "$RUNNER_TEMP/cx-transcode-production.jsonl"
+          cargo run --quiet --manifest-path spec-engine/Cargo.toml --example validate_receipts < "$RUNNER_TEMP/cx-transcode-production.jsonl"
+          set +e
+          python3 scripts/spec-lab/cx_transcode_spec_adapter.py \
+            --codec x264 --mode ssim --duration 1 --segment-time 1 \
+            --size 128x72 --fps 8 --noise 0 --gate 1.0 --skip-baseline \
+            --workdir "$RUNNER_TEMP/cx-transcode-rejected" >/tmp/cx-transcode-rejected.json
+          rc=$?
+          set -e
+          test "$rc" -eq 3
+          python3 -c 'import json,os; r=json.load(open("/tmp/cx-transcode-rejected.json")); assert r["artifact_verified"] is False; assert r["quality_tier"] == "fail"; assert r["details"]["delivered_artifact_path"] is None; assert r["details"]["candidate_artifact_path"] is None; assert not os.listdir(os.environ["RUNNER_TEMP"] + "/cx-transcode-rejected")'
+          python3 scripts/spec-lab/cx_transcode_spec_adapter.py \
+            --codec x264_lossless --mode lossless --duration 1 --segment-time 1 \
+            --size 128x72 --fps 8 --noise 0 --gate 1.0 --skip-baseline \
+            --workdir "$RUNNER_TEMP/cx-transcode-lossless" >/tmp/cx-transcode-lossless.json
+          python3 -c 'import json; r=json.load(open("/tmp/cx-transcode-lossless.json")); assert r["exact"] is True; assert r["artifact_verified"] is True; assert r["details"]["delivered_ssim_vs_source"] is None; assert r["details"]["delivered_timeline_verification"]["verified"] is True'
 
   # ── Supplier agent — CUDA lane (Linux) ───────────────────────────────────────
   # Compile-gate the NVIDIA/CUDA build so the lane can't silently rot. Installs the
@@ -204,5 +331,5 @@ jobs:
         env:
           PGPASSWORD: cx
         run: |
-          psql -h localhost -U cx -d cx -v ON_ERROR_STOP=1 -f db/schema.sql
-          psql -h localhost -U cx -d cx -v ON_ERROR_STOP=1 -f db/schema.sql
+          psql -h localhost -U cx -d cx -v ON_ERROR_STOP=1 --single-transaction -f db/schema.sql
+          psql -h localhost -U cx -d cx -v ON_ERROR_STOP=1 --single-transaction -f db/schema.sql

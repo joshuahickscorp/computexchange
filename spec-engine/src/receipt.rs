@@ -13,8 +13,33 @@
 //! `details`), mirroring the conventions of `control/receipt.go`'s
 //! `ClearingReceipt` and `control/quote.go`'s `QuoteRouting`.
 
+use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+
+/// Current canonical on-wire schema. Legacy rows without the field can still be
+/// inspected, but they cannot assert the v1 artifact-verification bit at the
+/// untrusted-ingress boundary; unknown future versions fail validation.
+pub const SPEC_RECEIPT_SCHEMA_VERSION: u16 = 1;
+/// Hard parse bound for an untrusted worker receipt. Rich per-tile receipts fit
+/// comfortably while a forged details bag cannot consume unbounded memory.
+pub const MAX_SPEC_RECEIPT_JSON_BYTES: usize = 1 << 20;
+/// Maximum object/array nesting at untrusted ingress.
+pub const MAX_SPEC_RECEIPT_JSON_DEPTH: usize = 32;
+/// The free-form details bag receives only half the total receipt budget, leaving
+/// deterministic room for accounting, identity and provenance fields.
+pub const MAX_SPEC_RECEIPT_DETAILS_JSON_BYTES: usize = 512 << 10;
+/// Cross-lane logical-unit ceiling. Token receipts may legitimately contain up
+/// to one million decode rounds; execution engines use tighter per-batch caps.
+pub const MAX_SPEC_RECEIPT_UNITS: u32 = 1_000_000;
+
+fn default_schema_version() -> u16 {
+    // Direct serde deserialization is useful for legacy inspection but is not a
+    // trust boundary. Versionless rows stay explicitly untrusted until the
+    // bounded `from_json` migration path handles them.
+    0
+}
 
 /// Free-form details bag (plan: a free-form details map). A `BTreeMap` gives
 /// deterministic key ordering for stable golden JSON, and `serde_json::Value`
@@ -44,6 +69,18 @@ impl Modality {
     /// pipeline).
     pub fn combined() -> Self {
         Modality("combined".into())
+    }
+    /// Encoded image / raster transformation lane.
+    pub fn image() -> Self {
+        Modality("image".into())
+    }
+    /// Video generation/interpolation lane.
+    pub fn video() -> Self {
+        Modality("video".into())
+    }
+    /// Video codec/transcode lane.
+    pub fn transcode() -> Self {
+        Modality("transcode".into())
     }
     /// Borrow the tag as a string slice.
     pub fn as_str(&self) -> &str {
@@ -143,6 +180,9 @@ pub enum BaselineSource {
 /// binds, with `speedup_vs_baseline` nullable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpecReceipt {
+    /// Schema version for explicit cross-language migrations.
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u16,
     // --- identity (matches the Python row's branch_id + modality) ---
     /// Experiment/branch id (Python `branch_id`).
     pub branch_id: String,
@@ -165,6 +205,10 @@ pub struct SpecReceipt {
     /// `repair_s`, `repair_cost`.
     #[serde(alias = "repair_s", alias = "repair_cost")]
     pub repair_cost_s: f64,
+    /// Policy, assembly, comparison and orchestration wall time that belongs to
+    /// none of the three adapter phases. Older emitters omit it and read as zero.
+    #[serde(default, alias = "overhead_s")]
+    pub overhead_cost_s: f64,
     /// Spec wall-clock = draft + verify + repair. Aliases: `speculative_s`
     /// (Python), `total_product_time` (render adapter).
     #[serde(alias = "speculative_s", alias = "total_product_time")]
@@ -192,6 +236,13 @@ pub struct SpecReceipt {
     /// target continuation); render sets it `false` (never bit-exact vs a full
     /// reference). Orthogonal to `quality_tier`.
     pub exact: bool,
+    /// The final artifact was checked against the modality's declared contract.
+    /// This is deliberately separate from `quality_tier`: render/transcode can
+    /// verify a non-bit-exact artifact, while token output can be exact even when
+    /// speculation coverage is poor. Legacy aliases are accepted, but a receipt
+    /// without `schema_version` is forced to `false` by [`SpecReceipt::from_json`].
+    #[serde(default, alias = "delivery_verified", alias = "delivery_eligible")]
+    pub artifact_verified: bool,
     /// Plan-mandated delivered/coverage tier; worst-wins across units. Defaults to
     /// `Preview` for an unlabeled legacy import.
     #[serde(default)]
@@ -214,4 +265,395 @@ pub struct SpecReceipt {
     /// alias; defaults to empty when absent.
     #[serde(default, alias = "meta")]
     pub details: Details,
+}
+
+/// A receipt rejected at the trust boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiptValidationError(pub String);
+
+impl fmt::Display for ReceiptValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ReceiptValidationError {}
+
+/// Parse failures keep malformed JSON distinct from a well-formed but dishonest
+/// or internally contradictory receipt.
+#[derive(Debug)]
+pub enum ReceiptParseError {
+    TooLarge { bytes: usize, max: usize },
+    Json(serde_json::Error),
+    Invalid(ReceiptValidationError),
+}
+
+impl fmt::Display for ReceiptParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TooLarge { bytes, max } => {
+                write!(f, "spec receipt JSON is {bytes} bytes; maximum is {max}")
+            }
+            Self::Json(err) => write!(f, "invalid spec receipt JSON: {err}"),
+            Self::Invalid(err) => write!(f, "invalid spec receipt: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for ReceiptParseError {}
+
+fn finite_nonnegative(name: &str, value: f64) -> Result<(), ReceiptValidationError> {
+    if !value.is_finite() || value < 0.0 {
+        return Err(ReceiptValidationError(format!(
+            "{name} must be finite and >= 0, got {value:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn phase_sum_close(a: f64, b: f64) -> bool {
+    // Four phase fields and the total are serialized to six decimals. Their
+    // worst legitimate independent-rounding drift is only a few microseconds;
+    // a relative tolerance would hide seconds on long renders.
+    (a - b).abs() <= 5e-6
+}
+
+fn rounded_ratio_close(a: f64, b: f64) -> bool {
+    // Canonical emitters round the ratio to six decimals after computing it
+    // from the rounded wire times.
+    (a - b).abs() <= 5e-6
+}
+
+pub(crate) fn validate_details(details: &Details) -> Result<(), ReceiptValidationError> {
+    let mut stack: Vec<(&serde_json::Value, usize)> =
+        details.values().map(|value| (value, 2)).collect();
+    while let Some((value, depth)) = stack.pop() {
+        if depth > MAX_SPEC_RECEIPT_JSON_DEPTH {
+            return Err(ReceiptValidationError(format!(
+                "details JSON nesting exceeds {MAX_SPEC_RECEIPT_JSON_DEPTH}"
+            )));
+        }
+        match value {
+            serde_json::Value::Array(values) => {
+                stack.extend(values.iter().map(|child| (child, depth + 1)));
+            }
+            serde_json::Value::Object(values) => {
+                stack.extend(values.values().map(|child| (child, depth + 1)));
+            }
+            _ => {}
+        }
+    }
+    let bytes = serde_json::to_vec(details)
+        .map_err(|err| ReceiptValidationError(format!("details are not serializable: {err}")))?;
+    if bytes.len() > MAX_SPEC_RECEIPT_DETAILS_JSON_BYTES {
+        return Err(ReceiptValidationError(format!(
+            "details JSON is {} bytes; maximum is {}",
+            bytes.len(),
+            MAX_SPEC_RECEIPT_DETAILS_JSON_BYTES
+        )));
+    }
+    Ok(())
+}
+
+/// JSON shape walk that rejects duplicate keys at every depth and caps nesting
+/// before serde collapses objects into maps. Duplicate details keys are just as
+/// ambiguous as duplicate accounting keys and must not become last-wins.
+struct StrictJsonSeed {
+    depth: usize,
+}
+
+impl<'de> DeserializeSeed<'de> for StrictJsonSeed {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if self.depth > MAX_SPEC_RECEIPT_JSON_DEPTH {
+            return Err(de::Error::custom(format!(
+                "JSON nesting exceeds {MAX_SPEC_RECEIPT_JSON_DEPTH}"
+            )));
+        }
+        deserializer.deserialize_any(StrictJsonVisitor { depth: self.depth })
+    }
+}
+
+struct StrictJsonVisitor {
+    depth: usize,
+}
+
+impl<'de> Visitor<'de> for StrictJsonVisitor {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("valid JSON without duplicate keys or excessive nesting")
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_string<E>(self, _value: String) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while seq
+            .next_element_seed(StrictJsonSeed {
+                depth: self.depth + 1,
+            })?
+            .is_some()
+        {}
+        Ok(())
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut keys = BTreeSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if !keys.insert(key.clone()) {
+                return Err(de::Error::custom(format!("duplicate JSON key {key:?}")));
+            }
+            map.next_value_seed(StrictJsonSeed {
+                depth: self.depth + 1,
+            })?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_json_shape(input: &str) -> Result<(), serde_json::Error> {
+    let mut deserializer = serde_json::Deserializer::from_str(input);
+    StrictJsonSeed { depth: 0 }.deserialize(&mut deserializer)?;
+    deserializer.end()
+}
+
+impl SpecReceipt {
+    /// Strict untrusted-ingress parser: size bound, explicit legacy quality-gate
+    /// migration, serde contract checks, then semantic validation.
+    pub fn from_json(input: &str) -> Result<Self, ReceiptParseError> {
+        if input.len() > MAX_SPEC_RECEIPT_JSON_BYTES {
+            return Err(ReceiptParseError::TooLarge {
+                bytes: input.len(),
+                max: MAX_SPEC_RECEIPT_JSON_BYTES,
+            });
+        }
+        validate_json_shape(input).map_err(ReceiptParseError::Json)?;
+        // Deserialize the struct directly so serde rejects duplicate canonical/
+        // alias fields instead of first collapsing them into a Value map.
+        let mut receipt: Self = serde_json::from_str(input).map_err(ReceiptParseError::Json)?;
+        let legacy: serde_json::Value =
+            serde_json::from_str(input).map_err(ReceiptParseError::Json)?;
+        // Compatibility parsing is not attestation. Old rows predate the v1
+        // verification contract, so even a similarly named extra field cannot
+        // make them billable merely by surviving deserialization.
+        if legacy.get("schema_version").is_none() {
+            receipt.schema_version = SPEC_RECEIPT_SCHEMA_VERSION;
+            receipt.artifact_verified = false;
+        }
+        // Old emitters carried a boolean quality_gate. Treat it as a strict
+        // compatibility projection of the tier: false=fail, true=non-fail.
+        // Wrong types and dual-field contradictions are ambiguous at a trust
+        // boundary and must fail instead of being silently ignored.
+        if let Some(gate_value) = legacy.get("quality_gate") {
+            let gate = gate_value.as_bool().ok_or_else(|| {
+                ReceiptParseError::Invalid(ReceiptValidationError(
+                    "quality_gate must be a boolean when present".into(),
+                ))
+            })?;
+            if legacy.get("quality_tier").is_some() {
+                let tier_passes = receipt.quality_tier != QualityTier::Fail;
+                if gate != tier_passes {
+                    return Err(ReceiptParseError::Invalid(ReceiptValidationError(format!(
+                        "quality_gate={gate} contradicts quality_tier={:?}",
+                        receipt.quality_tier
+                    ))));
+                }
+            } else if !gate {
+                receipt.quality_tier = QualityTier::Fail;
+            }
+        }
+        receipt.validate().map_err(ReceiptParseError::Invalid)?;
+        Ok(receipt)
+    }
+
+    /// Enforce the cross-language accounting and honesty contract. Imported
+    /// legacy rows receive range/provenance checks but skip phase-sum coherence:
+    /// old token emitters omitted loop overhead, which is why schema v1 now has
+    /// `overhead_cost_s` explicitly.
+    pub fn validate(&self) -> Result<(), ReceiptValidationError> {
+        if self.schema_version != SPEC_RECEIPT_SCHEMA_VERSION {
+            return Err(ReceiptValidationError(format!(
+                "unsupported schema_version {}; expected {}",
+                self.schema_version, SPEC_RECEIPT_SCHEMA_VERSION
+            )));
+        }
+        validate_details(&self.details)?;
+        let branch = self.branch_id.trim();
+        if branch.is_empty() || branch.len() > 256 {
+            return Err(ReceiptValidationError(
+                "branch_id must be non-empty and <= 256 bytes".into(),
+            ));
+        }
+        let modality = self.modality.as_str();
+        if modality.is_empty()
+            || modality.len() > 64
+            || !modality
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+        {
+            return Err(ReceiptValidationError(
+                "modality must be 1..64 ASCII alphanumeric/._- bytes".into(),
+            ));
+        }
+        for (name, value) in [
+            ("draft_cost_s", self.draft_cost_s),
+            ("verify_cost_s", self.verify_cost_s),
+            ("repair_cost_s", self.repair_cost_s),
+            ("overhead_cost_s", self.overhead_cost_s),
+            ("total_product_time_s", self.total_product_time_s),
+            ("baseline_total_time_s", self.baseline_total_time_s),
+        ] {
+            finite_nonnegative(name, value)?;
+        }
+        if self.units > MAX_SPEC_RECEIPT_UNITS {
+            return Err(ReceiptValidationError(format!(
+                "units {} exceeds safety maximum {}",
+                self.units, MAX_SPEC_RECEIPT_UNITS
+            )));
+        }
+        for (name, value) in [
+            ("accepted_fraction", self.accepted_fraction),
+            ("repaired_fraction", self.repaired_fraction),
+        ] {
+            if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                return Err(ReceiptValidationError(format!(
+                    "{name} must be finite in [0,1], got {value:?}"
+                )));
+            }
+        }
+        if self.units == 0
+            && (self.accepted_fraction != 0.0
+                || self.repaired_fraction != 0.0
+                || self.exact
+                || self.artifact_verified
+                || self.quality_tier != QualityTier::Fail
+                || self.draft_cost_s != 0.0
+                || self.verify_cost_s != 0.0
+                || self.repair_cost_s != 0.0
+                || self.overhead_cost_s != 0.0
+                || self.total_product_time_s != 0.0
+                || self.baseline_total_time_s != 0.0
+                || self.baseline_source != BaselineSource::Absent
+                || self.speedup_vs_baseline.is_some())
+        {
+            return Err(ReceiptValidationError(
+                "an empty receipt cannot claim work, a baseline, speedup, correctness, verification or a non-fail tier"
+                    .into(),
+            ));
+        }
+        if self.artifact_verified
+            && (self.evidence != Evidence::Measured || self.quality_tier == QualityTier::Fail)
+        {
+            return Err(ReceiptValidationError(
+                "artifact_verified=true requires measured evidence and a non-fail quality tier"
+                    .into(),
+            ));
+        }
+        if self.units > 0 && self.total_product_time_s <= 0.0 {
+            return Err(ReceiptValidationError(
+                "a non-empty receipt must charge positive total_product_time_s".into(),
+            ));
+        }
+        if self.evidence != Evidence::Imported {
+            let phase_total =
+                self.draft_cost_s + self.verify_cost_s + self.repair_cost_s + self.overhead_cost_s;
+            if !phase_sum_close(self.total_product_time_s, phase_total) {
+                return Err(ReceiptValidationError(format!(
+                    "total_product_time_s {} contradicts charged phase sum {}",
+                    self.total_product_time_s, phase_total
+                )));
+            }
+        }
+        match self.baseline_source {
+            BaselineSource::Absent => {
+                if self.baseline_total_time_s != 0.0 || self.speedup_vs_baseline.is_some() {
+                    return Err(ReceiptValidationError(
+                        "baseline_source=absent requires zero baseline time and null speedup"
+                            .into(),
+                    ));
+                }
+            }
+            BaselineSource::Measured | BaselineSource::Modeled => {
+                if self.baseline_total_time_s <= 0.0 {
+                    return Err(ReceiptValidationError(format!(
+                        "baseline_source={:?} requires positive baseline_total_time_s",
+                        self.baseline_source
+                    )));
+                }
+                if let Some(speedup) = self.speedup_vs_baseline {
+                    if !speedup.is_finite() || speedup <= 0.0 {
+                        return Err(ReceiptValidationError(format!(
+                            "speedup_vs_baseline must be finite and > 0, got {speedup:?}"
+                        )));
+                    }
+                    if self.baseline_total_time_s <= 0.0 || self.total_product_time_s <= 0.0 {
+                        return Err(ReceiptValidationError(
+                            "a reported speedup requires positive baseline and product times"
+                                .into(),
+                        ));
+                    }
+                    if self.evidence != Evidence::Imported {
+                        let expected = self.baseline_total_time_s / self.total_product_time_s;
+                        if !rounded_ratio_close(speedup, expected) {
+                            return Err(ReceiptValidationError(format!(
+                                "speedup_vs_baseline {speedup} contradicts baseline/total {expected}"
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Product eligibility is derived from verification, evidence and outcome.
+    /// `artifact_verified` is a modality-contract fact, not a billability bit;
+    /// synthetic/modeled/imported evidence still parks even when tests verified
+    /// the fixture output.
+    pub fn delivery_eligible(&self) -> bool {
+        self.validate().is_ok()
+            && self.artifact_verified
+            && self.evidence == Evidence::Measured
+            && self.quality_tier != QualityTier::Fail
+    }
 }

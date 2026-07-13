@@ -1,4 +1,12 @@
-# SITE-CLAIMS · the receipts ledger for the public page
+# SITE-CLAIMS · historical public-page claims audit
+
+<!-- CLAIM-SCOPE: historical-non-authoritative -->
+
+> This dated ledger is not current product evidence. It is retained to show how
+> earlier public-page claims were constructed and where they became stale. Current
+> capability state and repeatable validators live in `proof/5x5-gates.json`; a
+> hand-copied count, source line, or old deployment observation here must never be
+> rendered as a current claim.
 
 Every factual sentence on `web/index.html` traces to a row in this file, and every row carries
 `path:line` receipts with a short quote of the evidencing code, test, or doc. Anything that could
@@ -119,7 +127,9 @@ throttle, and the job's budget cap · quiet hours are enforced by the agent on t
 **Notes:** the candidate bundled quiet hours into the scheduler; in truth `throttled` covers only
 memory pressure and quiet hours live agent-side. The corrected line attributes each enforcement
 point. More hard filters exist than the five named (supplier active, job-type support, residency,
-reputation floor, private pools) · the page understates rather than overstates.
+reputation floor, private pools). Runtime-matrix ingress rejects unsupported exact job/model
+pairs, but the claim query still reads independent worker job/model roll-ups; exact persisted
+worker capability tuples remain an explicit gate rather than an implied guarantee.
 
 ## 6 · verification-stack · verified
 

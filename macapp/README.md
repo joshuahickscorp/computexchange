@@ -6,16 +6,26 @@ earnings, thermal state, model-cache size), exposes the operator toggles
 (active / quiet-hours / power-only / min-payout), launches/stops the agent, and
 opens the data dir.
 
-It also ships:
+The source tree currently contains:
 
-- **Sparkle auto-update** (SwiftPM dependency, wired into the app lifecycle). The
-  app checks an appcast over HTTPS and installs only EdDSA-signed updates.
+- **Sparkle integration code** (SwiftPM dependency, wired into the app lifecycle).
+  A real HTTPS appcast, EdDSA release, rollback exercise, and signed/notarized app
+  remain external distribution gates; a local build does not prove updates ship.
 - **First-run consent gate** · an onboarding sheet stating what runs on the
-  machine, the resource limits, quiet hours, and the 90/10 split. The agent
+  machine, the resource limits, quiet hours, and the versioned frozen economic
+  plan. The agent
   cannot launch (cannot earn) until consent is given; the gate is enforced in
   `AgentController.startAgent()`, not just in the UI.
+- **Device-proofed enrollment core and UI** · the app creates a persistent P-256
+  key (Secure Enclave when available; non-extractable, ThisDeviceOnly Keychain
+  fallback), emits a public request for the authenticated supplier account, and
+  accepts one return bundle containing a short-lived account/code approval. It
+  signs the server's exact exchange transcript, rejects redirects/cacheable secret
+  responses, probes the returned bearer, and only then persists it with rollback.
+  The authenticated account approval/deep-link/QR surface and signed-app release
+  remain external gates; regular agent requests are still bearer-authenticated.
 - **Trust panel** · an earnings sparkline (the app's own observed `lifetime_usd`
-  series), payout proof (last/next payout + payout-readiness), and a verification
+  series), payout-status display (last/next payout + payout-readiness), and a verification
   badge (honeypot pass/fail). Every element is sourced from `status.json` and
   shows an explicit "not available" state when the agent has not reported the
   data · it never shows a badge or figure it cannot back.
@@ -45,6 +55,12 @@ external release step driven by `macapp/sign-notarize.sh` · see below.
   `appcast.xml` and the EdDSA-signing step folded into `sign-notarize.sh`.
 - **Consent gate**: `Consent.swift` + `ConsentView.swift` show the terms before
   any work, persist consent, and HARD-gate `AgentController.startAgent()`.
+- **Enrollment gate**: `EnrollmentCore/` contains strict public-request/approval-
+  bundle codecs, protected P-256 key storage, the one-time exchange client,
+  non-secret config rendering, authenticated probe, and rollback/reset
+  orchestration. `EnrollmentView.swift` + `EnrollmentPersistence.swift` provide
+  the two-surface copy/paste and Keychain adapters. Launch requires both current
+  consent and a complete verified enrollment.
 - **Trust polish**: `TrustPanel.swift` draws the earnings sparkline, payout proof,
   and verification badge entirely from `status.json` data, with honest empty
   states everywhere the agent has not reported a value.
@@ -61,9 +77,57 @@ external release step driven by `macapp/sign-notarize.sh` · see below.
 - A **release host** for the appcast + zips at your `SUFeedURL`.
 - Assembling the `.app` bundle itself (Info.plist `LSUIElement = true`, the four+
   Swift sources, and the built `cx-agent` binary copied into
-  `Contents/Resources/`) · an Xcode app target or a manual bundle. Prefs are
-  written to an `agent.prefs.toml` sidecar (the app deliberately does not own the
-  canonical `agent.toml` format).
+  `Contents/Resources/`) · an Xcode app target or a manual bundle. Enrollment
+  creates a marker-owned base `agent.toml`; operator toggles remain isolated in
+  `agent.prefs.toml`. Neither file contains the raw worker token.
+
+## Enrollment and credential boundary
+
+The app first generates or reloads its P-256 enrollment key. The private key is
+non-exportable app state: Secure Enclave is preferred, with a non-extractable
+software SecKey stored `WhenUnlockedThisDeviceOnly` on unsupported/test hosts.
+The copyable `cxer2_…` request contains only the HTTPS origin, audience, public
+key, and key-derived request id. An authenticated account API adapter at
+`POST /v1/supplier/enrollment-approvals` strictly decodes that request, derives
+ownership only from the presenting buyer credential, issues the existing
+ten-minute code bound to its public key, trusted origin, and request id, and
+returns a `cxeb2_…` approval bundle containing the origin, account UUID,
+audience, raw one-time code, request id, and public fingerprint. Responses are
+`no-store`. Non-loopback deployments must set
+the exact canonical HTTPS `CX_PUBLIC_CONTROL_ORIGIN`; caller-controlled `Host`
+and `X-Forwarded-Proto` do not select the bundle origin. Neither bundle contains
+the private key or a long-lived worker bearer.
+
+The app persists the public pending origin/request/fingerprint so this check
+survives restart. It verifies the returned bundle matches that exact pending
+request, creates the v2 transcript containing origin and request id, and sends a
+DER P-256/SHA-256 proof to
+`POST /v1/worker/enrollment/exchange`. It then calls
+`GET /v1/worker/connect/status` with the returned `X-Worker-Token`. That probe
+authenticates the credential without registering, polling, or claiming work; a
+`200` is valid even when the payout provider is not configured. Only after the
+probe succeeds does persistence begin. Release builds require an HTTPS origin,
+redirects are rejected, and both requests use ephemeral/no-store transport.
+
+The returned raw token is stored as a device-only Keychain generic-password item and is
+injected into the child only as `CX_WORKER_TOKEN`. The on-disk config contains
+the deliberately invalid placeholder `KEYCHAIN_REQUIRED`. Existing manual
+configs are never overwritten or deleted.
+
+“Reset enrollment” stops the child, deletes the bearer and enrollment private key,
+deletes only an app-marker-owned config, and removes the non-secret verification
+receipt. Use it before uninstalling because deleting an app does not delete its
+Keychain items. Local reset does **not** revoke the server credential; revoke it
+from the supplier account when retiring a Mac.
+
+The P-256 proof binds issuance/exchange to the pending Mac key. It does **not**
+make normal worker requests device-bound: the running Rust agent still sends the
+returned `cxw_…` bearer, so a copied bearer remains usable until revoked. The
+authenticated account approval browser/deep-link/QR UI is also not in this
+package yet. The authenticated API adapter now completes the copy/paste wire
+bridge, but a user still needs an account-side API caller; response-loss/restart
+recovery and in-app server rotation/revocation are also unfinished. Terminal-free
+first-run enrollment therefore remains in progress rather than complete.
 
 ## Auto-update (Sparkle)
 

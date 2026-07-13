@@ -7,6 +7,13 @@ or any other existing `control/*.go`). Stdlib only. Build / vet / full unit
 suite green; the integration-tagged build compiles clean. Every wiring step
 below is a LATER, owner-gated climb.
 
+**2026-07-10 hardening update:** strict delivery is no longer “never achieved.” A bound 4K
+classroom repair recipe cleared at **2.450894x**, and the untuned 1080p sweep cleared 1/3 scenes
+(pavilion **1.658801x**). The shape-only quote still never promises strict delivery because it
+does not bind scene content or repair-policy/build digests; it now emits **no per-job speedup
+band** rather than projecting standalone scene results. See
+`SPEC_ENGINE_HARDENING_2026-07-10.md`.
+
 Companion docs: `docs/research/CX_SPEC_LANE_INTEGRATION_DESIGN.md` (the prior
 wave's design — this scaffold is its §3 turned into code),
 `docs/research/CONSOLIDATION_PLAN_2026-07-09.md` (the staged-multiplier table
@@ -22,7 +29,7 @@ each the render analog of a proven routing-block piece:
 |---|---|---|
 | `RenderSpecParams` + `Validate()` | (shot-shape inputs) | range/enum contract on the shot params |
 | `RenderSpecQuote` + `QuoteRenderSpec(p)` | `QuoteRouting` + `DecideSubstrate(...)` | advisory quote: the [MODELED] speedup band behind an honesty boundary |
-| `RenderSpecReceipt` + `receiptRenderSpec(r)` | `receiptRouting(inv)` | buyer-facing projection of a landed `SpecReceipt`; nil at the boundary |
+| `RenderSpecReceipt` + `receiptRenderSpec(r)` | `receiptRouting(inv)` | checked buyer-facing projection; `nil, nil` for absent/non-render input and an error for malformed render rows |
 | `renderSpecQuoteBasis` (const) | `quoteRoutingBasis` (const) | the one string that names the ledger + welds `[MODELED]` to every number |
 
 - **`QuoteRenderSpec(RenderSpecParams) (RenderSpecQuote, error)`** reads a shot's
@@ -32,12 +39,13 @@ each the render analog of a proven routing-block piece:
   quote. It errors only on params that fail `Validate`; a valid-but-out-of-
   envelope shot is not an error — it is a quote with the tier contract and NO
   band.
-- **`receiptRenderSpec(*SpecReceipt) *RenderSpecReceipt`** projects a landed
+- **`receiptRenderSpec(*SpecReceipt) (*RenderSpecReceipt, error)`** projects a landed
   `SpecReceipt` (parsed via the already-landed `ParseSpecReceipt`) onto a
-  buyer-facing block. It returns **nil at the honesty boundary** (a nil receipt,
-  or a non-render/token receipt with no render surface), never re-decides or
-  re-scores, and carries the receipt's OWN measured-vs-modeled labels through
-  unchanged.
+  buyer-facing block. It returns **`nil, nil` at the modality boundary** (a nil
+  receipt or a non-render/token receipt), but rejects a malformed render row
+  instead of disguising corruption as absence. A naked worker receipt is always
+  parked until the control plane verifies job/input/artifact/policy binding; the
+  projection never treats worker-local verification as server attestation.
 
 ### The two structural honesty invariants, made into code
 
@@ -48,13 +56,13 @@ each the render analog of a proven routing-block piece:
    synthesized figure. This is invariant #1 of the consolidation plan, enforced
    the same way the Go `SpecReceipt` enforces it: by the *absence* of any
    multiply.
-2. **The strict-delivery tier is never sold.** `QuoteRenderSpec` sets
+2. **Unbound strict delivery is never sold.** `QuoteRenderSpec` sets
    `QuotedTier = "preview"` unconditionally and `StrictDeliveryPromised = false`
    as a compile-time constant. Even when the buyer passes
    `requested_tier="delivery"`, the quote echoes the ask, quotes preview, and
-   the reason states plainly that delivery is a *target, not a promise* (no
-   integrated receipt has cleared the strict gate — RUN 3 self-pruned at
-   worst-tile 0.9095 < 0.95). `TestRenderSpecQuoteNeverStrict` proves this over
+   the reason states that strict has succeeded on exact recipes but is not a
+   promise for an unbound shot (the untuned scene sweep cleared 1/3).
+   `TestRenderSpecQuoteNeverStrict` proves this over
    a 4×4×4×3×3 matrix of shapes and tier requests.
 
 ## 2. The MEASURED basis every number is drawn from
@@ -66,7 +74,12 @@ the `CONSOLIDATION_PLAN` staged table):
 | constant | value | source / label |
 |---|---|---|
 | `renderSpecBandLowX` / `renderSpecBandHighX` | **3.87x – 7.87x** | representative-scene band, standalone delivery-tier renders, device-correct (many_glass 3.87 / sphere_bump 4.59 / monkey 6.88 / cube_volume 7.87). The 14.34x forgiving-scene outlier is DELIBERATELY EXCLUDED. `[MODELED]` when projected onto a shot. |
-| `renderSpec4KAnchorX` | **5.561x** | REAL RUN 3 (A100, classroom 3840×2160, ref 4096 / draft 512, kf=1): 5.561x @ global 0.9854 / worst-tile 0.9095. MEASURED end-to-end; self-pruned at the strict gate but clears the 0.95/preview tier. |
+| `renderSpec4KPreviewAnchorX` | **5.561327x** | REAL RUN 3 (A100, classroom 3840×2160, ref 4096 / draft 512, kf=1): preview/no-repair result, global 0.9854 / worst-tile 0.9095. MEASURED integrated product context; not projected onto a shot. |
+| strict 4K bound anchor | **2.450894x** | H100 classroom, exact `aov_edge` + match-reference repair recipe: global 0.9902 / worst-tile 0.9501. MEASURED integrated product ratio. Historical context only in the shape quote. |
+
+The old 3.87x–7.87x values are standalone-render context, not an integrated product band. The
+hardened quote keeps its legacy nullable fields for wire compatibility but leaves them nil until
+scene and policy/build evidence can be bound.
 
 The MEASURED envelope (outside it: tier contract, no band — the routing
 precedent's "unmeasured shape gets no block"):
@@ -104,10 +117,16 @@ the scaffold and the split travel together:
   hardware-relative (RUN 3 A100 5.56x vs RUN 4 H100 repair-free ≈4.6x), which is
   why the band is carried as a *band across silicon*, never a single-GPU
   promise.
-- **The fleet (Metal) is NOT a measured render substrate today.** Blender's
-  Metal backend runs on M-class nodes (the local asset-render path proves basic
-  capability), but there is **zero** fleet render receipt — no draft-rate, no
-  SSIM-under-Metal parity, no tile-throughput curve. Under the routing
+- **The fleet (Metal) now has a measured three-scene local preview matrix, not a
+  production fleet receipt.** On 2026-07-12 an M3 Ultra resident Cycles path
+  measured 56.714589x for classroom and 55.926238x for Pavilion at 24+24 spp
+  versus 4096 spp. BMW27 required 32+32 spp and measured 34.757412x. Every
+  selected draft passed the same local-unattested RGB agreement contract and an
+  independent 4096-spp audit. See
+  `APPLE_METAL_SPEC_RENDER_STAGE_2026-07-12.md`. This is not a repeated
+  draft-rate curve, animated-scene result, strict-delivery result, or schedulable
+  fleet job.
+  Under the routing
   precedent's rule, **`render_speculative` jobs get NO fleet-vs-GPU routing
   block until a fleet render sweep exists.** So this scaffold's quote surface is
   a *tier + speedup-band* surface (does this shot clear preview, and how fast),
@@ -139,9 +158,9 @@ the scaffold and the split travel together:
 1. **Schema + projection** (`db/schema.sql`, `store.go`, `types.go`,
    `receipt.go`): a `spec_receipt_json` + `spec_quote_json` column pair
    (idempotent `ALTER … ADD COLUMN IF NOT EXISTS`, the entry-94 pattern) and a
-   `ClearingReceipt.Speculation *RenderSpecReceipt` facet filled by
-   `receiptRenderSpec(ParseSpecReceipt(col))`. No producer yet — columns stay
-   NULL.
+   `ClearingReceipt.Speculation *RenderSpecReceipt` facet filled only after
+   separately checking both `ParseSpecReceipt(col)` and `receiptRenderSpec(r)`
+   errors. No producer yet — columns stay NULL.
 2. **Quote surface** (`quote.go`, `types.go`): register the
    `render_speculative` job type (a validated projection of
    `exp_render_stack.py`'s config JSON) and attach `RenderSpecQuote` behind the
@@ -149,10 +168,9 @@ the scaffold and the split travel together:
 3. **Ingest producer** (`collect.go` or an additive endpoint): the spec-lab
    driver POSTs its integrated receipt for a job it ran as an external worker;
    `ParseSpecReceipt` validates at the door; the receipt projection lights up.
-4. **Delivery-tier unlock**: ONLY after a strict-delivery receipt exists. Next
-   selector candidate is cross-denoiser disagreement (OIDN vs OptiX, ~$0.75 to
-   validate, per RUN 4's `selector_recall=0.0` negative); a second decisive
-   negative parks the tier rather than loosening the gate.
+4. **Bound delivery-tier unlock**: strict receipts now exist. Product unlock still requires a
+   content digest, exact repair/verifier policy and build digest, delivered artifact digest, and
+   authoritative attestation/server-side re-verification. A shape match alone never unlocks it.
 5. **Combined jobs**: only after the plan's sequenced nested-workload receipt.
 
 Kill clause (unchanged): if step 3's real ingestion shows the schema needs a

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"sort"
 	"testing"
 
@@ -31,21 +32,18 @@ func TestSealNoKeyIsHonestPlaintext(t *testing.T) {
 	}
 }
 
-// Signed state must verify, and a tampered signature must be rejected.
-func TestStateSignVerify(t *testing.T) {
-	t.Setenv("CX_STATE_SECRET", "state-secret")
-	id := uuid.New()
-	st := signState(id)
-	got, ok := verifyState(st)
-	if !ok || got != id {
-		t.Fatalf("verify failed for valid state")
+func TestSealConfiguredKeyFailsClosedOnEntropyFailure(t *testing.T) {
+	key := make([]byte, 32)
+	sealed := sealTokenWithReader("must-not-leak", key, failingSealReader{})
+	if sealed != "" {
+		t.Fatalf("entropy failure produced stored value %q; want fail-closed empty result", sealed)
 	}
-	if _, ok := verifyState(st + "x"); ok {
-		t.Fatal("tampered state must not verify")
-	}
-	if _, ok := verifyState(id.String()); ok {
-		t.Fatal("unsigned state must not verify when a secret is set")
-	}
+}
+
+type failingSealReader struct{}
+
+func (failingSealReader) Read([]byte) (int, error) {
+	return 0, errors.New("entropy unavailable")
 }
 
 // redundancySelectionHash must be deterministic for a fixed (jobID, taskID) pair
@@ -62,7 +60,9 @@ func TestRedundancySelectionHashIsDeterministicNotOrdinal(t *testing.T) {
 
 	// Determinism: hashing the same pair twice gives the same value.
 	for _, id := range tasks {
-		if redundancySelectionHash(jobID, id) != redundancySelectionHash(jobID, id) {
+		first := redundancySelectionHash(jobID, id)
+		second := redundancySelectionHash(jobID, id)
+		if first != second {
 			t.Fatalf("redundancySelectionHash not deterministic for task %s", id)
 		}
 	}

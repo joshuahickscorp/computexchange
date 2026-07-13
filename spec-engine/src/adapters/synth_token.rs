@@ -61,7 +61,9 @@ impl DraftProducer<TokenWindow> for NgramProposer {
     fn draft(&self, unit: &TokenWindow) -> Vec<u32> {
         let base = *unit.context.last().unwrap_or(&0);
         let _ = fnv_spin(unit.id as u64 ^ 0x4E47_5241, DRAFT_ITERS); // "NGRA"
-        (0..unit.k).map(|i| base.wrapping_add(i as u32 + 1)).collect()
+        (0..unit.k)
+            .map(|i| base.wrapping_add(i as u32 + 1))
+            .collect()
     }
 }
 
@@ -216,7 +218,10 @@ mod tests {
 
         assert_eq!(receipt.modality, Modality::token());
         assert_eq!(receipt.units, 3);
-        assert!(receipt.exact, "token delivered output is lossless by construction");
+        assert!(
+            receipt.exact,
+            "token delivered output is lossless by construction"
+        );
 
         // accepted_fraction is EXACTLY Σm/Σk = (8+6+2)/(8+8+8) = 16/24.
         assert!((0.0..=1.0).contains(&receipt.accepted_fraction));
@@ -232,7 +237,9 @@ mod tests {
         assert!(receipt.repair_cost_s > 0.0);
 
         // speedup = baseline / spec, present under a Modeled baseline.
-        let sp = receipt.speedup_vs_baseline.expect("modeled baseline => Some");
+        let sp = receipt
+            .speedup_vs_baseline
+            .expect("modeled baseline => Some");
         assert!((sp - 0.02 / receipt.total_product_time_s).abs() < 1e-9);
 
         // JSON round-trips.

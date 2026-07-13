@@ -1,6 +1,6 @@
 module computeexchange/control
 
-go 1.26.4 // patched stdlib (net/http2, net, crypto/x509, mime, net/textproto) — see govulncheck
+go 1.26.5 // patched stdlib (crypto/tls and prior net/http/x509 fixes) — see govulncheck
 
 require (
 	github.com/go-webauthn/webauthn v0.17.4
@@ -34,7 +34,7 @@ require (
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
-	golang.org/x/net v0.54.0 // indirect
+	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 	gopkg.in/ini.v1 v1.67.2 // indirect

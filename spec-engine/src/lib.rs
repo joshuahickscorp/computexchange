@@ -39,8 +39,15 @@ pub mod traits;
 pub mod unit;
 pub mod verify;
 
-pub use engine::{aggregate, SpecPipeline, UnitTrace};
-pub use receipt::{BaselineSource, Details, Evidence, Modality, QualityTier, SpecReceipt};
+pub use engine::{
+    aggregate, try_aggregate, EngineError, SpecPipeline, UnitTrace, MAX_SPEC_BATCH_UNITS,
+};
+pub use receipt::{
+    BaselineSource, Details, Evidence, Modality, QualityTier, ReceiptParseError,
+    ReceiptValidationError, SpecReceipt, MAX_SPEC_RECEIPT_DETAILS_JSON_BYTES,
+    MAX_SPEC_RECEIPT_JSON_BYTES, MAX_SPEC_RECEIPT_JSON_DEPTH, MAX_SPEC_RECEIPT_UNITS,
+    SPEC_RECEIPT_SCHEMA_VERSION,
+};
 pub use traits::{AcceptancePolicy, DraftProducer, RepairPolicy, Verifier};
 pub use unit::SpecUnit;
-pub use verify::{Acceptance, Verification};
+pub use verify::{Acceptance, AcceptanceError, Verification};

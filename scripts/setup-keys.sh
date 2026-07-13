@@ -3,8 +3,8 @@
 #
 # Secrets are read with `read -s`, so they never appear on screen or in shell
 # scrollback. .env is created from .env.example if absent and chmod'd to 600. The
-# script is re-runnable: a blank answer keeps the current value. The two hardening
-# secrets (CX_TOKEN_KEY / CX_STATE_SECRET) are auto-generated if unset. Each prompt
+# script is re-runnable: a blank answer keeps the current value. Hardening
+# secrets are auto-generated if unset. Each prompt
 # prints exactly where to find the value in the provider's dashboard.
 set -euo pipefail
 
@@ -87,6 +87,50 @@ prompt_secret STRIPE_WEBHOOK_SECRET \
   "Stripe WEBHOOK signing secret (whsec_…)" \
   "Developers → Webhooks → your endpoint (URL …/v1/stripe/webhook) → 'Signing secret' → Reveal. Local: 'stripe listen --print-secret'"
 
+prompt_secret CX_CONNECT_WEBHOOK_SECRET \
+  "Stripe CONNECT webhook signing secret (a distinct whsec_…)" \
+  "Developers → Webhooks → your endpoint (URL …/v1/stripe/connect-webhook) → 'Signing secret' → Reveal; scripts/stripe-webhooks.sh can create both endpoints"
+
+prompt_plain SITE_HOST \
+  "First-party production hostname" \
+  "the hostname served by your production TLS edge" \
+  "computexchange.net"
+
+prompt_plain CX_CONNECT_RETURN_URL \
+  "Stripe Connect onboarding return URL" \
+  "must be HTTPS on SITE_HOST; production startup validates the exact origin" \
+  "https://computexchange.net/earn?connected=1"
+
+prompt_plain CX_CONNECT_REFRESH_URL \
+  "Stripe Connect onboarding refresh URL" \
+  "must be HTTPS on SITE_HOST; Stripe sends expired onboarding links here" \
+  "https://computexchange.net/earn/connect/refresh"
+
+cat <<'EOF'
+
+────────────────────────────────────────────────────────────────────────────
+Production economics — REQUIRED when CX_ENV=production or an sk_live_ key is
+used. Enter values from the processor contract and the reviewed CX cost model;
+there are deliberately no runtime defaults. Basis points: 350 = 3.50%.
+────────────────────────────────────────────────────────────────────────────
+EOF
+
+prompt_plain CX_ECON_SCHEDULE_VERSION \
+  "Economic schedule version" \
+  "your dated operator-reviewed pricing record (for example 2026-07-card-v1)"
+prompt_plain CX_PROCESSOR_PERCENT_BPS \
+  "Processor variable fee (basis points)" \
+  "your current Stripe card-processing contract"
+prompt_plain CX_PROCESSOR_FIXED_USD \
+  "Processor fixed fee per collection (USD)" \
+  "your current Stripe card-processing contract"
+prompt_plain CX_CONTROL_PLANE_PER_TASK_USD \
+  "Modeled control-plane cost per task (USD)" \
+  "your measured infrastructure cost model"
+prompt_plain CX_TARGET_MARGIN_BPS \
+  "Minimum contribution-margin target (basis points)" \
+  "your approved pricing policy"
+
 # ── GitHub OAuth app (OPTIONAL — only powers "connect a repo from GitHub") ────
 # Derive the local callback default from LISTEN_ADDR (the browser always hits
 # localhost; only the port varies). Default :8080 to match .env.example.
@@ -116,7 +160,7 @@ Like the Stripe webhook, you CREATE the app once before these values exist:
   6. "Generate a new client secret", copy it NOW (shown once) -> prompt 2 below
 
 Production later: edit the app's URLs (or create a second app) for your real
-domain, e.g. https://compute.exchange/v1/connect/github/callback, then update
+domain, e.g. https://computexchange.net/v1/connect/github/callback, then update
 these three values on the server.
 ────────────────────────────────────────────────────────────────────────────
 EOF
@@ -136,7 +180,7 @@ prompt_plain GITHUB_REDIRECT_URL \
 
 # ── Hardening: auto-generate if unset ────────────────────────────────────────
 gen() { openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p -c 64; }
-for k in CX_TOKEN_KEY CX_STATE_SECRET; do
+for k in CX_TOKEN_KEY CX_VERIFICATION_SAMPLE_SECRET; do
   if [ -z "$(current "$k")" ]; then
     set_env "$k" "$(gen)"
     echo

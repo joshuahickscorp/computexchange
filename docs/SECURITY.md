@@ -35,11 +35,28 @@ Four distinct entry points, each with its own auth scheme and threat model:
   checks the signature's own claimed timestamp against a 5-minute tolerance
   (`control/billing.go`, `stripeSigTolerance`) — a correctly-signed payload used
   to be valid forever once computed.
+- **Cross-tenant or unsigned outbound completion callbacks.** Every webhook is
+  ownership-bound to one buyer/job, receives an independent 256-bit secret, and
+  stores only its `CX_TOKEN_KEY`-sealed ciphertext. Responses carrying the secret
+  use `Cache-Control: no-store`; delivery refuses redirects, pins validated public
+  DNS answers, and sends `X-CX-Signature: t=...,v1=...`. A legacy row without a
+  usable sealed secret is dead-lettered before network I/O and can be re-armed only
+  by an authenticated exact re-registration (`control/webhook_secret.go`,
+  `control/store.go`, `control/workers.go`).
 - **Live-Stripe deploy without hardening secrets.** `control/main.go` refuses
-  to start (fatal, not a warning) when `CX_TOKEN_KEY`/`CX_STATE_SECRET` are
+  to start (fatal, not a warning) when `CX_TOKEN_KEY`/
+  `CX_VERIFICATION_SAMPLE_SECRET` are
   unset AND either `CX_ENV=production` OR `STRIPE_SECRET_KEY` is a real
   `sk_live_` key — the second check exists so a live payment key alone is
   sufficient, independent of whether an operator also remembered to set `CX_ENV`.
+  Both hardening keys must contain at least 32 unpredictable bytes.
+  OAuth state itself is random, stored hash-only, single-use, expiry-bound, and
+  cookie-bound; it does not use a reusable environment secret.
+- **Unpredictable audit sampling.** Reputation-weighted verification uses
+  `HMAC-SHA256(CX_VERIFICATION_SAMPLE_SECRET, task_id)` with domain separation.
+  A worker knows its task UUID but not the keyed audit decision, so it cannot
+  selectively cheat only on sampled-out tasks. The decision remains stable across
+  control-plane retries.
 - **Honeypot/redundancy task fingerprinting.** Every task's storage key is
   `jobs/{job}/tasks/{taskID}/result.json` — primary, redundancy, and honeypot
   tasks are byte-for-byte indistinguishable in their addressing
@@ -51,7 +68,10 @@ Four distinct entry points, each with its own auth scheme and threat model:
   submission order" — a supplier watching dispatch order alone cannot infer
   which chunks are more likely to be checked.
 - **Untrusted byte streams are capped.** `control/api.go`'s `capBody` middleware
-  (`http.MaxBytesReader`, 256 MiB) on every inbound request; the agent's
+  uses `http.MaxBytesReader`: 4 MiB for ordinary JSON, 32 MiB for inline job
+  JSON, 72 MiB only for the supported 64 MiB file-upload route, and a dedicated
+  smaller WAV multipart ceiling. Larger job inputs use the streamed
+  object-reference path. The agent's
   `s3_get` bounds a task input download at 512 MiB, checked against both a
   reported `Content-Length` and the real received size
   (`agent/src/main.rs`, `MAX_INPUT_DOWNLOAD_BYTES`).
@@ -100,11 +120,11 @@ Four distinct entry points, each with its own auth scheme and threat model:
   registers against a mock control plane, and is then DENIED writing its `status.json`
   into `~/Documents` (`CX_STATUS_PATH` probe) while the same unsandboxed run writes it
   successfully — the exact "a filesystem write it should be denied is denied" proof.
-  When the profile can't be resolved (a bare dev build with no assembled `.app` bundle
-  and no `CX_SANDBOX_PROFILE` override), both the launcher and the self-re-exec fall
-  through to an UNSANDBOXED run and say so — the launcher records `sandboxActive=false`,
-  the binary logs a loud "running UNSANDBOXED" warning — never claiming a protection it
-  isn't applying (Security Posture 8→9, docs/internal/CREED_AND_PATH_TO_TEN.md).
+  The distributed app now sets `CX_REQUIRE_SANDBOX=1`: if the profile or
+  `sandbox-exec` is unavailable, the child exits before registering or accepting
+  buyer work. A bare direct development build without that policy may still run
+  unsandboxed and logs a loud warning; it never claims containment it did not apply
+  (Security Posture 8→9, docs/internal/CREED_AND_PATH_TO_TEN.md).
 - **Worker tokens and API keys are hashed at rest**, never stored or logged in
   plaintext (`worker_tokens.token_hash`, `api_keys` masked-hint pattern,
   `control/suppliers.go`).

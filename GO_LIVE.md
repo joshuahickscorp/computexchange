@@ -1,9 +1,13 @@
-# GO LIVE — the few-commands runbook
+# Draft external-service runbook — not a go-live attestation
 
-The engine is proven (`make prove-local`). What's left is *external*: real Stripe
-rails, an Apple-notarized supplier app, and a real-GPU CUDA re-proof. This file is
-the honest minimum you type to close each one. Every script fails loudly and never
-fakes success — if a credential is missing it tells you exactly which.
+<!-- CLAIM-SCOPE: draft-runbook-non-authoritative -->
+
+This file records candidate commands for later Stripe, Apple, and RunPod work. It
+does not mean the engine, product, policies, deployment, or market are go-live, and
+running a script cannot close the corresponding 5/5 outcome gate by itself. Use
+[`proof/5x5-gates.json`](proof/5x5-gates.json) for current status and required
+evidence. Never provision paid infrastructure or use live credentials from this
+runbook without the user's explicit authorization and a stated spend/scope cap.
 
 **What you supply** (the only things a script can't do for you): a Stripe secret key,
 an Apple Developer ID + notary credentials, and a RunPod API key. Everything else is
@@ -13,13 +17,15 @@ scripted.
 
 ## 1 · Stripe — payments + supplier payouts
 
-Prereq: production is already deployed at `computexchange.net` with `STRIPE_SECRET_KEY`
-set (buyer charges are live). This adds the two webhooks + Connect payout readiness.
+Prereq: the code is deployed but the control service is expected to remain
+unready until all live-money inputs exist. Production requires
+`STRIPE_SECRET_KEY`, two distinct webhook secrets, the two hardening secrets,
+and all five versioned `CX_ECON_*` values; startup rejects an incomplete set.
 
 ```bash
 # a) put your Stripe keys in .env (hidden prompts; re-runnable, blank keeps current).
-#    Paste sk_live_… for STRIPE_SECRET_KEY. You can leave STRIPE_WEBHOOK_SECRET
-#    BLANK — step (b) fills it in for you.
+#    Paste sk_live_… for STRIPE_SECRET_KEY, review the five economic inputs, and
+#    either paste both endpoint secrets or leave those two blank for step (b).
 bash scripts/setup-keys.sh
 
 # b) auto-register BOTH webhook endpoints and capture their signing secrets → .env.
@@ -35,10 +41,11 @@ Verify: `curl -s https://computexchange.net/readyz` → 200, and in the Stripe
 dashboard both endpoints show "enabled". A supplier then links payouts in-app
 (Earn → connect), which drives `account.updated` → `payouts_enabled=true`.
 
-> The Connect onboarding return URLs (`CX_CONNECT_RETURN_URL` /
-> `CX_CONNECT_REFRESH_URL`) are set once in the prod `.env` — they already point at
-> `computexchange.net` in production. The code default is `compute.exchange`, so
-> don't rely on the default; keep them explicit in `.env`.
+> Set both Connect onboarding URLs explicitly in the production `.env`, for example
+> `CX_CONNECT_RETURN_URL=https://computexchange.net/earn?connected=1` and
+> `CX_CONNECT_REFRESH_URL=https://computexchange.net/earn/connect/refresh`.
+> Production startup requires both to be HTTPS URLs on `SITE_HOST`; there is no
+> cross-marketplace fallback.
 
 > Note: `stripe-webhooks.sh` writes a NEW endpoint's secret automatically. If an
 > endpoint already exists, Stripe won't re-reveal its secret via API — the script
@@ -100,9 +107,11 @@ Knobs (env): `GPU_TYPE` (default `NVIDIA A100 80GB PCIe`), `CLOUD_TYPE`
 inspection. Subcommands: `up` (provision only), `ssh` (shell in), `down`
 (terminate). The proof log lands in `.artifacts/runpod-spike-proof.log`.
 
-Expect: `CUDA lane PROVEN ✅` — self-classifies `nvidia_80g`, real embed eps / llama
-tps, and `batched == serial` with a speedup. A **non-zero exit tears the pod down
-too**; only `KEEP=1` leaves it running (and warns you it's costing money).
+Expect the script to emit a narrow CUDA test ledger and teardown status. A green
+run is hardware evidence for the exact pinned build/workload only; it does not
+promote CUDA to production, prove multi-lane identity, establish a competitive
+speedup, or close the 24-hour soak gate. A **non-zero exit tears the pod down too**;
+only `KEEP=1` leaves it running (and warns that it is costing money).
 
 ---
 

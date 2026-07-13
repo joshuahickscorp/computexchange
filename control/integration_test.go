@@ -26,9 +26,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -84,8 +84,102 @@ func ensureExtraDemoSuppliers(t *testing.T, ctx context.Context) {
 	}
 }
 
+// registerDemoWorkerForTest gives the shared demo identity the same exact
+// current-matrix authority a real POST /v1/worker/register would create. Production
+// seedDemo intentionally does not create these rows: a seeded/legacy array-only
+// worker is inert until its agent re-registers. The integration harness opts in
+// explicitly so unrelated lifecycle tests continue to start with one real eligible
+// worker while runtime-authority tests can delete the rows to prove inertness.
+func demoProductionCapability() WorkerCapability {
+	return WorkerCapability{
+		WorkerID:     demoWorkerUUID,
+		SupplierID:   demoSupplierUUID,
+		HWClass:      "apple_silicon_max",
+		Engine:       "candle",
+		MemoryGB:     64,
+		MemoryBwGbps: 400,
+		SupportedJobs: []string{
+			"embed", "rerank", "batch_infer", "batch_classification",
+			"json_extraction", "audio_transcribe",
+		},
+		SupportedModels: []string{
+			"all-minilm-l6-v2", "llama-3.2-1b-instruct-q4",
+			"whisper-tiny", "whisper-base",
+		},
+		AgentVersion: "integration-test",
+		OSVersion:    "macOS",
+	}
+}
+
+func registerDemoWorkerForTest(t *testing.T, ctx context.Context) {
+	t.Helper()
+	cap := demoProductionCapability()
+	if err := itStore.UpsertWorker(ctx, cap); err != nil {
+		t.Fatalf("register demo worker fixture: %v", err)
+	}
+}
+
+// replaceWorkerAuthorizationsForTest is the explicit adapter for integration
+// fixtures that insert worker rows directly to exercise a later lifecycle state.
+// It derives rows from the generated production matrix exactly like registration;
+// it never manufactures authority for a pending/stub runtime. Production code has
+// no equivalent escape hatch: only UpsertWorker writes these rows.
+func replaceWorkerAuthorizationsForTest(t *testing.T, ctx context.Context, workerID uuid.UUID, pairs ...[2]string) {
+	t.Helper()
+	var hwClass, engine string
+	if err := itPool.QueryRow(ctx,
+		`SELECT hw_class, COALESCE(engine,'candle') FROM workers WHERE id = $1`, workerID,
+	).Scan(&hwClass, &engine); err != nil {
+		t.Fatalf("read worker lane for exact test authority: %v", err)
+	}
+	if _, err := itPool.Exec(ctx,
+		`DELETE FROM worker_authorized_capabilities WHERE worker_id = $1`, workerID); err != nil {
+		t.Fatalf("clear exact test authority: %v", err)
+	}
+	for _, pair := range pairs {
+		var matched *generatedRuntimeCapability
+		for i := range generatedAdvertisedRuntimeCapabilities {
+			cell := &generatedAdvertisedRuntimeCapabilities[i]
+			if cell.Engine == engine && generatedCapabilityHasHWClass(*cell, hwClass) &&
+				cell.Job == pair[0] && cell.Model == pair[1] {
+				matched = cell
+				break
+			}
+		}
+		if matched == nil {
+			t.Fatalf("test fixture requested non-production authority worker=%s lane=%s/%s tuple=%s/%s",
+				workerID, engine, hwClass, pair[0], pair[1])
+		}
+		if _, err := itPool.Exec(ctx,
+			`INSERT INTO worker_authorized_capabilities
+			   (worker_id, cell_id, runtime_id, job_type, model_ref, model_kind, matrix_sha256)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+			workerID, matched.ID, matched.Runtime, matched.Job, matched.Model,
+			matched.ModelKind, generatedRuntimeMatrixSHA256); err != nil {
+			t.Fatalf("insert exact test authority: %v", err)
+		}
+	}
+}
+
 func TestMain(m *testing.M) {
 	ctx := context.Background()
+	// Tests opt into an explicit versioned economic schedule. Production has no
+	// defaults: a missing variable blocks quote/submit. Keeping the fixture here
+	// makes that distinction visible instead of teaching production code a test
+	// fallback.
+	for name, value := range map[string]string{
+		economicScheduleVersionEnv: "integration-test-stripe-conservative-v1",
+		processorPercentBPSEnv:     "350",
+		processorFixedUSDEnv:       "0.35",
+		controlPerTaskUSDEnv:       "0.005",
+		targetMarginBPSEnv:         "300",
+		"CX_TOKEN_KEY":             "integration-test-webhook-and-oauth-sealing-key",
+	} {
+		if err := os.Setenv(name, value); err != nil {
+			fmt.Fprintf(os.Stderr, "integration: setting %s: %v\n", name, err)
+			os.Exit(2)
+		}
+	}
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		fmt.Fprintln(os.Stderr, "integration: DATABASE_URL unset — run via scripts/prove-local.sh (it provisions Postgres + MinIO)")
@@ -149,7 +243,10 @@ func reset(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
 	if _, err := itPool.Exec(ctx,
-		`TRUNCATE tasks, jobs, webhooks, ledger_entries, benchmark_results, disputes, verification_events, charge_batches RESTART IDENTITY CASCADE`); err != nil {
+		`TRUNCATE tasks, jobs, webhooks, ledger_entries, benchmark_results, disputes,
+		 buyer_charge_operations, stripe_webhook_events, stripe_charge_cash_state, stripe_dispute_cash_state,
+		 supplier_payout_funding_state, verification_events, charge_batches
+		 RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatalf("reset truncate: %v", err)
 	}
 	// Workers/worker_tokens are NOT truncated above (FK from worker_tokens). Drop
@@ -174,9 +271,61 @@ func reset(t *testing.T) {
 	}
 	// Demo worker must exist + be live for poll claims.
 	if _, err := itPool.Exec(ctx,
-		`UPDATE workers SET last_seen_at = now() WHERE id = $1`, demoWorkerUUID); err != nil {
+		`UPDATE workers SET last_seen_at = now(), priority_claim_streak = 0 WHERE id = $1`, demoWorkerUUID); err != nil {
 		t.Fatalf("reset worker: %v", err)
 	}
+	registerDemoWorkerForTest(t, ctx)
+}
+
+// installRawFixtureEconomicPlan is the narrow adapter for legacy integration
+// fixtures that intentionally hand-build jobs/tasks in unusual lifecycle states
+// (already complete redundancy peers, old stragglers, etc.). Production has no
+// fallback for such rows: the fixture explicitly persists the same immutable
+// plan + bounded reserve CreateJobWithTasks requires, then callers stamp the
+// returned frozen amounts on every raw task INSERT.
+func installRawFixtureEconomicPlan(t *testing.T, ctx context.Context, jobID uuid.UUID, initialTasks, extraReserve int) EconomicPlan {
+	t.Helper()
+	plan := BuildEconomicPlan(EconomicPlanInput{
+		BaseComputeUSD:   float64(initialTasks),
+		InitialTaskCount: initialTasks,
+		ExtraTaskReserve: extraReserve,
+		SupplierShare:    supplierShareRate,
+	}, testEconomicSchedule())
+	if err := ValidateEconomicPlanSnapshot(plan); err != nil {
+		t.Fatalf("raw fixture economic plan: %v", err)
+	}
+	blob, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := itPool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO job_economic_plans (
+		  job_id,plan_version,schedule_version,plan_json,initial_task_count,
+		  buyer_charge_per_task_usd,supplier_payout_per_task_usd,
+		  initial_buyer_charge_usd,reserved_buyer_charge_usd,sla_premium_usd,firm_quote_max_usd
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,0,NULL)`,
+		jobID, plan.Version, plan.Schedule.Version, blob, initialTasks,
+		plan.BuyerChargePerTaskUSD, plan.SupplierPayoutPerTaskUSD,
+		plan.InitialBuyerChargeUSD, plan.ReservedBuyerChargeUSD); err != nil {
+		t.Fatalf("insert raw fixture economic plan: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO job_economic_reserves (job_id,reserved_tasks,consumed_tasks)
+		VALUES ($1,$2,0)`, jobID, extraReserve); err != nil {
+		t.Fatalf("insert raw fixture reserve: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE jobs SET estimated_usd=$2 WHERE id=$1`, jobID, plan.InitialBuyerChargeUSD); err != nil {
+		t.Fatalf("stamp raw fixture estimate: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit raw fixture economics: %v", err)
+	}
+	return plan
 }
 
 // --- HTTP helpers ---
@@ -218,6 +367,22 @@ func adminKey() hdr  { return hdr{"Authorization", "Bearer " + demoAdminAPIKey} 
 func workerTok() hdr { return hdr{"X-Worker-Token", demoWorkerToken} }
 func jsonCT() hdr    { return hdr{"Content-Type", "application/json"} }
 
+func integrationAdminActor(t *testing.T) AdminActor {
+	t.Helper()
+	var id uuid.UUID
+	if err := itPool.QueryRow(context.Background(),
+		`SELECT id FROM api_keys WHERE key_hash=$1 AND is_admin=true AND revoked=false`,
+		hashKey(demoAdminAPIKey)).Scan(&id); err != nil {
+		t.Fatalf("load integration admin actor: %v", err)
+	}
+	return AdminActor{
+		Mode:             AdminAuthBreakGlassAPIKey,
+		PrincipalID:      id,
+		AttributionScope: AdminAttributionSharedCredentialOnly,
+		Label:            "integration break-glass API key",
+	}
+}
+
 // embedResultJSON builds a deterministic embed result blob with n unit vectors.
 func embedResultJSON(n int) []byte {
 	vecs := make([][]float64, n)
@@ -230,6 +395,46 @@ func embedResultJSON(n int) []byte {
 	return b
 }
 
+// demoHoneypotEmbedResultJSON puts the seeded, measured known-answer vector in
+// the exact result envelope emitted by the Rust EmbedRunner. The seed remains a
+// vectors-only semantic fixture so old known answers stay readable, but a fake
+// worker must upload the same job_type/model/dim/count contract as a real agent.
+func demoHoneypotEmbedResultJSON(t *testing.T) []byte {
+	t.Helper()
+	var known struct {
+		Vectors [][]float64 `json:"vectors"`
+	}
+	if err := json.Unmarshal([]byte(demoHoneypotEmbedKnownAnswer), &known); err != nil {
+		t.Fatalf("decode seeded honeypot answer: %v", err)
+	}
+	width := 0
+	if len(known.Vectors) > 0 {
+		width = len(known.Vectors[0])
+	}
+	if len(known.Vectors) != 1 || width != 384 {
+		t.Fatalf("seeded honeypot answer has shape %dx%d, want 1x384",
+			len(known.Vectors), width)
+	}
+	result := struct {
+		JobType string      `json:"job_type"`
+		Model   string      `json:"model"`
+		Dim     int         `json:"dim"`
+		Count   int         `json:"count"`
+		Vectors [][]float64 `json:"vectors"`
+	}{
+		JobType: "embed",
+		Model:   "all-minilm-l6-v2",
+		Dim:     len(known.Vectors[0]),
+		Count:   len(known.Vectors),
+		Vectors: known.Vectors,
+	}
+	body, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("encode seeded honeypot result envelope: %v", err)
+	}
+	return body
+}
+
 // submitEmbedJob submits an embed job with the given input lines + policy and
 // returns the job id and task count.
 func submitEmbedJob(t *testing.T, lines int, redFrac, honeyFrac float32, holdSecs uint32) (uuid.UUID, int) {
@@ -240,7 +445,7 @@ func submitEmbedJob(t *testing.T, lines int, redFrac, honeyFrac float32, holdSec
 	}
 	body := map[string]any{
 		"job_type":    map[string]any{"type": "embed"},
-		"model":       map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"model":       map[string]any{"kind": "hf", "ref": "all-minilm-l6-v2"},
 		"params":      map[string]any{"split_size": 1000},
 		"constraints": map[string]any{"min_memory_gb": 2},
 		// skip_verification_floor: this helper's callers pass explicit
@@ -298,7 +503,7 @@ func TestVerificationFloorAppliesUnlessOptedOut(t *testing.T) {
 		}
 		body := map[string]any{
 			"job_type":     map[string]any{"type": "embed"},
-			"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+			"model":        map[string]any{"kind": "hf", "ref": "all-minilm-l6-v2"},
 			"params":       map[string]any{"split_size": 1000},
 			"constraints":  map[string]any{"min_memory_gb": 2},
 			"verification": map[string]any{"redundancy_frac": 0, "honeypot_frac": 0},
@@ -326,7 +531,7 @@ func TestVerificationFloorAppliesUnlessOptedOut(t *testing.T) {
 		}
 		body := map[string]any{
 			"job_type":     map[string]any{"type": "embed"},
-			"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+			"model":        map[string]any{"kind": "hf", "ref": "all-minilm-l6-v2"},
 			"params":       map[string]any{"split_size": 1000},
 			"constraints":  map[string]any{"min_memory_gb": 2},
 			"verification": map[string]any{"redundancy_frac": 0, "honeypot_frac": 0, "skip_verification_floor": true},
@@ -448,7 +653,8 @@ func TestWorkerRegister(t *testing.T) {
 	reset(t)
 	cap := WorkerCapability{
 		HWClass: "apple_silicon_max", MemoryGB: 64, MemoryBwGbps: 400,
-		SupportedJobs: []string{"embed"}, AgentVersion: "test", OSVersion: "macOS",
+		SupportedJobs: []string{"embed"}, SupportedModels: []string{"all-minilm-l6-v2"},
+		AgentVersion: "test", OSVersion: "macOS",
 	}
 	code, body := req(t, "POST", "/v1/worker/register", cap, workerTok(), jsonCT())
 	if code != 200 {
@@ -541,7 +747,7 @@ func TestResolveInputRejectsCrossBuyerS3Key(t *testing.T) {
 
 	crossBody := map[string]any{
 		"job_type":    map[string]any{"type": "embed"},
-		"model":       map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"model":       map[string]any{"kind": "hf", "ref": "all-minilm-l6-v2"},
 		"constraints": map[string]any{"min_memory_gb": 2},
 		"tier":        "batch",
 		"input":       map[string]any{"s3_key": "jobs/" + jobA.String() + "/input.jsonl"},
@@ -558,7 +764,7 @@ func TestResolveInputRejectsCrossBuyerS3Key(t *testing.T) {
 	// chaining use case this fix must not break.
 	ownBody := map[string]any{
 		"job_type":    map[string]any{"type": "embed"},
-		"model":       map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"model":       map[string]any{"kind": "hf", "ref": "all-minilm-l6-v2"},
 		"constraints": map[string]any{"min_memory_gb": 2},
 		"tier":        "batch",
 		"input":       map[string]any{"s3_key": "jobs/" + jobA.String() + "/input.jsonl"},
@@ -639,11 +845,75 @@ func TestEmbedHappyPathSimulated(t *testing.T) {
 	}
 }
 
+// TestJobConstraintsPersistAndDispatch proves every buyer-authored constraint
+// survives the submit -> jobs row -> claim -> poll manifest path. These values
+// are execution inputs to the agent, not scheduler-only hints.
+func TestJobConstraintsPersistAndDispatch(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+	body := map[string]any{
+		"job_type": map[string]any{"type": "embed"},
+		"model":    map[string]any{"kind": "hf", "ref": "all-minilm-l6-v2"},
+		"params":   map[string]any{"split_size": 1000},
+		"constraints": map[string]any{
+			"min_memory_gb":     7.5,
+			"hw_classes":        []string{"apple_silicon_max"},
+			"max_duration_secs": 4321,
+			"data_residency":    []string{"US"},
+		},
+		"verification": map[string]any{
+			"redundancy_frac": 0, "honeypot_frac": 0,
+			"payout_hold_secs": 0, "skip_verification_floor": true,
+		},
+		"tier":  "batch",
+		"input": "{\"id\":\"r0\",\"text\":\"constraint round trip\"}\n",
+	}
+	code, out := req(t, "POST", "/v1/jobs", body, buyerKey(), jsonCT())
+	if code != http.StatusAccepted {
+		t.Fatalf("submit: want 202, got %d: %s", code, out)
+	}
+	var submitted JobSubmitResponse
+	if err := json.Unmarshal(out, &submitted); err != nil {
+		t.Fatalf("submit decode: %v", err)
+	}
+
+	var minMemory float32
+	var hwClasses, residency []string
+	var maxDuration uint32
+	if err := itPool.QueryRow(ctx, `
+		SELECT min_memory_gb, hw_classes, max_duration_secs, data_residency
+		  FROM jobs WHERE id=$1`, submitted.JobID).
+		Scan(&minMemory, &hwClasses, &maxDuration, &residency); err != nil {
+		t.Fatalf("read persisted constraints: %v", err)
+	}
+	if minMemory != 7.5 || maxDuration != 4321 ||
+		len(hwClasses) != 1 || hwClasses[0] != "apple_silicon_max" ||
+		len(residency) != 1 || residency[0] != "US" {
+		t.Fatalf("persisted constraints changed: memory=%v hw=%v duration=%d residency=%v",
+			minMemory, hwClasses, maxDuration, residency)
+	}
+
+	code, out = req(t, "GET", "/v1/worker/poll", nil, workerTok())
+	if code != http.StatusOK {
+		t.Fatalf("poll: want 200, got %d: %s", code, out)
+	}
+	var disp TaskDispatch
+	if err := json.Unmarshal(out, &disp); err != nil {
+		t.Fatalf("dispatch decode: %v", err)
+	}
+	got := disp.Manifest.Constraints
+	if got.MinMemoryGB != 7.5 || got.MaxDurationSecs != 4321 ||
+		len(got.HWClasses) != 1 || got.HWClasses[0] != "apple_silicon_max" ||
+		len(got.DataResidency) != 1 || got.DataResidency[0] != "US" {
+		t.Fatalf("dispatch constraints changed: %+v", got)
+	}
+}
+
 // --- 6b. quote-to-actual drift: a committed task records its real duration ---
 
 // Plane D D6 / errata C-Errata-6: every COMMITTED task writes one task_durations row
 // carrying the worker's reported wall-time, job_type, model_ref + split_size, so the
-// Exchange Brain can learn an observed p90. A second (duplicate) commit is a 409 that
+// Exchange Brain can learn an observed p90. An exact response-loss replay is 204 but
 // records NOTHING — the duration is written inside the commit transaction, so a task
 // that does not truly commit cannot poison the estimate. /admin/drift then reflects it.
 func TestTaskDurationRecorded(t *testing.T) {
@@ -692,9 +962,9 @@ func TestTaskDurationRecorded(t *testing.T) {
 		t.Fatalf("duration row context wrong: job_type=%q model=%q split=%d", jobType, modelRef, splitSize)
 	}
 
-	// A duplicate commit is a 409 and must NOT add a second row (no poisoning).
-	if code, _ := req(t, "POST", "/v1/worker/task/"+disp.TaskID.String()+"/commit", commit, workerTok(), jsonCT()); code != 409 {
-		t.Fatalf("duplicate commit: want 409, got %d", code)
+	// An exact duplicate is acknowledged idempotently and must not add a row.
+	if code, _ := req(t, "POST", "/v1/worker/task/"+disp.TaskID.String()+"/commit", commit, workerTok(), jsonCT()); code != 204 {
+		t.Fatalf("duplicate commit replay: want 204, got %d", code)
 	}
 	itPool.QueryRow(ctx, `SELECT count(*) FROM task_durations WHERE job_id=$1`, jobID).Scan(&rows)
 	if rows != 1 {
@@ -913,7 +1183,7 @@ func TestLatencyPhaseDecomposition(t *testing.T) {
 	_ = jobID
 }
 
-// --- 7. duplicate commit is idempotent: second → 409, credited once ---
+// --- 7. duplicate commit is idempotent: exact replay → 204, credited once ---
 
 func TestDuplicateCommitIdempotent(t *testing.T) {
 	reset(t)
@@ -931,8 +1201,8 @@ func TestDuplicateCommitIdempotent(t *testing.T) {
 	if code, _ := req(t, "POST", "/v1/worker/task/"+disp.TaskID.String()+"/commit", commit, workerTok(), jsonCT()); code != 204 {
 		t.Fatalf("first commit not 204: %d", code)
 	}
-	if code, _ := req(t, "POST", "/v1/worker/task/"+disp.TaskID.String()+"/commit", commit, workerTok(), jsonCT()); code != 409 {
-		t.Fatalf("second commit: want 409, got %d", code)
+	if code, _ := req(t, "POST", "/v1/worker/task/"+disp.TaskID.String()+"/commit", commit, workerTok(), jsonCT()); code != 204 {
+		t.Fatalf("second exact commit: want 204, got %d", code)
 	}
 	var credits int
 	itPool.QueryRow(ctx, `SELECT count(*) FROM ledger_entries le JOIN tasks t ON t.id=le.task_id
@@ -945,7 +1215,7 @@ func TestDuplicateCommitIdempotent(t *testing.T) {
 // TestCompletedTasksCounterMaintainedAtCommit proves the Control Plane Hot Path
 // 7->8 fix (docs/internal/CREED_AND_PATH_TO_TEN.md): suppliers.completed_tasks
 // is a REAL maintained column, incremented exactly once per real commit — never
-// on a rejected duplicate — and ClaimTask's trusted-tier gate reads it directly
+// on an acknowledged duplicate — and ClaimTask's trusted-tier gate reads it directly
 // instead of re-deriving it with a count(*) scan on every claim.
 func TestCompletedTasksCounterMaintainedAtCommit(t *testing.T) {
 	reset(t)
@@ -972,9 +1242,9 @@ func TestCompletedTasksCounterMaintainedAtCommit(t *testing.T) {
 		t.Fatalf("want completed_tasks +1 after one real commit, got +%d (before=%d after=%d)", afterOne-before, before, afterOne)
 	}
 
-	// A rejected duplicate commit must NOT increment it again.
-	if code, _ := req(t, "POST", "/v1/worker/task/"+disp.TaskID.String()+"/commit", commit, workerTok(), jsonCT()); code != 409 {
-		t.Fatal("duplicate commit must 409")
+	// An exact acknowledged replay must NOT increment it again.
+	if code, _ := req(t, "POST", "/v1/worker/task/"+disp.TaskID.String()+"/commit", commit, workerTok(), jsonCT()); code != 204 {
+		t.Fatal("duplicate commit replay must 204")
 	}
 	afterDup := supplierCompletedTasks(t, demoSupplierUUID)
 	if afterDup != afterOne {
@@ -1017,6 +1287,10 @@ func TestCreateJobWithTasksCopyFromCorrectness(t *testing.T) {
 		InputRef: "jobs/cf/in.jsonl", OutputRef: "jobs/cf/out.json", Tier: "batch",
 		VerificationPolicy: []byte(`{}`), TaskCount: 3, MinMemoryGB: 2,
 	}
+	jr.EconomicPlan = BuildEconomicPlan(EconomicPlanInput{
+		BaseComputeUSD: 3, InitialTaskCount: 3, SupplierShare: supplierShareRate,
+	}, testEconomicSchedule())
+	jr.EstimatedUSD = jr.EconomicPlan.InitialBuyerChargeUSD
 	primary, honeypot, redundancy := uuid.New(), uuid.New(), uuid.New()
 	tasks := []taskRow{
 		{ID: primary, JobID: jobID, InputRef: "jobs/cf/t0/in.jsonl", ResultKey: "jobs/cf/t0/out.json", ChunkIndex: 0},
@@ -1113,6 +1387,10 @@ func TestCreateJobWithTasksCopyFromScalesLinearly(t *testing.T) {
 			InputRef: fmt.Sprintf("jobs/scale/%s/in.jsonl", jobID), OutputRef: fmt.Sprintf("jobs/scale/%s/out.json", jobID),
 			Tier: "batch", VerificationPolicy: []byte(`{}`), TaskCount: n, MinMemoryGB: 2,
 		}
+		jr.EconomicPlan = BuildEconomicPlan(EconomicPlanInput{
+			BaseComputeUSD: float64(n), InitialTaskCount: n, SupplierShare: supplierShareRate,
+		}, testEconomicSchedule())
+		jr.EstimatedUSD = jr.EconomicPlan.InitialBuyerChargeUSD
 		tasks := makeTasks(jobID, n)
 		start := time.Now()
 		if err := itStore.CreateJobWithTasks(ctx, jr, tasks); err != nil {
@@ -1171,7 +1449,9 @@ func supplierCompletedTasks(t *testing.T, supplierID uuid.UUID) int64 {
 func TestRedundancyVerify(t *testing.T) {
 	t.Run("match", func(t *testing.T) {
 		reset(t)
-		info := &CommitTaskInfo{TaskID: uuid.New(), JobID: uuid.New(), WorkerID: demoWorkerUUID,
+		jobID, taskID := uuid.New(), uuid.New()
+		mustJobTask(t, jobID, taskID, false, false, "jobs/x/input.jsonl")
+		info := &CommitTaskInfo{TaskID: taskID, JobID: jobID, WorkerID: demoWorkerUUID,
 			SupplierID: demoSupplierUUID, jobType: "embed", HWClass: "apple_silicon_max"}
 		out, err := itServer.verifier.verifyTaskResult(context.Background(), info,
 			TaskCommit{TaskID: info.TaskID}, embedResultJSON(1), embedResultJSON(1))
@@ -1186,7 +1466,9 @@ func TestRedundancyVerify(t *testing.T) {
 		reset(t)
 		a := embedResultJSON(1)              // unit vector e0
 		b := []byte(`{"vectors":[[0,1,0]]}`) // orthogonal → cosine 0 < 0.999
-		info := &CommitTaskInfo{TaskID: uuid.New(), JobID: uuid.New(), WorkerID: demoWorkerUUID,
+		jobID, taskID := uuid.New(), uuid.New()
+		mustJobTask(t, jobID, taskID, false, false, "jobs/x/input.jsonl")
+		info := &CommitTaskInfo{TaskID: taskID, JobID: jobID, WorkerID: demoWorkerUUID,
 			SupplierID: demoSupplierUUID, jobType: "embed", HWClass: "apple_silicon_max"}
 		out, err := itServer.verifier.verifyTaskResult(context.Background(), info,
 			TaskCommit{TaskID: info.TaskID}, a, b)
@@ -1204,16 +1486,13 @@ func TestRedundancyVerify(t *testing.T) {
 	})
 }
 
-// TestHashTrustedRedundancySkipsPeerFetch proves the Control Plane Hot Path 8->9
-// fix (docs/internal/CREED_AND_PATH_TO_TEN.md, "Get result-commit off the S3
-// critical path"): when a committing worker reports a SHA-256 of its own result
-// bytes that matches a same-verification-class peer's STORED SHA-256 (a
-// byte-exact job type), the real HTTP commit path trusts the hash instead of
-// re-fetching the peer's object from S3 — proven both by the correct verification
-// OUTCOME (a real redundancy match, reputation credited) and by the
-// cx_hash_trusted_redundancy_total metric advancing, which can only happen on the
-// hash-trust branch in handleWorkerCommit (api.go), not the GetObject fallback.
-func TestHashTrustedRedundancySkipsPeerFetch(t *testing.T) {
+// TestWorkerReportedHashNeverSkipsPeerFetch proves the authority correction to
+// the old hot-path optimization: a raw task row carrying only a worker-reported
+// hash is not enough to skip the peer GET. Hash trust now requires a terminal
+// verification_work artifact whose digest the control plane computed itself.
+// This legacy/raw fixture therefore takes the real object path and still reaches
+// the same honest redundancy verdict.
+func TestWorkerReportedHashNeverSkipsPeerFetch(t *testing.T) {
 	ctx := context.Background()
 	reset(t)
 	ensureExtraDemoSuppliers(t, ctx)
@@ -1245,7 +1524,7 @@ func TestHashTrustedRedundancySkipsPeerFetch(t *testing.T) {
 	// The peer already committed with a REAL result_sha256 stored (as CommitTask
 	// would have written it) and a real object in MinIO — matching what a real
 	// second worker's earlier commit would have left behind.
-	resultBytes := []byte(`{"outputs":["real inference output"]}`)
+	resultBytes := []byte(`{"job_type":"batch_infer","model":"llama-3.2-1b-instruct-q4","completions":[{"index":0,"text":"real inference output","tokens":3}]}`)
 	sum := sha256.Sum256(resultBytes)
 	resultSHA256 := hex.EncodeToString(sum[:])
 
@@ -1256,15 +1535,21 @@ func TestHashTrustedRedundancySkipsPeerFetch(t *testing.T) {
 		jobID, demoBuyerUUID); err != nil {
 		t.Fatal(err)
 	}
+	economicPlan := installRawFixtureEconomicPlan(t, ctx, jobID, 2, 1)
 	peerKey := "jobs/ht/redundancy/0/result.json"
 	if err := itStorage.PutObject(ctx, peerKey, resultBytes, "application/json"); err != nil {
 		t.Fatal(err)
 	}
 	peerTask := uuid.New()
 	if _, err := itPool.Exec(ctx,
-		`INSERT INTO tasks (id, job_id, status, is_redundancy, input_ref, result_key, result_ref, result_sha256, chunk_index, worker_id, claimed_by, completed_at)
-		 VALUES ($1,$2,'complete',true,'jobs/ht/tasks/0/input.jsonl',$3,$3,$4,0,$5,$5, now())`,
-		peerTask, jobID, peerKey, resultSHA256, peerWorker); err != nil {
+		`INSERT INTO tasks (id, job_id, status, is_redundancy, input_ref, result_key, result_ref, result_sha256, chunk_index, worker_id, claimed_by, completed_at,
+		                    economic_buyer_charge_usd,economic_supplier_payout_usd,
+		                    execution_worker_id,execution_supplier_id,execution_hw_class,execution_engine,execution_build_hash)
+		 SELECT $1,$2,'complete',true,'jobs/ht/tasks/0/input.jsonl',$3,$3,$4,0,$5,$5,now(),$6,$7,
+		        w.id,w.supplier_id,w.hw_class,w.engine,w.build_hash
+		   FROM workers w WHERE w.id=$5`,
+		peerTask, jobID, peerKey, resultSHA256, peerWorker,
+		economicPlan.BuyerChargePerTaskUSD, economicPlan.SupplierPayoutPerTaskUSD); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1274,10 +1559,15 @@ func TestHashTrustedRedundancySkipsPeerFetch(t *testing.T) {
 	primaryTask := uuid.New()
 	primaryKey := "jobs/ht/tasks/0/result.json"
 	if _, err := itPool.Exec(ctx,
-		`INSERT INTO tasks (id, job_id, status, input_ref, result_key, chunk_index, worker_id, claimed_by, visible_at)
-		 VALUES ($1,$2,'running','jobs/ht/tasks/0/input.jsonl',$3,0,$4,$4, now())`,
-		primaryTask, jobID, primaryKey, demoWorkerUUID); err != nil {
+		`INSERT INTO tasks (id, job_id, status, input_ref, result_key, chunk_index, claimed_by, claimed_at, visible_at,
+		                    economic_buyer_charge_usd,economic_supplier_payout_usd)
+		 VALUES ($1,$2,'queued','jobs/ht/tasks/0/input.jsonl',$3,0,$4,now(),now(),$5,$6)`,
+		primaryTask, jobID, primaryKey, demoWorkerUUID,
+		economicPlan.BuyerChargePerTaskUSD, economicPlan.SupplierPayoutPerTaskUSD); err != nil {
 		t.Fatal(err)
+	}
+	if err := itStore.StartTask(ctx, primaryTask, demoWorkerUUID); err != nil {
+		t.Fatalf("start primary hash-trust fixture: %v", err)
 	}
 	if err := itStorage.PutObject(ctx, primaryKey, resultBytes, "application/json"); err != nil {
 		t.Fatal(err)
@@ -1293,11 +1583,11 @@ func TestHashTrustedRedundancySkipsPeerFetch(t *testing.T) {
 	}
 
 	after := metrics.hashTrustedRedundancy.Load()
-	if after-before != 1 {
-		t.Fatalf("want cx_hash_trusted_redundancy_total +1 (hash-trust branch taken, no peer GetObject), got +%d", after-before)
+	if after-before != 0 {
+		t.Fatalf("worker-reported peer hash must not be trusted without sealed verification work, metric changed by %d", after-before)
 	}
-	// A genuine redundancy MATCH (both sides prove out to the same bytes via the
-	// trusted hash) credits reputation, same as the slow GetObject path would.
+	// A genuine redundancy match still credits reputation after the mandatory
+	// real peer fetch.
 	if repAfter := supplierRep(t); repAfter <= repBefore {
 		t.Fatalf("hash-trusted match should credit reputation like a real byte match, got %v -> %v", repBefore, repAfter)
 	}
@@ -1330,7 +1620,8 @@ func TestHashTrustedRedundancySkipsPeerFetch(t *testing.T) {
 			jobID2, demoBuyerUUID); err != nil {
 			t.Fatal(err)
 		}
-		peerBytes := []byte(`{"outputs":["DIFFERENT real inference output"]}`)
+		economicPlan2 := installRawFixtureEconomicPlan(t, ctx, jobID2, 2, 1)
+		peerBytes := []byte(`{"job_type":"batch_infer","model":"llama-3.2-1b-instruct-q4","completions":[{"index":0,"text":"DIFFERENT real inference output","tokens":4}]}`)
 		peerSum := sha256.Sum256(peerBytes)
 		peerSHA := hex.EncodeToString(peerSum[:])
 		peerKey2 := "jobs/ht2/redundancy/0/result.json"
@@ -1339,20 +1630,30 @@ func TestHashTrustedRedundancySkipsPeerFetch(t *testing.T) {
 		}
 		peerTask2 := uuid.New()
 		if _, err := itPool.Exec(ctx,
-			`INSERT INTO tasks (id, job_id, status, is_redundancy, input_ref, result_key, result_ref, result_sha256, chunk_index, worker_id, claimed_by, completed_at)
-			 VALUES ($1,$2,'complete',true,'jobs/ht2/tasks/0/input.jsonl',$3,$3,$4,0,$5,$5, now())`,
-			peerTask2, jobID2, peerKey2, peerSHA, peerWorker); err != nil {
+			`INSERT INTO tasks (id, job_id, status, is_redundancy, input_ref, result_key, result_ref, result_sha256, chunk_index, worker_id, claimed_by, completed_at,
+			                    economic_buyer_charge_usd,economic_supplier_payout_usd,
+			                    execution_worker_id,execution_supplier_id,execution_hw_class,execution_engine,execution_build_hash)
+			 SELECT $1,$2,'complete',true,'jobs/ht2/tasks/0/input.jsonl',$3,$3,$4,0,$5,$5,now(),$6,$7,
+			        w.id,w.supplier_id,w.hw_class,w.engine,w.build_hash
+			   FROM workers w WHERE w.id=$5`,
+			peerTask2, jobID2, peerKey2, peerSHA, peerWorker,
+			economicPlan2.BuyerChargePerTaskUSD, economicPlan2.SupplierPayoutPerTaskUSD); err != nil {
 			t.Fatal(err)
 		}
 		primaryTask2 := uuid.New()
 		primaryKey2 := "jobs/ht2/tasks/0/result.json"
 		if _, err := itPool.Exec(ctx,
-			`INSERT INTO tasks (id, job_id, status, input_ref, result_key, chunk_index, worker_id, claimed_by, visible_at)
-			 VALUES ($1,$2,'running','jobs/ht2/tasks/0/input.jsonl',$3,0,$4,$4, now())`,
-			primaryTask2, jobID2, primaryKey2, demoWorkerUUID); err != nil {
+			`INSERT INTO tasks (id, job_id, status, input_ref, result_key, chunk_index, claimed_by, claimed_at, visible_at,
+			                    economic_buyer_charge_usd,economic_supplier_payout_usd)
+			 VALUES ($1,$2,'queued','jobs/ht2/tasks/0/input.jsonl',$3,0,$4,now(),now(),$5,$6)`,
+			primaryTask2, jobID2, primaryKey2, demoWorkerUUID,
+			economicPlan2.BuyerChargePerTaskUSD, economicPlan2.SupplierPayoutPerTaskUSD); err != nil {
 			t.Fatal(err)
 		}
-		primaryBytes := []byte(`{"outputs":["real inference output"]}`) // deliberately DIFFERENT from peerBytes
+		if err := itStore.StartTask(ctx, primaryTask2, demoWorkerUUID); err != nil {
+			t.Fatalf("start mismatched hash-trust fixture: %v", err)
+		}
+		primaryBytes := []byte(`{"job_type":"batch_infer","model":"llama-3.2-1b-instruct-q4","completions":[{"index":0,"text":"real inference output","tokens":3}]}`) // deliberately DIFFERENT from peerBytes
 		primarySum := sha256.Sum256(primaryBytes)
 		primarySHA := hex.EncodeToString(primarySum[:])
 		if err := itStorage.PutObject(ctx, primaryKey2, primaryBytes, "application/json"); err != nil {
@@ -1386,7 +1687,9 @@ func TestHoneypotVerify(t *testing.T) {
 	ctx := context.Background()
 	t.Run("pass", func(t *testing.T) {
 		reset(t)
-		info := &CommitTaskInfo{TaskID: uuid.New(), JobID: uuid.New(), WorkerID: demoWorkerUUID,
+		jobID, taskID := uuid.New(), uuid.New()
+		mustJobTask(t, jobID, taskID, true, false, demoHoneypotEmbedRef)
+		info := &CommitTaskInfo{TaskID: taskID, JobID: jobID, WorkerID: demoWorkerUUID,
 			SupplierID: demoSupplierUUID, IsHoneypot: true, InputRef: demoHoneypotEmbedRef, jobType: "embed"}
 		// known answer is demoHoneypotEmbedKnownAnswer (a REAL measured MiniLM
 		// embedding, seed.go — Buyer Developer Experience 7->8's real-SDK proof
@@ -1564,11 +1867,23 @@ func TestPayoutHoldToReadyAndBlocked(t *testing.T) {
 	reset(t)
 	ctx := context.Background()
 	// stubPayout never fakes a transfer.
-	if _, err := (stubPayout{}).Send(ctx, demoSupplierUUID, 1.0, uuid.NewString()); err == nil {
+	if _, err := (stubPayout{}).Send(ctx, demoSupplierUUID, 100, "usd", uuid.NewString()); err == nil {
 		t.Fatal("stubPayout.Send must return an error (no fake transfers)")
 	}
+	jobID := uuid.New()
 	taskID := uuid.New()
-	mustJobTask(t, uuid.New(), taskID, false, false, "jobs/z/tasks/0/input.jsonl")
+	mustJobTask(t, jobID, taskID, false, false, "jobs/z/tasks/0/input.jsonl")
+	if _, err := itPool.Exec(ctx,
+		`UPDATE tasks SET status='complete', verification_outcome='pass', verified_at=now(), completed_at=now()
+		 WHERE id=$1`, taskID); err != nil {
+		t.Fatalf("mark payout task accepted: %v", err)
+	}
+	if err := itStore.SetJobCharged(ctx, jobID, ChargeResult{
+		PaymentIntentID: "pi_payout_hold_ready", ChargeID: "ch_pi_payout_hold_ready", RequestedCents: 2,
+		ReceivedCents: 2, Currency: "usd",
+	}); err != nil {
+		t.Fatalf("record exact buyer cash funding: %v", err)
+	}
 	past := time.Now().Add(-time.Minute)
 	if err := itStore.InsertLedgerEntries(ctx, []LedgerEntry{{
 		Kind: KindSupplierCredit, SupplierID: &demoSupplierUUID, TaskID: &taskID,
@@ -1589,6 +1904,16 @@ func TestPayoutHoldToReadyAndBlocked(t *testing.T) {
 	}
 	if ref != "" || status == "released" {
 		t.Fatalf("no rail configured: must NOT be released with a ref (status=%q ref=%q)", status, ref)
+	}
+	earnings, err := itStore.WorkerEarnings(ctx, demoSupplierUUID)
+	if err != nil {
+		t.Fatalf("worker earnings after deferred payout: %v", err)
+	}
+	if earnings.BalanceUSD != 0 || earnings.LastPayoutUSD != nil || earnings.LastPayoutAt != nil {
+		t.Fatalf("ready/owed credit rendered as paid cash: %+v", earnings)
+	}
+	if earnings.LifetimeUSD != 0.02 {
+		t.Fatalf("deferred credit must remain accrued lifetime value, got %.6f", earnings.LifetimeUSD)
 	}
 }
 
@@ -1648,14 +1973,15 @@ func TestReconcileDriftMetric(t *testing.T) {
 	}
 }
 
-// --- 13. webhook delivery with retries against a local receiver ---
+// --- 13. webhook delivery attempt semantics against local receivers ---
 
 func TestWebhookRetry(t *testing.T) {
 	reset(t)
 	ctx := context.Background()
 	wk := NewWorkers(itStore, itStorage, stubPayout{})
 
-	// Receiver fails twice, then 200 — exercises the backoff retry loop.
+	// The HTTP method performs one attempt. Durable outbox state, rather than an
+	// in-memory sleep loop, decides when each later attempt is allowed to run.
 	var hits int32
 	flaky := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if atomic.AddInt32(&hits, 1) < 3 {
@@ -1665,25 +1991,356 @@ func TestWebhookRetry(t *testing.T) {
 		w.WriteHeader(200)
 	}))
 	defer flaky.Close()
-	if err := wk.deliverWebhook(ctx, PendingWebhook{ID: uuid.New(), JobID: uuid.New(), URL: flaky.URL, Status: "complete"}); err != nil {
-		t.Fatalf("flaky webhook should eventually deliver: %v", err)
+	_, sealed, err := newWebhookSigningSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := PendingWebhook{
+		ID: uuid.New(), JobID: uuid.New(), URL: flaky.URL, Status: "complete",
+		SigningSecretSealed: sealed,
+	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		err := wk.deliverWebhook(ctx, pending)
+		if attempt < 3 && err == nil {
+			t.Fatalf("flaky webhook attempt %d unexpectedly succeeded", attempt)
+		}
+		if attempt == 3 && err != nil {
+			t.Fatalf("flaky webhook third attempt should deliver: %v", err)
+		}
 	}
 	if got := atomic.LoadInt32(&hits); got != 3 {
 		t.Fatalf("want 3 delivery attempts, got %d", got)
 	}
 
-	// Always-500 receiver → delivery fails after all retries (never marked delivered).
+	// Always-500 receiver → this one attempt fails (never marked delivered).
 	var fhits int32
 	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&fhits, 1)
 		w.WriteHeader(500)
 	}))
 	defer dead.Close()
-	if err := wk.deliverWebhook(ctx, PendingWebhook{ID: uuid.New(), JobID: uuid.New(), URL: dead.URL, Status: "complete"}); err == nil {
+	if err := wk.deliverWebhook(ctx, PendingWebhook{
+		ID: uuid.New(), JobID: uuid.New(), URL: dead.URL, Status: "complete", SigningSecretSealed: sealed,
+	}); err == nil {
 		t.Fatal("dead webhook must surface an error, not a fake success")
 	}
-	if got := atomic.LoadInt32(&fhits); got != 3 {
-		t.Fatalf("dead receiver: want 3 attempts, got %d", got)
+	if got := atomic.LoadInt32(&fhits); got != 1 {
+		t.Fatalf("dead receiver: want one attempt per call, got %d", got)
+	}
+}
+
+func TestWebhookRegistrationOwnershipAndRequiredJob(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+	jobID, taskID := uuid.New(), uuid.New()
+	mustJobTask(t, jobID, taskID, false, false, "jobs/webhook-owner/tasks/0/input.jsonl")
+
+	if _, err := itStore.InsertWebhook(ctx, demoBuyerUUID, nil, "https://hooks.example.test/event"); !errors.Is(err, errWebhookJobRequired) {
+		t.Fatalf("nil job registration error = %v, want errWebhookJobRequired", err)
+	}
+	code, out := req(t, "POST", "/v1/webhooks",
+		map[string]any{"url": "https://hooks.example.test/event"}, buyerKey(), jsonCT())
+	if code != http.StatusBadRequest || !strings.Contains(string(out), "job_id is required") {
+		t.Fatalf("jobless registration: want honest 400, got %d: %s", code, out)
+	}
+
+	otherBuyer := uuid.New()
+	otherKey := "cx_test_webhook_owner_" + uuid.NewString()
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO api_keys (buyer_id,key_hash,revoked) VALUES ($1,$2,false)`,
+		otherBuyer, hashKey(otherKey)); err != nil {
+		t.Fatalf("insert second buyer key: %v", err)
+	}
+	t.Cleanup(func() { _, _ = itPool.Exec(ctx, `DELETE FROM api_keys WHERE key_hash=$1`, hashKey(otherKey)) })
+	code, out = req(t, "POST", "/v1/webhooks", map[string]any{
+		"url": "https://hooks.example.test/event", "job_id": jobID.String(),
+	}, hdr{"Authorization", "Bearer " + otherKey}, jsonCT())
+	if code != http.StatusNotFound {
+		t.Fatalf("cross-buyer registration: want indistinguishable 404, got %d: %s", code, out)
+	}
+	var crossRows int
+	if err := itPool.QueryRow(ctx,
+		`SELECT count(*) FROM webhooks WHERE buyer_id=$1 OR (job_id=$2 AND buyer_id<>$3)`,
+		otherBuyer, jobID, demoBuyerUUID).Scan(&crossRows); err != nil {
+		t.Fatal(err)
+	}
+	if crossRows != 0 {
+		t.Fatalf("cross-buyer registration persisted %d webhook row(s)", crossRows)
+	}
+
+	registrationRequest, err := http.NewRequest(http.MethodPost, itHTTP.URL+"/v1/webhooks",
+		strings.NewReader(fmt.Sprintf(`{"url":"https://hooks.example.test/event","job_id":%q}`, jobID.String())))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registrationRequest.Header.Set("Authorization", "Bearer "+demoAPIKey)
+	registrationRequest.Header.Set("Content-Type", "application/json")
+	registrationResponse, err := http.DefaultClient.Do(registrationRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registrationBody, _ := io.ReadAll(registrationResponse.Body)
+	registrationResponse.Body.Close()
+	if registrationResponse.StatusCode != http.StatusCreated {
+		t.Fatalf("owned registration: want 201, got %d: %s", registrationResponse.StatusCode, registrationBody)
+	}
+	if registrationResponse.Header.Get("Cache-Control") != "no-store" ||
+		registrationResponse.Header.Get("Pragma") != "no-cache" {
+		t.Fatalf("secret response cache headers = Cache-Control %q, Pragma %q",
+			registrationResponse.Header.Get("Cache-Control"), registrationResponse.Header.Get("Pragma"))
+	}
+	var firstRegistration struct {
+		ID     uuid.UUID `json:"webhook_id"`
+		Secret string    `json:"webhook_secret"`
+	}
+	if err := json.Unmarshal(registrationBody, &firstRegistration); err != nil {
+		t.Fatal(err)
+	}
+	if firstRegistration.ID == uuid.Nil || !strings.HasPrefix(firstRegistration.Secret, webhookSigningSecretPrefix) {
+		t.Fatalf("registration id_present=%v secret_present=%v",
+			firstRegistration.ID != uuid.Nil, strings.HasPrefix(firstRegistration.Secret, webhookSigningSecretPrefix))
+	}
+	var storedSealed string
+	if err := itPool.QueryRow(ctx,
+		`SELECT signing_secret_sealed FROM webhooks WHERE id=$1`, firstRegistration.ID).Scan(&storedSealed); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(storedSealed, "enc:") || strings.Contains(storedSealed, firstRegistration.Secret) {
+		t.Fatalf("stored webhook secret is not sealed: %q", storedSealed)
+	}
+
+	duplicate, err := itStore.InsertWebhook(ctx, demoBuyerUUID, &jobID, "https://hooks.example.test/event")
+	if err != nil || duplicate.ID != firstRegistration.ID || duplicate.Secret != firstRegistration.Secret {
+		t.Fatalf("idempotent registration: id=%s same_secret=%v err=%v; want id %s",
+			duplicate.ID, duplicate.Secret == firstRegistration.Secret, err, firstRegistration.ID)
+	}
+	for i := 1; i < webhookRegistrationLimitPerJob; i++ {
+		if _, err := itStore.InsertWebhook(ctx, demoBuyerUUID, &jobID,
+			fmt.Sprintf("https://hooks-%02d.example.test/event", i)); err != nil {
+			t.Fatalf("fill webhook quota %d: %v", i, err)
+		}
+	}
+	if _, err := itStore.InsertWebhook(ctx, demoBuyerUUID, &jobID, "https://over-limit.example.test/event"); !errors.Is(err, errWebhookLimit) {
+		t.Fatalf("over-limit store error = %v, want errWebhookLimit", err)
+	}
+	code, out = req(t, "POST", "/v1/webhooks", map[string]any{
+		"url": "https://over-limit.example.test/event", "job_id": jobID.String(),
+	}, buyerKey(), jsonCT())
+	if code != http.StatusTooManyRequests {
+		t.Fatalf("over-limit HTTP registration: want 429, got %d: %s", code, out)
+	}
+}
+
+func TestWebhookRegistrationFailsClosedWithoutTokenKey(t *testing.T) {
+	reset(t)
+	t.Setenv("CX_TOKEN_KEY", "")
+	ctx := context.Background()
+	jobID, taskID := uuid.New(), uuid.New()
+	mustJobTask(t, jobID, taskID, false, false, "jobs/webhook-key/tasks/0/input.jsonl")
+	code, out := req(t, "POST", "/v1/webhooks", map[string]any{
+		"url": "https://hooks.example.test/event", "job_id": jobID.String(),
+	}, buyerKey(), jsonCT())
+	if code != http.StatusServiceUnavailable || !strings.Contains(string(out), "encrypted signing-secret storage") {
+		t.Fatalf("missing CX_TOKEN_KEY: want 503, got %d: %s", code, out)
+	}
+	var rows int
+	if err := itPool.QueryRow(ctx, `SELECT count(*) FROM webhooks WHERE job_id=$1`, jobID).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Fatalf("missing encryption key persisted %d webhook row(s)", rows)
+	}
+}
+
+func TestInlineJobWebhookReturnsRecoverableNoStoreSecret(t *testing.T) {
+	reset(t)
+	body := map[string]any{
+		"job_type": map[string]any{"type": "embed"},
+		"model":    map[string]any{"kind": "hf", "ref": "all-minilm-l6-v2"},
+		"verification": map[string]any{
+			"redundancy_frac": 0, "honeypot_frac": 0, "skip_verification_floor": true,
+		},
+		"tier":        "batch",
+		"input":       "{\"id\":\"signed-hook\",\"text\":\"hello\"}\n",
+		"webhook_url": "https://hooks.example.test/completed",
+	}
+	raw, _ := json.Marshal(body)
+	request, err := http.NewRequest(http.MethodPost, itHTTP.URL+"/v1/jobs", bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+demoAPIKey)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	responseBody, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("inline webhook job: want 202, got %d: %s", response.StatusCode, responseBody)
+	}
+	if response.Header.Get("Cache-Control") != "no-store" || response.Header.Get("Pragma") != "no-cache" {
+		t.Fatalf("inline webhook secret response was cacheable: Cache-Control=%q Pragma=%q",
+			response.Header.Get("Cache-Control"), response.Header.Get("Pragma"))
+	}
+	var submitted JobSubmitResponse
+	if err := json.Unmarshal(responseBody, &submitted); err != nil {
+		t.Fatal(err)
+	}
+	if submitted.WebhookID == "" || !strings.HasPrefix(submitted.WebhookSecret, webhookSigningSecretPrefix) {
+		t.Fatalf("inline response webhook_id_present=%v webhook_secret_present=%v",
+			submitted.WebhookID != "", strings.HasPrefix(submitted.WebhookSecret, webhookSigningSecretPrefix))
+	}
+	hookID, err := uuid.Parse(submitted.WebhookID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sealed string
+	if err := itPool.QueryRow(context.Background(),
+		`SELECT signing_secret_sealed FROM webhooks WHERE id=$1 AND job_id=$2`, hookID, submitted.JobID).Scan(&sealed); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := openWebhookSigningSecret(sealed)
+	if err != nil || opened != submitted.WebhookSecret {
+		t.Fatalf("persisted inline webhook secret was not recoverable from sealed storage: %v", err)
+	}
+}
+
+func TestWebhookOutboxLeaseBackoffAndPoisonIsolation(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+	jobID, taskID := uuid.New(), uuid.New()
+	mustJobTask(t, jobID, taskID, false, false, "jobs/webhook-outbox/tasks/0/input.jsonl")
+	if _, err := itPool.Exec(ctx, `UPDATE jobs SET status='complete' WHERE id=$1`, jobID); err != nil {
+		t.Fatal(err)
+	}
+
+	const total = webhookDeliveryBatch + 1
+	for i := 0; i < total; i++ {
+		if _, err := itStore.InsertWebhook(ctx, demoBuyerUUID, &jobID,
+			fmt.Sprintf("https://hooks-%02d.example.test/event", i)); err != nil {
+			t.Fatalf("insert webhook %d: %v", i, err)
+		}
+	}
+	first, err := itStore.ClaimPendingWebhooks(ctx, webhookDeliveryBatch, time.Minute)
+	if err != nil || len(first) != webhookDeliveryBatch {
+		t.Fatalf("first claim = %d rows, %v; want %d", len(first), err, webhookDeliveryBatch)
+	}
+	for i, p := range first {
+		permanent := i == 0
+		attempts, dead, err := itStore.MarkWebhookFailed(
+			ctx, p.ID, p.LeaseToken, errors.New("scripted poison endpoint"), permanent, time.Minute, 12)
+		if err != nil || attempts != 1 || dead != permanent {
+			t.Fatalf("mark failure %d: attempts=%d dead=%v err=%v", i, attempts, dead, err)
+		}
+	}
+
+	// All poison rows are now either backoff-ineligible or dead-lettered, so the
+	// item immediately behind a full poison page is claimable without starvation.
+	second, err := itStore.ClaimPendingWebhooks(ctx, webhookDeliveryBatch, time.Minute)
+	if err != nil || len(second) != 1 {
+		t.Fatalf("second claim = %d rows, %v; want one row behind poison page", len(second), err)
+	}
+	oldLease := second[0].LeaseToken
+	if _, err := itPool.Exec(ctx,
+		`UPDATE webhooks SET lease_expires_at=now()-interval '1 second' WHERE id=$1`, second[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	reclaimed, err := itStore.ClaimPendingWebhooks(ctx, webhookDeliveryBatch, time.Minute)
+	if err != nil || len(reclaimed) != 1 || reclaimed[0].ID != second[0].ID || reclaimed[0].LeaseToken == oldLease {
+		t.Fatalf("expired lease reclaim = %+v, %v; want same row with a new token", reclaimed, err)
+	}
+	if err := itStore.MarkWebhookDelivered(ctx, second[0].ID, oldLease); !errors.Is(err, errWebhookLeaseLost) {
+		t.Fatalf("stale lease completion error = %v, want errWebhookLeaseLost", err)
+	}
+	if err := itStore.MarkWebhookDelivered(ctx, reclaimed[0].ID, reclaimed[0].LeaseToken); err != nil {
+		t.Fatalf("current lease completion: %v", err)
+	}
+
+	var deadCount, backedOff, delivered int
+	if err := itPool.QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE dead_lettered_at IS NOT NULL),
+		       count(*) FILTER (WHERE attempts=1 AND dead_lettered_at IS NULL AND next_attempt_at>now()),
+		       count(*) FILTER (WHERE delivered_at IS NOT NULL)
+		  FROM webhooks WHERE job_id=$1`, jobID).Scan(&deadCount, &backedOff, &delivered); err != nil {
+		t.Fatal(err)
+	}
+	if deadCount != 1 || backedOff != webhookDeliveryBatch-1 || delivered != 1 {
+		t.Fatalf("outbox state: dead=%d backed_off=%d delivered=%d", deadCount, backedOff, delivered)
+	}
+}
+
+func TestLegacyWebhookDeadLettersUntilExplicitReregistration(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+	jobID, taskID := uuid.New(), uuid.New()
+	mustJobTask(t, jobID, taskID, false, false, "jobs/webhook-legacy/tasks/0/input.jsonl")
+	if _, err := itPool.Exec(ctx, `UPDATE jobs SET status='complete' WHERE id=$1`, jobID); err != nil {
+		t.Fatal(err)
+	}
+
+	var hits atomic.Int32
+	var expectedSecret atomic.Value
+	expectedSecret.Store("")
+	var signatureOK atomic.Bool
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		secret, _ := expectedSecret.Load().(string)
+		if secret != "" && verifyStripeSig(body, r.Header.Get("X-CX-Signature"), secret) {
+			signatureOK.Store(true)
+		}
+		hits.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer receiver.Close()
+
+	activeLegacyID, deadLegacyID := uuid.New(), uuid.New()
+	if _, err := itPool.Exec(ctx, `
+		INSERT INTO webhooks (id,buyer_id,job_id,url,signing_secret_sealed)
+		VALUES ($1,$3,$4,$5,NULL),
+		       ($2,$3,$4,$6,NULL)`,
+		activeLegacyID, deadLegacyID, demoBuyerUUID, jobID,
+		receiver.URL+"/active-legacy", receiver.URL+"/reregistered-legacy"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := itPool.Exec(ctx, `
+		UPDATE webhooks
+		   SET dead_lettered_at=now(),last_error='legacy webhook has no per-registration signing secret; re-register it'
+		 WHERE id=$1`, deadLegacyID); err != nil {
+		t.Fatal(err)
+	}
+
+	wk := NewWorkers(itStore, itStorage, stubPayout{})
+	if err := wk.deliverPendingWebhooks(ctx); err != nil {
+		t.Fatalf("dead-letter unsigned legacy row: %v", err)
+	}
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("legacy unsigned row reached receiver %d time(s)", got)
+	}
+	var activeDead bool
+	if err := itPool.QueryRow(ctx,
+		`SELECT dead_lettered_at IS NOT NULL FROM webhooks WHERE id=$1`, activeLegacyID).Scan(&activeDead); err != nil {
+		t.Fatal(err)
+	}
+	if !activeDead {
+		t.Fatal("legacy unsigned row was not permanently dead-lettered")
+	}
+
+	registration, err := itStore.InsertWebhook(
+		ctx, demoBuyerUUID, &jobID, receiver.URL+"/reregistered-legacy")
+	if err != nil {
+		t.Fatalf("explicit legacy re-registration: %v", err)
+	}
+	if registration.ID != deadLegacyID || registration.Secret == "" {
+		t.Fatalf("legacy upgrade id=%s has_secret=%v, want id=%s", registration.ID, registration.Secret != "", deadLegacyID)
+	}
+	expectedSecret.Store(registration.Secret)
+	if err := wk.deliverPendingWebhooks(ctx); err != nil {
+		t.Fatalf("deliver explicitly re-registered webhook: %v", err)
+	}
+	if got := hits.Load(); got != 1 || !signatureOK.Load() {
+		t.Fatalf("re-registered delivery hits=%d signature_ok=%v", got, signatureOK.Load())
 	}
 }
 
@@ -1692,9 +2349,17 @@ func TestWebhookRetry(t *testing.T) {
 func TestWebhookSweepExactlyOnce(t *testing.T) {
 	reset(t)
 	ctx := context.Background()
-	var hits int32
+	var hits atomic.Int32
+	var signingSecret atomic.Value
+	signingSecret.Store("")
+	var signatureOK atomic.Bool
 	rcv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&hits, 1)
+		body, _ := io.ReadAll(r.Body)
+		secret, _ := signingSecret.Load().(string)
+		if secret != "" && verifyStripeSig(body, r.Header.Get("X-CX-Signature"), secret) {
+			signatureOK.Store(true)
+		}
+		hits.Add(1)
 		w.WriteHeader(200)
 	}))
 	defer rcv.Close()
@@ -1708,9 +2373,11 @@ func TestWebhookSweepExactlyOnce(t *testing.T) {
 	if _, err := itPool.Exec(ctx, `UPDATE tasks SET status='complete' WHERE id=$1`, taskID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := itStore.InsertWebhook(ctx, demoBuyerUUID, &jobID, rcv.URL); err != nil {
+	registration, err := itStore.InsertWebhook(ctx, demoBuyerUUID, &jobID, rcv.URL)
+	if err != nil {
 		t.Fatal(err)
 	}
+	signingSecret.Store(registration.Secret)
 	wk := NewWorkers(itStore, itStorage, stubPayout{})
 	// Two sweeps: the first finalizes + delivers, the second must NOT re-deliver.
 	if err := wk.sweepAndDeliver(ctx); err != nil {
@@ -1719,8 +2386,11 @@ func TestWebhookSweepExactlyOnce(t *testing.T) {
 	if err := wk.sweepAndDeliver(ctx); err != nil {
 		t.Fatalf("sweep 2: %v", err)
 	}
-	if got := atomic.LoadInt32(&hits); got != 1 {
+	if got := hits.Load(); got != 1 {
 		t.Fatalf("webhook should fire exactly once, fired %d", got)
+	}
+	if !signatureOK.Load() {
+		t.Fatal("delivered webhook signature did not verify with its registration secret")
 	}
 	var jstatus string
 	itPool.QueryRow(ctx, `SELECT status FROM jobs WHERE id=$1`, jobID).Scan(&jstatus)
@@ -1764,7 +2434,7 @@ func TestQuoteEndpointPersistsAssumptions(t *testing.T) {
 	// Inline JSONL: 2 valid records + 1 malformed (line 2) → the scanner must see it.
 	body := map[string]any{
 		"job_type":     map[string]any{"type": "embed"},
-		"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"model":        map[string]any{"kind": "hf", "ref": "all-minilm-l6-v2"},
 		"tier":         "batch",
 		"verification": map[string]any{"redundancy_frac": 0.0, "honeypot_frac": 0.0, "payout_hold_secs": 0},
 		"input":        "{\"id\":\"a\",\"text\":\"hello\"}\n{bad json}\n{\"id\":\"c\",\"text\":\"world\"}\n",
@@ -1840,7 +2510,7 @@ func TestQuotePricesTheVerificationFloor(t *testing.T) {
 		t.Helper()
 		body := map[string]any{
 			"job_type":     map[string]any{"type": "embed"},
-			"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+			"model":        map[string]any{"kind": "hf", "ref": "all-minilm-l6-v2"},
 			"tier":         "batch",
 			"verification": verification,
 			"input":        input,
@@ -1861,9 +2531,23 @@ func TestQuotePricesTheVerificationFloor(t *testing.T) {
 		if q.Cost.VerificationOverheadUSD <= 0 {
 			t.Fatalf("a default-verification quote must price the mandatory honeypot floor, got verification_overhead_usd=%v", q.Cost.VerificationOverheadUSD)
 		}
-		wantMax := roundUSD((q.Cost.ExpectedUSD + q.Cost.VerificationOverheadUSD) * 1.5)
+		if !q.Economics.Executable {
+			t.Fatalf("default-verification quote must have an executable economic plan: %+v", q.Economics)
+		}
+		extraTasks := q.Economics.Input.InitialTaskCount - q.Execution.EstimatedTasks
+		if extraTasks != 1 {
+			t.Fatalf("default verification must add exactly one priced honeypot task: primary=%d initial=%d", q.Execution.EstimatedTasks, q.Economics.Input.InitialTaskCount)
+		}
+		wantOverhead := roundEconomicUSD(q.Economics.BuyerChargePerTaskUSD * float64(extraTasks))
+		if q.Cost.VerificationOverheadUSD != wantOverhead {
+			t.Fatalf("verification overhead must be the frozen guarded buyer charge of the floored task: want %v, got %v (%+v)", wantOverhead, q.Cost.VerificationOverheadUSD, q.Economics)
+		}
+		// Cost.Max excludes the optional, separately itemized SLA premium. The
+		// economic reserve is now the authoritative cap; the old 1.5x heuristic is
+		// deliberately no longer authoritative after the margin guard.
+		wantMax := roundEconomicUSD(q.Economics.ReservedBuyerChargeUSD - q.Economics.Input.SLAPremiumUSD)
 		if q.Cost.MaxUSD != wantMax {
-			t.Fatalf("cost_max_usd must reflect the floored verification_overhead_usd: want %v, got %v (%+v)", wantMax, q.Cost.MaxUSD, q.Cost)
+			t.Fatalf("cost_max_usd must equal the frozen non-SLA economic reserve: want %v, got %v (%+v)", wantMax, q.Cost.MaxUSD, q.Cost)
 		}
 	})
 
@@ -1882,10 +2566,22 @@ func TestQuotePricesTheVerificationFloor(t *testing.T) {
 	})
 
 	t.Run("an explicit non-zero honeypot_frac is left untouched", func(t *testing.T) {
-		q := quote(map[string]any{"honeypot_frac": 0.5})
-		want := roundUSD(q.Cost.ExpectedUSD * 0.5)
-		if q.Cost.VerificationOverheadUSD != want {
-			t.Fatalf("an explicit 0.5 honeypot_frac must not be bumped by the floor logic: want %v, got %v", want, q.Cost.VerificationOverheadUSD)
+		// This fixture produces one primary. At 0.49, the explicitly requested
+		// fraction rounds to zero; if the default floor were incorrectly applied as
+		// well, the quote would contain one extra task. That makes this case
+		// distinguish the two policies without depending on multiple seed honeypots.
+		q := quote(map[string]any{"honeypot_frac": 0.49})
+		wantExtraTasks := fracCount(q.Execution.EstimatedTasks, 0.49)
+		if wantExtraTasks != 0 {
+			t.Fatalf("test fixture must round explicit 0.49 to zero tasks; primary=%d extra=%d", q.Execution.EstimatedTasks, wantExtraTasks)
+		}
+		if q.Economics.Input.InitialTaskCount != q.Execution.EstimatedTasks+wantExtraTasks {
+			t.Fatalf("an explicit non-zero honeypot_frac must not be bumped by the floor logic: primary=%d want extra=%d got initial=%d",
+				q.Execution.EstimatedTasks, wantExtraTasks, q.Economics.Input.InitialTaskCount)
+		}
+		wantOverhead := roundEconomicUSD(q.Economics.BuyerChargePerTaskUSD * float64(wantExtraTasks))
+		if q.Cost.VerificationOverheadUSD != wantOverhead {
+			t.Fatalf("explicit verification overhead must use the frozen guarded buyer charge: want %v, got %v", wantOverhead, q.Cost.VerificationOverheadUSD)
 		}
 	})
 }
@@ -1957,10 +2653,19 @@ func TestQuotePricesOutputTokens(t *testing.T) {
 	price := modelPrice(*m)
 	const nRecords = 10
 	wantDelta := roundUSD(float64(nRecords) * float64(1024-64) / 1000.0 * price)
-	gotDelta := roundUSD(long.Cost.ExpectedUSD - short.Cost.ExpectedUSD)
-	if gotDelta != wantDelta {
-		t.Fatalf("output-token cost delta wrong: want %v (=%d records * %d extra tokens /1k * price %v), got %v (short=%v long=%v)",
-			wantDelta, nRecords, 1024-64, price, gotDelta, short.Cost.ExpectedUSD, long.Cost.ExpectedUSD)
+	// The raw catalogue term is frozen in the economic input. Public ExpectedUSD
+	// then adds the independently modeled processor/control/margin guard, so its
+	// delta is intentionally not the raw token-price delta.
+	gotBaseDelta := roundUSD(long.Economics.Input.BaseComputeUSD - short.Economics.Input.BaseComputeUSD)
+	if gotBaseDelta != wantDelta {
+		t.Fatalf("output-token base-compute delta wrong: want %v (=%d records * %d extra tokens /1k * price %v), got %v (short=%v long=%v)",
+			wantDelta, nRecords, 1024-64, price, gotBaseDelta, short.Economics.Input.BaseComputeUSD, long.Economics.Input.BaseComputeUSD)
+	}
+	for _, q := range []Quote{short, long} {
+		wantPublicExpected := roundEconomicUSD(q.Economics.InitialBuyerChargeUSD - q.Economics.Input.SLAPremiumUSD)
+		if q.Cost.ExpectedUSD != wantPublicExpected {
+			t.Fatalf("public expected cost must equal the frozen non-SLA guarded charge: want %v, got %v", wantPublicExpected, q.Cost.ExpectedUSD)
+		}
 	}
 
 	// (3) an UNSET max_tokens is priced at the documented default (defaultQuoteMaxTokens),
@@ -1980,7 +2685,7 @@ func TestQuotePricesOutputTokens(t *testing.T) {
 		t.Helper()
 		body := map[string]any{
 			"job_type":     map[string]any{"type": "embed", "max_tokens": maxTokens},
-			"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+			"model":        map[string]any{"kind": "hf", "ref": "all-minilm-l6-v2"},
 			"tier":         "batch",
 			"verification": map[string]any{"skip_verification_floor": true},
 			"input":        input,
@@ -2144,7 +2849,7 @@ func TestQuoteRecommendsFieldAgainstHumanJudgment(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			body := map[string]any{
 				"job_type":     map[string]any{"type": "embed"},
-				"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+				"model":        map[string]any{"kind": "hf", "ref": "all-minilm-l6-v2"},
 				"tier":         "batch",
 				"verification": map[string]any{"skip_verification_floor": true},
 				"input":        c.input + "\n",
@@ -2191,7 +2896,7 @@ func TestQuoteBindingMatchAndExpiry(t *testing.T) {
 	const input = "{\"id\":\"a\",\"text\":\"bind me to a price\"}\n{\"id\":\"b\",\"text\":\"so the invoice can prove it\"}\n"
 	quoteBody := map[string]any{
 		"job_type":     map[string]any{"type": "embed"},
-		"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"model":        map[string]any{"kind": "hf", "ref": "all-minilm-l6-v2"},
 		"tier":         "batch",
 		"verification": map[string]any{"redundancy_frac": 0.0, "honeypot_frac": 0.0, "payout_hold_secs": 0},
 		"input":        input,
@@ -2219,7 +2924,7 @@ func TestQuoteBindingMatchAndExpiry(t *testing.T) {
 	//    bare uuid, a quote_bound event, and the invoice carries quoted_usd.
 	bind := map[string]any{
 		"job_type":     map[string]any{"type": "embed"},
-		"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"model":        map[string]any{"kind": "hf", "ref": "all-minilm-l6-v2"},
 		"tier":         "batch",
 		"verification": map[string]any{"redundancy_frac": 0.0, "honeypot_frac": 0.0, "payout_hold_secs": 0},
 		"input":        input,
@@ -2266,9 +2971,8 @@ func TestQuoteBindingMatchAndExpiry(t *testing.T) {
 		t.Fatalf("quoted_usd=%v, want the quote's expected %v", *inv.QuotedUSD, q.Cost.ExpectedUSD)
 	}
 
-	// 2) Mismatched submit: same quote_id, DIFFERENT model → 409, no job. The quote
-	//    described all-minilm; submitting under another model is acting on a price the
-	//    buyer was not given.
+	// 2) Mismatched submit: BGE is hardware_pending in the runtime matrix, so the
+	// exact job/model admission boundary rejects it before quote binding or storage.
 	mismatch := map[string]any{
 		"job_type":     map[string]any{"type": "embed"},
 		"model":        map[string]any{"kind": "gguf", "ref": "bge-small-en-v1.5"},
@@ -2278,11 +2982,11 @@ func TestQuoteBindingMatchAndExpiry(t *testing.T) {
 		"quote_id":     q.QuoteID,
 	}
 	mcode, mbody := req(t, "POST", "/v1/jobs", mismatch, buyerKey(), jsonCT())
-	if mcode != http.StatusConflict {
-		t.Fatalf("model-mismatch submit: want 409, got %d: %s", mcode, mbody)
+	if mcode != http.StatusBadRequest {
+		t.Fatalf("non-production model submit: want 400, got %d: %s", mcode, mbody)
 	}
-	if !strings.Contains(string(mbody), "does not match") {
-		t.Fatalf("409 reason should explain the mismatch, got %s", mbody)
+	if !strings.Contains(string(mbody), "runtime capability is not advertised") {
+		t.Fatalf("400 reason should explain the runtime admission boundary, got %s", mbody)
 	}
 
 	// 3) Expired submit: age the quote past its TTL in the DB, then re-submit the
@@ -2506,6 +3210,138 @@ func bytesContains(b []byte, sub string) bool {
 	return strings.Contains(string(b), sub)
 }
 
+// TestClaimPriorityStreakYieldsToBatch proves the service-lane guarantee at the
+// real transactional boundary: priority wins three times, the fourth ordinary
+// claim is batch when one is eligible, and priority may continue without idling
+// when no batch work exists while the durable debt remains outstanding.
+func TestClaimPriorityStreakYieldsToBatch(t *testing.T) {
+	ctx := context.Background()
+	reset(t)
+	wauth := WorkerAuth{WorkerID: demoWorkerUUID, SupplierID: demoSupplierUUID}
+
+	addTask := func(tier string, pinned bool) uuid.UUID {
+		t.Helper()
+		jobID, taskID := uuid.New(), uuid.New()
+		if _, err := itPool.Exec(ctx, `
+			INSERT INTO jobs (id,buyer_id,status,job_type,model_ref,input_ref,output_ref,tier,
+			                  verification_policy,task_count,tasks_done,min_memory_gb,job_type_spec)
+			VALUES ($1,$2,'queued','embed','all-minilm-l6-v2',$3,$4,$5,'{}',1,0,0,'{"type":"embed"}')`,
+			jobID, demoBuyerUUID, "jobs/"+jobID.String()+"/input.jsonl",
+			"jobs/"+jobID.String()+"/output.json", tier); err != nil {
+			t.Fatal(err)
+		}
+		var claimedBy any
+		if pinned {
+			claimedBy = demoWorkerUUID
+		}
+		if _, err := itPool.Exec(ctx, `
+			INSERT INTO tasks (id,job_id,status,input_ref,result_key,chunk_index,visible_at,claimed_by)
+			VALUES ($1,$2,'queued',$3,$4,0,now(),$5)`,
+			taskID, jobID, "jobs/"+jobID.String()+"/task/input.jsonl",
+			"jobs/"+jobID.String()+"/task/result.json", claimedBy); err != nil {
+			t.Fatal(err)
+		}
+		return taskID
+	}
+
+	priorityTasks := []uuid.UUID{addTask("priority", false), addTask("priority", false), addTask("priority", false)}
+	batchTask := addTask("batch", false)
+	for i, want := range priorityTasks {
+		got, err := itStore.ClaimTask(ctx, wauth)
+		if err != nil || got == nil {
+			t.Fatalf("priority claim %d: task=%v err=%v", i+1, got, err)
+		}
+		if got.TaskID != want || got.Tier != "priority" {
+			t.Fatalf("priority claim %d: want task %s, got task %s tier %q", i+1, want, got.TaskID, got.Tier)
+		}
+	}
+	got, err := itStore.ClaimTask(ctx, wauth)
+	if err != nil || got == nil {
+		t.Fatalf("batch opportunity claim: task=%v err=%v", got, err)
+	}
+	if got.TaskID != batchTask || got.Tier != "batch" {
+		t.Fatalf("fourth ordinary claim must yield to batch %s, got task %s tier %q", batchTask, got.TaskID, got.Tier)
+	}
+	var streak int
+	if err := itPool.QueryRow(ctx, `SELECT priority_claim_streak FROM workers WHERE id=$1`, demoWorkerUUID).Scan(&streak); err != nil {
+		t.Fatal(err)
+	}
+	if streak != 0 {
+		t.Fatalf("batch opportunity must reset streak, got %d", streak)
+	}
+
+	// No batch is eligible: do not idle. Priority proceeds, but the capped debt is
+	// retained so the next batch arrival still receives the opportunity.
+	if _, err := itPool.Exec(ctx, `UPDATE workers SET priority_claim_streak=3 WHERE id=$1`, demoWorkerUUID); err != nil {
+		t.Fatal(err)
+	}
+	priorityOnly := addTask("priority", false)
+	got, err = itStore.ClaimTask(ctx, wauth)
+	if err != nil || got == nil || got.TaskID != priorityOnly {
+		t.Fatalf("priority fallback without batch: want %s, got task=%v err=%v", priorityOnly, got, err)
+	}
+	if err := itPool.QueryRow(ctx, `SELECT priority_claim_streak FROM workers WHERE id=$1`, demoWorkerUUID).Scan(&streak); err != nil {
+		t.Fatal(err)
+	}
+	if streak != 3 {
+		t.Fatalf("priority fallback must retain capped batch debt, got %d", streak)
+	}
+}
+
+// TestPinnedClaimPrecedesPriorityStreakFairness proves verification/tiebreak
+// placement remains the absolute first branch. A pending batch opportunity may
+// reorder ordinary work only after the already-selected pinned task starts.
+func TestPinnedClaimPrecedesPriorityStreakFairness(t *testing.T) {
+	ctx := context.Background()
+	reset(t)
+	wauth := WorkerAuth{WorkerID: demoWorkerUUID, SupplierID: demoSupplierUUID}
+
+	addTask := func(tier string, pinned bool) uuid.UUID {
+		t.Helper()
+		jobID, taskID := uuid.New(), uuid.New()
+		if _, err := itPool.Exec(ctx, `
+			INSERT INTO jobs (id,buyer_id,status,job_type,model_ref,input_ref,tier,
+			                  verification_policy,task_count,tasks_done,min_memory_gb,job_type_spec)
+			VALUES ($1,$2,'queued','embed','all-minilm-l6-v2',$3,$4,'{}',1,0,0,'{"type":"embed"}')`,
+			jobID, demoBuyerUUID, "jobs/"+jobID.String()+"/input.jsonl", tier); err != nil {
+			t.Fatal(err)
+		}
+		var claimedBy any
+		if pinned {
+			claimedBy = demoWorkerUUID
+		}
+		if _, err := itPool.Exec(ctx, `
+			INSERT INTO tasks (id,job_id,status,input_ref,result_key,chunk_index,visible_at,claimed_by)
+			VALUES ($1,$2,'queued',$3,$4,0,now(),$5)`, taskID, jobID,
+			"jobs/"+jobID.String()+"/task/input.jsonl", "jobs/"+jobID.String()+"/task/result.json", claimedBy); err != nil {
+			t.Fatal(err)
+		}
+		return taskID
+	}
+
+	pinnedPriority := addTask("priority", true)
+	batchTask := addTask("batch", false)
+	if _, err := itPool.Exec(ctx, `UPDATE workers SET priority_claim_streak=3 WHERE id=$1`, demoWorkerUUID); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := itStore.ClaimTask(ctx, wauth)
+	if err != nil || got == nil || got.TaskID != pinnedPriority {
+		t.Fatalf("pinned claim must remain first: want %s, got task=%v err=%v", pinnedPriority, got, err)
+	}
+	var streak int
+	if err := itPool.QueryRow(ctx, `SELECT priority_claim_streak FROM workers WHERE id=$1`, demoWorkerUUID).Scan(&streak); err != nil {
+		t.Fatal(err)
+	}
+	if streak != 3 {
+		t.Fatalf("pinned work must not mutate ordinary lane debt, got %d", streak)
+	}
+	got, err = itStore.ClaimTask(ctx, wauth)
+	if err != nil || got == nil || got.TaskID != batchTask {
+		t.Fatalf("batch opportunity must follow pinned claim: want %s, got task=%v err=%v", batchTask, got, err)
+	}
+}
+
 // TestClaimDispatchInterleaveFairness proves the Scheduling & Matching Engine
 // 6.5->7 fix (docs/internal/CREED_AND_PATH_TO_TEN.md): without a fairness term,
 // ClaimTask's ORDER BY fell straight through to oldest-first, so a large job
@@ -2595,8 +3431,8 @@ func TestWorkerTpsCacheMaintainedAndReadByClaim(t *testing.T) {
 	wauth := WorkerAuth{WorkerID: demoWorkerUUID, SupplierID: demoSupplierUUID}
 
 	// Part A: UpsertWorker maintenance. Register with an embed benchmark of 50
-	// tps, confirm worker_tps_cache reflects it; re-register (a real worker
-	// state change — a fresh benchmark report) with 120 tps for the SAME
+	// eps, confirm worker_tps_cache projects that job's native rate; re-register
+	// (a real worker state change — a fresh benchmark report) with 120 eps for the SAME
 	// job_type, and confirm the cache is UPDATED in place (last-write-wins),
 	// not duplicated into a second row.
 	readCachedTps := func(jobType string) (float32, bool) {
@@ -2616,7 +3452,7 @@ func TestWorkerTpsCacheMaintainedAndReadByClaim(t *testing.T) {
 	if code, body := req(t, "POST", "/v1/worker/register", WorkerCapability{
 		WorkerID: demoWorkerUUID, SupplierID: demoSupplierUUID, HWClass: "apple_silicon_max", MemoryGB: 64,
 		SupportedJobs: []string{"embed", "batch_infer"}, SupportedModels: []string{"all-minilm-l6-v2", "llama-3.2-1b-instruct-q4"},
-		Benchmarks: []BenchResult{{ModelID: "all-minilm-l6-v2", JobType: "embed", TPS: 50, ThermalOK: true}},
+		Benchmarks: []BenchResult{{ModelID: "all-minilm-l6-v2", JobType: "embed", EPS: 50, ThermalOK: true}},
 	}, workerTok(), jsonCT()); code != 200 {
 		t.Fatalf("register: want 200, got %d: %s", code, body)
 	}
@@ -2627,7 +3463,7 @@ func TestWorkerTpsCacheMaintainedAndReadByClaim(t *testing.T) {
 	if code, body := req(t, "POST", "/v1/worker/register", WorkerCapability{
 		WorkerID: demoWorkerUUID, SupplierID: demoSupplierUUID, HWClass: "apple_silicon_max", MemoryGB: 64,
 		SupportedJobs: []string{"embed", "batch_infer"}, SupportedModels: []string{"all-minilm-l6-v2", "llama-3.2-1b-instruct-q4"},
-		Benchmarks: []BenchResult{{ModelID: "all-minilm-l6-v2", JobType: "embed", TPS: 120, ThermalOK: true}},
+		Benchmarks: []BenchResult{{ModelID: "all-minilm-l6-v2", JobType: "embed", EPS: 120, ThermalOK: true}},
 	}, workerTok(), jsonCT()); code != 200 {
 		t.Fatalf("re-register: want 200, got %d: %s", code, body)
 	}
@@ -2718,6 +3554,7 @@ func TestWorkerTpsCacheMaintainedAndReadByClaim(t *testing.T) {
 }
 
 func TestClaimHardFilter(t *testing.T) {
+	reset(t)
 	ctx := context.Background()
 	wauth := WorkerAuth{WorkerID: demoWorkerUUID, SupplierID: demoSupplierUUID}
 
@@ -2760,6 +3597,11 @@ func TestClaimHardFilter(t *testing.T) {
 			`UPDATE suppliers SET status='active', data_country='US' WHERE id=$1`, demoSupplierUUID); err != nil {
 			t.Fatal(err)
 		}
+		// Legacy supported_jobs/supported_models arrays are declarations only. Give
+		// this fixture exactly one current generated production cell so every case
+		// isolates its intended axis without bypassing runtime authority.
+		replaceWorkerAuthorizationsForTest(t, ctx, demoWorkerUUID,
+			[2]string{"embed", "all-minilm-l6-v2"})
 	}
 	claims := func(t *testing.T) bool {
 		t.Helper()
@@ -2775,32 +3617,32 @@ func TestClaimHardFilter(t *testing.T) {
 		breakIt func(t *testing.T) // make the worker/supplier ineligible
 	}{
 		{"unsupported job type", func(t *testing.T) {
-			setJob(t, "rerank", "", 0, nil, nil, 1)
-			// worker supports embed/batch_infer, NOT rerank
+			setJob(t, "rerank", "all-minilm-l6-v2", 0, nil, nil, 1)
+			// The exact fixture authority contains embed, NOT rerank.
 			itPool.Exec(ctx, `UPDATE workers SET supported_jobs=ARRAY['embed'] WHERE id=$1`, demoWorkerUUID)
 		}},
 		{"unsupported model", func(t *testing.T) {
 			setJob(t, "embed", "some-other-model", 0, nil, nil, 1)
 		}},
 		{"insufficient memory", func(t *testing.T) {
-			setJob(t, "embed", "", 999, nil, nil, 1)
+			setJob(t, "embed", "all-minilm-l6-v2", 999, nil, nil, 1)
 		}},
 		{"wrong hw_class", func(t *testing.T) {
-			setJob(t, "embed", "", 0, []string{"apple_silicon_ultra"}, nil, 1)
+			setJob(t, "embed", "all-minilm-l6-v2", 0, []string{"apple_silicon_ultra"}, nil, 1)
 		}},
 		{"data residency mismatch", func(t *testing.T) {
-			setJob(t, "embed", "", 0, nil, []string{"DE"}, 1) // supplier is US
+			setJob(t, "embed", "all-minilm-l6-v2", 0, nil, []string{"DE"}, 1) // supplier is US
 		}},
 		{"offered rate below worker floor", func(t *testing.T) {
-			setJob(t, "embed", "", 0, nil, nil, 0.5)
+			setJob(t, "embed", "all-minilm-l6-v2", 0, nil, nil, 0.5)
 			itPool.Exec(ctx, `UPDATE workers SET min_payout_usd_hr=10 WHERE id=$1`, demoWorkerUUID)
 		}},
 		{"supplier quarantined", func(t *testing.T) {
-			setJob(t, "embed", "", 0, nil, nil, 1)
+			setJob(t, "embed", "all-minilm-l6-v2", 0, nil, nil, 1)
 			itPool.Exec(ctx, `UPDATE suppliers SET status='suspended' WHERE id=$1`, demoSupplierUUID)
 		}},
 		{"worker throttled (memory pressure)", func(t *testing.T) {
-			setJob(t, "embed", "", 0, nil, nil, 1)
+			setJob(t, "embed", "all-minilm-l6-v2", 0, nil, nil, 1)
 			// Worker is healthy on every axis but is pausing for memory pressure —
 			// the safe-dispatch filter must not hand it work.
 			itPool.Exec(ctx, `UPDATE workers SET throttled=true WHERE id=$1`, demoWorkerUUID)
@@ -2808,7 +3650,7 @@ func TestClaimHardFilter(t *testing.T) {
 		{"effective memory below job min", func(t *testing.T) {
 			// Total memory (64) clears the 32GB floor, but the live effective pool
 			// after headroom is only 8GB — the claim must use effective, not total.
-			setJob(t, "embed", "", 32, nil, nil, 1)
+			setJob(t, "embed", "all-minilm-l6-v2", 32, nil, nil, 1)
 			itPool.Exec(ctx, `UPDATE workers SET effective_memory_gb=8 WHERE id=$1`, demoWorkerUUID)
 		}},
 	}
@@ -2821,17 +3663,14 @@ func TestClaimHardFilter(t *testing.T) {
 			}
 			// Restoring eligibility lets the SAME worker claim the SAME task — proving
 			// the rejection was the filter, not an unrelated empty queue. Make the
-			// worker maximally capable and strip every job constraint so the claim
-			// must succeed on whatever axis was broken above.
+			// Normalize the same queued row to the known production embed cell and
+			// strip every other constraint. This is the positive control for queue,
+			// liveness, and exact runtime authority; a non-production model is never
+			// made claimable merely to satisfy a test.
 			restoreWorker(t)
 			if _, err := itPool.Exec(ctx,
-				`UPDATE workers SET supported_jobs=ARRAY['embed','batch_infer','rerank','json_extraction','batch_classification'],
-				   supported_models=ARRAY['all-minilm-l6-v2','some-other-model'], min_payout_usd_hr=0 WHERE id=$1`,
-				demoWorkerUUID); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := itPool.Exec(ctx,
-				`UPDATE jobs SET min_memory_gb=0, hw_classes=NULL, data_residency=NULL, offered_rate_usd_hr=1`); err != nil {
+				`UPDATE jobs SET job_type='embed', model_ref='all-minilm-l6-v2',
+				   min_memory_gb=0, hw_classes=NULL, data_residency=NULL, offered_rate_usd_hr=1`); err != nil {
 				t.Fatal(err)
 			}
 			if !claims(t) {
@@ -2949,7 +3788,7 @@ func TestPrivatePoolBuyerFacingFlow(t *testing.T) {
 	// to be silently accepted and then could never be claimed by anyone.
 	body := map[string]any{
 		"job_type":     map[string]any{"type": "embed"},
-		"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"model":        map[string]any{"kind": "hf", "ref": "all-minilm-l6-v2"},
 		"constraints":  map[string]any{"min_memory_gb": 2},
 		"verification": map[string]any{"skip_verification_floor": true},
 		"tier":         "batch",
@@ -2969,7 +3808,7 @@ func TestPrivatePoolBuyerFacingFlow(t *testing.T) {
 	// warning names the exact zero-member problem the submit above just hit.
 	quoteBody := map[string]any{
 		"job_type":     map[string]any{"type": "embed"},
-		"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"model":        map[string]any{"kind": "hf", "ref": "all-minilm-l6-v2"},
 		"constraints":  map[string]any{"min_memory_gb": 2},
 		"tier":         "batch",
 		"input":        `{"id":"a","text":"hello"}` + "\n",
@@ -3012,7 +3851,7 @@ func TestPrivatePoolBuyerFacingFlow(t *testing.T) {
 	// the attestation — the premium is opt-in, never charged by default.
 	plainBody := map[string]any{
 		"job_type":    map[string]any{"type": "embed"},
-		"model":       map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"model":       map[string]any{"kind": "hf", "ref": "all-minilm-l6-v2"},
 		"constraints": map[string]any{"min_memory_gb": 2},
 		"tier":        "batch",
 		"input":       `{"id":"a","text":"hello"}` + "\n",
@@ -3122,6 +3961,7 @@ func TestPrivatePoolBuyerFacingFlow(t *testing.T) {
 // "nothing eligible" visible instead of looking like a slow worker. Also checks the
 // empty-queue no_queued_tasks path, the eligible path, and the endpoint's auth/404.
 func TestSchedulerExplain(t *testing.T) {
+	reset(t)
 	ctx := context.Background()
 
 	// Reset the demo worker + supplier to the fully-eligible baseline (apple_silicon_max,
@@ -3140,6 +3980,8 @@ func TestSchedulerExplain(t *testing.T) {
 			`UPDATE suppliers SET status='active', data_country='US' WHERE id=$1`, demoSupplierUUID); err != nil {
 			t.Fatal(err)
 		}
+		replaceWorkerAuthorizationsForTest(t, ctx, demoWorkerUUID,
+			[2]string{"embed", "all-minilm-l6-v2"})
 	}
 	// seedJob inserts one queued primary task on a fresh job with the given
 	// constraints (mirrors TestClaimHardFilter's setJob), returning the job id.
@@ -3175,30 +4017,30 @@ func TestSchedulerExplain(t *testing.T) {
 		reason func(e *SchedulerExplanation) int
 	}{
 		{"hw_class mismatch", func(t *testing.T) {
-			seedJob(t, "embed", "", 0, []string{"apple_silicon_ultra"}, nil, 1) // worker is _max
+			seedJob(t, "embed", "all-minilm-l6-v2", 0, []string{"apple_silicon_ultra"}, nil, 1) // worker is _max
 		}, func(e *SchedulerExplanation) int { return e.HWClassMismatch }},
 		{"memory mismatch", func(t *testing.T) {
-			seedJob(t, "embed", "", 999, nil, nil, 1) // worker has 64GB
+			seedJob(t, "embed", "all-minilm-l6-v2", 999, nil, nil, 1) // worker has 64GB
 		}, func(e *SchedulerExplanation) int { return e.MemoryMismatch }},
 		{"job_type mismatch", func(t *testing.T) {
-			seedJob(t, "rerank", "", 0, nil, nil, 1) // worker supports embed/batch_infer, not rerank
+			seedJob(t, "rerank", "all-minilm-l6-v2", 0, nil, nil, 1) // exact fixture authority is embed only
 		}, func(e *SchedulerExplanation) int { return e.JobTypeMismatch }},
 		{"model mismatch", func(t *testing.T) {
 			seedJob(t, "embed", "some-other-model", 0, nil, nil, 1)
 		}, func(e *SchedulerExplanation) int { return e.ModelMismatch }},
 		{"residency mismatch", func(t *testing.T) {
-			seedJob(t, "embed", "", 0, nil, []string{"DE"}, 1) // supplier is US
+			seedJob(t, "embed", "all-minilm-l6-v2", 0, nil, []string{"DE"}, 1) // supplier is US
 		}, func(e *SchedulerExplanation) int { return e.ResidencyMismatch }},
 		{"payout floor", func(t *testing.T) {
-			seedJob(t, "embed", "", 0, nil, nil, 0.5)
+			seedJob(t, "embed", "all-minilm-l6-v2", 0, nil, nil, 0.5)
 			itPool.Exec(ctx, `UPDATE workers SET min_payout_usd_hr=10 WHERE id=$1`, demoWorkerUUID)
 		}, func(e *SchedulerExplanation) int { return e.PayoutFloor }},
 		{"supplier inactive", func(t *testing.T) {
-			seedJob(t, "embed", "", 0, nil, nil, 1)
+			seedJob(t, "embed", "all-minilm-l6-v2", 0, nil, nil, 1)
 			itPool.Exec(ctx, `UPDATE suppliers SET status='suspended' WHERE id=$1`, demoSupplierUUID)
 		}, func(e *SchedulerExplanation) int { return e.SupplierInactive }},
 		{"throttled", func(t *testing.T) {
-			seedJob(t, "embed", "", 0, nil, nil, 1)
+			seedJob(t, "embed", "all-minilm-l6-v2", 0, nil, nil, 1)
 			itPool.Exec(ctx, `UPDATE workers SET throttled=true WHERE id=$1`, demoWorkerUUID)
 		}, func(e *SchedulerExplanation) int { return e.Throttled }},
 	}
@@ -3288,16 +4130,19 @@ func TestSchedulerExplain(t *testing.T) {
 	})
 }
 
-// Plane B (docs/PLANE_B.md §5 "Routing proof"): a co-located cluster registers as
-// ONE apple_silicon_cluster worker advertising the SUMMED member memory. A job
-// whose min_memory_gb exceeds any single Mac's capacity must route ONLY to that
-// cluster — and the SAME job, on the SAME unchanged claim filter, still routes a
-// small job to a single Mac. This proves the summed-memory abstraction needs NO
-// scheduler change (the existing ClaimTask memory filter does all the work).
+// Plane B (docs/internal/PLANE_B.md): the summed-memory scheduler seam exists, but
+// the cluster runtime itself is still a generated-matrix stub. This regression test
+// therefore proves the honest current boundary: even a legacy row advertising 1.8TB
+// cannot claim until a real ClusterRunner is promoted to an advertised production
+// cell. A normal production Metal cell remains claimable as the positive control.
+// When physical multi-Mac execution is real, this test can add the 200GB success
+// branch without weakening exact runtime authority or manufacturing a matrix row.
 func TestClusterSummedMemoryRouting(t *testing.T) {
+	reset(t)
 	ctx := context.Background()
 	clusterID := uuid.New()
-	// A 4-Mac cluster registering as one worker with ~1800 GB summed usable memory.
+	// A legacy/self-declared cluster row with ~1800 GB summed memory. It deliberately
+	// has no worker_authorized_capabilities row: apple_cluster remains a stub.
 	if _, err := itPool.Exec(ctx,
 		`INSERT INTO workers (id, supplier_id, hw_class, memory_gb, last_seen_at, version,
 		                      supported_jobs, supported_models, min_payout_usd_hr, thermal_ok)
@@ -3350,16 +4195,25 @@ func TestClusterSummedMemoryRouting(t *testing.T) {
 	single := WorkerAuth{WorkerID: demoWorkerUUID, SupplierID: demoSupplierUUID}
 	cluster := WorkerAuth{WorkerID: clusterID, SupplierID: demoSupplierUUID}
 
-	// A 200 GB-min job: above any single Mac (64), within the cluster (1800). The
-	// single Mac is filtered out; the SAME queued task is then claimed by the cluster.
+	// A 200 GB-min job is above one Mac's memory. The cluster would clear the memory
+	// predicate, but must remain inert because no production cluster cell exists.
 	submit(200)
 	if claims(single) {
 		t.Fatal("single Mac (64GB) must NOT claim a 200GB-min job — summed memory is the whole point")
 	}
-	if !claims(cluster) {
-		t.Fatal("cluster (1800GB summed) must claim the 200GB-min job (no scheduler change needed)")
+	if claims(cluster) {
+		t.Fatal("unadvertised cluster stub claimed work from legacy arrays without exact runtime authority")
 	}
-	// The unchanged filter still routes a small job to the single Mac.
+	var clusterAuthority int
+	if err := itPool.QueryRow(ctx,
+		`SELECT count(*) FROM worker_authorized_capabilities WHERE worker_id=$1`, clusterID,
+	).Scan(&clusterAuthority); err != nil {
+		t.Fatal(err)
+	}
+	if clusterAuthority != 0 {
+		t.Fatalf("cluster stub unexpectedly has %d exact authority rows", clusterAuthority)
+	}
+	// The exact-authority filter still routes a small job to the registered Mac.
 	submit(0)
 	if !claims(single) {
 		t.Fatal("single Mac must still claim a 0GB-min job (routing unbroken for small work)")
@@ -3428,6 +4282,8 @@ func TestTiebreakThreeWay(t *testing.T) {
 		peerWorker, demoSupplier2UUID); err != nil {
 		t.Fatal(err)
 	}
+	replaceWorkerAuthorizationsForTest(t, ctx, peerWorker,
+		[2]string{"embed", "all-minilm-l6-v2"})
 	defer itPool.Exec(ctx, `DELETE FROM worker_tokens WHERE worker_id=$1`, peerWorker)
 
 	// A THIRD distinct same-class worker on a THIRD supplier. A real tiebreak excludes
@@ -3442,6 +4298,8 @@ func TestTiebreakThreeWay(t *testing.T) {
 		tiebreakPeer, demoSupplier3UUID); err != nil {
 		t.Fatal(err)
 	}
+	replaceWorkerAuthorizationsForTest(t, ctx, tiebreakPeer,
+		[2]string{"embed", "all-minilm-l6-v2"})
 
 	// One job, one chunk, two committed PRIMARY-ish results that disagree. We model
 	// the chunk with a primary task (worker A) and a redundancy task (worker B) over
@@ -3453,6 +4311,7 @@ func TestTiebreakThreeWay(t *testing.T) {
 		jobID, demoBuyerUUID); err != nil {
 		t.Fatal(err)
 	}
+	economicPlan := installRawFixtureEconomicPlan(t, ctx, jobID, 2, 1)
 	primary, redun := uuid.New(), uuid.New()
 	aKey := "jobs/t/tasks/0/result.json"
 	bKey := "jobs/t/redundancy/0/result.json"
@@ -3465,9 +4324,14 @@ func TestTiebreakThreeWay(t *testing.T) {
 		key    string
 	}{{primary, demoWorkerUUID, false, aKey}, {redun, peerWorker, true, bKey}} {
 		if _, err := itPool.Exec(ctx,
-			`INSERT INTO tasks (id, job_id, status, is_redundancy, input_ref, result_key, result_ref, chunk_index, worker_id, claimed_by, completed_at)
-			 VALUES ($1,$2,'complete',$3,'jobs/t/tasks/0/input.jsonl',$4,$4,0,$5,$5, now())`,
-			r.id, jobID, r.redun, r.key, r.worker); err != nil {
+			`INSERT INTO tasks (id, job_id, status, is_redundancy, input_ref, result_key, result_ref, chunk_index, worker_id, claimed_by, completed_at,
+			                    economic_buyer_charge_usd,economic_supplier_payout_usd,
+			                    execution_worker_id,execution_supplier_id,execution_hw_class,execution_engine,execution_build_hash)
+			 SELECT $1,$2,'complete',$3,'jobs/t/tasks/0/input.jsonl',$4,$4,0,$5,$5,now(),$6,$7,
+			        w.id,w.supplier_id,w.hw_class,w.engine,w.build_hash
+			   FROM workers w WHERE w.id=$5`,
+			r.id, jobID, r.redun, r.key, r.worker,
+			economicPlan.BuyerChargePerTaskUSD, economicPlan.SupplierPayoutPerTaskUSD); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -3527,6 +4391,8 @@ func TestTiebreakLoserPayoutClawedBack(t *testing.T) {
 		peerWorker, demoSupplier2UUID); err != nil {
 		t.Fatal(err)
 	}
+	replaceWorkerAuthorizationsForTest(t, ctx, peerWorker,
+		[2]string{"embed", "all-minilm-l6-v2"})
 	defer itPool.Exec(ctx, `DELETE FROM worker_tokens WHERE worker_id=$1`, peerWorker)
 
 	tiebreakPeerWorker := uuid.New()
@@ -3538,6 +4404,8 @@ func TestTiebreakLoserPayoutClawedBack(t *testing.T) {
 		tiebreakPeerWorker, demoSupplier3UUID); err != nil {
 		t.Fatal(err)
 	}
+	replaceWorkerAuthorizationsForTest(t, ctx, tiebreakPeerWorker,
+		[2]string{"embed", "all-minilm-l6-v2"})
 
 	// A real priced job (estimated_usd=1.00 over 2 tasks ⇒ $0.50/task at commit
 	// time; a 3rd task gets added by InsertTiebreakTask below, but each task's
@@ -3551,6 +4419,7 @@ func TestTiebreakLoserPayoutClawedBack(t *testing.T) {
 		jobID, demoBuyerUUID); err != nil {
 		t.Fatal(err)
 	}
+	economicPlan := installRawFixtureEconomicPlan(t, ctx, jobID, 2, 1)
 
 	primary, redun := uuid.New(), uuid.New()
 	aKey := "jobs/tc/tasks/0/result.json"
@@ -3566,9 +4435,14 @@ func TestTiebreakLoserPayoutClawedBack(t *testing.T) {
 		key    string
 	}{{primary, demoWorkerUUID, false, aKey}, {redun, peerWorker, true, bKey}} {
 		if _, err := itPool.Exec(ctx,
-			`INSERT INTO tasks (id, job_id, status, is_redundancy, input_ref, result_key, result_ref, chunk_index, worker_id, claimed_by, completed_at)
-			 VALUES ($1,$2,'complete',$3,'jobs/tc/tasks/0/input.jsonl',$4,$4,0,$5,$5, now())`,
-			r.id, jobID, r.redun, r.key, r.worker); err != nil {
+			`INSERT INTO tasks (id, job_id, status, is_redundancy, input_ref, result_key, result_ref, chunk_index, worker_id, claimed_by, completed_at,
+			                    economic_buyer_charge_usd,economic_supplier_payout_usd,
+			                    execution_worker_id,execution_supplier_id,execution_hw_class,execution_engine,execution_build_hash)
+			 SELECT $1,$2,'complete',$3,'jobs/tc/tasks/0/input.jsonl',$4,$4,0,$5,$5,now(),$6,$7,
+			        w.id,w.supplier_id,w.hw_class,w.engine,w.build_hash
+			   FROM workers w WHERE w.id=$5`,
+			r.id, jobID, r.redun, r.key, r.worker,
+			economicPlan.BuyerChargePerTaskUSD, economicPlan.SupplierPayoutPerTaskUSD); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -3599,9 +4473,12 @@ func TestTiebreakLoserPayoutClawedBack(t *testing.T) {
 	}
 	tbKey := fmt.Sprintf("jobs/%s/tiebreak/%s/result.json", jobID, tbID)
 	itStorage.PutObject(ctx, tbKey, winningBytes, "application/json")
+	if err := itStore.StartTask(ctx, tbID, tiebreakPeerWorker); err != nil {
+		t.Fatalf("start tiebreak task: %v", err)
+	}
 	if _, err := itPool.Exec(ctx,
-		`UPDATE tasks SET status='complete', worker_id=$2, result_ref=$3, completed_at=now() WHERE id=$1`,
-		tbID, tiebreakPeerWorker, tbKey); err != nil {
+		`UPDATE tasks SET status='complete',result_ref=$2,completed_at=now() WHERE id=$1`,
+		tbID, tbKey); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3617,13 +4494,12 @@ func TestTiebreakLoserPayoutClawedBack(t *testing.T) {
 	if verr != nil {
 		t.Fatalf("verifyTaskResult: %v", verr)
 	}
-	if out != OutcomePassWithPenalty {
+	if out != OutcomePass {
 		// The tiebreak worker itself is on the WINNING side of the 3-way vote —
-		// its own commit is still paid — but the vote as a whole DID detect a
-		// real mismatch (the redundancy worker's task), so the outcome for THIS
-		// commit is pass_with_penalty (the caller still schedules its payout;
-		// only OutcomeFail/OutcomeLossNoPayout ever suppress payout).
-		t.Fatalf("tiebreak worker on the winning side should be pass_with_penalty (paid, mismatch detected elsewhere), got %v", out)
+		// its own commit is a final payable pass. The vote's real mismatch remains
+		// durable on the losing task's event/resolution; it must not strand the
+		// proven winner behind the pass_with_penalty release gate.
+		t.Fatalf("tiebreak worker on the winning side should be a payable pass, got %v", out)
 	}
 	// Winning side's own commit gets its payout scheduled exactly like any
 	// other clean pass (handleWorkerCommit does this outside the verifier).
@@ -3769,6 +4645,14 @@ func TestHoneypotFailNoPayout(t *testing.T) {
 		result := embedResultJSON(1)
 		if disp.TaskID == taskID {
 			honeypotDispatched = true
+			// The primary can commit first and raise 0.900 reputation to 0.901,
+			// legitimately making a later honeypot comparison sampled. This test is
+			// specifically the fail/no-payout branch, so pin the fixture at the trust
+			// floor immediately before its known-wrong commit (probability 1.0).
+			if _, err := itPool.Exec(ctx,
+				`UPDATE suppliers SET reputation=$2 WHERE id=$1`, demoSupplierUUID, verifyTrustFloor); err != nil {
+				t.Fatalf("pin honeypot fixture reputation: %v", err)
+			}
 			result = []byte(`{"vectors":[[0,1,0]]}`) // wrong answer for the honeypot
 		}
 		if err := itStorage.PutObject(ctx, disp.ResultKey, result, "application/json"); err != nil {
@@ -3945,7 +4829,7 @@ func TestHoneypotInputURLOpaque(t *testing.T) {
 		// Commit the CORRECT answer for every task — the honeypot's known answer is
 		// the real measured MiniLM embedding, so committing it back makes the
 		// honeypot PASS (a live proof the opaque input did not disarm the trap).
-		if err := itStorage.PutObject(ctx, disp.ResultKey, []byte(demoHoneypotEmbedKnownAnswer), "application/json"); err != nil {
+		if err := itStorage.PutObject(ctx, disp.ResultKey, demoHoneypotEmbedResultJSON(t), "application/json"); err != nil {
 			t.Fatalf("put result: %v", err)
 		}
 		commit := TaskCommit{TaskID: disp.TaskID, ResultKey: disp.ResultKey, DurationMS: 10, TokensUsed: 8}
@@ -4005,13 +4889,21 @@ func TestStragglerHedge(t *testing.T) {
 	// Must NOT share demoSupplierUUID: SelectRedundancyPeerExcluding (which
 	// hedgeStragglers calls) excludes the anchor's own supplier (backlog P0 item 6).
 	peer := uuid.New()
-	if _, err := itPool.Exec(ctx,
-		`INSERT INTO workers (id, supplier_id, hw_class, memory_gb, bw_gbps, last_seen_at, version,
-		                      supported_jobs, supported_models, min_payout_usd_hr, thermal_ok)
-		 VALUES ($1,$2,'apple_silicon_max',64,400,now(),'seed',ARRAY['embed'],ARRAY['all-minilm-l6-v2'],0,true)
-		 ON CONFLICT (id) DO UPDATE SET last_seen_at=now()`, peer, demoSupplier2UUID); err != nil {
+	var anchorEngine, anchorBuildHash string
+	if err := itPool.QueryRow(ctx, `SELECT COALESCE(engine,''),COALESCE(build_hash,'') FROM workers WHERE id=$1`, demoWorkerUUID).
+		Scan(&anchorEngine, &anchorBuildHash); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO workers (id, supplier_id, hw_class, engine, build_hash, memory_gb, bw_gbps, last_seen_at, version,
+		                      supported_jobs, supported_models, min_payout_usd_hr, thermal_ok)
+		 VALUES ($1,$2,'apple_silicon_max',$3,$4,64,400,now(),'seed',ARRAY['embed'],ARRAY['all-minilm-l6-v2'],0,true)
+		 ON CONFLICT (id) DO UPDATE SET last_seen_at=now()`,
+		peer, demoSupplier2UUID, anchorEngine, anchorBuildHash); err != nil {
+		t.Fatal(err)
+	}
+	replaceWorkerAuthorizationsForTest(t, ctx, peer,
+		[2]string{"embed", "all-minilm-l6-v2"})
 	jobID, slow := uuid.New(), uuid.New()
 	if _, err := itPool.Exec(ctx,
 		`INSERT INTO jobs (id, buyer_id, status, job_type, model_ref, input_ref, tier, task_count, tasks_done, min_memory_gb)
@@ -4019,11 +4911,15 @@ func TestStragglerHedge(t *testing.T) {
 		jobID, demoBuyerUUID); err != nil {
 		t.Fatal(err)
 	}
+	economicPlan := installRawFixtureEconomicPlan(t, ctx, jobID, 1, 1)
 	// Running primary, started well past the hedge window.
 	if _, err := itPool.Exec(ctx,
-		`INSERT INTO tasks (id, job_id, status, input_ref, result_key, chunk_index, worker_id, claimed_by, claimed_at, started_at)
-		 VALUES ($1,$2,'running','jobs/h/tasks/0/input.jsonl','jobs/h/tasks/0/result.json',0,$3,$3, now()-interval '10 minutes', now()-interval '10 minutes')`,
-		slow, jobID, demoWorkerUUID); err != nil {
+		`INSERT INTO tasks (id, job_id, status, input_ref, result_key, chunk_index, worker_id, claimed_by, claimed_at, started_at,
+		                    economic_buyer_charge_usd,economic_supplier_payout_usd)
+		 VALUES ($1,$2,'running','jobs/h/tasks/0/input.jsonl','jobs/h/tasks/0/result.json',0,$3,$3,
+		         now()-interval '10 minutes', now()-interval '10 minutes',$4,$5)`,
+		slow, jobID, demoWorkerUUID,
+		economicPlan.BuyerChargePerTaskUSD, economicPlan.SupplierPayoutPerTaskUSD); err != nil {
 		t.Fatal(err)
 	}
 	wk := NewWorkers(itStore, itStorage, stubPayout{})
@@ -4085,6 +4981,8 @@ func TestThrottledWorkerHedgesBeforeElapsedWindow(t *testing.T) {
 		 ON CONFLICT (id) DO UPDATE SET last_seen_at=now()`, peer, demoSupplier2UUID); err != nil {
 		t.Fatal(err)
 	}
+	replaceWorkerAuthorizationsForTest(t, ctx, peer,
+		[2]string{"embed", "all-minilm-l6-v2"})
 
 	// Two distinct worker rows on the demo supplier — one currently throttled,
 	// one not — so a throttled vs. non-throttled claimant can be compared under
@@ -4098,6 +4996,8 @@ func TestThrottledWorkerHedgesBeforeElapsedWindow(t *testing.T) {
 			 ON CONFLICT (id) DO UPDATE SET last_seen_at=now()`, w, demoSupplierUUID); err != nil {
 			t.Fatal(err)
 		}
+		replaceWorkerAuthorizationsForTest(t, ctx, w,
+			[2]string{"embed", "all-minilm-l6-v2"})
 	}
 	// Mark ONLY throttledWorker's live heartbeat state as throttled=true — the
 	// exact real signal main.rs's heartbeat sends when either memory pressure OR
@@ -4114,10 +5014,13 @@ func TestThrottledWorkerHedgesBeforeElapsedWindow(t *testing.T) {
 			jobID, demoBuyerUUID, "jobs/"+prefix+"/input.jsonl"); err != nil {
 			t.Fatal(err)
 		}
+		economicPlan := installRawFixtureEconomicPlan(t, ctx, jobID, 1, 1)
 		if _, err := itPool.Exec(ctx,
-			`INSERT INTO tasks (id, job_id, status, input_ref, result_key, chunk_index, worker_id, claimed_by, claimed_at, started_at)
-			 VALUES ($1,$2,'running',$3,$4,0,$5,$5, now()-interval '20 seconds', now()-interval '20 seconds')`,
-			taskID, jobID, "jobs/"+prefix+"/tasks/0/input.jsonl", "jobs/"+prefix+"/tasks/0/result.json", worker); err != nil {
+			`INSERT INTO tasks (id, job_id, status, input_ref, result_key, chunk_index, worker_id, claimed_by, claimed_at, started_at,
+			                    economic_buyer_charge_usd,economic_supplier_payout_usd)
+			 VALUES ($1,$2,'running',$3,$4,0,$5,$5, now()-interval '20 seconds', now()-interval '20 seconds',$6,$7)`,
+			taskID, jobID, "jobs/"+prefix+"/tasks/0/input.jsonl", "jobs/"+prefix+"/tasks/0/result.json", worker,
+			economicPlan.BuyerChargePerTaskUSD, economicPlan.SupplierPayoutPerTaskUSD); err != nil {
 			t.Fatal(err)
 		}
 		return jobID, taskID
@@ -4600,7 +5503,7 @@ func driveOneTask(t *testing.T, ctx context.Context) {
 	// unlike the old input_url substring check the fix intentionally closed).
 	result := embedResultJSON(1)
 	if taskIsHoneypot(t, ctx, disp.TaskID) {
-		result = []byte(demoHoneypotEmbedKnownAnswer)
+		result = demoHoneypotEmbedResultJSON(t)
 	}
 	if err := itStorage.PutObject(ctx, disp.ResultKey, result, "application/json"); err != nil {
 		t.Fatalf("put result: %v", err)
@@ -4771,16 +5674,16 @@ func TestDisputeResolverNoPeer(t *testing.T) {
 	reset(t)
 	ctx := context.Background()
 	jobID, taskID := uuid.New(), uuid.New()
+	mustJobTask(t, jobID, taskID, false, false, "jobs/x/input.jsonl")
 	if _, err := itPool.Exec(ctx,
-		`INSERT INTO jobs (id, buyer_id, status, job_type, input_ref, task_count, tasks_done)
-		 VALUES ($1,$2,'complete','embed','jobs/x/input.jsonl',1,1)`, jobID, demoBuyerUUID); err != nil {
-		t.Fatalf("insert job: %v", err)
+		`UPDATE tasks SET status='complete', worker_id=$2, result_ref=result_key,
+		 verification_outcome='pass', verified_at=now(), completed_at=now()
+		 WHERE id=$1`, taskID, demoWorkerUUID); err != nil {
+		// worker_id is part of the verification class the resolver excludes.
+		t.Fatalf("mark task delivered: %v", err)
 	}
-	if _, err := itPool.Exec(ctx,
-		`INSERT INTO tasks (id, job_id, worker_id, status, input_ref, result_key, chunk_index, completed_at)
-		 VALUES ($1,$2,$3,'complete','jobs/x/tasks/0/input.jsonl','jobs/x/tasks/0/result.json',0, now())`,
-		taskID, jobID, demoWorkerUUID); err != nil {
-		t.Fatalf("insert task: %v", err)
+	if _, err := itPool.Exec(ctx, `UPDATE jobs SET status='complete',tasks_done=1 WHERE id=$1`, jobID); err != nil {
+		t.Fatalf("mark job complete: %v", err)
 	}
 	code, body := req(t, "POST", "/v1/jobs/"+jobID.String()+"/dispute",
 		map[string]string{"reason": "x"}, buyerKey(), jsonCT())
@@ -4809,10 +5712,16 @@ func TestVerificationReceiptSurfaced(t *testing.T) {
 	reset(t)
 	ctx := context.Background()
 	jobID, taskID := uuid.New(), uuid.New()
+	mustJobTask(t, jobID, taskID, false, false, "jobs/x/input.jsonl")
 	if _, err := itPool.Exec(ctx,
-		`INSERT INTO jobs (id, buyer_id, status, job_type, input_ref, task_count, tasks_done)
-		 VALUES ($1,$2,'complete','embed','jobs/x/input.jsonl',1,1)`, jobID, demoBuyerUUID); err != nil {
-		t.Fatalf("insert job: %v", err)
+		`UPDATE tasks SET status='complete', worker_id=$2, result_ref=result_key,
+		 verification_outcome='pass', verified_at=now(), completed_at=now()
+		 WHERE id=$1`, taskID, demoWorkerUUID); err != nil {
+		t.Fatalf("mark task delivered: %v", err)
+	}
+	if _, err := itPool.Exec(ctx,
+		`UPDATE jobs SET status='complete', tasks_done=1 WHERE id=$1`, jobID); err != nil {
+		t.Fatalf("mark job complete: %v", err)
 	}
 	// A redundancy MATCH (two agreeing results) records a redundancy_match event for the job.
 	info := &CommitTaskInfo{TaskID: taskID, JobID: jobID, WorkerID: demoWorkerUUID,
@@ -4834,8 +5743,8 @@ func TestVerificationReceiptSurfaced(t *testing.T) {
 	if jv.Verification.RedundancyMatched < 1 || jv.Verification.Checked < 1 {
 		t.Fatalf("receipt aggregate missing: %+v", jv.Verification)
 	}
-	if jv.Verification.Label != "verified" {
-		t.Fatalf("want label 'verified' (redundancy matched), got %q", jv.Verification.Label)
+	if jv.Verification.Label != "fully-verified" || jv.Verification.DeliveredChunks != 1 || jv.Verification.VerifiedChunks != 1 {
+		t.Fatalf("want one fully verified delivered chunk, got %+v", jv.Verification)
 	}
 	if jv.ChargeStatus == "" {
 		t.Fatalf("charge_status should surface a default state, got empty")
@@ -4927,6 +5836,63 @@ func TestAPIKeyLifecycle(t *testing.T) {
 
 // --- OpenAI-Batch-compatible adapter: inline embeddings batch → status maps ---
 
+// TestOpenAIFileUploadRoundTrip exercises the disk-backed multipart ingress and
+// streaming object-store egress through the real authenticated HTTP surface.
+func TestOpenAIFileUploadRoundTrip(t *testing.T) {
+	reset(t)
+
+	want := []byte(`{"custom_id":"a","method":"POST","url":"/v1/embeddings","body":{"model":"all-minilm-l6-v2","input":"hello"}}` + "\n")
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("purpose", "batch"); err != nil {
+		t.Fatalf("write purpose: %v", err)
+	}
+	part, err := writer.CreateFormFile("file", "requests.jsonl")
+	if err != nil {
+		t.Fatalf("create file part: %v", err)
+	}
+	if _, err := part.Write(want); err != nil {
+		t.Fatalf("write file part: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart: %v", err)
+	}
+
+	code, out := req(t, "POST", "/v1/files", body.Bytes(), buyerKey(),
+		hdr{"Content-Type", writer.FormDataContentType()})
+	if code != http.StatusOK {
+		t.Fatalf("upload file: want 200, got %d: %s", code, out)
+	}
+	var file struct {
+		ID       string `json:"id"`
+		Object   string `json:"object"`
+		Filename string `json:"filename"`
+		Purpose  string `json:"purpose"`
+		Bytes    int64  `json:"bytes"`
+	}
+	if err := json.Unmarshal(out, &file); err != nil {
+		t.Fatalf("decode file object: %v (%s)", err, out)
+	}
+	if !strings.HasPrefix(file.ID, "file-") || file.Object != "file" ||
+		file.Filename != "requests.jsonl" || file.Purpose != "batch" || file.Bytes != int64(len(want)) {
+		t.Fatalf("unexpected file object: %+v", file)
+	}
+
+	code, out = req(t, "GET", "/v1/files/"+file.ID+"/content", nil, buyerKey())
+	if code != http.StatusOK {
+		t.Fatalf("download file: want 200, got %d: %s", code, out)
+	}
+	if !bytes.Equal(out, want) {
+		t.Fatalf("downloaded bytes differ: got %q want %q", out, want)
+	}
+
+	code, out = req(t, "POST", "/v1/files?purpose=batch", []byte(" \t\r\n"),
+		buyerKey(), hdr{"Content-Type", "application/x-ndjson"})
+	if code != http.StatusBadRequest {
+		t.Fatalf("whitespace-only raw upload: want 400, got %d: %s", code, out)
+	}
+}
+
 // TestOpenAIBatchInlineEmbeddings posts an OpenAI-Batch-shaped embeddings request
 // with INLINE input (no separate file upload), then confirms GET /v1/batches/{id}
 // returns an OpenAI-Batch-shaped object whose status maps from the underlying CX
@@ -4935,8 +5901,8 @@ func TestOpenAIBatchInlineEmbeddings(t *testing.T) {
 	reset(t)
 
 	// Two embeddings lines, inline as a JSONL string (the OpenAI batch line shape).
-	jsonl := `{"custom_id":"a","method":"POST","url":"/v1/embeddings","body":{"model":"text-embedding-3-small","input":"hello"}}` + "\n" +
-		`{"custom_id":"b","method":"POST","url":"/v1/embeddings","body":{"model":"text-embedding-3-small","input":"world"}}`
+	jsonl := `{"custom_id":"a","method":"POST","url":"/v1/embeddings","body":{"model":"all-minilm-l6-v2","input":"hello"}}` + "\n" +
+		`{"custom_id":"b","method":"POST","url":"/v1/embeddings","body":{"model":"all-minilm-l6-v2","input":"world"}}`
 
 	code, out := req(t, "POST", "/v1/batches", map[string]any{
 		"endpoint":          "/v1/embeddings",
@@ -5060,7 +6026,7 @@ func TestSignupTokenAuthenticatesAndSandboxGate(t *testing.T) {
 	}
 	jobBody := map[string]any{
 		"job_type":     map[string]any{"type": "embed"},
-		"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"model":        map[string]any{"kind": "hf", "ref": "all-minilm-l6-v2"},
 		"params":       map[string]any{"split_size": 1000},
 		"verification": map[string]any{},
 		"tier":         "batch",
@@ -5176,51 +6142,309 @@ func TestLoginGoodAndBadPassword(t *testing.T) {
 
 // --- supplier onboarding (suppliers.go) ---
 
-// TestSupplierOnboardUnconfigured proves tax info persists even when Stripe is
-// unset, and that the Connect path returns the HONEST 503 (never a faked account).
-func TestSupplierOnboardUnconfigured(t *testing.T) {
+type supplierTestAccount struct {
+	buyerID uuid.UUID
+	email   string
+	auth    hdr
+}
+
+func newSupplierTestAccount(t *testing.T, prefix string) supplierTestAccount {
+	t.Helper()
+	email := uniqueEmail(prefix)
+	code, out := req(t, "POST", "/v1/signup",
+		map[string]any{"email": email, "password": "supplier-test-password"}, jsonCT())
+	if code != http.StatusCreated {
+		t.Fatalf("supplier account signup: want 201, got %d: %s", code, out)
+	}
+	var created struct {
+		BuyerID string `json:"buyer_id"`
+		Token   string `json:"token"`
+	}
+	if err := json.Unmarshal(out, &created); err != nil || created.Token == "" {
+		t.Fatalf("supplier account signup decode: %v (%s)", err, out)
+	}
+	return supplierTestAccount{
+		buyerID: uuid.MustParse(created.BuyerID),
+		email:   email,
+		auth:    hdr{"Authorization", "Bearer " + created.Token},
+	}
+}
+
+// TestSupplierOnboardBoundToAuthenticatedAccount proves the supplier identity is
+// derived from the presenting buyer account, legacy email/tax fields are rejected,
+// KYC stays at Stripe, and an unconfigured Connect boundary is still an honest 503.
+func TestSupplierOnboardBoundToAuthenticatedAccount(t *testing.T) {
 	reset(t)
-	// Ensure Stripe is unconfigured for this test regardless of ambient env.
 	t.Setenv("STRIPE_SECRET_KEY", "")
 	ctx := context.Background()
+	legacyBuyerID := uuid.New()
+	legacyKey := "cx_test_supplier_legacy_" + uuid.NewString()
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO api_keys (buyer_id,key_hash,revoked) VALUES ($1,$2,false)`,
+		legacyBuyerID, hashKey(legacyKey),
+	); err != nil {
+		t.Fatalf("insert accountless buyer key: %v", err)
+	}
+	if code, out := req(t, "POST", "/v1/supplier/worker-tokens", map[string]any{}, jsonCT(),
+		hdr{"Authorization", "Bearer " + legacyKey}); code != http.StatusForbidden {
+		t.Fatalf("accountless buyer identity: want 403, got %d: %s", code, out)
+	}
+	account := newSupplierTestAccount(t, "supplier-owned")
 
-	email := uniqueEmail("supplier")
+	// Old clients must not be allowed to choose identity or send plaintext KYC/tax
+	// data. Reject before creating any supplier row.
 	code, out := req(t, "POST", "/v1/supplier/onboard",
-		map[string]any{"email": email, "tax_id": "12-3456789", "tax_country": "US"}, jsonCT(), buyerKey())
+		map[string]any{"email": "victim@example.com", "tax_id": "12-3456789", "tax_country": "US"}, jsonCT(), account.auth)
+	if code != http.StatusBadRequest {
+		t.Fatalf("onboard with caller identity/KYC: want 400, got %d: %s", code, out)
+	}
+	var before int
+	if err := itPool.QueryRow(ctx, `SELECT count(*) FROM suppliers WHERE owner_buyer_id=$1`, account.buyerID).Scan(&before); err != nil {
+		t.Fatalf("count supplier before clean onboard: %v", err)
+	}
+	if before != 0 {
+		t.Fatalf("rejected identity/KYC body must not create a supplier, got %d", before)
+	}
+
+	code, out = req(t, "POST", "/v1/supplier/onboard", map[string]any{}, jsonCT(), account.auth)
 	if code != http.StatusServiceUnavailable {
 		t.Fatalf("onboard with no Stripe: want 503, got %d: %s", code, out)
 	}
 
-	// Despite the 503, the supplier + tax info must be on file (recorded before the
-	// Stripe call). Status must report tax_on_file=true, connect_status=none.
-	code, out = req(t, "GET", "/v1/supplier/status?email="+url.QueryEscape(email), nil, buyerKey())
+	var supplierID, ownerID uuid.UUID
+	var supplierEmail string
+	if err := itPool.QueryRow(ctx,
+		`SELECT id, owner_buyer_id, email FROM suppliers WHERE owner_buyer_id=$1`, account.buyerID,
+	).Scan(&supplierID, &ownerID, &supplierEmail); err != nil {
+		t.Fatalf("read owned supplier: %v", err)
+	}
+	if ownerID != account.buyerID || supplierEmail != account.email {
+		t.Fatalf("supplier must use authenticated account identity: owner=%s email=%q", ownerID, supplierEmail)
+	}
+
+	code, out = req(t, "GET", "/v1/supplier/status", nil, account.auth)
 	if code != http.StatusOK {
 		t.Fatalf("supplier status: want 200, got %d: %s", code, out)
 	}
 	var st struct {
-		ConnectStatus  string `json:"connect_status"`
-		PayoutsEnabled bool   `json:"payouts_enabled"`
-		TaxOnFile      bool   `json:"tax_on_file"`
+		SupplierID     uuid.UUID `json:"supplier_id"`
+		ConnectStatus  string    `json:"connect_status"`
+		PayoutsEnabled bool      `json:"payouts_enabled"`
+		KYCProvider    string    `json:"kyc_provider"`
 	}
 	if err := json.Unmarshal(out, &st); err != nil {
 		t.Fatalf("status decode: %v (%s)", err, out)
 	}
-	if !st.TaxOnFile {
-		t.Fatalf("tax info must persist even when Stripe is unset: %+v", st)
-	}
-	if st.ConnectStatus != "none" || st.PayoutsEnabled {
+	if st.SupplierID != supplierID || st.ConnectStatus != "none" || st.PayoutsEnabled || st.KYCProvider != "stripe_connect" {
 		t.Fatalf("no Connect account yet: want none/false, got %+v", st)
 	}
 
-	// Confirm the tax fields landed on the supplier row.
-	var taxID, taxCountry string
-	if err := itPool.QueryRow(ctx,
-		`SELECT COALESCE(tax_id,''), COALESCE(tax_country,'') FROM suppliers WHERE email=lower($1)`, email,
-	).Scan(&taxID, &taxCountry); err != nil {
-		t.Fatalf("read supplier tax: %v", err)
+	var statusBody map[string]json.RawMessage
+	if err := json.Unmarshal(out, &statusBody); err != nil {
+		t.Fatalf("status map decode: %v", err)
 	}
-	if taxID != "12-3456789" || taxCountry != "US" {
-		t.Fatalf("tax fields not persisted: id=%q country=%q", taxID, taxCountry)
+	if _, exists := statusBody["tax_on_file"]; exists {
+		t.Fatalf("status must not claim CX stores tax data: %s", out)
+	}
+	var taxColumns int
+	if err := itPool.QueryRow(ctx,
+		`SELECT count(*) FROM information_schema.columns
+		  WHERE table_schema = current_schema()
+		    AND table_name = 'suppliers'
+		    AND column_name IN ('tax_id','tax_country')`,
+	).Scan(&taxColumns); err != nil {
+		t.Fatalf("inspect supplier tax columns: %v", err)
+	}
+	if taxColumns != 0 {
+		t.Fatalf("CX must not retain plaintext tax columns, found %d", taxColumns)
+	}
+}
+
+// TestSupplierRoutesPreventCrossAccountAccess proves that a second authenticated
+// buyer cannot select the first supplier by email for status, onboarding, or token
+// minting. Empty-body requests create and operate only on the caller's own supplier.
+func TestSupplierRoutesPreventCrossAccountAccess(t *testing.T) {
+	reset(t)
+	t.Setenv("STRIPE_SECRET_KEY", "")
+	ctx := context.Background()
+	owner := newSupplierTestAccount(t, "supplier-a")
+	other := newSupplierTestAccount(t, "supplier-b")
+
+	code, out := req(t, "POST", "/v1/supplier/worker-tokens", map[string]any{}, jsonCT(), owner.auth)
+	if code != http.StatusCreated {
+		t.Fatalf("owner token mint: want 201, got %d: %s", code, out)
+	}
+	var ownerMint struct {
+		SupplierID uuid.UUID `json:"supplier_id"`
+		WorkerID   uuid.UUID `json:"worker_id"`
+		Token      string    `json:"worker_token"`
+	}
+	if err := json.Unmarshal(out, &ownerMint); err != nil || ownerMint.SupplierID == uuid.Nil || ownerMint.Token == "" {
+		t.Fatalf("owner token response: %v (%s)", err, out)
+	}
+	if _, err := itStore.CreateWorkerTokenForBuyer(ctx, other.buyerID, uuid.New(), ownerMint.SupplierID); !errors.Is(err, errSupplierOwnershipConflict) {
+		t.Fatalf("store cross-account mint: want ownership conflict, got %v", err)
+	}
+
+	if code, out = req(t, "GET", "/v1/supplier/status", nil, other.auth); code != http.StatusNotFound {
+		t.Fatalf("other account status before own supplier: want 404, got %d: %s", code, out)
+	}
+	if code, out = req(t, "GET", "/v1/supplier/status?email="+owner.email, nil, other.auth); code != http.StatusBadRequest {
+		t.Fatalf("cross-account status selector: want 400, got %d: %s", code, out)
+	}
+	if code, out = req(t, "POST", "/v1/supplier/onboard", map[string]any{"email": owner.email}, jsonCT(), other.auth); code != http.StatusBadRequest {
+		t.Fatalf("cross-account onboard selector: want 400, got %d: %s", code, out)
+	}
+	if code, out = req(t, "POST", "/v1/supplier/worker-tokens", map[string]any{"email": owner.email}, jsonCT(), other.auth); code != http.StatusBadRequest {
+		t.Fatalf("cross-account token selector: want 400, got %d: %s", code, out)
+	}
+
+	var ownerTokens int
+	if err := itPool.QueryRow(ctx,
+		`SELECT count(*) FROM worker_tokens WHERE supplier_id=$1`, ownerMint.SupplierID,
+	).Scan(&ownerTokens); err != nil {
+		t.Fatalf("count owner tokens: %v", err)
+	}
+	if ownerTokens != 1 {
+		t.Fatalf("cross-account requests changed owner token count: want 1, got %d", ownerTokens)
+	}
+
+	code, out = req(t, "POST", "/v1/supplier/worker-tokens", map[string]any{}, jsonCT(), other.auth)
+	if code != http.StatusCreated {
+		t.Fatalf("other account own token mint: want 201, got %d: %s", code, out)
+	}
+	var otherMint struct {
+		SupplierID uuid.UUID `json:"supplier_id"`
+		Token      string    `json:"worker_token"`
+	}
+	if err := json.Unmarshal(out, &otherMint); err != nil || otherMint.Token == "" {
+		t.Fatalf("other token response: %v (%s)", err, out)
+	}
+	if otherMint.SupplierID == ownerMint.SupplierID {
+		t.Fatalf("distinct buyer accounts received the same supplier id %s", ownerMint.SupplierID)
+	}
+	var ownerA, ownerB uuid.UUID
+	if err := itPool.QueryRow(ctx, `SELECT owner_buyer_id FROM suppliers WHERE id=$1`, ownerMint.SupplierID).Scan(&ownerA); err != nil {
+		t.Fatalf("read first owner: %v", err)
+	}
+	if err := itPool.QueryRow(ctx, `SELECT owner_buyer_id FROM suppliers WHERE id=$1`, otherMint.SupplierID).Scan(&ownerB); err != nil {
+		t.Fatalf("read second owner: %v", err)
+	}
+	if ownerA != owner.buyerID || ownerB != other.buyerID {
+		t.Fatalf("wrong supplier owners: first=%s second=%s", ownerA, ownerB)
+	}
+}
+
+// TestSupplierLegacyCollisionFailsClosed proves a request cannot claim an unowned
+// legacy supplier simply because its email equals the authenticated account email.
+func TestSupplierLegacyCollisionFailsClosed(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+	account := newSupplierTestAccount(t, "supplier-legacy")
+	legacyID := uuid.New()
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO suppliers (id, email, status, owner_buyer_id)
+		 VALUES ($1,$2,'pending',NULL)`, legacyID, account.email,
+	); err != nil {
+		t.Fatalf("insert unowned legacy supplier: %v", err)
+	}
+
+	code, out := req(t, "POST", "/v1/supplier/worker-tokens", map[string]any{}, jsonCT(), account.auth)
+	if code != http.StatusConflict {
+		t.Fatalf("legacy collision token mint: want 409, got %d: %s", code, out)
+	}
+	var stillUnowned bool
+	if err := itPool.QueryRow(ctx,
+		`SELECT owner_buyer_id IS NULL FROM suppliers WHERE id=$1`, legacyID,
+	).Scan(&stillUnowned); err != nil {
+		t.Fatalf("read legacy ownership: %v", err)
+	}
+	if !stillUnowned {
+		t.Fatal("request-time email collision must not claim an unowned legacy supplier")
+	}
+	var tokenCount int
+	if err := itPool.QueryRow(ctx, `SELECT count(*) FROM worker_tokens WHERE supplier_id=$1`, legacyID).Scan(&tokenCount); err != nil {
+		t.Fatalf("count legacy tokens: %v", err)
+	}
+	if tokenCount != 0 {
+		t.Fatalf("legacy ownership conflict minted %d worker tokens", tokenCount)
+	}
+}
+
+// TestSupplierOwnershipMigrationBackfillsOnlyUnambiguous proves the idempotent
+// runtime migration binds a one-to-one legacy match but deliberately leaves a
+// case-insensitively ambiguous match unowned.
+func TestSupplierOwnershipMigrationBackfillsOnlyUnambiguous(t *testing.T) {
+	reset(t)
+	ctx := context.Background()
+
+	uniqueBuyer := uuid.New()
+	uniqueSupplier := uuid.New()
+	uniqueMail := uniqueEmail("supplier-backfill")
+	ambiguousBuyer := uuid.New()
+	ambiguousSupplierA := uuid.New()
+	ambiguousSupplierB := uuid.New()
+	ambiguousMail := uniqueEmail("supplier-ambiguous")
+	maskedBuyerA := uuid.New()
+	maskedBuyerB := uuid.New()
+	maskedOwnedSupplier := uuid.New()
+	maskedUnownedSupplier := uuid.New()
+	maskedMail := uniqueEmail("supplier-masked-ambiguity")
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO buyers (id,email) VALUES
+		 ($1,$2),($3,$4),($5,$6),($7,$8)`,
+		uniqueBuyer, uniqueMail,
+		ambiguousBuyer, ambiguousMail,
+		maskedBuyerA, maskedMail,
+		maskedBuyerB, strings.ToUpper(maskedMail),
+	); err != nil {
+		t.Fatalf("insert migration buyers: %v", err)
+	}
+	if _, err := itPool.Exec(ctx,
+		`INSERT INTO suppliers (id,email,status,owner_buyer_id) VALUES
+		 ($1,$2,'pending',NULL),
+		 ($3,$4,'pending',NULL),
+		 ($5,$6,'pending',NULL),
+		 ($7,$8,'pending',$9),
+		 ($10,$11,'pending',NULL)`,
+		uniqueSupplier, uniqueMail,
+		ambiguousSupplierA, ambiguousMail,
+		ambiguousSupplierB, strings.ToUpper(ambiguousMail),
+		maskedOwnedSupplier, uniqueEmail("supplier-owned-elsewhere"), maskedBuyerA,
+		maskedUnownedSupplier, maskedMail,
+	); err != nil {
+		t.Fatalf("insert migration suppliers: %v", err)
+	}
+
+	if err := itStore.Migrate(ctx); err != nil {
+		t.Fatalf("re-run ownership migration: %v", err)
+	}
+	var uniqueOwner uuid.UUID
+	if err := itPool.QueryRow(ctx, `SELECT owner_buyer_id FROM suppliers WHERE id=$1`, uniqueSupplier).Scan(&uniqueOwner); err != nil {
+		t.Fatalf("read unique backfill: %v", err)
+	}
+	if uniqueOwner != uniqueBuyer {
+		t.Fatalf("one-to-one legacy supplier not backfilled: want %s, got %s", uniqueBuyer, uniqueOwner)
+	}
+	var ambiguousOwned int
+	if err := itPool.QueryRow(ctx,
+		`SELECT count(*) FROM suppliers
+		  WHERE id IN ($1,$2) AND owner_buyer_id IS NOT NULL`,
+		ambiguousSupplierA, ambiguousSupplierB,
+	).Scan(&ambiguousOwned); err != nil {
+		t.Fatalf("read ambiguous backfill: %v", err)
+	}
+	if ambiguousOwned != 0 {
+		t.Fatalf("ambiguous legacy email matches must remain unowned, got %d owned rows", ambiguousOwned)
+	}
+	var maskedStillUnowned bool
+	if err := itPool.QueryRow(ctx,
+		`SELECT owner_buyer_id IS NULL FROM suppliers WHERE id=$1`, maskedUnownedSupplier,
+	).Scan(&maskedStillUnowned); err != nil {
+		t.Fatalf("read masked ambiguity backfill: %v", err)
+	}
+	if !maskedStillUnowned {
+		t.Fatal("an already-owned duplicate buyer must not hide an ambiguous email match")
 	}
 }
 
@@ -5232,12 +6456,12 @@ func TestConnectWebhookFlipsPayoutsEnabled(t *testing.T) {
 	t.Setenv("CX_CONNECT_WEBHOOK_SECRET", "whsec_test_connect")
 	ctx := context.Background()
 
-	// Onboard records the supplier (503 on the Connect link is expected/ignored),
-	// then attach a known stripe_acct so the webhook has a target.
-	email := uniqueEmail("supplier")
-	_, _ = req(t, "POST", "/v1/supplier/onboard", map[string]any{"email": email}, jsonCT(), buyerKey())
+	// Onboard records this account's supplier (503 on the Connect link is expected),
+	// then attach a known stripe_acct so the signed webhook has a target.
+	account := newSupplierTestAccount(t, "supplier-webhook")
+	_, _ = req(t, "POST", "/v1/supplier/onboard", map[string]any{}, jsonCT(), account.auth)
 	const acct = "acct_TESTwebhook123"
-	if _, err := itPool.Exec(ctx, `UPDATE suppliers SET stripe_acct=$2 WHERE email=lower($1)`, email, acct); err != nil {
+	if _, err := itPool.Exec(ctx, `UPDATE suppliers SET stripe_acct=$2 WHERE owner_buyer_id=$1`, account.buyerID, acct); err != nil {
 		t.Fatalf("set stripe_acct: %v", err)
 	}
 
@@ -5249,7 +6473,7 @@ func TestConnectWebhookFlipsPayoutsEnabled(t *testing.T) {
 	}
 
 	var pe bool
-	if err := itPool.QueryRow(ctx, `SELECT COALESCE(payouts_enabled,false) FROM suppliers WHERE email=lower($1)`, email).Scan(&pe); err != nil {
+	if err := itPool.QueryRow(ctx, `SELECT COALESCE(payouts_enabled,false) FROM suppliers WHERE owner_buyer_id=$1`, account.buyerID).Scan(&pe); err != nil {
 		t.Fatalf("read payouts_enabled: %v", err)
 	}
 	if !pe {
@@ -5692,9 +6916,17 @@ func TestRescueDeadClaimRequeues(t *testing.T) {
 	deadJob, deadTask := uuid.New(), uuid.New()
 	mustJobTask(t, deadJob, deadTask, false, false, "jobs/dc/tasks/0/input.jsonl")
 	if _, err := itPool.Exec(ctx,
-		`UPDATE tasks SET claimed_by=$2, claimed_at=now()-interval '10 minutes',
-		        started_at=now()-interval '10 minutes', worker_id=$2 WHERE id=$1`,
+		`UPDATE tasks SET status='queued',claimed_by=$2,claimed_at=now()-interval '10 minutes',
+		        started_at=NULL,worker_id=NULL WHERE id=$1`,
 		deadTask, deadWorker); err != nil {
+		t.Fatal(err)
+	}
+	if err := itStore.StartTask(ctx, deadTask, deadWorker); err != nil {
+		t.Fatalf("start dead-worker task: %v", err)
+	}
+	if _, err := itPool.Exec(ctx,
+		`UPDATE tasks SET claimed_at=now()-interval '10 minutes',started_at=now()-interval '10 minutes' WHERE id=$1`,
+		deadTask); err != nil {
 		t.Fatal(err)
 	}
 
@@ -5702,9 +6934,17 @@ func TestRescueDeadClaimRequeues(t *testing.T) {
 	liveJob, liveTask := uuid.New(), uuid.New()
 	mustJobTask(t, liveJob, liveTask, false, false, "jobs/dc2/tasks/0/input.jsonl")
 	if _, err := itPool.Exec(ctx,
-		`UPDATE tasks SET claimed_by=$2, claimed_at=now()-interval '10 minutes',
-		        started_at=now()-interval '10 minutes', worker_id=$2 WHERE id=$1`,
+		`UPDATE tasks SET status='queued',claimed_by=$2,claimed_at=now()-interval '10 minutes',
+		        started_at=NULL,worker_id=NULL WHERE id=$1`,
 		liveTask, demoWorkerUUID); err != nil {
+		t.Fatal(err)
+	}
+	if err := itStore.StartTask(ctx, liveTask, demoWorkerUUID); err != nil {
+		t.Fatalf("start live-worker task: %v", err)
+	}
+	if _, err := itPool.Exec(ctx,
+		`UPDATE tasks SET claimed_at=now()-interval '10 minutes',started_at=now()-interval '10 minutes' WHERE id=$1`,
+		liveTask); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := itPool.Exec(ctx,
@@ -5853,7 +7093,7 @@ func TestWatchdogOptOutValidation(t *testing.T) {
 		t.Helper()
 		body := map[string]any{
 			"job_type":      map[string]any{"type": "embed"},
-			"model":         map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+			"model":         map[string]any{"kind": "hf", "ref": "all-minilm-l6-v2"},
 			"constraints":   map[string]any{"min_memory_gb": 2},
 			"verification":  map[string]any{},
 			"tier":          "batch",
@@ -6205,17 +7445,13 @@ func TestApplyRepricingUsesRealSupplierEconomics(t *testing.T) {
 	}
 }
 
-// --- Project Detection & Quotation 6.5->7: cost-drift loop + auto-tuning -------
+// --- Quote-to-settlement economics truth --------------------------------------
 
-// TestAdminQuoteCostDriftAndAutoTune proves the whole rung end to end against
-// real Postgres: real quote-bound, terminal jobs with a real, deliberate,
-// non-zero quoted-vs-actual cost drift roll up correctly on GET /admin/quotes
-// (the missing surface the rung names by exact route), and POST
-// /admin/quotes/auto-tune actually corrects a real catalogue price from that real
-// drift — the proof artifact the rung asks for ("a real, non-zero quoted-vs-
-// charged drift report exists and has been used at least once to correct a
-// catalogue price"), not just a number computed and left on a dashboard.
-func TestAdminQuoteCostDriftAndAutoTune(t *testing.T) {
+// TestAdminQuoteSettlementRollupRefusesCircularAutoTune proves the admin API
+// still exposes quote-to-settlement realization while naming its circular basis,
+// and refuses to mutate catalogue prices until independent execution-cost
+// telemetry exists.
+func TestAdminQuoteSettlementRollupRefusesCircularAutoTune(t *testing.T) {
 	reset(t)
 	ctx := context.Background()
 	itPool.Exec(ctx, `TRUNCATE quotes`)
@@ -6234,10 +7470,9 @@ func TestAdminQuoteCostDriftAndAutoTune(t *testing.T) {
 		t.Fatalf("reset qwen price: %v", err)
 	}
 
-	// Five real, quote-bound, terminal jobs (>= costDriftMinSamples) that each
-	// actually cost 20% MORE than quoted — a real, deliberate, consistent
-	// underquote, not noise. Each gets its own quotes row (quoted at $1.00) and a
-	// jobs row bound to it (quote_id set, status complete, actual_usd = $1.20).
+	// Five quote-bound terminal jobs whose settlement field is 20% above the quote.
+	// The ratio is displayable, but actual_usd is still quote-derived settlement,
+	// not measured runtime/energy/hardware/platform cost.
 	const nSamples = 5
 	const quotedEach = 1.00
 	const actualEach = 1.20
@@ -6291,80 +7526,50 @@ func TestAdminQuoteCostDriftAndAutoTune(t *testing.T) {
 	if diff := row.DriftPct - 20.0; diff > 1e-6 || diff < -1e-6 {
 		t.Fatalf("drift_pct = %v, want 20", row.DriftPct)
 	}
-	if !row.UsingForTuning {
-		t.Fatalf("row has %d >= costDriftMinSamples samples, should be UsingForTuning", row.Samples)
+	if row.UsingForTuning {
+		t.Fatalf("quote-derived settlement must never be eligible for tuning: %+v", row)
+	}
+	if row.ActualUSDBasis != actualUSDBasisQuoteDerivedSettlement ||
+		row.TuningBlockReason != priceTuningBlockedNoIndependentTelemetry {
+		t.Fatalf("admin row did not name/fail-closed its basis: %+v", row)
 	}
 
-	// POST /admin/quotes/auto-tune: the drift must actually correct the real
-	// catalogue price, live over HTTP — not just be computable.
-	acode, abody := req(t, "POST", "/admin/quotes/auto-tune", nil, adminKey())
-	if acode != 200 {
-		t.Fatalf("POST /admin/quotes/auto-tune: %d %s", acode, abody)
-	}
-	var tuneResp struct {
-		Tuned []PriceTuneResult `json:"tuned"`
-		Count int               `json:"count"`
-	}
-	if err := json.Unmarshal(abody, &tuneResp); err != nil {
-		t.Fatalf("decode auto-tune response: %v (%s)", err, abody)
-	}
-	var tuned *PriceTuneResult
-	for i := range tuneResp.Tuned {
-		if tuneResp.Tuned[i].ModelID == "qwen2.5-7b-instruct-q4" {
-			tuned = &tuneResp.Tuned[i]
-		}
-	}
-	if tuned == nil {
-		t.Fatalf("qwen2.5-7b-instruct-q4 missing from auto-tune response: %+v", tuneResp)
-	}
-	if tuned.OldPricePer1K != 0.008 {
-		t.Fatalf("old_price_per_1k = %v, want the real seeded 0.008", tuned.OldPricePer1K)
-	}
-	// A 20% underquote is within the ±15% clamp band's... no: 1.2 EXCEEDS the 1.15
-	// clamp ceiling, so the applied adjustment must be exactly the clamped 1.15,
-	// not the raw 1.2 — proving the damping actually engages, not just exists as
-	// an unused constant.
-	wantNewPrice := roundUSD(0.008 * 1.15)
-	if tuned.NewPricePer1K != wantNewPrice {
-		t.Fatalf("new_price_per_1k = %v, want the CLAMPED %v (raw drift_ratio=1.2 must clamp to 1.15, not apply unclamped)", tuned.NewPricePer1K, wantNewPrice)
-	}
-	if tuned.NewPricePer1K <= tuned.OldPricePer1K {
-		t.Fatalf("a real 20%% underquote must raise the price, got old=%v new=%v", tuned.OldPricePer1K, tuned.NewPricePer1K)
-	}
-
-	// The change actually landed in the real models table, not just the response body.
-	var dbPrice float64
-	var dbSource string
+	var beforePrice float64
+	var beforeSource string
 	if err := itPool.QueryRow(ctx,
 		`SELECT price_per_1k::float8, price_source FROM models WHERE id='qwen2.5-7b-instruct-q4'`,
-	).Scan(&dbPrice, &dbSource); err != nil {
-		t.Fatalf("read tuned price: %v", err)
-	}
-	if dbSource != "drift_auto_tuned" {
-		t.Fatalf("price_source = %q, want drift_auto_tuned", dbSource)
-	}
-	if dbPrice != wantNewPrice {
-		t.Fatalf("DB price_per_1k = %v, want %v", dbPrice, wantNewPrice)
+	).Scan(&beforePrice, &beforeSource); err != nil {
+		t.Fatalf("read pre-refusal price: %v", err)
 	}
 
-	// A second auto-tune pass against the SAME (now-corrected, still 20%-drifted-
-	// looking) history moves the price again — proving the clamp is a per-pass
-	// damper, not a one-time hard ceiling — but the raw underlying drift signal
-	// (the quotes/jobs rows) is untouched by tuning, so this is deliberately
-	// checking that repeated real drift keeps correcting the price rather than
-	// silently freezing after one pass.
-	acode2, abody2 := req(t, "POST", "/admin/quotes/auto-tune", nil, adminKey())
-	if acode2 != 200 {
-		t.Fatalf("second auto-tune: %d %s", acode2, abody2)
+	// POST refuses with a stable, non-500 contract and leaves the catalogue alone.
+	acode, abody := req(t, "POST", "/admin/quotes/auto-tune", nil, adminKey())
+	if acode != http.StatusConflict {
+		t.Fatalf("POST /admin/quotes/auto-tune: want 409, got %d: %s", acode, abody)
 	}
-	var tuneResp2 struct {
-		Tuned []PriceTuneResult `json:"tuned"`
+	var refusal struct {
+		Reason            PriceTuningBlockReason `json:"reason"`
+		ActualUSDBasis    string                 `json:"actual_usd_basis"`
+		RequiredTelemetry string                 `json:"required_telemetry"`
 	}
-	json.Unmarshal(abody2, &tuneResp2)
-	for _, tr := range tuneResp2.Tuned {
-		if tr.ModelID == "qwen2.5-7b-instruct-q4" && tr.NewPricePer1K <= wantNewPrice {
-			t.Fatalf("second pass should keep correcting toward the real drift, old=%v new=%v", wantNewPrice, tr.NewPricePer1K)
-		}
+	if err := json.Unmarshal(abody, &refusal); err != nil {
+		t.Fatalf("decode auto-tune refusal: %v (%s)", err, abody)
+	}
+	if refusal.Reason != priceTuningBlockedNoIndependentTelemetry ||
+		refusal.ActualUSDBasis != actualUSDBasisQuoteDerivedSettlement ||
+		refusal.RequiredTelemetry == "" {
+		t.Fatalf("incomplete structured refusal: %+v", refusal)
+	}
+	var afterPrice float64
+	var afterSource string
+	if err := itPool.QueryRow(ctx,
+		`SELECT price_per_1k::float8, price_source FROM models WHERE id='qwen2.5-7b-instruct-q4'`,
+	).Scan(&afterPrice, &afterSource); err != nil {
+		t.Fatalf("read post-refusal price: %v", err)
+	}
+	if afterPrice != beforePrice || afterSource != beforeSource {
+		t.Fatalf("refused auto-tune mutated catalogue: before=%v/%q after=%v/%q",
+			beforePrice, beforeSource, afterPrice, afterSource)
 	}
 }
 
@@ -6377,7 +7582,7 @@ func TestAdminQuoteCostDriftAndAutoTune(t *testing.T) {
 func TestFirmQuoteSubmissionRequiresQuoteID(t *testing.T) {
 	code, body := req(t, "POST", "/v1/jobs", map[string]any{
 		"job_type":     map[string]any{"type": "embed"},
-		"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"model":        map[string]any{"kind": "hf", "ref": "all-minilm-l6-v2"},
 		"tier":         "batch",
 		"verification": map[string]any{"redundancy_frac": 0.0, "honeypot_frac": 0.0, "payout_hold_secs": 0},
 		"input":        "{\"id\":\"a\",\"text\":\"no quote_id\"}\n",
@@ -6412,7 +7617,7 @@ func TestFirmQuoteCapsChargeAtStatedMaximum(t *testing.T) {
 	const input = "{\"id\":\"a\",\"text\":\"firm quote me\"}\n{\"id\":\"b\",\"text\":\"a real commitment\"}\n"
 	quoteBody := map[string]any{
 		"job_type":     map[string]any{"type": "embed"},
-		"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"model":        map[string]any{"kind": "hf", "ref": "all-minilm-l6-v2"},
 		"tier":         "batch",
 		"verification": map[string]any{"redundancy_frac": 0.0, "honeypot_frac": 0.0, "payout_hold_secs": 0},
 		"input":        input,
@@ -6431,7 +7636,7 @@ func TestFirmQuoteCapsChargeAtStatedMaximum(t *testing.T) {
 
 	bind := map[string]any{
 		"job_type":     map[string]any{"type": "embed"},
-		"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"model":        map[string]any{"kind": "hf", "ref": "all-minilm-l6-v2"},
 		"tier":         "batch",
 		"verification": map[string]any{"redundancy_frac": 0.0, "honeypot_frac": 0.0, "payout_hold_secs": 0},
 		"input":        input,
@@ -6541,7 +7746,7 @@ func TestFirmQuoteDoesNotCapWhenActualIsUnderMax(t *testing.T) {
 	const input = "{\"id\":\"a\",\"text\":\"under budget\"}\n"
 	quoteBody := map[string]any{
 		"job_type":     map[string]any{"type": "embed"},
-		"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"model":        map[string]any{"kind": "hf", "ref": "all-minilm-l6-v2"},
 		"tier":         "batch",
 		"verification": map[string]any{"redundancy_frac": 0.0, "honeypot_frac": 0.0, "payout_hold_secs": 0},
 		"input":        input,
@@ -6555,7 +7760,7 @@ func TestFirmQuoteDoesNotCapWhenActualIsUnderMax(t *testing.T) {
 
 	bind := map[string]any{
 		"job_type":     map[string]any{"type": "embed"},
-		"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"model":        map[string]any{"kind": "hf", "ref": "all-minilm-l6-v2"},
 		"tier":         "batch",
 		"verification": map[string]any{"redundancy_frac": 0.0, "honeypot_frac": 0.0, "payout_hold_secs": 0},
 		"input":        input,
@@ -6668,12 +7873,12 @@ func TestAdminForceRequeueTask(t *testing.T) {
 	if acode != http.StatusOK {
 		t.Fatalf("GET /admin/actions: %d %s", acode, abody)
 	}
-	var actions []AdminAction
+	var actions AdminActionReviewPage
 	if err := json.Unmarshal(abody, &actions); err != nil {
 		t.Fatalf("unmarshal actions: %v", err)
 	}
 	found := false
-	for _, a := range actions {
+	for _, a := range actions.Items {
 		if a.Kind == "task_requeued" && a.TaskID != nil && *a.TaskID == taskID {
 			found = true
 			if a.Reason != "wedged worker, confirmed dead via /admin/workers" {

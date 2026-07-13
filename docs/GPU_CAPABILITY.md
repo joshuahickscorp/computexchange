@@ -1,3 +1,4 @@
+<!-- CLAIM-SCOPE: internal-engineering-non-authoritative -->
 # GPU capability — Apple Silicon + NVIDIA, measured
 
 CX runs the SAME inference stack (Candle) on two hardware families and proves it on

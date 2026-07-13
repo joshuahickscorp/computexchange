@@ -144,7 +144,7 @@ func TestQuoteSubstrateRouting(t *testing.T) {
 	// past what it measured.
 	embed := routingQuote(t, map[string]any{
 		"job_type":     map[string]any{"type": "embed"},
-		"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"model":        map[string]any{"kind": "hf", "ref": "all-minilm-l6-v2"},
 		"constraints":  map[string]any{"min_memory_gb": 2},
 		"verification": map[string]any{"redundancy_frac": 0, "honeypot_frac": 0, "skip_verification_floor": true},
 		"tier":         "batch",
@@ -156,11 +156,10 @@ func TestQuoteSubstrateRouting(t *testing.T) {
 	t.Logf("ROUTING embed (20 records): no routing block, as the honesty boundary requires")
 }
 
-// registerVLLMWorker inserts + registers ONE real vLLM-engine worker eligible for
-// (raceJobType, raceModel): an nvidia_80g box with the model + job in its
-// supported sets and engine='vllm', live via the real registration path. This is
-// the supply that EligibleVLLMWorkerCount counts and that lights the GPU lane.
-func registerVLLMWorker(t *testing.T, ctx context.Context) {
+// tryRegisterVLLMWorker attempts to promote one vLLM/CUDA worker through the real
+// production registration path. vllm_cuda is still soak_only in the canonical
+// runtime matrix, so this attempt must fail closed and must not light the route.
+func tryRegisterVLLMWorker(t *testing.T, ctx context.Context) (int, []byte) {
 	t.Helper()
 	workerID, supplierID := uuid.New(), uuid.New()
 	token := "vllm-worker-" + workerID.String()
@@ -182,22 +181,18 @@ func registerVLLMWorker(t *testing.T, ctx context.Context) {
 		hashKey(token), workerID, supplierID); err != nil {
 		t.Fatalf("insert vllm token: %v", err)
 	}
-	code, body := req(t, "POST", "/v1/worker/register", WorkerCapability{
+	return req(t, "POST", "/v1/worker/register", WorkerCapability{
 		HWClass: "nvidia_80g", MemoryGB: 80, Engine: "vllm",
 		SupportedJobs: []string{raceJobType}, SupportedModels: []string{raceModel},
 		Benchmarks: []BenchResult{{ModelID: raceModel, JobType: raceJobType,
 			TPS: 5000, ThermalOK: true, LoadMS: 3000}},
 	}, hdr{"X-Worker-Token", token}, jsonCT())
-	if code != 200 {
-		t.Fatalf("register vllm worker: %d %s", code, body)
-	}
 }
 
-// TestQuoteRoutingLitGPULaneWhenVLLMSupplyOnline is the proof that the lit-lane
-// count is LIVE, not a const: with a real vLLM-engine worker online and eligible,
-// a large generative quote flips from "gpu_recommend" to "gpu_lane" — the honest
-// switch that lights the GPU serving lane the moment verified supply exists.
-func TestQuoteRoutingLitGPULaneWhenVLLMSupplyOnline(t *testing.T) {
+// TestQuoteRoutingDoesNotLightSoakOnlyVLLMLane proves benchmark/adapter existence
+// cannot promote a soak-only runtime into advertised supply. Registration rejects
+// it and the same quote remains an honest recommendation, not a fictitious lit lane.
+func TestQuoteRoutingDoesNotLightSoakOnlyVLLMLane(t *testing.T) {
 	reset(t)
 	ctx := context.Background()
 	cleanSLADeterminism(t, ctx)
@@ -214,25 +209,26 @@ func TestQuoteRoutingLitGPULaneWhenVLLMSupplyOnline(t *testing.T) {
 		t.Fatalf("baseline (no vLLM supply) must be gpu_recommend, got %+v", before.Routing)
 	}
 
-	// Light the lane: register a real eligible vLLM worker.
-	registerVLLMWorker(t, ctx)
+	// The adapter/worker is real, but its runtime cell is still soak_only. Public
+	// registration must not convert that evidence into production authority.
+	code, body := tryRegisterVLLMWorker(t, ctx)
+	if code != http.StatusBadRequest || !strings.Contains(string(body), "no advertised production cell") {
+		t.Fatalf("soak-only vLLM registration must fail closed: %d %s", code, body)
+	}
 
-	// Same large input now routes to the LIT gpu lane.
+	// Same large input remains advisory because no production vLLM supply exists.
 	after := routingQuote(t, slaSubmitBody(slaInput(500)))
 	if after.Routing == nil {
 		t.Fatal("a generative quote must carry a routing block")
 	}
-	if after.Routing.Substrate != "gpu_lane" {
-		t.Fatalf("with a vLLM worker online, 500 records must route to gpu_lane, got %q (%s)",
+	if after.Routing.Substrate != "gpu_recommend" {
+		t.Fatalf("a rejected soak-only vLLM worker must not light gpu_lane, got %q (%s)",
 			after.Routing.Substrate, after.Routing.Reason)
-	}
-	if !strings.Contains(after.Routing.Reason, "verified vllm-lane worker(s) are online") {
-		t.Errorf("gpu_lane reason must state the live vLLM supply: %q", after.Routing.Reason)
 	}
 	// The comparison numbers are still surfaced and still [MODELED].
 	if after.Routing.GPUModeledSecs <= 0 || after.Routing.FleetETASecs <= 0 {
-		t.Errorf("gpu_lane must still carry both compared numbers: %+v", after.Routing)
+		t.Errorf("gpu recommendation must still carry both compared numbers: %+v", after.Routing)
 	}
-	t.Logf("LIT LANE: 500 records → substrate=%s (was gpu_recommend before the vLLM worker registered)\n  reason: %s",
+	t.Logf("SOAK BOUNDARY: 500 records → substrate=%s after rejected vLLM registration\n  reason: %s",
 		after.Routing.Substrate, after.Routing.Reason)
 }

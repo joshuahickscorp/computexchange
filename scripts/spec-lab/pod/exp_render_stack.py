@@ -190,9 +190,17 @@ failure emits {"error":...} as the last stdout line and exits 0 (never hangs).
 """
 
 import glob
+import contextlib
+import fcntl
 import hashlib
 import json
+import math
 import os
+import platform
+import re
+import secrets
+import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -239,6 +247,877 @@ def log(*a):
 def emit(obj):
     """Print exactly one JSON object as the FINAL stdout line and flush."""
     print(json.dumps(obj), flush=True)
+
+
+# --------------------------------------------------------------------------- #
+# Reference-cache identity. Reference pixels are portable, but their historical #
+# wall-times are not: they are valid only for the hardware, Blender build, and   #
+# actual Cycles device that produced them.                                      #
+# --------------------------------------------------------------------------- #
+REF_CACHE_SCHEMA = "cx-render-reference-cache-v2"
+REF_CACHE_IDENTITY_SCHEMA = 2
+REF_CACHE_INPUT_SCHEMA = 1
+REF_CACHE_ARTIFACT_SCHEMA = 1
+
+
+class CacheIdentityError(RuntimeError):
+    """A cache/render provenance mismatch that callers must never downgrade."""
+
+
+def _canonical_json(value):
+    """Stable, strict JSON used for cache keys and identity comparisons."""
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        allow_nan=False,
+    )
+
+
+def _command_value(argv, timeout_s=10):
+    """Best-effort single-line host fact; an empty string means unavailable."""
+    try:
+        proc = subprocess.run(
+            list(argv), capture_output=True, text=True, timeout=timeout_s,
+            check=False,
+        )
+        if proc.returncode == 0:
+            return (proc.stdout or "").strip().splitlines()[0].strip()
+    except Exception:  # noqa: BLE001 - callers apply fail-closed requirements
+        pass
+    return ""
+
+
+def _linux_cpu_model():
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                key, sep, value = line.partition(":")
+                if sep and key.strip().lower() in ("model name", "hardware"):
+                    value = value.strip()
+                    if value:
+                        return value
+    except OSError:
+        pass
+    return ""
+
+
+def _read_small_text(path, limit=4096):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.read(limit).strip()
+    except OSError:
+        return ""
+
+
+def _linux_cpu_capacity():
+    """Effective container CPU/memory allocation facts that affect wall timing."""
+    capacity = {}
+    count = os.cpu_count()
+    if isinstance(count, int) and count > 0:
+        capacity["visible_logical_cpus"] = count
+    try:
+        affinity = os.sched_getaffinity(0)
+        if affinity:
+            capacity["affinity_cpu_count"] = len(affinity)
+    except (AttributeError, OSError):
+        pass
+
+    # cgroup v2 first, then the common v1 files. Raw normalized values preserve
+    # exact quota/cpuset semantics without guessing how the container runtime rounds.
+    for label, paths in {
+        "cgroup_cpu_max": (
+            "/sys/fs/cgroup/cpu.max",
+        ),
+        "cgroup_cpuset": (
+            "/sys/fs/cgroup/cpuset.cpus.effective",
+            "/sys/fs/cgroup/cpuset/cpuset.cpus",
+        ),
+        "cgroup_memory_max": (
+            "/sys/fs/cgroup/memory.max",
+            "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+        ),
+        "cgroup_cpu_quota_us": (
+            "/sys/fs/cgroup/cpu/cpu.cfs_quota_us",
+        ),
+        "cgroup_cpu_period_us": (
+            "/sys/fs/cgroup/cpu/cpu.cfs_period_us",
+        ),
+    }.items():
+        for path in paths:
+            value = _read_small_text(path, limit=256)
+            if value:
+                capacity[label] = " ".join(value.split())
+                break
+    if not capacity:
+        raise RuntimeError(
+            "cannot establish effective Linux CPU capacity; refusing unbound "
+            "reference-cache use"
+        )
+    return capacity
+
+
+def host_hardware_identity():
+    """Return a hardware-*class* identity, deliberately excluding hostname/serial.
+
+    The cache may be shared by repeated pods of the same class, so a per-machine UUID
+    would destroy useful cloud reuse. Conversely, ``arm64`` alone is unsafe on the
+    local fleet: it aliases an M3 Pro and M3 Ultra. Darwin therefore requires the
+    Apple chip brand/model from sysctl. Linux binds CPU/platform class here and the
+    accelerator model in :func:`probe_blender_runtime`; together they distinguish
+    cloud GPU classes without depending on an ephemeral pod hostname.
+    """
+    system = platform.system() or "unknown"
+    machine = platform.machine() or "unknown"
+    identity = {
+        "system": system,
+        "machine": machine,
+    }
+
+    if system == "Darwin":
+        release = platform.release() or "unknown"
+        cpu_brand = _command_value(["sysctl", "-n", "machdep.cpu.brand_string"])
+        model = _command_value(["sysctl", "-n", "hw.model"])
+        memory_bytes = _command_value(["sysctl", "-n", "hw.memsize"])
+        physical_cpus = _command_value(["sysctl", "-n", "hw.physicalcpu"])
+        logical_cpus = _command_value(["sysctl", "-n", "hw.logicalcpu"])
+        # Fail closed: platform.machine()==arm64 is precisely the old M3 Pro/Ultra
+        # collision. At least one chip/model discriminator must be available.
+        if not cpu_brand and not model:
+            raise RuntimeError(
+                "cannot establish Darwin hardware identity (both CPU brand and "
+                "hw.model are unavailable); refusing unbound reference-cache use"
+            )
+        identity.update({
+            "os_release": release,
+            "cpu_model": cpu_brand or "unknown",
+            "product_model": model or "unknown",
+        })
+        if memory_bytes.isdigit():
+            identity["memory_bytes"] = int(memory_bytes)
+        if physical_cpus.isdigit():
+            identity["physical_cpus"] = int(physical_cpus)
+        if logical_cpus.isdigit():
+            identity["logical_cpus"] = int(logical_cpus)
+    elif system == "Linux":
+        cpu_model = _linux_cpu_model() or platform.processor()
+        product_model = _read_small_text("/sys/devices/virtual/dmi/id/product_name")
+        if not cpu_model and not product_model:
+            raise RuntimeError(
+                "cannot establish Linux CPU/product model; refusing unbound "
+                "reference-cache use"
+            )
+        identity.update({
+            "cpu_model": cpu_model or "unknown",
+            "product_model": product_model or "unknown",
+            "effective_capacity": _linux_cpu_capacity(),
+        })
+    else:
+        identity["os_release"] = platform.release() or "unknown"
+        cpu_model = platform.processor()
+        if machine == "unknown" and not cpu_model:
+            raise RuntimeError(
+                "cannot establish host hardware identity; refusing unbound "
+                "reference-cache use"
+            )
+        identity["cpu_model"] = cpu_model or "unknown"
+
+    return identity
+
+
+def _nvidia_driver_version():
+    version = _command_value([
+        "nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader",
+    ])
+    if version and version.lower() not in {"unknown", "n/a", "not supported"}:
+        return version
+    raw = _read_small_text("/proc/driver/nvidia/version")
+    match = re.search(r"Kernel Module\s+([0-9][0-9.]*)", raw)
+    return match.group(1) if match else ""
+
+
+def accelerator_runtime_identity(device):
+    """Bind the selected backend to its driver/runtime, not just the GPU model."""
+    if not isinstance(device, dict):
+        raise RuntimeError("device runtime identity is missing")
+    render_device = device.get("render_device")
+    if render_device == "CPU":
+        return {"kind": "cpu"}
+    if render_device == "GPU/METAL":
+        version = platform.mac_ver()[0] or platform.release()
+        if not version:
+            raise RuntimeError("cannot establish Metal/macOS runtime version")
+        return {"kind": "metal_os", "version": version}
+    if render_device in {"GPU/OPTIX", "GPU/CUDA"}:
+        version = _nvidia_driver_version()
+        if not version:
+            raise RuntimeError(
+                "cannot establish NVIDIA driver version; refusing unbound "
+                "reference-cache use"
+            )
+        return {"kind": "nvidia_driver", "version": version}
+    if render_device == "GPU/HIP":
+        version = (_read_small_text("/sys/module/amdgpu/version", limit=256)
+                   or _command_value(["rocm-smi", "--showdriverversion", "--csv"]))
+        if not version:
+            raise RuntimeError(
+                "cannot establish AMD/HIP driver version; refusing unbound "
+                "reference-cache use"
+            )
+        return {"kind": "amd_driver", "version": " ".join(version.split())}
+    if render_device == "GPU/ONEAPI":
+        version = (_command_value(["sycl-ls", "--version"])
+                   or _command_value(["clinfo", "--version"]))
+        if not version:
+            raise RuntimeError(
+                "cannot establish oneAPI driver/runtime version; refusing unbound "
+                "reference-cache use"
+            )
+        return {"kind": "oneapi_runtime", "version": " ".join(version.split())}
+    raise RuntimeError(f"unsupported render device identity {render_device!r}")
+
+
+_SUPPORTED_RENDER_DEVICES = {
+    "CPU", "GPU/OPTIX", "GPU/CUDA", "GPU/HIP", "GPU/ONEAPI", "GPU/METAL",
+}
+_UNKNOWN_DEVICE_WORDS = {
+    "", "unknown", "unknown gpu", "generic", "generic gpu", "gpu", "n/a",
+    "none", "null", "unavailable", "not supported",
+}
+
+
+def validate_device_identity(device):
+    """Validate a resolved Cycles backend without accepting an aliased GPU name."""
+    if not isinstance(device, dict):
+        raise RuntimeError("Blender cache-identity probe returned no device object")
+    render_device = device.get("render_device")
+    physical = device.get("physical_devices")
+    if render_device not in _SUPPORTED_RENDER_DEVICES or not isinstance(physical, list):
+        raise RuntimeError("Blender cache-identity probe returned an invalid device")
+    if render_device == "CPU":
+        if physical:
+            raise RuntimeError("CPU render identity unexpectedly listed GPU devices")
+        return True
+    if not physical:
+        raise RuntimeError("Blender selected a GPU backend without a physical device")
+
+    backend = render_device.split("/", 1)[1]
+    for entry in physical:
+        if not isinstance(entry, dict):
+            raise RuntimeError("Blender selected a GPU with invalid physical identity")
+        name = entry.get("name")
+        kind = entry.get("type")
+        name_norm = name.strip().lower() if isinstance(name, str) else ""
+        kind_norm = kind.strip().upper() if isinstance(kind, str) else ""
+        if (name_norm in _UNKNOWN_DEVICE_WORDS
+                or "unknown" in name_norm
+                or kind_norm.lower() in _UNKNOWN_DEVICE_WORDS
+                or kind_norm == "CPU"):
+            raise RuntimeError(
+                "Blender selected a GPU whose physical name/type is unknown; "
+                "refusing an aliased cache identity"
+            )
+        # Cycles reports CUDA devices while using OPTIX, but every other backend's
+        # physical type should agree with the selected compute API.
+        allowed_types = {"CUDA", "OPTIX"} if backend == "OPTIX" else {backend}
+        if kind_norm not in allowed_types:
+            raise RuntimeError(
+                "Blender selected a GPU whose physical type disagrees with its "
+                f"backend: backend={backend!r} type={kind!r}"
+            )
+    return True
+
+
+BLENDER_CACHE_IDENTITY_SCRIPT = r'''
+import bpy, json, os, platform, sys
+
+def _text(value):
+    if isinstance(value, bytes):
+        value = value.decode('utf-8', 'replace')
+    return str(value or '').strip()
+
+app = bpy.app
+build = {
+    'version': list(getattr(app, 'version', ())),
+    'version_string': _text(getattr(app, 'version_string', '')),
+    'version_cycle': _text(getattr(app, 'version_cycle', '')),
+    'build_hash': _text(getattr(app, 'build_hash', '')),
+    'build_branch': _text(getattr(app, 'build_branch', '')),
+    'build_commit_date': _text(getattr(app, 'build_commit_date', '')),
+    'build_commit_time': _text(getattr(app, 'build_commit_time', '')),
+    'build_platform': _text(getattr(app, 'build_platform', '')),
+    'build_system': _text(getattr(app, 'build_system', '')),
+    'build_type': _text(getattr(app, 'build_type', '')),
+    'build_cflags': _text(getattr(app, 'build_cflags', '')),
+    'build_cxxflags': _text(getattr(app, 'build_cxxflags', '')),
+    'build_linkflags': _text(getattr(app, 'build_linkflags', '')),
+}
+
+# Mirror BLENDER_SCENE_SCRIPT's device ladder without rendering the production scene.
+# Device names are included because GPU/METAL alone aliases M3 Pro and M3 Ultra, while
+# GPU/OPTIX alone aliases every NVIDIA class on a shared cloud cache volume. Volatile
+# PCI/device IDs are deliberately excluded so a same-class replacement pod can reuse a
+# cache; sorted (type, name) entries still bind the model and same-model device count.
+requested = os.environ.get('CX_DEVICE', 'AUTO').upper()
+render_device = 'CPU'
+selected = []
+if requested in ('AUTO', 'GPU'):
+    prefs = bpy.context.preferences.addons['cycles'].preferences
+    for backend in ["OPTIX", "CUDA", "HIP", "ONEAPI", "METAL"]:
+        try:
+            prefs.compute_device_type = backend
+        except Exception:
+            continue
+        try:
+            prefs.get_devices()
+        except Exception:
+            pass
+        if backend == 'METAL':
+            try:
+                metal_device_loader = getattr(prefs, 'get_devices_for_type', None)
+                if metal_device_loader is not None:
+                    metal_device_loader('METAL')
+            except Exception:
+                pass
+        gpu_devices = [d for d in prefs.devices
+                       if getattr(d, 'type', 'CPU') != 'CPU']
+        if gpu_devices:
+            selected = sorted(({
+                'name': _text(getattr(d, 'name', '')) or 'unknown',
+                'type': _text(getattr(d, 'type', '')) or backend,
+            } for d in gpu_devices), key=lambda d: (d['type'], d['name']))
+            render_device = 'GPU/' + backend
+            break
+
+payload = {
+    'build': build,
+    'runtime': {
+        'python_version': list(sys.version_info[:3]),
+        'python_implementation': platform.python_implementation(),
+        'blender_binary_name': os.path.basename(os.path.realpath(
+            _text(getattr(app, 'binary_path', '')))),
+        'ocio_version_string': _text(getattr(app, 'ocio_version_string', '')),
+        'oiio_version_string': _text(getattr(app, 'oiio_version_string', '')),
+        'osl_version_string': _text(getattr(app, 'osl_version_string', '')),
+    },
+    'device': {
+        'render_device': render_device,
+        'physical_devices': selected,
+    },
+}
+print('CX_CACHE_RUNTIME_IDENTITY=' + json.dumps(payload, sort_keys=True), flush=True)
+'''
+
+
+def _sha256_stream(stream):
+    h = hashlib.sha256()
+    while True:
+        chunk = stream.read(4 << 20)
+        if not chunk:
+            break
+        h.update(chunk)
+    return h.hexdigest()
+
+
+def _sha256_file(path):
+    """Hash the bytes of a resolved regular file."""
+    resolved = os.path.realpath(path)
+    with open(resolved, "rb") as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            raise RuntimeError(f"cannot hash non-regular file: {path}")
+        return _sha256_stream(f)
+
+
+def blender_build_identity(blender_bin, probed_build, file_hasher=_sha256_file):
+    """Bind both Blender's claimed build and the actual executable bytes."""
+    if not isinstance(probed_build, dict):
+        raise RuntimeError("Blender identity probe returned no build object")
+    resolved_bin = os.path.realpath(blender_bin)
+    if not (os.path.isfile(resolved_bin) and os.access(resolved_bin, os.X_OK)):
+        raise RuntimeError(
+            "Blender executable cannot be content-hashed; refusing unbound "
+            "reference-cache use"
+        )
+    build_hash = str(probed_build.get("build_hash", "")).strip()
+    stable_hash = bool(build_hash and build_hash.lower() not in {
+        "unknown", "none", "null", "0", "unavailable",
+    })
+    base = {
+        "version": probed_build.get("version", []),
+        "version_string": str(probed_build.get("version_string", "")),
+        "version_cycle": str(probed_build.get("version_cycle", "")),
+        "build_platform": str(probed_build.get("build_platform", "")),
+        # A build hash is self-reported metadata. The executable digest prevents a
+        # repacked/patched binary from sharing timings under an unchanged build_hash.
+        "executable_sha256": file_hasher(resolved_bin),
+        "executable_size": os.path.getsize(resolved_bin),
+    }
+    if stable_hash:
+        base.update({
+            "identity_kind": "blender_build_hash",
+            "build_hash": build_hash,
+            "build_branch": str(probed_build.get("build_branch", "")),
+            "build_commit_date": str(probed_build.get("build_commit_date", "")),
+            "build_commit_time": str(probed_build.get("build_commit_time", "")),
+            "build_system": str(probed_build.get("build_system", "")),
+            "build_type": str(probed_build.get("build_type", "")),
+            "build_cflags": str(probed_build.get("build_cflags", "")),
+            "build_cxxflags": str(probed_build.get("build_cxxflags", "")),
+            "build_linkflags": str(probed_build.get("build_linkflags", "")),
+        })
+        return base
+
+    base.update({
+        "identity_kind": "binary_sha256",
+        "binary_sha256": base["executable_sha256"],
+        "binary_size": base["executable_size"],
+    })
+    return base
+
+
+def probe_blender_runtime(blender_bin, device_pref, timeout_s=120):
+    """Resolve Blender build and the exact Cycles device ladder before cache lookup."""
+    env = dict(os.environ)
+    env["CX_DEVICE"] = str(device_pref).upper()
+    cmd = [
+        blender_bin, "-b", "-noaudio", "--factory-startup", "--python-expr",
+        BLENDER_CACHE_IDENTITY_SCRIPT,
+    ]
+    try:
+        proc = subprocess.run(
+            cmd, env=env, capture_output=True, text=True, timeout=timeout_s,
+        )
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(
+            f"Blender cache-identity probe failed: {type(e).__name__}: {e}"
+        ) from e
+    payload = None
+    for line in (proc.stdout or "").splitlines():
+        if line.startswith("CX_CACHE_RUNTIME_IDENTITY="):
+            try:
+                payload = json.loads(line.split("=", 1)[1])
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"invalid Blender cache-identity JSON: {e}") from e
+    if proc.returncode != 0 or not isinstance(payload, dict):
+        raise RuntimeError(
+            "Blender cache-identity probe did not produce a valid identity "
+            f"(rc={proc.returncode}, stderr_tail={(proc.stderr or '')[-500:]})"
+        )
+    validate_device_identity(payload.get("device"))
+    runtime_info = payload.get("runtime")
+    if (not isinstance(runtime_info, dict)
+            or not isinstance(runtime_info.get("python_version"), list)
+            or len(runtime_info["python_version"]) < 2
+            or not isinstance(runtime_info.get("blender_binary_name"), str)
+            or not runtime_info["blender_binary_name"].strip()):
+        raise RuntimeError("Blender cache-identity probe returned an invalid runtime")
+    return payload
+
+
+def reference_cache_identity(blender_bin, device_pref, *, hardware=None, runtime=None):
+    """Create the complete fail-closed binding for reference pixels *and timings*."""
+    hardware = host_hardware_identity() if hardware is None else hardware
+    runtime = (probe_blender_runtime(blender_bin, device_pref)
+               if runtime is None else runtime)
+    if not isinstance(hardware, dict) or not hardware:
+        raise RuntimeError("empty host hardware identity")
+    if not isinstance(runtime, dict) or not isinstance(runtime.get("device"), dict):
+        raise RuntimeError("empty Blender runtime identity")
+    validate_device_identity(runtime["device"])
+    runtime_info = runtime.get("runtime")
+    if not isinstance(runtime_info, dict) or not runtime_info:
+        raise RuntimeError("empty Blender embedded-runtime identity")
+    identity = {
+        "schema": REF_CACHE_IDENTITY_SCHEMA,
+        "hardware": hardware,
+        "blender": blender_build_identity(blender_bin, runtime.get("build")),
+        "blender_runtime": runtime_info,
+        "device": runtime["device"],
+        "accelerator_runtime": accelerator_runtime_identity(runtime["device"]),
+    }
+    # Force strict JSON serializability now, before any expensive reference render.
+    _canonical_json(identity)
+    return identity
+
+
+def make_reference_cache_key(*, scene_key, res_x, res_y, ref_spp, bounces,
+                             frames, seed, cam_motion, identity, scene_bundle,
+                             implementation):
+    """Build the v2 key; identity is part of the address, not just metadata."""
+    return _canonical_json({
+        "schema": REF_CACHE_SCHEMA,
+        "reference": {
+            "scene": scene_key,
+            "scene_bundle": scene_bundle,
+            "implementation": implementation,
+            "res_x": res_x,
+            "res_y": res_y,
+            "ref_spp": ref_spp,
+            "bounces": bounces,
+            "frames": frames,
+            "seed": seed,
+            "cam_motion": cam_motion,
+        },
+        "cache_identity": identity,
+    })
+
+
+def validate_reference_cache_manifest(manifest, *, key, frames, identity):
+    """Validate a cache manifest or raise. Missing fields always fail closed."""
+    if not isinstance(manifest, dict):
+        raise ValueError("manifest is not an object")
+    if manifest.get("schema") != REF_CACHE_SCHEMA:
+        raise ValueError("legacy or unknown cache schema")
+    if type(manifest.get("frames")) is not int or manifest["frames"] != frames:
+        raise ValueError("frame count mismatch")
+    if manifest.get("key") != key:
+        raise ValueError("reference config/cache key mismatch")
+    stored_identity = manifest.get("cache_identity")
+    if not isinstance(stored_identity, dict):
+        raise ValueError("cache identity missing")
+    if _canonical_json(stored_identity) != _canonical_json(identity):
+        raise ValueError("cache hardware/Blender/device identity mismatch")
+
+    expected_device = identity.get("device", {}).get("render_device")
+    devices = manifest.get("devices")
+    if (not isinstance(devices, list) or not devices
+            or any(not isinstance(x, str) or not x for x in devices)
+            or set(devices) != {expected_device}):
+        raise ValueError("actual reference render device does not match cache identity")
+
+    timings = manifest.get("per_frame_ref_s")
+    if not isinstance(timings, list) or len(timings) != frames:
+        raise ValueError("reference timing vector is missing or has the wrong length")
+    for value in timings:
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value <= 0):
+            raise ValueError("reference timing vector contains an invalid duration")
+
+    artifacts = manifest.get("frame_artifacts")
+    if not isinstance(artifacts, list) or len(artifacts) != frames:
+        raise ValueError("reference frame artifact vector is missing or has wrong length")
+    for index, artifact in enumerate(artifacts):
+        expected_name = f"color_{index:04d}.npy"
+        if (not isinstance(artifact, dict)
+                or artifact.get("schema") != REF_CACHE_ARTIFACT_SCHEMA
+                or artifact.get("index") != index
+                or artifact.get("filename") != expected_name
+                or artifact.get("dtype") != "float32"
+                or artifact.get("finite") is not True
+                or not isinstance(artifact.get("shape"), list)
+                or artifact.get("shape")[-1:] != [3]
+                or type(artifact.get("byte_size")) is not int
+                or artifact["byte_size"] <= 0
+                or not re.fullmatch(r"[0-9a-f]{64}", artifact.get("npy_sha256", ""))):
+            raise ValueError(f"invalid reference frame artifact metadata at index {index}")
+    return True
+
+
+def validate_actual_render_device(expected, reported):
+    """Require a production render's backend and physical devices to match its probe."""
+    if not isinstance(expected, dict) or not isinstance(reported, dict):
+        raise CacheIdentityError("production render omitted its physical device identity")
+    try:
+        validate_device_identity(expected)
+        validate_device_identity(reported)
+    except RuntimeError as exc:
+        raise CacheIdentityError(str(exc)) from exc
+    if _canonical_json(expected) != _canonical_json(reported):
+        raise CacheIdentityError(
+            "production render device disagreed with pre-cache probe: "
+            f"expected={expected!r} actual={reported!r}"
+        )
+    return True
+
+
+def _scene_bundle_root(blend_path):
+    """Choose the portable dependency root for a cached production scene."""
+    blend = os.path.realpath(blend_path)
+    parent = os.path.dirname(blend)
+    cursor = parent
+    while cursor and cursor != os.path.dirname(cursor):
+        if os.path.basename(cursor) == "extracted":
+            return cursor
+        cursor = os.path.dirname(cursor)
+    return parent
+
+
+def scene_bundle_identity(blend_path):
+    """Hash the main .blend and every sidecar file Blender may resolve beside it."""
+    blend = os.path.realpath(blend_path)
+    root = _scene_bundle_root(blend)
+    if not os.path.isfile(blend):
+        raise RuntimeError(f"scene .blend is missing: {blend_path}")
+    entries = []
+    total_bytes = 0
+    administrative = {".ready", ".blendpath", "download.zip"}
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+        for dirname in list(dirnames):
+            path = os.path.join(dirpath, dirname)
+            if stat.S_ISLNK(os.lstat(path).st_mode):
+                raise RuntimeError(f"scene dependency bundle contains symlink: {path}")
+        for filename in sorted(filenames):
+            path = os.path.join(dirpath, filename)
+            rel = os.path.relpath(path, root).replace(os.sep, "/")
+            if os.path.dirname(path) == root and filename in administrative:
+                continue
+            st = os.lstat(path)
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+                raise RuntimeError(
+                    f"scene dependency bundle contains symlink or non-regular file: {path}"
+                )
+            digest = _sha256_file(path)
+            entries.append({"path": rel, "bytes": st.st_size, "sha256": digest})
+            total_bytes += st.st_size
+    entries.sort(key=lambda item: item["path"])
+    main_rel = os.path.relpath(blend, root).replace(os.sep, "/")
+    if not any(entry["path"] == main_rel for entry in entries):
+        raise RuntimeError("main .blend was not included in its dependency bundle")
+    digest_payload = {
+        "schema": REF_CACHE_INPUT_SCHEMA,
+        "main_blend": main_rel,
+        "files": entries,
+    }
+    return {
+        "schema": REF_CACHE_INPUT_SCHEMA,
+        "main_blend": main_rel,
+        "file_count": len(entries),
+        "total_bytes": total_bytes,
+        "sha256": hashlib.sha256(
+            _canonical_json(digest_payload).encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def _assert_scene_bundle_identity(blend_path, expected):
+    current = scene_bundle_identity(blend_path)
+    if _canonical_json(current) != _canonical_json(expected):
+        raise CacheIdentityError(
+            "scene/dependency bundle changed during reference-cache operation"
+        )
+    return True
+
+
+def _assert_blender_executable_identity(blender_bin, identity):
+    expected = identity.get("blender", {})
+    resolved = os.path.realpath(blender_bin)
+    if (os.path.getsize(resolved) != expected.get("executable_size")
+            or _sha256_file(resolved) != expected.get("executable_sha256")):
+        raise CacheIdentityError(
+            "Blender executable changed during reference-cache operation"
+        )
+    return True
+
+
+def _open_regular_nofollow(path):
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError(f"cache artifact is not a regular file: {path}")
+        return os.fdopen(fd, "rb")
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _open_exclusive_nofollow(path, *, text=False):
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    if text:
+        return os.fdopen(fd, "w", encoding="utf-8")
+    return os.fdopen(fd, "wb")
+
+
+def _fsync_dir(path):
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def write_private_pinned_text(directory, prefix, content, expected_sha256):
+    """Materialize exact source in an unpredictable, exclusive, no-follow file."""
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    for _ in range(32):
+        path = os.path.join(
+            directory, f"{prefix}-{os.getpid()}-{secrets.token_hex(16)}.py")
+        try:
+            with _open_exclusive_nofollow(path, text=True) as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            if _sha256_file(path) != expected_sha256:
+                raise CacheIdentityError("materialized render script digest mismatch")
+            return path
+        except FileExistsError:
+            continue
+        except Exception:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            raise
+    raise RuntimeError("could not allocate unpredictable render-script path")
+
+
+@contextlib.contextmanager
+def reference_cache_lock(cache_parent, cache_name):
+    """Serialize readers, invalidation, and atomic publication for one cache key."""
+    os.makedirs(cache_parent, mode=0o700, exist_ok=True)
+    lock_path = os.path.join(cache_parent, f".{cache_name}.lock")
+    flags = os.O_RDWR | os.O_CREAT
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(lock_path, flags, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise RuntimeError("reference-cache lock is not a regular file")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def quarantine_reference_cache(cache_dir):
+    """Move a rejected publication out of the address without exposing partial state."""
+    if not os.path.lexists(cache_dir):
+        return None
+    parent = os.path.dirname(cache_dir)
+    base = os.path.basename(cache_dir)
+    for _ in range(32):
+        quarantine = os.path.join(
+            parent, f".{base}.invalid-{os.getpid()}-{secrets.token_hex(12)}")
+        if os.path.lexists(quarantine):
+            continue
+        os.rename(cache_dir, quarantine)
+        return quarantine
+    raise RuntimeError("could not allocate unpredictable cache quarantine name")
+
+
+def _read_json_nofollow(path):
+    with _open_regular_nofollow(path) as stream:
+        return json.load(stream)
+
+
+def load_reference_cache(cache_dir, *, key, frames, identity, expected_shape):
+    """Load one fully published cache and verify every byte before accepting it."""
+    import numpy as np
+
+    root_stat = os.lstat(cache_dir)
+    if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode):
+        raise ValueError("reference cache publication is not a real directory")
+    manifest = _read_json_nofollow(os.path.join(cache_dir, "manifest.json"))
+    validate_reference_cache_manifest(
+        manifest, key=key, frames=frames, identity=identity,
+    )
+    colors = []
+    for index, artifact in enumerate(manifest["frame_artifacts"]):
+        path = os.path.join(cache_dir, artifact["filename"])
+        with _open_regular_nofollow(path) as stream:
+            file_stat = os.fstat(stream.fileno())
+            if file_stat.st_size != artifact["byte_size"]:
+                raise ValueError(f"cached color_{index:04d}.npy byte size mismatch")
+            actual_digest = _sha256_stream(stream)
+            if actual_digest != artifact["npy_sha256"]:
+                raise ValueError(f"cached color_{index:04d}.npy digest mismatch")
+            stream.seek(0)
+            array = np.load(stream, allow_pickle=False)
+        if array.shape != tuple(expected_shape) or list(array.shape) != artifact["shape"]:
+            raise ValueError(
+                f"cached color_{index:04d}.npy shape {array.shape} != "
+                f"{tuple(expected_shape)}"
+            )
+        if array.dtype != np.dtype("float32"):
+            raise ValueError(
+                f"cached color_{index:04d}.npy dtype {array.dtype} != float32"
+            )
+        if not bool(np.isfinite(array).all()):
+            raise ValueError(f"cached color_{index:04d}.npy contains non-finite pixels")
+        colors.append(array)
+    return manifest, colors
+
+
+def _new_staging_dir(cache_parent, cache_name):
+    for _ in range(32):
+        stage = os.path.join(
+            cache_parent, f".{cache_name}.stage-{os.getpid()}-{secrets.token_hex(16)}")
+        try:
+            os.mkdir(stage, 0o700)
+            return stage
+        except FileExistsError:
+            continue
+    raise RuntimeError("could not allocate unpredictable reference-cache staging dir")
+
+
+def publish_reference_cache(cache_dir, colors, manifest, *, expected_shape):
+    """Build a private complete directory, then publish it atomically under a lock."""
+    import numpy as np
+
+    parent = os.path.dirname(cache_dir)
+    cache_name = os.path.basename(cache_dir)
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    stage = _new_staging_dir(parent, cache_name)
+    published_manifest = dict(manifest)
+    artifacts = []
+    try:
+        if len(colors) != manifest.get("frames"):
+            raise ValueError("reference color count does not match manifest")
+        for index, color in enumerate(colors):
+            array = np.asarray(color)
+            if array.shape != tuple(expected_shape):
+                raise ValueError(f"reference frame {index} has unexpected shape")
+            if array.dtype != np.dtype("float32"):
+                raise ValueError(f"reference frame {index} is not float32")
+            if not bool(np.isfinite(array).all()):
+                raise ValueError(f"reference frame {index} contains non-finite pixels")
+            filename = f"color_{index:04d}.npy"
+            path = os.path.join(stage, filename)
+            with _open_exclusive_nofollow(path) as stream:
+                np.save(stream, array, allow_pickle=False)
+                stream.flush()
+                os.fsync(stream.fileno())
+            byte_size = os.path.getsize(path)
+            artifacts.append({
+                "schema": REF_CACHE_ARTIFACT_SCHEMA,
+                "index": index,
+                "filename": filename,
+                "shape": list(array.shape),
+                "dtype": "float32",
+                "finite": True,
+                "byte_size": byte_size,
+                "npy_sha256": _sha256_file(path),
+            })
+        published_manifest["frame_artifacts"] = artifacts
+        manifest_path = os.path.join(stage, "manifest.json")
+        with _open_exclusive_nofollow(manifest_path, text=True) as stream:
+            json.dump(published_manifest, stream, sort_keys=True, allow_nan=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _fsync_dir(stage)
+
+        with reference_cache_lock(parent, cache_name):
+            if os.path.lexists(cache_dir):
+                try:
+                    winner, _ = load_reference_cache(
+                        cache_dir, key=manifest["key"], frames=manifest["frames"],
+                        identity=manifest["cache_identity"],
+                        expected_shape=expected_shape,
+                    )
+                    return False, winner
+                except Exception:
+                    quarantine_reference_cache(cache_dir)
+            os.rename(stage, cache_dir)
+            stage = None
+            _fsync_dir(parent)
+        return True, published_manifest
+    finally:
+        if stage is not None:
+            shutil.rmtree(stage, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -455,7 +1334,7 @@ def resolve_scene(scene_arg):
 #    CX_RENDER_DONE (+ CX_DENOISER_UNAVAILABLE on a missing denoiser) sentinels.   #
 # --------------------------------------------------------------------------- #
 BLENDER_SCENE_SCRIPT = r'''
-import bpy, os, sys, math
+import bpy, json, os, sys, math
 
 def _log(*a):
     print("[bpy]", *a, file=sys.stderr, flush=True)
@@ -621,6 +1500,7 @@ except Exception:
 # 'continue' skips it. On macOS builds the enum is ('NONE','METAL') so the four
 # CUDA-family rungs each raise/continue and METAL is the one that lands.
 chosen_device = "CPU"
+chosen_physical_devices = []
 if DEV_PREF in ("AUTO", "GPU"):
     try:
         prefs = bpy.context.preferences.addons['cycles'].preferences
@@ -651,6 +1531,10 @@ if DEV_PREF in ("AUTO", "GPU"):
             if gpu_devs:
                 for d in prefs.devices:
                     d.use = (getattr(d, "type", "CPU") not in ("CPU",))
+                chosen_physical_devices = sorted(({
+                    "name": str(getattr(d, "name", "") or "unknown"),
+                    "type": str(getattr(d, "type", "") or backend),
+                } for d in gpu_devs), key=lambda d: (d["type"], d["name"]))
                 picked = backend
                 break
         if picked:
@@ -663,6 +1547,7 @@ if DEV_PREF in ("AUTO", "GPU"):
         _log("GPU setup failed, using CPU:", e)
         scene.cycles.device = 'CPU'
         chosen_device = "CPU(gpu-setup-failed)"
+        chosen_physical_devices = []
 else:
     scene.cycles.device = 'CPU'
     chosen_device = "CPU"
@@ -771,7 +1656,26 @@ if BORDERS_ENV:
 else:
     bpy.ops.render.render(write_still=True)
     print("CX_RENDER_DONE", flush=True)
+# Emitted only AFTER every requested trace completed. The outer process also requires
+# CX_RENDER_DONE + output files, so this binds a successful render to the enumerated
+# backend and physical device model rather than merely attesting pre-render selection.
+print("CX_CHOSEN_DEVICE_IDENTITY=" + json.dumps({
+    "render_device": chosen_device,
+    "physical_devices": chosen_physical_devices,
+}, sort_keys=True), flush=True)
 '''
+
+
+def reference_implementation_identity(script=None):
+    """Bind cached pixels to the exact in-Blender reference recipe implementation."""
+    source = BLENDER_SCENE_SCRIPT if script is None else script
+    if not isinstance(source, str) or not source:
+        raise RuntimeError("reference render implementation source is empty")
+    return {
+        "schema": REF_CACHE_INPUT_SCHEMA,
+        "kind": "blender_scene_script",
+        "sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+    }
 
 
 def numpy_rect_to_blender_border(x0, y0, x1, y1, res_x, res_y):
@@ -804,7 +1708,8 @@ def run_blender_frame(blender_bin, script_path, *, blend, out_exr, res_x, res_y,
                       device_pref, timeout_s, adaptive=False, adaptive_thr=0.01,
                       adaptive_min=16, denoiser="none", guides=False,
                       light_tree=False, match_reference=False, require_gpu=False,
-                      borders=None, out_pattern=None):
+                      borders=None, out_pattern=None,
+                      expected_device_identity=None):
     """Render ONE animation frame of the production scene to a multilayer EXR.
 
     Returns (wall_seconds, chosen_device, resolved_exr_path). wall_seconds is
@@ -819,7 +1724,9 @@ def run_blender_frame(blender_bin, script_path, *, blend, out_exr, res_x, res_y,
     (.blend load + BVH paid once per frame, not per region). The return value's third
     element is then the LIST of resolved per-region EXR paths (full-resolution EXRs;
     pixels outside each border are black). All existing call sites (borders=None) are
-    unchanged."""
+    unchanged. When expected_device_identity is provided (the reference-cache path),
+    the production render's own physical-device sentinel must exactly match the
+    pre-cache Blender probe or the render fails closed."""
     env = dict(os.environ)
     env["CX_BLEND"] = blend
     env["CX_OUT"] = out_exr
@@ -873,11 +1780,17 @@ def run_blender_frame(blender_bin, script_path, *, blend, out_exr, res_x, res_y,
         log("blender stderr tail:\n" + err_tail)
 
     chosen_device = "unknown"
+    chosen_device_identity = None
     denoiser_unavail = None
     device_error = None
     for line in (proc.stdout or "").splitlines():
         if line.startswith("CX_CHOSEN_DEVICE="):
             chosen_device = line.split("=", 1)[1].strip()
+        elif line.startswith("CX_CHOSEN_DEVICE_IDENTITY="):
+            try:
+                chosen_device_identity = json.loads(line.split("=", 1)[1])
+            except json.JSONDecodeError:
+                chosen_device_identity = None
         elif line.startswith("CX_DENOISER_UNAVAILABLE="):
             denoiser_unavail = line.split("=", 1)[1].strip()
         elif line.startswith("CX_DEVICE_ERROR="):
@@ -905,7 +1818,6 @@ def run_blender_frame(blender_bin, script_path, *, blend, out_exr, res_x, res_y,
             f"require_gpu set but frame {frame} [{kind}] reported device={chosen_device!r}; "
             f"refusing a CPU-fallback benchmark (Blender Cycles kernel missing for this GPU arch)"
         )
-
     if borders is not None:
         resolved_list = [
             _resolve_exr_path(out_pattern.format(region=i), frame)
@@ -920,6 +1832,9 @@ def run_blender_frame(blender_bin, script_path, *, blend, out_exr, res_x, res_y,
                 f"rc={proc.returncode}, missing_regions={missing}); "
                 f"stdout tail: {tail[-700:]}"
             )
+        if expected_device_identity is not None:
+            validate_actual_render_device(
+                expected_device_identity, chosen_device_identity)
         return wall_s, chosen_device, resolved_list
 
     resolved = _resolve_exr_path(out_exr, frame)
@@ -929,6 +1844,8 @@ def run_blender_frame(blender_bin, script_path, *, blend, out_exr, res_x, res_y,
             f"blender render failed [{kind}] (frame={frame}, rc={proc.returncode}, "
             f"out_exists={resolved is not None}); stdout tail: {tail[-700:]}"
         )
+    if expected_device_identity is not None:
+        validate_actual_render_device(expected_device_identity, chosen_device_identity)
     return wall_s, chosen_device, resolved
 
 
@@ -1790,11 +2707,61 @@ def main():
     blender_bin = ensure_blender(blender_url)
     if require_gpu:
         require_gpu_probe(blender_bin, timeout_s=gpu_probe_timeout_s)
+    # Resolve this BEFORE looking at the persistent cache. Reference pixels can be
+    # shared broadly, but the historical durations used in net_speedup are valid only
+    # on this hardware + Blender build + actual Cycles device. A probe failure aborts
+    # before a costly render rather than permitting an unbound timing cache lookup.
+    ref_cache_identity = reference_cache_identity(blender_bin, device_pref)
+    ref_cache_identity_sha256 = hashlib.sha256(
+        _canonical_json(ref_cache_identity).encode("utf-8")
+    ).hexdigest()
+    log(
+        "reference cache identity: "
+        f"hardware={ref_cache_identity['hardware'].get('cpu_model', 'unknown')} "
+        f"blender={ref_cache_identity['blender'].get('identity_kind')}="
+        f"{ref_cache_identity['blender'].get('build_hash', ref_cache_identity['blender'].get('binary_sha256', 'unknown'))} "
+        f"device={ref_cache_identity['device'].get('render_device')} "
+        f"physical={ref_cache_identity['device'].get('physical_devices')} "
+        f"identity={ref_cache_identity_sha256[:24]}"
+    )
     blend, scene_key, fallback_note = resolve_scene(scene_arg)
+    ref_implementation = reference_implementation_identity()
+    blender_claim = ref_cache_identity.get("blender", {})
+    ref_cache_integrity_enabled = bool(
+        isinstance(blender_claim, dict)
+        and re.fullmatch(r"[0-9a-f]{64}", blender_claim.get("executable_sha256", ""))
+        and type(blender_claim.get("executable_size")) is int
+        and blender_claim["executable_size"] > 0
+    )
+    if ref_cache_integrity_enabled:
+        ref_scene_bundle = scene_bundle_identity(blend)
+        log(
+            "reference inputs: "
+            f"scene_bundle={ref_scene_bundle['sha256']} "
+            f"files={ref_scene_bundle['file_count']} "
+            f"bytes={ref_scene_bundle['total_bytes']} "
+            f"implementation={ref_implementation['sha256']}"
+        )
+    else:
+        # Unit/integration harnesses historically inject an intentionally synthetic
+        # identity and fake paths. Such runs may exercise accounting, but are never
+        # permitted to read or publish the persistent reference cache.
+        ref_scene_bundle = {
+            "schema": REF_CACHE_INPUT_SCHEMA,
+            "main_blend": os.path.basename(str(blend)),
+            "file_count": 0,
+            "total_bytes": 0,
+            "sha256": hashlib.sha256(
+                _canonical_json({"cache_disabled_unbound_scene": str(blend)}).encode(
+                    "utf-8")
+            ).hexdigest(),
+        }
+        log("reference cache disabled: injected identity lacks executable binding")
 
-    script_path = os.path.join(WORK_DIR, "cx_stack_scene.py")
-    with open(script_path, "w") as f:
-        f.write(BLENDER_SCENE_SCRIPT)
+    script_path = write_private_pinned_text(
+        WORK_DIR, "cx_stack_scene", BLENDER_SCENE_SCRIPT,
+        ref_implementation["sha256"],
+    )
 
     # generous timeouts: a 1080p @ 4096-spp reference frame is heavy on CPU.
     # sm_90 JIT interaction (2026-07-09): the FIRST GPU render on the pod pays any
@@ -1813,7 +2780,8 @@ def main():
     # frames' color for the end-to-end SSIM.                                     #
     #                                                                            #
     # CACHED: this is the expensive ~15-40min step. A repeat invocation with the  #
-    # SAME (scene_key, res, ref_spp, bounces, frames, seed, cam_motion) reuses    #
+    # SAME (scene_key, res, ref_spp, bounces, frames, seed, cam_motion) AND the  #
+    # SAME hardware, Blender build, and resolved physical render device reuses  #
     # the saved true-color frames + per-frame times instead of re-rendering —    #
     # this is what makes a SWEEP over draft-side knobs (draft_spp, adaptive_     #
     # threshold, keyframe_every, hole_fill, light_tree, denoiser) cheap after     #
@@ -1821,11 +2789,18 @@ def main():
     # wall-times (loaded from the cache manifest) — a cache hit reports the true  #
     # historical render cost, never a fabricated/zero cost for the reference.    #
     # ======================================================================== #
-    ref_cache_key = "|".join(str(x) for x in (
-        "v1", scene_key, res_x, res_y, ref_spp, bounces, frames, seed, cam_motion))
-    ref_cache_hash = hashlib.sha1(ref_cache_key.encode()).hexdigest()[:16]
+    ref_cache_key = make_reference_cache_key(
+        scene_key=scene_key, res_x=res_x, res_y=res_y, ref_spp=ref_spp,
+        bounces=bounces, frames=frames, seed=seed, cam_motion=cam_motion,
+        identity=ref_cache_identity,
+        scene_bundle=ref_scene_bundle,
+        implementation=ref_implementation,
+    )
+    ref_cache_key_sha256 = hashlib.sha256(
+        ref_cache_key.encode("utf-8")
+    ).hexdigest()
+    ref_cache_hash = ref_cache_key_sha256[:24]
     ref_cache_dir = os.path.join(_CACHE_ROOT, "ref_cache", ref_cache_hash)
-    ref_manifest_path = os.path.join(ref_cache_dir, "manifest.json")
 
     T_ref = 0.0
     ref_devices = set()
@@ -1833,22 +2808,43 @@ def main():
     per_frame_ref_s = []
     ref_cache_hit = False
 
-    if os.path.isfile(ref_manifest_path):
-        try:
-            with open(ref_manifest_path) as f:
-                manifest = json.load(f)
-            if manifest.get("frames") == frames and manifest.get("key") == ref_cache_key:
-                for t in range(frames):
-                    arr = np.load(os.path.join(ref_cache_dir, f"color_{t:04d}.npy"))
-                    true_colors.append(arr.astype(np.float32))
-                per_frame_ref_s = [float(x) for x in manifest["per_frame_ref_s"]]
-                T_ref = float(sum(per_frame_ref_s))
-                ref_devices = set(manifest.get("devices", []))
-                ref_cache_hit = True
-                log(f"reference CACHE HIT ({ref_cache_hash}): reusing {frames} true frames, "
-                    f"T_ref={T_ref:.1f}s (real historical render time, not re-timed)")
-        except Exception as e:
-            log(f"reference cache read failed ({e}); re-rendering")
+    cache_parent = os.path.dirname(ref_cache_dir)
+    if ref_cache_integrity_enabled:
+        with reference_cache_lock(cache_parent, ref_cache_hash):
+            if os.path.lexists(ref_cache_dir):
+                try:
+                    _assert_scene_bundle_identity(blend, ref_scene_bundle)
+                    _assert_blender_executable_identity(
+                        blender_bin, ref_cache_identity)
+                    manifest, true_colors = load_reference_cache(
+                        ref_cache_dir, key=ref_cache_key, frames=frames,
+                        identity=ref_cache_identity,
+                        expected_shape=(res_y, res_x, 3),
+                    )
+                    # Close the bundle TOCTOU window around artifact loading.
+                    _assert_scene_bundle_identity(blend, ref_scene_bundle)
+                    per_frame_ref_s = [float(x) for x in manifest["per_frame_ref_s"]]
+                    T_ref = float(sum(per_frame_ref_s))
+                    ref_devices = set(manifest["devices"])
+                    ref_cache_hit = True
+                    log(
+                        f"reference CACHE HIT ({ref_cache_hash}): reusing {frames} "
+                        f"true frames, T_ref={T_ref:.1f}s "
+                        "(real historical render time, not re-timed)"
+                    )
+                except CacheIdentityError:
+                    raise
+                except Exception as e:
+                    log(
+                        f"reference cache read failed ({e}); quarantining and "
+                        "re-rendering"
+                    )
+                    quarantine_reference_cache(ref_cache_dir)
+                    T_ref = 0.0
+                    ref_devices.clear()
+                    true_colors.clear()
+                    per_frame_ref_s.clear()
+                    ref_cache_hit = False
 
     if not ref_cache_hit:
         for t in range(frames):
@@ -1860,6 +2856,7 @@ def main():
                 frame=frame_no, nframes=frames, cam_motion=cam_motion, seed=seed,
                 bounces=bounces, device_pref=device_pref, timeout_s=ref_timeout,
                 require_gpu=require_gpu,
+                expected_device_identity=ref_cache_identity["device"],
             )
             T_ref += wall_s
             per_frame_ref_s.append(wall_s)
@@ -1867,18 +2864,49 @@ def main():
             color, _mp, _d, _mn = read_exr_layers(resolved, res_x, res_y)
             true_colors.append(color)
 
-        try:
-            os.makedirs(ref_cache_dir, exist_ok=True)
-            for t, color in enumerate(true_colors):
-                np.save(os.path.join(ref_cache_dir, f"color_{t:04d}.npy"),
-                        color.astype(np.float32))
-            with open(ref_manifest_path, "w") as f:
-                json.dump({"key": ref_cache_key, "frames": frames,
-                           "per_frame_ref_s": per_frame_ref_s,
-                           "devices": sorted(ref_devices)}, f)
-            log(f"reference cached ({ref_cache_hash}) for future trials")
-        except Exception as e:
-            log(f"reference cache WRITE failed ({e}) — continuing uncached, not fatal")
+        expected_ref_device = ref_cache_identity["device"]["render_device"]
+        if ref_devices != {expected_ref_device}:
+            # The probe and actual production render disagreed (for example a GPU setup
+            # failure reported CPU(gpu-setup-failed)). The current run remains usable,
+            # but its timings cannot be assigned to the probed cache identity.
+            log(
+                "reference cache WRITE skipped: actual render devices "
+                f"{sorted(ref_devices)} != probed device {expected_ref_device!r}"
+            )
+        elif not ref_cache_integrity_enabled:
+            log("reference cache WRITE skipped: identity is intentionally unbound")
+        else:
+            try:
+                _assert_scene_bundle_identity(blend, ref_scene_bundle)
+                _assert_blender_executable_identity(
+                    blender_bin, ref_cache_identity)
+                manifest = {
+                    "schema": REF_CACHE_SCHEMA,
+                    "key": ref_cache_key,
+                    "frames": frames,
+                    "per_frame_ref_s": per_frame_ref_s,
+                    "devices": sorted(ref_devices),
+                    "cache_identity": ref_cache_identity,
+                }
+                published, _published_manifest = publish_reference_cache(
+                    ref_cache_dir, true_colors, manifest,
+                    expected_shape=(res_y, res_x, 3),
+                )
+                if published:
+                    log(f"reference cached ({ref_cache_hash}) for future trials")
+                else:
+                    log(
+                        f"reference cache ({ref_cache_hash}) was published by a "
+                        "concurrent identical run; kept the complete winner"
+                    )
+            except Exception as e:
+                log(f"reference cache WRITE failed ({e}) — continuing uncached, not fatal")
+
+    # The anchor/quality pass must compare against the same scene bytes used to address
+    # or generate the reference. A mid-run mutation is an experiment failure, not a miss.
+    if ref_cache_integrity_enabled:
+        _assert_scene_bundle_identity(blend, ref_scene_bundle)
+        _assert_blender_executable_identity(blender_bin, ref_cache_identity)
 
     # ======================================================================== #
     # PASS 2 — ANCHOR: render EVERY frame with the FULL anchor stack (adaptive + #
@@ -1929,6 +2957,7 @@ def main():
                 adaptive=True, adaptive_thr=adaptive_threshold,
                 adaptive_min=adaptive_min_samples, denoiser=denoiser,
                 guides=denoise_guides, light_tree=light_tree, require_gpu=require_gpu,
+                expected_device_identity=ref_cache_identity["device"],
             )
             anchor_devices.add(dev)
             color, motion_prev, depth, motion_next = read_exr_layers(resolved, res_x, res_y)
@@ -1978,9 +3007,12 @@ def main():
                 adaptive=True, adaptive_thr=adaptive_threshold,
                 adaptive_min=adaptive_min_samples, denoiser=denoiser,
                 guides=denoise_guides, light_tree=light_tree, require_gpu=require_gpu,
+                expected_device_identity=ref_cache_identity["device"],
             )
             # HONEST: the calibration render is REAL work spent to measure O — charge it.
             T_stack += fixed_overhead_s
+        except CacheIdentityError:
+            raise
         except Exception as _ce:  # noqa: BLE001 — calibration failed -> charge only P
             fixed_overhead_s = 0.0
             log(f"overhead calibration failed ({_ce}); fixed_overhead_s=0 (charge only P)")
@@ -2120,6 +3152,7 @@ def main():
                     device_pref=device_pref, timeout_s=anchor_timeout,
                     adaptive=False, denoiser="none", guides=False,
                     light_tree=light_tree, require_gpu=require_gpu,
+                    expected_device_identity=ref_cache_identity["device"],
                 )
                 anchor_devices.add(dev)
                 T_stack += wall_s      # CHARGED: the second draft is real pipeline cost
@@ -2226,6 +3259,7 @@ def main():
                 device_pref=device_pref, timeout_s=repair_timeout,
                 require_gpu=require_gpu,
                 borders=borders, out_pattern=out_pattern,
+                expected_device_identity=ref_cache_identity["device"],
                 **repair_render_kwargs,
             )
             anchor_devices.add(dev)
@@ -2481,6 +3515,13 @@ def main():
         "per_frame_worst_tile_ssim": [round(float(x), 4) for x in worst_tiles],
         "requested_scene": scene_arg,
     }
+    if ref_cache_integrity_enabled:
+        metrics.update({
+            "ref_cache_key_sha256": ref_cache_key_sha256,
+            "ref_cache_identity_sha256": ref_cache_identity_sha256,
+            "ref_scene_bundle_sha256": ref_scene_bundle["sha256"],
+            "ref_implementation_sha256": ref_implementation["sha256"],
+        })
 
     # ---- REPAIR receipt fields — emitted ONLY when the pass ran, so a default run's
     # metrics stay byte-identical to the legacy runner. repair_total_s is ALREADY inside

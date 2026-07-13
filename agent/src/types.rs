@@ -41,6 +41,26 @@ pub enum HardwareClass {
     Cpu,
 }
 
+impl HardwareClass {
+    /// Canonical wire tag used by the generated runtime matrix. Keeping this
+    /// explicit avoids deriving production advertisement from a second hand-
+    /// maintained list or from Debug formatting.
+    pub const fn as_wire_str(self) -> &'static str {
+        match self {
+            Self::AppleSiliconBase => "apple_silicon_base",
+            Self::AppleSiliconPro => "apple_silicon_pro",
+            Self::AppleSiliconMax => "apple_silicon_max",
+            Self::AppleSiliconUltra => "apple_silicon_ultra",
+            Self::AppleSiliconCluster => "apple_silicon_cluster",
+            Self::Nvidia24g => "nvidia_24g",
+            Self::Nvidia48g => "nvidia_48g",
+            Self::Nvidia80g => "nvidia_80g",
+            Self::Nvidia180g => "nvidia_180g",
+            Self::Cpu => "cpu",
+        }
+    }
+}
+
 /// Service tier. Wire: `batch | priority | trusted`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -137,6 +157,33 @@ pub enum JobType {
         #[serde(default)]
         command: Vec<String>,
     },
+    /// Closed, preview-only Cycles speculation contract.  Unlike `Custom`, this
+    /// variant never carries buyer-selected code or an executable path.  Every
+    /// operator/controller/renderer component is selected locally and is bound
+    /// here by SHA-256; the scene and all execution-affecting render parameters
+    /// also round-trip in the persisted `job_type_spec` (the control plane does
+    /// not round-trip `manifest.params`).  There are intentionally no serde
+    /// defaults: a bare discriminant is not a runnable preview contract.
+    RenderSpeculativePreview {
+        schema_version: u32,
+        preview_only: bool,
+        billing_eligible: bool,
+        production_ready: bool,
+        receipt_trust: String,
+        driver_sha256: String,
+        backend_sha256: String,
+        controller_core_sha256: String,
+        controller_adapter_sha256: String,
+        blender_sha256: String,
+        scene_path: String,
+        scene_sha256: String,
+        width: u32,
+        height: u32,
+        frame: u32,
+        draft_samples: u32,
+        verify_samples: u32,
+        repair_samples: u32,
+    },
 }
 
 impl JobType {
@@ -154,6 +201,7 @@ impl JobType {
             JobType::JsonExtraction { .. } => "json_extraction",
             JobType::Rerank { .. } => "rerank",
             JobType::Custom { .. } => "custom",
+            JobType::RenderSpeculativePreview { .. } => "render_speculative_preview",
         }
     }
 }
@@ -173,6 +221,17 @@ pub enum ModelKind {
     Gguf,
     Hf,
     Mlx,
+}
+
+impl ModelKind {
+    /// Canonical manifest tag bound into each generated runtime capability.
+    pub const fn as_wire_str(self) -> &'static str {
+        match self {
+            Self::Gguf => "gguf",
+            Self::Hf => "hf",
+            Self::Mlx => "mlx",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -305,6 +364,15 @@ pub struct WorkerCapability {
 pub struct TaskDispatch {
     pub task_id: Uuid,
     pub job_id: Uuid,
+    /// Exact server-authorized execution cell. Defaults keep the wire decoder
+    /// compatible with an older control plane, but execute_task fails closed when
+    /// any value is absent, stale, or does not match this agent's generated matrix.
+    #[serde(default)]
+    pub runtime_cell_id: String,
+    #[serde(default)]
+    pub runtime_id: String,
+    #[serde(default)]
+    pub runtime_matrix_sha256: String,
     pub manifest: JobManifest,
     pub input_url: String,
     pub output_url: String,
@@ -502,7 +570,7 @@ mod tests {
             "manifest":{
                 "id":"00000000-0000-0000-0000-000000000002",
                 "job_type":{"type":"embed"},
-                "model":{"kind":"gguf","ref":"all-minilm-l6-v2"},
+                "model":{"kind":"hf","ref":"all-minilm-l6-v2"},
                 "inputs":[],
                 "output":{"url":""},
                 "params":null,
@@ -517,10 +585,13 @@ mod tests {
         }"#;
         let d: TaskDispatch = serde_json::from_str(json).expect("minimal dispatch must decode");
         assert!(matches!(d.manifest.job_type, JobType::Embed { .. }));
-        assert_eq!(d.manifest.model.kind, ModelKind::Gguf);
+        assert_eq!(d.manifest.model.kind, ModelKind::Hf);
         assert_eq!(d.manifest.model.model_ref, "all-minilm-l6-v2");
         assert!(d.manifest.inputs.is_empty());
         assert_eq!(d.result_key, "jobs/x/tasks/0/result.json");
+        assert!(d.runtime_cell_id.is_empty());
+        assert!(d.runtime_id.is_empty());
+        assert!(d.runtime_matrix_sha256.is_empty());
         // No `partial_put_url` on the wire (older control plane) → None, never an
         // error (the intra-task checkpointing delta is strictly additive).
         assert!(d.partial_put_url.is_none());
@@ -649,5 +720,39 @@ mod tests {
                 command,
             } if command.is_empty()
         ));
+    }
+
+    #[test]
+    fn render_speculative_preview_contract_round_trips_all_pins_and_params() {
+        let raw = r#"{
+            "type":"render_speculative_preview",
+            "schema_version":1,
+            "preview_only":true,
+            "billing_eligible":false,
+            "production_ready":false,
+            "receipt_trust":"local_experiment_unattested",
+            "driver_sha256":"1111111111111111111111111111111111111111111111111111111111111111",
+            "backend_sha256":"2222222222222222222222222222222222222222222222222222222222222222",
+            "controller_core_sha256":"3333333333333333333333333333333333333333333333333333333333333333",
+            "controller_adapter_sha256":"4444444444444444444444444444444444444444444444444444444444444444",
+            "blender_sha256":"5555555555555555555555555555555555555555555555555555555555555555",
+            "scene_path":"scenes/pinned.blend",
+            "scene_sha256":"6666666666666666666666666666666666666666666666666666666666666666",
+            "width":640,"height":360,"frame":7,
+            "draft_samples":8,"verify_samples":8,"repair_samples":64
+        }"#;
+        let parsed: JobType = serde_json::from_str(raw).expect("closed preview job type");
+        assert_eq!(parsed.tag(), "render_speculative_preview");
+        let encoded = serde_json::to_value(&parsed).expect("preview job type serializes");
+        assert_eq!(encoded["billing_eligible"], false);
+        assert_eq!(encoded["production_ready"], false);
+        assert_eq!(encoded["scene_path"], "scenes/pinned.blend");
+        assert_eq!(encoded["repair_samples"], 64);
+
+        // Unlike execution hints on established production variants, every
+        // preview safety field is required. A bare tag must fail closed.
+        assert!(
+            serde_json::from_str::<JobType>(r#"{"type":"render_speculative_preview"}"#).is_err()
+        );
     }
 }

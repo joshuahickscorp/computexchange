@@ -16,6 +16,7 @@ use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config as BertConfig, DTYPE as BERT_DTYPE};
 use candle_transformers::models::whisper::{self, audio as whisper_audio, model as whisper_model};
 use serde::{Deserialize, Serialize};
+use token_spec_poc::{DraftProducer, NgramDraft};
 use tokenizers::Tokenizer;
 
 use crate::models;
@@ -919,6 +920,12 @@ async fn embed_texts(
 // WhisperRunner — speech-to-text (openai/whisper-tiny|base)
 // ---------------------------------------------------------------------------
 
+/// Hard ingress ceiling for one WAV payload. A maximum-length 30-second PCM16
+/// mono clip is 960,000 bytes plus its small RIFF header, so 1 MiB leaves room
+/// for ordinary WAV metadata without permitting an unbounded base64 allocation.
+const MAX_WHISPER_WAV_BYTES: usize = 1024 * 1024;
+const MAX_WHISPER_WAV_BASE64_BYTES: usize = MAX_WHISPER_WAV_BYTES.div_ceil(3) * 4;
+
 pub struct WhisperBackend {
     model: whisper_model::Whisper,
     // PATCH (P-selfkv, see whisper_decoder_kv.rs): an incrementally-KV-cached decoder
@@ -933,8 +940,21 @@ pub struct WhisperBackend {
     // Special token ids resolved from the tokenizer.
     sot: u32,
     eot: u32,
+    english: u32,
     transcribe: u32,
     no_timestamps: u32,
+}
+
+#[derive(Debug)]
+struct WhisperTranscriptionTrace {
+    text: String,
+    // Retained for the ignored real-model parity/diagnostic gates. Production
+    // transcription consumes only `text`, but dropping these would make the
+    // target-token audit impossible to run.
+    #[allow(dead_code)]
+    generated_tokens: Vec<u32>,
+    #[allow(dead_code)]
+    terminated_by_eot: bool,
 }
 
 impl WhisperBackend {
@@ -969,6 +989,7 @@ impl WhisperBackend {
         Ok(Self {
             sot: tok(whisper::SOT_TOKEN)?,
             eot: tok(whisper::EOT_TOKEN)?,
+            english: tok("<|en|>")?,
             transcribe: tok(whisper::TRANSCRIBE_TOKEN)?,
             no_timestamps: tok(whisper::NO_TIMESTAMPS_TOKEN)?,
             model,
@@ -982,10 +1003,32 @@ impl WhisperBackend {
 
     /// Transcribe one 30s-or-less PCM clip (f32 mono @16kHz) via greedy decoding.
     pub fn transcribe(&mut self, pcm: &[f32]) -> Result<String, RunError> {
+        Ok(self.transcribe_trace(pcm)?.text)
+    }
+
+    /// The production greedy path plus its exact generated-token trace. The
+    /// trace is kept internal: it supports lossless-speculation acceptance
+    /// screening without changing the buyer result or treating decoded-text
+    /// round-trips as token identity.
+    fn transcribe_trace(&mut self, pcm: &[f32]) -> Result<WhisperTranscriptionTrace, RunError> {
         let backend = "whisper";
+        validate_whisper_sample_count(pcm.len())?;
         let n_mel = self.config.num_mel_bins;
         let mel = whisper_audio::pcm_to_mel(&self.config, pcm, &self.mel_filters);
-        let frames = mel.len() / n_mel;
+        // Candle rounds its generated mel frame count in 15-second blocks and
+        // appends another 15 seconds of padding. Consequently a clip just over
+        // 15 seconds produces 4,500 frames, which exceeds the encoder's 3,000
+        // positional slots. Shape each mel band independently: flat truncation
+        // would discard later bands instead of later time frames.
+        let frames = self
+            .config
+            .max_source_positions
+            .checked_mul(2)
+            .ok_or_else(|| RunError::Inference {
+                backend,
+                msg: "Whisper source-position frame count overflow".to_string(),
+            })?;
+        let mel = shape_whisper_mel_frames(mel, n_mel, frames)?;
         let mel = Tensor::from_vec(mel, (1, n_mel, frames), &self.device)
             .map_err(infer_err(backend))?
             .to_dtype(whisper::DTYPE)
@@ -997,17 +1040,22 @@ impl WhisperBackend {
             .forward(&mel, true)
             .map_err(infer_err(backend))?;
 
-        // Greedy decode from the standard prompt: <sot> <transcribe> <notimestamps>.
+        // Greedy decode from the multilingual model's English transcription
+        // prompt: <sot> <en> <transcribe> <notimestamps>. Omitting <en> is not
+        // language auto-detection; with openai/whisper-tiny it produced invalid,
+        // often repeated non-English tokens on clear English speech.
         //
         // PATCH (P-selfkv, whisper_decoder_kv.rs): the prompt is a real multi-token PREFILL
-        // (flush=true, self-attn cache seeded + causal mask applied among these 3
+        // (flush=true, self-attn cache seeded + causal mask applied among these 4
         // positions); every step after that feeds ONLY the single newly-decoded token
         // (flush=false) into the incrementally-KV-cached decoder, which attends it over
         // the growing cache instead of recomputing self-attention over the whole sequence
-        // from scratch — O(n) total decode compute instead of O(n^2), verified
-        // bit-for-bit equivalent to the old whole-sequence-every-step pattern in
-        // whisper_decoder_kv.rs's `incremental_matches_full_recompute` test.
-        let mut tokens: Vec<u32> = vec![self.sot, self.transcribe, self.no_timestamps];
+        // from scratch — O(n) total decode compute instead of O(n^2). The synthetic
+        // reference test keeps every logit within 1e-4 and selects the same greedy
+        // argmax token at every step; it does not claim bit-exact float logits.
+        let mut tokens: Vec<u32> =
+            vec![self.sot, self.english, self.transcribe, self.no_timestamps];
+        let prompt_len = tokens.len();
         self.decoder_kv.reset();
         let prompt_toks = Tensor::new(tokens.as_slice(), &self.device)
             .map_err(infer_err(backend))?
@@ -1018,6 +1066,7 @@ impl WhisperBackend {
             .forward(&prompt_toks, &audio_features, true)
             .map_err(infer_err(backend))?;
         let max_new = self.config.max_target_positions.min(224);
+        let mut terminated_by_eot = false;
         for _ in 0..max_new {
             let seq_len = dec.dim(1).map_err(infer_err(backend))?;
             let logits = self
@@ -1031,6 +1080,7 @@ impl WhisperBackend {
                 .to_scalar::<u32>()
                 .map_err(infer_err(backend))?;
             if next == self.eot {
+                terminated_by_eot = true;
                 break;
             }
             tokens.push(next);
@@ -1049,9 +1099,13 @@ impl WhisperBackend {
         // Decode, dropping the prompt + any special tokens.
         let text = self
             .tokenizer
-            .decode(&tokens[3..], true)
+            .decode(&tokens[prompt_len..], true)
             .map_err(infer_err(backend))?;
-        Ok(text.trim().to_string())
+        Ok(WhisperTranscriptionTrace {
+            text: text.trim().to_string(),
+            generated_tokens: tokens[prompt_len..].to_vec(),
+            terminated_by_eot,
+        })
     }
 }
 
@@ -1075,6 +1129,13 @@ impl JobRunner for WhisperRunner {
         pool: &ModelPool,
     ) -> Result<JobOutput, RunError> {
         let started = std::time::Instant::now();
+        if let JobType::AudioTranscribe {
+            language,
+            timestamps,
+        } = &manifest.job_type
+        {
+            validate_whisper_options(language.as_deref(), *timestamps)?;
+        }
         let items: Vec<AudioItem> = parse_jsonl(input, "audio_transcribe")?;
 
         // Warm whisper backend (loaded once). `transcribe` is `&mut self`, so we
@@ -1130,46 +1191,136 @@ impl JobRunner for WhisperRunner {
     }
 }
 
-/// Decode a base64 WAV (16kHz mono, 16-bit or float) into f32 PCM in [-1,1].
+fn validate_whisper_options(language: Option<&str>, timestamps: bool) -> Result<(), RunError> {
+    if timestamps {
+        return Err(RunError::BadInput {
+            job: "audio_transcribe",
+            msg: "timestamps=true is not implemented; the current runner emits one clip-level segment"
+                .to_string(),
+        });
+    }
+    if let Some(language) = language {
+        let normalized = language.trim().to_ascii_lowercase();
+        if normalized != "en" && normalized != "english" {
+            return Err(RunError::BadInput {
+                job: "audio_transcribe",
+                msg: format!(
+                    "language={language:?} is not implemented; the current multilingual Whisper weights are pinned to the <|en|> transcription prompt"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_whisper_sample_count(samples: usize) -> Result<(), RunError> {
+    if !(1..=whisper::N_SAMPLES).contains(&samples) {
+        return Err(RunError::BadInput {
+            job: "audio_transcribe",
+            msg: format!(
+                "WAV must contain 1..={} samples (30 seconds maximum), got {samples}",
+                whisper::N_SAMPLES
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Pad or truncate a band-major mel spectrogram to the encoder's exact frame
+/// count. `pcm_to_mel` lays out its result as `[mel_band][time_frame]`.
+fn shape_whisper_mel_frames(
+    mel: Vec<f32>,
+    n_mel: usize,
+    target_frames: usize,
+) -> Result<Vec<f32>, RunError> {
+    let backend = "whisper";
+    if n_mel == 0 || target_frames == 0 || !mel.len().is_multiple_of(n_mel) {
+        return Err(RunError::Inference {
+            backend,
+            msg: format!(
+                "invalid mel shape: {} values, {n_mel} bands, {target_frames} target frames",
+                mel.len()
+            ),
+        });
+    }
+    let source_frames = mel.len() / n_mel;
+    let target_len = n_mel
+        .checked_mul(target_frames)
+        .ok_or_else(|| RunError::Inference {
+            backend,
+            msg: "Whisper mel target shape overflow".to_string(),
+        })?;
+    let copy_frames = source_frames.min(target_frames);
+    let mut shaped = vec![0.0f32; target_len];
+    for band in 0..n_mel {
+        let source_start = band * source_frames;
+        let target_start = band * target_frames;
+        shaped[target_start..target_start + copy_frames]
+            .copy_from_slice(&mel[source_start..source_start + copy_frames]);
+    }
+    Ok(shaped)
+}
+
+/// Decode a bounded base64 WAV containing PCM16 mono audio at 16 kHz into f32
+/// PCM in [-1, 1). No resampling, downmixing, or lossy format coercion occurs at
+/// this trust boundary.
 fn decode_wav_b64(b64: &str) -> Result<Vec<f32>, RunError> {
     use base64::Engine;
+    let encoded = b64.trim();
+    if encoded.len() > MAX_WHISPER_WAV_BASE64_BYTES {
+        return Err(RunError::BadInput {
+            job: "audio_transcribe",
+            msg: format!(
+                "audio_b64 exceeds the {}-byte encoded limit",
+                MAX_WHISPER_WAV_BASE64_BYTES
+            ),
+        });
+    }
     let bytes = base64::engine::general_purpose::STANDARD
-        .decode(b64.trim())
+        .decode(encoded)
         .map_err(|e| RunError::BadInput {
             job: "audio_transcribe",
             msg: format!("audio_b64 not valid base64: {e}"),
         })?;
+    if bytes.len() > MAX_WHISPER_WAV_BYTES {
+        return Err(RunError::BadInput {
+            job: "audio_transcribe",
+            msg: format!(
+                "decoded WAV exceeds the {MAX_WHISPER_WAV_BYTES}-byte limit (got {})",
+                bytes.len()
+            ),
+        });
+    }
     let mut reader = hound::WavReader::new(Cursor::new(bytes)).map_err(|e| RunError::BadInput {
         job: "audio_transcribe",
         msg: format!("not a WAV: {e}"),
     })?;
     let spec = reader.spec();
-    let pcm: Vec<f32> = match spec.sample_format {
-        hound::SampleFormat::Float => reader.samples::<f32>().filter_map(Result::ok).collect(),
-        hound::SampleFormat::Int => {
-            let max = (1i64 << (spec.bits_per_sample - 1)) as f32;
-            reader
-                .samples::<i32>()
-                .filter_map(Result::ok)
-                .map(|s| s as f32 / max)
-                .collect()
-        }
-    };
-    // Downmix to mono if needed (average channels).
-    let pcm = if spec.channels > 1 {
-        let ch = spec.channels as usize;
-        pcm.chunks(ch)
-            .map(|c| c.iter().sum::<f32>() / ch as f32)
-            .collect()
-    } else {
-        pcm
-    };
-    if pcm.is_empty() {
+    if spec.channels != 1
+        || spec.sample_rate != whisper::SAMPLE_RATE as u32
+        || spec.bits_per_sample != 16
+        || spec.sample_format != hound::SampleFormat::Int
+    {
         return Err(RunError::BadInput {
             job: "audio_transcribe",
-            msg: "WAV decoded to zero samples".to_string(),
+            msg: format!(
+                "WAV must be 16-bit integer PCM, mono, at 16000 Hz (got {:?}, {}-bit, {} channel(s), {} Hz)",
+                spec.sample_format, spec.bits_per_sample, spec.channels, spec.sample_rate
+            ),
         });
     }
+    let samples: Vec<i16> = reader
+        .samples::<i16>()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| RunError::BadInput {
+            job: "audio_transcribe",
+            msg: format!("invalid PCM16 WAV sample data: {e}"),
+        })?;
+    validate_whisper_sample_count(samples.len())?;
+    let pcm = samples
+        .into_iter()
+        .map(|sample| sample as f32 / 32768.0)
+        .collect();
     Ok(pcm)
 }
 
@@ -1226,6 +1377,764 @@ fn mel_filterbank(n_mels: usize) -> Vec<f32> {
 /// to batch-of-1 serial decode. 16 keeps worst-case padding under one bin width
 /// (≤15 pad tokens) per row — the ~10% padding-overhead target the rung names.
 const PAD_BUCKET: usize = 16;
+
+/// Opt-in mode for the owned Candle speculative lane. `ngram` (or `1`) enables
+/// prompt-lookup drafting; absent/`off` keeps the established greedy path. This
+/// stays opt-in until the batched verifier and fleet acceptance/latency gates are
+/// complete, so a local optimization cannot silently change market execution.
+const SPEC_DECODE_ENV: &str = "CX_SPEC_DECODE";
+const SPEC_WINDOW_ENV: &str = "CX_SPEC_DECODE_WINDOW";
+const SPEC_NGRAM_ORDER_ENV: &str = "CX_SPEC_DECODE_NGRAM_ORDER";
+const MAX_SPEC_WINDOW: usize = 32;
+/// The lane remains explicitly opt-in, but once selected it may grow through the
+/// full verified window. The adaptive policy still starts at one token and backs
+/// off on poor yield, so short/diverse requests do not immediately pay for K=32.
+/// Real-model AB/BA sweeps on the reference M3 Ultra showed the former K=4 cap
+/// losing at a 256-token copied span (0.958x), while this cap reached 1.882x at
+/// 256 tokens and 2.816x at 512 with byte-exact greedy parity.
+const DEFAULT_SPEC_WINDOW: usize = MAX_SPEC_WINDOW;
+const DEFAULT_SPEC_NGRAM_ORDER: usize = 3;
+const MAX_SPEC_NGRAM_ORDER: usize = 64;
+
+/// Conservative ceiling for the first multi-row verifier. A synchronized cohort
+/// commits the minimum accepted prefix across its rows, so very wide cohorts lose
+/// useful draft yield exponentially when their predictions differ. B<=4 retains
+/// meaningful batching without letting one weak row suppress a large request; the
+/// stable-region continuous scheduler is the later solution for independent widths.
+const SPEC_SYNC_COHORT_MAX: usize = 4;
+/// Current Metal calibration for the smallest verifier width that can amortize a
+/// target call at each synchronized batch shape. B=2 wins at K=2; B=4 needs K=3;
+/// B=3 conservatively stays at K=2 until it has its own real-model sweep. This is a
+/// static source calibration, not an automatic hardware guess: `runners.rs` is in
+/// `hardware::infer_content_id()`, so every change moves the Candle build hash and
+/// requires class-local evidence. The whole lane remains behind `CX_SPEC_DECODE`.
+/// Policy, remaining-token, and proposal availability still cap the requested width.
+fn candle_spec_profit_probe_width(batch: usize) -> usize {
+    match batch {
+        SPEC_SYNC_COHORT_MAX => 3,
+        _ => 2,
+    }
+}
+/// Two real dense rounds are the smallest useful local timing baseline: one
+/// sample has no jitter check at all. The selector records its first eligible
+/// probe before forcing these counterfactual rounds, so baseline collection cannot
+/// destroy the n-gram suffix that made draft discovery possible.
+const SPEC_PROFIT_DENSE_SAMPLES: usize = 2;
+
+// Small-M verification only wins when accepted tokens amortize its launch and
+// quantized-matmul overhead. Evaluate a short, bounded token epoch instead of a
+// lifetime average: stale misses must not suppress a copied span later in the
+// request. Three quarters is deliberately conservative on the current Metal
+// backend (the measured 60% case regresses; the 95% case wins).
+const SPEC_POLICY_EPOCH_TOKENS: usize = 8;
+const SPEC_POLICY_EPOCH_ROUNDS: usize = 4;
+const SPEC_POLICY_ACCEPT_NUMERATOR: usize = 3;
+const SPEC_POLICY_ACCEPT_DENOMINATOR: usize = 4;
+const SPEC_POLICY_MAX_YIELD_TARGET_PER_VERIFY: usize = 2;
+const SPEC_POLICY_BASE_COOLDOWN: usize = 4;
+const SPEC_POLICY_MAX_COOLDOWN: usize = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CandleSpecConfig {
+    max_window: usize,
+    ngram_order: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct CandleSpecStats {
+    attempted_tokens: usize,
+    accepted_tokens: usize,
+    proposal_rounds: usize,
+    full_accept_rounds: usize,
+    zero_accept_rounds: usize,
+    target_calls: usize,
+    rounds: usize,
+    final_window: usize,
+    speculation_enabled: bool,
+    cooldown_remaining: usize,
+    cooldown_entries: usize,
+    cooldown_rounds: usize,
+    #[cfg(test)]
+    proposal_trace: Vec<(usize, usize)>,
+}
+
+/// Aggregate evidence for one `generate_batch_speculative_rows` call. Target calls
+/// count real model dispatches, not row-equivalent calls: one B-row verifier is one
+/// call. `synchronized_clamp_tokens` records otherwise-acceptable draft tokens that
+/// the dense-KV cohort deliberately declined in order to keep every live row at one
+/// transaction boundary.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct CandleSpecBatchStats {
+    rows: usize,
+    serial_rows: usize,
+    batched_cohorts: usize,
+    max_cohort_width: usize,
+    attempted_tokens: usize,
+    accepted_tokens: usize,
+    synchronized_clamp_tokens: usize,
+    target_calls: usize,
+    rounds: usize,
+    output_tokens: usize,
+    selector_dense_rounds: usize,
+    selector_probe_rounds: usize,
+    selector_retry_rounds: usize,
+    selector_confirmation_rounds: usize,
+    selector_active_rounds: usize,
+    selector_terminal_rounds_excluded: usize,
+    selector_activated_cohorts: usize,
+    selector_locked_cohorts: usize,
+    /// Positive means verified speculation has banked time versus the request's
+    /// own conservative dense baseline; negative is the bounded probe regret.
+    selector_credit_ns: i128,
+    selector_regret_ns: u128,
+}
+
+#[cfg(feature = "spec-receipt-bridge")]
+impl CandleSpecStats {
+    /// Convert only an already-successful scalar production call. This method is
+    /// intentionally not invoked by live routing: the default-off bridge is a
+    /// typed conformance seam until a durable, independently verified output
+    /// binding exists.
+    #[allow(dead_code)]
+    fn try_common_receipt(
+        &self,
+        branch_id: &str,
+        unit_id: &str,
+        output_tokens: usize,
+        e2e_elapsed: std::time::Duration,
+    ) -> Result<cx_spec_engine::SpecReceipt, crate::spec_receipt_bridge::ReceiptBridgeError> {
+        use crate::spec_receipt_bridge::{
+            CandleSpecPath, CompletedCandleSpecObservation, ReceiptBridgeError,
+        };
+
+        if !self.speculation_enabled {
+            return Err(ReceiptBridgeError::InvalidObservation(
+                "scalar stats do not record an enabled speculative lane".into(),
+            ));
+        }
+        CompletedCandleSpecObservation::try_new(
+            branch_id,
+            unit_id,
+            CandleSpecPath::Scalar,
+            self.attempted_tokens,
+            self.accepted_tokens,
+            0,
+            output_tokens,
+            self.target_calls,
+            self.rounds,
+            e2e_elapsed,
+        )?
+        .try_into_receipt()
+    }
+}
+
+#[cfg(feature = "spec-receipt-bridge")]
+impl CandleSpecBatchStats {
+    /// Convert only an already-successful synchronized/serial mixed batch. The
+    /// canonical receipt treats the completed call as one unit because these
+    /// aggregate production counters cannot honestly reconstruct per-row traces.
+    #[allow(dead_code)]
+    fn try_common_receipt(
+        &self,
+        branch_id: &str,
+        unit_id: &str,
+        e2e_elapsed: std::time::Duration,
+    ) -> Result<cx_spec_engine::SpecReceipt, crate::spec_receipt_bridge::ReceiptBridgeError> {
+        use crate::spec_receipt_bridge::{CandleSpecPath, CompletedCandleSpecObservation};
+
+        CompletedCandleSpecObservation::try_new(
+            branch_id,
+            unit_id,
+            CandleSpecPath::Batch { rows: self.rows },
+            self.attempted_tokens,
+            self.accepted_tokens,
+            self.synchronized_clamp_tokens,
+            self.output_tokens,
+            self.target_calls,
+            self.rounds,
+            e2e_elapsed,
+        )?
+        .try_into_receipt()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandleSpecProfitMode {
+    Probe,
+    Counterfactual,
+    Retry,
+    Confirm,
+    Active,
+    DenseLocked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CandleSpecRoundObservation {
+    active_batch: usize,
+    width: usize,
+    visible_yield: usize,
+    elapsed_ns: u128,
+    terminal_eos: bool,
+}
+
+/// Request-local, measurement-driven selector for the synchronized cohort.
+///
+/// The selector probes the batch-calibrated width (B2/B3 K=2, B4 K=3) at the first
+/// phase where every row can draft, preserving n-gram discovery before any forced
+/// dense token changes the suffix. It stores that observation, collects two
+/// immediately-following dense Bx1 counterfactuals, and evaluates the probe against
+/// their conservative minimum. A partially accepted but nonprofitable probe may
+/// spend exactly one delayed retry at the same calibrated width; that retry must
+/// repay the stored loss before reaching the ordinary confirmation gate. A
+/// zero-accept probe locks without retry. Thereafter only banked measured savings
+/// can be spent. Active-batch change locks dense permanently, bounding a poor
+/// request to one probe, at most one retry, and at most one confirmation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CandleSpecProfitSelector {
+    mode: CandleSpecProfitMode,
+    initial_batch: usize,
+    probe_width: usize,
+    dense_samples_ns: [u128; SPEC_PROFIT_DENSE_SAMPLES],
+    dense_sample_count: usize,
+    dense_lcb_ns: Option<u128>,
+    pending_probe: Option<(usize, u128)>,
+    bank_ns: i128,
+    approved_width: usize,
+    dense_rounds: usize,
+    probe_rounds: usize,
+    retry_rounds: usize,
+    confirmation_rounds: usize,
+    active_rounds: usize,
+    terminal_rounds_excluded: usize,
+    ever_activated: bool,
+    ever_locked: bool,
+    regret_ns: u128,
+}
+
+impl CandleSpecProfitSelector {
+    fn new(initial_batch: usize) -> Self {
+        debug_assert!((2..=SPEC_SYNC_COHORT_MAX).contains(&initial_batch));
+        let probe_width = candle_spec_profit_probe_width(initial_batch);
+        Self {
+            mode: CandleSpecProfitMode::Probe,
+            initial_batch,
+            probe_width,
+            dense_samples_ns: [0; SPEC_PROFIT_DENSE_SAMPLES],
+            dense_sample_count: 0,
+            dense_lcb_ns: None,
+            pending_probe: None,
+            bank_ns: 0,
+            approved_width: probe_width,
+            dense_rounds: 0,
+            probe_rounds: 0,
+            retry_rounds: 0,
+            confirmation_rounds: 0,
+            active_rounds: 0,
+            terminal_rounds_excluded: 0,
+            ever_activated: false,
+            ever_locked: false,
+            regret_ns: 0,
+        }
+    }
+
+    /// Width the selector permits this round. Proposal availability may reduce it
+    /// further; a resulting width zero is observed as another dense baseline round.
+    fn requested_width(
+        &mut self,
+        active_batch: usize,
+        policy_width: usize,
+        remaining: usize,
+    ) -> usize {
+        if active_batch != self.initial_batch {
+            self.lock_dense();
+            return 0;
+        }
+        let cap = policy_width.min(remaining.saturating_sub(1));
+        match self.mode {
+            CandleSpecProfitMode::Probe
+            | CandleSpecProfitMode::Retry
+            | CandleSpecProfitMode::Confirm => cap.min(self.probe_width),
+            CandleSpecProfitMode::Counterfactual | CandleSpecProfitMode::DenseLocked => 0,
+            CandleSpecProfitMode::Active => cap.min(self.approved_width),
+        }
+    }
+
+    fn observe(&mut self, observation: CandleSpecRoundObservation) {
+        if observation.active_batch != self.initial_batch {
+            self.lock_dense();
+            return;
+        }
+        // EOS censors the output yield and may shrink the batch. It must not make
+        // either arm look faster; the next decision observes the width change and
+        // locks the short tail to dense.
+        if observation.terminal_eos {
+            self.terminal_rounds_excluded += 1;
+            return;
+        }
+        if observation.width == 0 {
+            let retry_unavailable = self.mode == CandleSpecProfitMode::Retry;
+            self.observe_dense(observation.elapsed_ns);
+            if retry_unavailable {
+                // The one delayed retry is tied to this exact post-baseline phase.
+                // Proposal unavailability consumes no speculative retry and must
+                // not turn into an unbounded search across later suffixes.
+                self.record_regret_and_lock();
+            }
+            return;
+        }
+
+        match self.mode {
+            CandleSpecProfitMode::Probe => {
+                self.probe_rounds += 1;
+                if self.dense_lcb_ns.is_some() {
+                    self.evaluate_probe(observation.visible_yield, observation.elapsed_ns);
+                } else {
+                    self.pending_probe = Some((observation.visible_yield, observation.elapsed_ns));
+                    self.mode = CandleSpecProfitMode::Counterfactual;
+                }
+            }
+            CandleSpecProfitMode::Retry => {
+                self.retry_rounds += 1;
+                let Some(delta) =
+                    self.profit_delta(observation.visible_yield, observation.elapsed_ns)
+                else {
+                    self.lock_dense();
+                    return;
+                };
+                let Some(bank) = self.bank_ns.checked_add(delta) else {
+                    self.lock_dense();
+                    return;
+                };
+                self.bank_ns = bank;
+                // A zero-accept retry is never evidence for speculation, even if
+                // an anomalously slow baseline makes its timing delta look positive.
+                if observation.visible_yield <= 1 {
+                    if self.bank_ns <= 0 {
+                        self.record_regret_and_lock();
+                    } else {
+                        self.lock_dense();
+                    }
+                } else if self.bank_ns <= 0 {
+                    self.record_regret_and_lock();
+                } else {
+                    self.mode = CandleSpecProfitMode::Confirm;
+                }
+            }
+            CandleSpecProfitMode::Confirm => {
+                self.confirmation_rounds += 1;
+                let Some(delta) =
+                    self.profit_delta(observation.visible_yield, observation.elapsed_ns)
+                else {
+                    self.lock_dense();
+                    return;
+                };
+                let Some(bank) = self.bank_ns.checked_add(delta) else {
+                    self.lock_dense();
+                    return;
+                };
+                self.bank_ns = bank;
+                if self.bank_ns <= 0 {
+                    self.record_regret_and_lock();
+                } else {
+                    self.mode = CandleSpecProfitMode::Active;
+                    self.approved_width = self.probe_width;
+                    self.ever_activated = true;
+                }
+            }
+            CandleSpecProfitMode::Active => {
+                self.active_rounds += 1;
+                let Some(delta) =
+                    self.profit_delta(observation.visible_yield, observation.elapsed_ns)
+                else {
+                    self.lock_dense();
+                    return;
+                };
+                let Some(bank) = self.bank_ns.checked_add(delta) else {
+                    self.lock_dense();
+                    return;
+                };
+                self.bank_ns = bank;
+                if self.bank_ns <= 0 {
+                    self.record_regret_and_lock();
+                } else if observation.visible_yield == observation.width + 1 {
+                    self.approved_width = self.approved_width.saturating_add(1);
+                } else {
+                    self.approved_width = self.approved_width.min(observation.visible_yield.max(1));
+                }
+            }
+            // A speculative observation in either state is a caller/state-machine
+            // bug. Fail toward dense rather than learning from an impossible trace.
+            CandleSpecProfitMode::Counterfactual | CandleSpecProfitMode::DenseLocked => {
+                self.lock_dense();
+            }
+        }
+    }
+
+    fn observe_dense(&mut self, elapsed_ns: u128) {
+        self.dense_rounds += 1;
+        if self.dense_sample_count < SPEC_PROFIT_DENSE_SAMPLES {
+            self.dense_samples_ns[self.dense_sample_count] = elapsed_ns;
+            self.dense_sample_count += 1;
+            if self.dense_sample_count == SPEC_PROFIT_DENSE_SAMPLES {
+                self.dense_lcb_ns = self.dense_samples_ns.iter().copied().min();
+            }
+        } else if !matches!(self.mode, CandleSpecProfitMode::DenseLocked) {
+            // Refresh only downward: a slow thermal/jitter outlier must never make
+            // speculation look profitable.
+            self.dense_lcb_ns = Some(
+                self.dense_lcb_ns
+                    .map_or(elapsed_ns, |baseline| baseline.min(elapsed_ns)),
+            );
+        }
+
+        if self.mode == CandleSpecProfitMode::Counterfactual
+            && self.dense_sample_count == SPEC_PROFIT_DENSE_SAMPLES
+        {
+            let Some((visible_yield, probe_ns)) = self.pending_probe.take() else {
+                self.lock_dense();
+                return;
+            };
+            self.evaluate_probe(visible_yield, probe_ns);
+        }
+    }
+
+    fn evaluate_probe(&mut self, visible_yield: usize, elapsed_ns: u128) {
+        let Some(delta) = self.profit_delta(visible_yield, elapsed_ns) else {
+            self.lock_dense();
+            return;
+        };
+        self.bank_ns = delta;
+        if self.bank_ns <= 0 {
+            if visible_yield > 1 {
+                self.mode = CandleSpecProfitMode::Retry;
+            } else {
+                self.record_regret_and_lock();
+            }
+        } else {
+            self.mode = CandleSpecProfitMode::Confirm;
+        }
+    }
+
+    fn profit_delta(&self, visible_yield: usize, elapsed_ns: u128) -> Option<i128> {
+        let dense = self.dense_lcb_ns?;
+        let counterfactual = dense.checked_mul(visible_yield as u128)?;
+        let counterfactual = i128::try_from(counterfactual).ok()?;
+        let elapsed = i128::try_from(elapsed_ns).ok()?;
+        counterfactual.checked_sub(elapsed)
+    }
+
+    fn record_regret_and_lock(&mut self) {
+        self.regret_ns = self
+            .bank_ns
+            .checked_neg()
+            .map(|v| v as u128)
+            .unwrap_or(u128::MAX);
+        self.lock_dense();
+    }
+
+    fn lock_dense(&mut self) {
+        self.mode = CandleSpecProfitMode::DenseLocked;
+        self.ever_locked = true;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandleSpecVerifierPath {
+    /// Production-shaped Bx1 decode: final-position logits only.
+    DenseForward,
+    /// Transactional Bx(1+K) decode: target ids for every verifier position.
+    SpeculativeForwardAll,
+}
+
+fn synchronized_verifier_path(width: usize) -> CandleSpecVerifierPath {
+    if width == 0 {
+        CandleSpecVerifierPath::DenseForward
+    } else {
+        CandleSpecVerifierPath::SpeculativeForwardAll
+    }
+}
+
+/// Lift production `forward(Bx1) -> argmax(B)` output into the verifier's common
+/// row-major `(B, 1)` target contract. Keeping this conversion explicit lets the
+/// rest of the synchronized commit/EOS/KV logic remain identical for dense and
+/// speculative rounds without routing K=0 through the more expensive all-position
+/// output head.
+fn synchronized_dense_targets(
+    target_tokens: Vec<u32>,
+    expected_rows: usize,
+) -> Result<Vec<Vec<u32>>, String> {
+    if target_tokens.len() != expected_rows {
+        return Err(format!(
+            "dense synchronized target row mismatch: got {}, expected {expected_rows}",
+            target_tokens.len()
+        ));
+    }
+    Ok(target_tokens.into_iter().map(|token| vec![token]).collect())
+}
+
+/// Return `(common_accept, per_row_accept)` for a dense speculative cohort.
+///
+/// Every target row contains the greedy token after accepting exactly `j` draft
+/// tokens at index `j`; therefore a row accepts the longest prefix for which
+/// `proposal[j] == target_after[j]`. Committing the minimum of those prefixes is
+/// conservative but exact for every row and, critically, leaves the whole dense
+/// batch at one KV length so the existing transactional truncate is sufficient.
+fn synchronized_accept_prefix(
+    proposals: &[Vec<u32>],
+    target_after: &[Vec<u32>],
+    width: usize,
+) -> Result<(usize, Vec<usize>), String> {
+    if proposals.is_empty() || proposals.len() != target_after.len() {
+        return Err(format!(
+            "synchronized verifier row mismatch: proposals={} targets={}",
+            proposals.len(),
+            target_after.len()
+        ));
+    }
+    let mut per_row = Vec::with_capacity(proposals.len());
+    for (row, (proposal, targets)) in proposals.iter().zip(target_after).enumerate() {
+        if proposal.len() < width {
+            return Err(format!(
+                "synchronized proposal row {row} has {} tokens, needs {width}",
+                proposal.len()
+            ));
+        }
+        if targets.len() != width + 1 {
+            return Err(format!(
+                "synchronized target row {row} has {} tokens, expected {}",
+                targets.len(),
+                width + 1
+            ));
+        }
+        let mut accepted = 0usize;
+        while accepted < width && proposal[accepted] == targets[accepted] {
+            accepted += 1;
+        }
+        per_row.push(accepted);
+    }
+    let common = per_row.iter().copied().min().unwrap_or(0);
+    Ok((common, per_row))
+}
+
+/// Assemble one row's externally visible emission after a synchronized accept.
+/// EOS terminates the row and is never returned or counted, matching the scalar
+/// production contract. The returned boolean distinguishes EOS from an empty but
+/// otherwise live emission (the latter cannot occur in a valid verifier round).
+fn synchronized_emit(
+    proposal: &[u32],
+    target_after: &[u32],
+    common_accept: usize,
+    eos: u32,
+) -> Result<(Vec<u32>, bool), String> {
+    if proposal.len() < common_accept || target_after.len() <= common_accept {
+        return Err(format!(
+            "cannot emit synchronized prefix {common_accept}: proposal={}, targets={}",
+            proposal.len(),
+            target_after.len()
+        ));
+    }
+    let mut emit = Vec::with_capacity(common_accept + 1);
+    emit.extend_from_slice(&proposal[..common_accept]);
+    emit.push(target_after[common_accept]);
+    let eos_at = emit.iter().position(|&token| token == eos);
+    if let Some(eos_at) = eos_at {
+        emit.truncate(eos_at);
+    }
+    Ok((emit, eos_at.is_some()))
+}
+
+/// Request-local, deterministic speculation policy. Low-acceptance rounds or
+/// low-yield proposal epochs switch to ordinary greedy rounds for a capped
+/// cooldown; they never permanently turn drafting off. Once the cooldown expires,
+/// a one-token probe can discover a later copied span, and complete accepts widen
+/// the next verify immediately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CandleSpecPolicy {
+    max_window: usize,
+    current_window: usize,
+    epoch_attempted: usize,
+    epoch_accepted: usize,
+    epoch_verifies: usize,
+    epoch_yield_target: usize,
+    cooldown_remaining: usize,
+    backoff_level: u32,
+    cooldown_entries: usize,
+    cooldown_rounds: usize,
+}
+
+impl CandleSpecPolicy {
+    fn new(max_window: usize) -> Self {
+        // Preserve the scalar lane's established conservative K=2 start.
+        Self::new_with_initial_window(max_window, 2)
+    }
+
+    fn new_with_initial_window(max_window: usize, initial_window: usize) -> Self {
+        debug_assert!(max_window > 0);
+        debug_assert!(initial_window > 0);
+        Self {
+            max_window,
+            current_window: initial_window.min(max_window).max(1),
+            epoch_attempted: 0,
+            epoch_accepted: 0,
+            epoch_verifies: 0,
+            epoch_yield_target: 0,
+            cooldown_remaining: 0,
+            backoff_level: 0,
+            cooldown_entries: 0,
+            cooldown_rounds: 0,
+        }
+    }
+
+    /// Advance one generation round and return the permitted proposal width.
+    /// Cooldown is measured in output-producing target rounds, not wall time.
+    fn window_for_round(&mut self, eligible: bool, remaining: usize) -> usize {
+        if self.cooldown_remaining > 0 {
+            self.cooldown_remaining -= 1;
+            self.cooldown_rounds += 1;
+            return 0;
+        }
+        if !eligible {
+            return 0;
+        }
+        self.current_window.min(remaining.saturating_sub(1))
+    }
+
+    /// Feed one verifier outcome into the bounded epoch. `accepted` is the
+    /// committed prefix, so EOS-truncated tokens cannot make policy look better
+    /// than the externally visible generation actually was.
+    fn observe(&mut self, attempted: usize, accepted: usize) {
+        debug_assert!(accepted <= attempted);
+        if attempted == 0 {
+            return;
+        }
+
+        self.epoch_attempted += attempted;
+        self.epoch_accepted += accepted;
+        self.epoch_verifies += 1;
+        // A drafter that can only find one token should not be punished for
+        // accepting that token. Normalize the per-verify yield target by the
+        // width actually offered, while still asking wider verifies to amortize
+        // their extra target work.
+        self.epoch_yield_target += attempted.min(SPEC_POLICY_MAX_YIELD_TARGET_PER_VERIFY);
+
+        if accepted == attempted {
+            self.current_window = (self.current_window + 1).min(self.max_window);
+            // A successful probe is evidence that the local regime changed. Let
+            // repeated hits rapidly unwind a prior exponential backoff.
+            self.backoff_level = self.backoff_level.saturating_sub(1);
+        } else {
+            // A partial hit should not keep paying the same wide verify. Preserve
+            // one token beyond the useful prefix as the next bounded experiment.
+            self.current_window = self.current_window.min(accepted + 1).max(1);
+        }
+
+        let wholly_rejected = accepted == 0;
+        let epoch_complete = self.epoch_attempted >= SPEC_POLICY_EPOCH_TOKENS
+            || self.epoch_verifies >= SPEC_POLICY_EPOCH_ROUNDS;
+        let epoch_is_low = epoch_complete
+            && (self.epoch_accepted * SPEC_POLICY_ACCEPT_DENOMINATOR
+                < self.epoch_attempted * SPEC_POLICY_ACCEPT_NUMERATOR
+                || self.epoch_accepted < self.epoch_yield_target);
+
+        if wholly_rejected || epoch_is_low {
+            self.enter_cooldown();
+        } else if epoch_complete {
+            // Good epochs get a clean slate. This is intentionally not a lifetime
+            // counter: a later workload phase must be judged on its own evidence.
+            self.epoch_attempted = 0;
+            self.epoch_accepted = 0;
+            self.epoch_verifies = 0;
+            self.epoch_yield_target = 0;
+        }
+    }
+
+    fn enter_cooldown(&mut self) {
+        let duration = SPEC_POLICY_BASE_COOLDOWN
+            .checked_shl(self.backoff_level)
+            .unwrap_or(usize::MAX)
+            .min(SPEC_POLICY_MAX_COOLDOWN);
+        self.cooldown_remaining = duration;
+        self.backoff_level = (self.backoff_level + 1).min(SPEC_POLICY_MAX_COOLDOWN.ilog2());
+        self.current_window = 1;
+        self.epoch_attempted = 0;
+        self.epoch_accepted = 0;
+        self.epoch_verifies = 0;
+        self.epoch_yield_target = 0;
+        self.cooldown_entries += 1;
+    }
+
+    #[cfg(test)]
+    fn ready_to_speculate(&self) -> bool {
+        self.cooldown_remaining == 0
+    }
+}
+
+/// Pure parser kept separate from process environment reads so bounds and
+/// fail-closed behavior are unit-testable without global-env races.
+fn parse_candle_spec_config(
+    mode: Option<&str>,
+    window: Option<&str>,
+    order: Option<&str>,
+) -> Result<Option<CandleSpecConfig>, String> {
+    let enabled = match mode.map(str::trim) {
+        None | Some("") | Some("0") | Some("off") => false,
+        Some("1") | Some("on") | Some("ngram") => true,
+        Some(other) => {
+            return Err(format!(
+                "{SPEC_DECODE_ENV} must be off|0|on|1|ngram, got {other:?}"
+            ))
+        }
+    };
+    if !enabled {
+        return Ok(None);
+    }
+    let parse_bound =
+        |name: &str, raw: Option<&str>, default: usize, max: usize| -> Result<usize, String> {
+            let value = match raw {
+                Some(raw) => raw
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|_| format!("{name} must be an integer in [1,{max}], got {raw:?}"))?,
+                None => default,
+            };
+            if !(1..=max).contains(&value) {
+                return Err(format!("{name} must be in [1,{max}], got {value}"));
+            }
+            Ok(value)
+        };
+    Ok(Some(CandleSpecConfig {
+        max_window: parse_bound(
+            SPEC_WINDOW_ENV,
+            window,
+            DEFAULT_SPEC_WINDOW,
+            MAX_SPEC_WINDOW,
+        )?,
+        ngram_order: parse_bound(
+            SPEC_NGRAM_ORDER_ENV,
+            order,
+            DEFAULT_SPEC_NGRAM_ORDER,
+            MAX_SPEC_NGRAM_ORDER,
+        )?,
+    }))
+}
+
+fn candle_spec_config() -> Result<Option<CandleSpecConfig>, RunError> {
+    let mode = std::env::var(SPEC_DECODE_ENV).ok();
+    let window = std::env::var(SPEC_WINDOW_ENV).ok();
+    let order = std::env::var(SPEC_NGRAM_ORDER_ENV).ok();
+    parse_candle_spec_config(mode.as_deref(), window.as_deref(), order.as_deref()).map_err(|msg| {
+        RunError::Inference {
+            backend: "batch_infer",
+            msg: format!("invalid speculative-decode configuration: {msg}"),
+        }
+    })
+}
+
+/// Largest KV position the speculative loop can make live. The last generated
+/// token is returned without another target forward, exactly like greedy decode.
+fn speculative_cache_end(prompt_len: usize, max_tokens: u32) -> Option<usize> {
+    prompt_len.checked_add((max_tokens as usize).saturating_sub(1))
+}
 
 pub struct LlamaBackend {
     model: QLlama,
@@ -1292,6 +2201,19 @@ impl LlamaBackend {
     /// 0.0 → argmax; >0 still uses argmax here for determinism — see note). Wraps
     /// the prompt in the model's chat format. Returns (text, n_generated).
     pub fn generate(&mut self, prompt: &str, max_tokens: u32) -> Result<(String, usize), RunError> {
+        match candle_spec_config()? {
+            Some(config) => self.generate_speculative_ngram(prompt, max_tokens, config),
+            None => self.generate_greedy(prompt, max_tokens),
+        }
+    }
+
+    /// Established token-at-a-time reference path. Kept separate so speculative
+    /// correctness/benchmark gates always have an authoritative local oracle.
+    fn generate_greedy(
+        &mut self,
+        prompt: &str,
+        max_tokens: u32,
+    ) -> Result<(String, usize), RunError> {
         let backend = "batch_infer";
         let wrapped = format!(
             "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{prompt}<|eot_id|>\
@@ -1346,6 +2268,293 @@ impl LlamaBackend {
             .decode(&generated, true)
             .map_err(infer_err(backend))?;
         Ok((text.trim().to_string(), generated.len()))
+    }
+
+    /// Lossless greedy speculative decode using the CX rolling n-gram proposer
+    /// and the real target model's one-pass all-position verifier.
+    ///
+    /// KV invariant: after each round the cache contains every committed token
+    /// except `pending` (the target-approved bonus/correction). The next target
+    /// pass consumes `pending ++ draft`, verifies the entire draft in one pass,
+    /// then truncates rejected KV. The initial prompt prefill is special only in
+    /// that its already-computed next-token argmax validates draft token zero.
+    fn generate_speculative_ngram(
+        &mut self,
+        prompt: &str,
+        max_tokens: u32,
+        config: CandleSpecConfig,
+    ) -> Result<(String, usize), RunError> {
+        self.generate_speculative_ngram_with_stats(prompt, max_tokens, config)
+            .map(|(output, _stats)| output)
+    }
+
+    fn generate_speculative_ngram_with_stats(
+        &mut self,
+        prompt: &str,
+        max_tokens: u32,
+        config: CandleSpecConfig,
+    ) -> Result<((String, usize), CandleSpecStats), RunError> {
+        let backend = "batch_infer";
+        if max_tokens == 0 {
+            return Ok(((String::new(), 0), CandleSpecStats::default()));
+        }
+        let wrapped = format!(
+            "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{prompt}<|eot_id|>\
+             <|start_header_id|>assistant<|end_header_id|>\n\n"
+        );
+        let enc = self
+            .tokenizer
+            .encode(wrapped, true)
+            .map_err(infer_err(backend))?;
+        let prompt_tokens: Vec<u32> = enc.get_ids().to_vec();
+        if prompt_tokens.is_empty() {
+            return Err(RunError::Inference {
+                backend,
+                msg: "tokenizer produced an empty prompt for speculative decode".to_string(),
+            });
+        }
+
+        // As in the established greedy loop, the final generated token is returned
+        // without another target forward. Therefore at most `max_tokens - 1`
+        // generated tokens ever enter KV. Using `max_tokens` here would reject the
+        // otherwise-valid boundary case where the last emitted token exactly fills
+        // the advertised context window.
+        let max_cached_generation = (max_tokens as usize).saturating_sub(1);
+        let requested_end =
+            speculative_cache_end(prompt_tokens.len(), max_tokens).ok_or_else(|| {
+                RunError::Inference {
+                    backend,
+                    msg: "speculative prompt + cached generation overflowed the context length"
+                        .to_string(),
+                }
+            })?;
+        if requested_end > crate::quantized_llama_batched::MAX_SEQ_LEN {
+            return Err(RunError::Inference {
+                backend,
+                msg: format!(
+                    "context length exceeded: prompt={} + cached_generation={} = {requested_end}, \
+                     beyond MAX_SEQ_LEN={}",
+                    prompt_tokens.len(),
+                    max_cached_generation,
+                    crate::quantized_llama_batched::MAX_SEQ_LEN
+                ),
+            });
+        }
+        let seq_cap = requested_end;
+        self.model.set_next_seq_cap(Some(seq_cap));
+        let prompt_input = Tensor::new(prompt_tokens.as_slice(), &self.device)
+            .map_err(infer_err(backend))?
+            .unsqueeze(0)
+            .map_err(infer_err(backend))?;
+        let prompt_logits = self
+            .model
+            .forward(&prompt_input, 0)
+            .map_err(infer_err(backend))?;
+        let cached_next = prompt_logits
+            .squeeze(0)
+            .map_err(infer_err(backend))?
+            .argmax(0)
+            .map_err(infer_err(backend))?
+            .to_scalar::<u32>()
+            .map_err(infer_err(backend))?;
+
+        // Prompt lookup should mine buyer content, not the repeated chat-template
+        // headers around it. Seeding from the raw prompt avoids high-confidence-
+        // looking but useless matches on special header/newline token sequences.
+        let draft_seed = self
+            .tokenizer
+            .encode(prompt, false)
+            .map_err(infer_err(backend))?
+            .get_ids()
+            .to_vec();
+        let mut draft = NgramDraft::try_new(config.ngram_order, config.max_window)
+            .map_err(infer_err(backend))?;
+        draft.reset(&draft_seed);
+        let mut draft_context = draft_seed;
+        let mut generated: Vec<u32> = Vec::with_capacity(max_tokens as usize);
+        let mut kv_len = prompt_tokens.len();
+        let mut prefill_next = Some(cached_next);
+        let mut pending: Option<u32> = None;
+        let mut policy = CandleSpecPolicy::new(config.max_window);
+        let mut attempted = 0usize;
+        let mut accepted = 0usize;
+        let mut proposal_rounds = 0usize;
+        let mut full_accept_rounds = 0usize;
+        let mut zero_accept_rounds = 0usize;
+        #[cfg(test)]
+        let mut proposal_trace = Vec::new();
+        let mut target_calls = 1usize; // prompt prefill above
+        let mut rounds = 0usize;
+
+        while generated.len() < max_tokens as usize {
+            rounds += 1;
+            let remaining = max_tokens as usize - generated.len();
+            // The prompt prefill already produced the first target token. Emitting
+            // it directly is free; drafting on this first round would require an
+            // otherwise-unnecessary second target call before any output. Begin
+            // speculation only once a pending token must be consumed anyway.
+            let want = policy.window_for_round(prefill_next.is_none(), remaining);
+            let proposed = draft.propose(&draft_context, want);
+            if proposed.len() > want {
+                return Err(RunError::Inference {
+                    backend,
+                    msg: format!(
+                        "speculative drafter exceeded its bounded request: proposed={} want={want}",
+                        proposed.len()
+                    ),
+                });
+            }
+
+            // `target_after[j]` is the target token after accepting exactly j
+            // proposal tokens. It must contain proposed.len()+1 entries.
+            let (target_after, consumed_pending) = if let Some(next) = prefill_next.take() {
+                if proposed.is_empty() {
+                    (vec![next], 0usize)
+                } else {
+                    let input = Tensor::new(proposed.as_slice(), &self.device)
+                        .map_err(infer_err(backend))?
+                        .unsqueeze(0)
+                        .map_err(infer_err(backend))?;
+                    let after_draft = self
+                        .model
+                        .forward_all_argmax(&input, kv_len)
+                        .map_err(infer_err(backend))?
+                        .squeeze(0)
+                        .map_err(infer_err(backend))?
+                        .to_vec1::<u32>()
+                        .map_err(infer_err(backend))?;
+                    target_calls += 1;
+                    let mut targets = Vec::with_capacity(proposed.len() + 1);
+                    targets.push(next);
+                    targets.extend(after_draft);
+                    (targets, 0usize)
+                }
+            } else {
+                let pending_token = pending.take().ok_or_else(|| RunError::Inference {
+                    backend,
+                    msg: "speculative decode lost both prefill and pending target state"
+                        .to_string(),
+                })?;
+                let mut span = Vec::with_capacity(proposed.len() + 1);
+                span.push(pending_token);
+                span.extend_from_slice(&proposed);
+                let input = Tensor::new(span.as_slice(), &self.device)
+                    .map_err(infer_err(backend))?
+                    .unsqueeze(0)
+                    .map_err(infer_err(backend))?;
+                let targets = self
+                    .model
+                    .forward_all_argmax(&input, kv_len)
+                    .map_err(infer_err(backend))?
+                    .squeeze(0)
+                    .map_err(infer_err(backend))?
+                    .to_vec1::<u32>()
+                    .map_err(infer_err(backend))?;
+                target_calls += 1;
+                (targets, 1usize)
+            };
+            if target_after.len() != proposed.len() + 1 {
+                // Defensive even though tensor shapes currently make this
+                // unreachable: malformed verifier output must never be indexed.
+                self.model
+                    .truncate_kv_cache(kv_len)
+                    .map_err(infer_err(backend))?;
+                return Err(RunError::Inference {
+                    backend,
+                    msg: format!(
+                        "speculative verifier returned {} targets for {} proposals",
+                        target_after.len(),
+                        proposed.len()
+                    ),
+                });
+            }
+
+            let mut n_accept = 0usize;
+            while n_accept < proposed.len() && proposed[n_accept] == target_after[n_accept] {
+                n_accept += 1;
+            }
+            let bonus = target_after[n_accept];
+            let mut emit = Vec::with_capacity(n_accept + 1);
+            emit.extend_from_slice(&proposed[..n_accept]);
+            emit.push(bonus);
+            // Match the established production contract: EOS terminates generation
+            // but is not included in decoded text or `tokens_used`.
+            let eos_at = emit.iter().position(|&token| token == self.eos);
+            if let Some(eos_at) = eos_at {
+                emit.truncate(eos_at);
+            }
+            // Accepted draft tokens are the prefix before the bonus, bounded again
+            // by an early EOS inside that accepted prefix.
+            let committed_accept = n_accept.min(emit.len());
+            let keep_len = kv_len + consumed_pending + committed_accept;
+            self.model
+                .truncate_kv_cache(keep_len)
+                .map_err(infer_err(backend))?;
+            kv_len = keep_len;
+
+            attempted += proposed.len();
+            accepted += committed_accept;
+            if !proposed.is_empty() {
+                proposal_rounds += 1;
+                full_accept_rounds += usize::from(committed_accept == proposed.len());
+                zero_accept_rounds += usize::from(committed_accept == 0);
+                #[cfg(test)]
+                proposal_trace.push((proposed.len(), committed_accept));
+            }
+            policy.observe(proposed.len(), committed_accept);
+
+            draft.commit(&emit);
+            draft_context.extend_from_slice(&emit);
+            generated.extend_from_slice(&emit);
+            if eos_at.is_some() {
+                break;
+            }
+            pending = Some(bonus);
+        }
+
+        let stats = CandleSpecStats {
+            attempted_tokens: attempted,
+            accepted_tokens: accepted,
+            proposal_rounds,
+            full_accept_rounds,
+            zero_accept_rounds,
+            target_calls,
+            rounds,
+            final_window: policy.current_window,
+            // Cooldown is temporary; the owned lane is never permanently disabled
+            // by request-local evidence and will probe again when this reaches zero.
+            speculation_enabled: true,
+            cooldown_remaining: policy.cooldown_remaining,
+            cooldown_entries: policy.cooldown_entries,
+            cooldown_rounds: policy.cooldown_rounds,
+            #[cfg(test)]
+            proposal_trace,
+        };
+        tracing::debug!(
+            attempted_tokens = attempted,
+            accepted_tokens = accepted,
+            proposal_rounds,
+            full_accept_rounds,
+            zero_accept_rounds,
+            accepted_fraction = if attempted == 0 {
+                0.0
+            } else {
+                accepted as f64 / attempted as f64
+            },
+            target_calls,
+            output_tokens = generated.len(),
+            final_window = policy.current_window,
+            speculation_enabled = true,
+            cooldown_remaining = policy.cooldown_remaining,
+            cooldown_entries = policy.cooldown_entries,
+            cooldown_rounds = policy.cooldown_rounds,
+            "owned Candle speculative decode completed"
+        );
+        let text = self
+            .tokenizer
+            .decode(&generated, true)
+            .map_err(infer_err(backend))?;
+        Ok(((text.trim().to_string(), generated.len()), stats))
     }
 
     /// HAWKING lane (docs/HAWKING_PORT_PLAN.md Week 4 — the capstone). Greedy-generate
@@ -1403,7 +2612,8 @@ impl LlamaBackend {
         let max_prompt = encoded.iter().map(|e| e.len()).max().unwrap_or(0);
         // Flat KV window: worst-case prompt + all generated tokens, per slot,
         // bounded by the model's own ceiling.
-        let window = (max_prompt + max_tokens as usize).min(super::quantized_llama_batched::MAX_SEQ_LEN);
+        let window =
+            (max_prompt + max_tokens as usize).min(super::quantized_llama_batched::MAX_SEQ_LEN);
         // One stable region per slot (0..batch); the region id is decoupled from the
         // compacted batch index but here they coincide for a fixed cohort.
         let regions: Vec<u32> = (0..batch as u32).collect();
@@ -1447,7 +2657,9 @@ impl LlamaBackend {
                     sampling.push(cursor[b] + 1 == encoded[b].len() && !done[b]);
                 } else if !done[b] {
                     // Generation: feed the slot's most recent sampled token.
-                    let last = *generated[b].last().unwrap_or(&encoded[b][encoded[b].len() - 1]);
+                    let last = *generated[b]
+                        .last()
+                        .unwrap_or(&encoded[b][encoded[b].len() - 1]);
                     step_tokens.push(last);
                     step_pos.push(position[b] as u32);
                     sampling.push(true);
@@ -1456,7 +2668,9 @@ impl LlamaBackend {
                     // own last real position) so it neither grows nor corrupts its KV,
                     // and its output is ignored.
                     let park = position[b].saturating_sub(1) as u32;
-                    let last = *generated[b].last().unwrap_or(&encoded[b][encoded[b].len() - 1]);
+                    let last = *generated[b]
+                        .last()
+                        .unwrap_or(&encoded[b][encoded[b].len() - 1]);
                     step_tokens.push(last);
                     step_pos.push(park);
                     sampling.push(false);
@@ -1558,6 +2772,9 @@ impl LlamaBackend {
                 arrival.len()
             ))));
         }
+        if max_tokens == 0 {
+            return Ok((vec![(String::new(), 0); n], ChurnStats::default()));
+        }
         let pool_size = pool_size.max(1);
 
         // Tokenize every prompt (same chat template + tokenizer as `generate`).
@@ -1598,6 +2815,8 @@ impl LlamaBackend {
         let mut prompt_done: Vec<bool> = vec![false; n];
         let mut prompt_admitted: Vec<bool> = vec![false; n];
         let mut region_prompt: Vec<Option<usize>> = vec![None; pool_size];
+        let mut region_handle: Vec<Option<crate::continuous_batch::SlotHandle>> =
+            vec![None; pool_size];
         // Prefill cursor for the prompt currently in each region (index into its
         // encoded prompt; == prompt.len() once prefill is complete).
         let mut region_cursor: Vec<usize> = vec![0; pool_size];
@@ -1632,12 +2851,18 @@ impl LlamaBackend {
                     continue;
                 }
                 // Greedy (temp=0) so this stays deterministic and comparable to serial.
-                let Some(region) = sched.admit(encoded[p].clone(), max_new, true, Some(0)) else {
+                let Some(handle) = sched
+                    .admit(encoded[p].clone(), max_new, true, Some(0))
+                    .map_err(|error| {
+                        infer_err(backend)(candle_core::Error::Msg(error.to_string()))
+                    })?
+                else {
                     break; // pool full this tick; remaining prompts wait for a release
                 };
-                let region = region as usize;
+                let region = handle.slot_id as usize;
                 prompt_admitted[p] = true;
                 region_prompt[region] = Some(p);
+                region_handle[region] = Some(handle);
                 region_cursor[region] = 0;
                 stats.admissions += 1;
                 if region_ever_used[region] {
@@ -1702,10 +2927,10 @@ impl LlamaBackend {
             //    region active_regions[i]); every non-listed region is untouched, so
             //    a waiting/parked region keeps its KV intact.
             cache.set_regions(active_regions.clone());
-            let tok_t =
-                Tensor::from_vec(step_tokens, active_regions.len(), &device).map_err(infer_err(backend))?;
-            let pos_t =
-                Tensor::from_vec(step_pos, active_regions.len(), &device).map_err(infer_err(backend))?;
+            let tok_t = Tensor::from_vec(step_tokens, active_regions.len(), &device)
+                .map_err(infer_err(backend))?;
+            let pos_t = Tensor::from_vec(step_pos, active_regions.len(), &device)
+                .map_err(infer_err(backend))?;
             let logits = self
                 .model
                 .hawking_decode_step(&tok_t, &pos_t, &mut cache)
@@ -1717,7 +2942,7 @@ impl LlamaBackend {
             //    prefill complete once a prompt is fully consumed.
             // Collect the decode batch (Decoding slots) so the scheduler validates +
             // advances them; prefill advancement is bookkeeping this method owns.
-            let mut to_release: Vec<u32> = Vec::new();
+            let mut to_release: Vec<crate::continuous_batch::SlotHandle> = Vec::new();
             let mut decode_batch: Vec<crate::continuous_batch::DecodeStep> = Vec::new();
             let mut decode_tokens: Vec<u32> = Vec::new();
 
@@ -1740,13 +2965,22 @@ impl LlamaBackend {
                             .map_err(infer_err(backend))?;
                         // Prefill is done: mark decoding, seed last_token/position via
                         // the scheduler so decode_plan picks it up next tick.
-                        sched.mark_prefill_complete(region_u32);
-                        // The scheduler's slot is now Decoding at position == prompt
-                        // len, last_token == prompt's last id. Feed the freshly sampled
-                        // first token through apply so it advances to prompt_len+1 and
-                        // records the emission (EOS/max handled centrally).
+                        let handle = region_handle[region]
+                            .expect("active prefilling region retains its admission handle");
+                        if !sched.mark_prefill_complete(handle) {
+                            return Err(infer_err(backend)(candle_core::Error::Msg(format!(
+                                "stale prefill completion for slot {} epoch {}",
+                                handle.slot_id, handle.admission_epoch
+                            ))));
+                        }
+                        // The scheduler's slot is now Decoding at the prompt's final
+                        // zero-based position, with last_token == prompt's last id.
+                        // Feed the freshly sampled first token through apply: this
+                        // records it at the contiguous `prompt_len` position (EOS/max
+                        // handled centrally), with no KV/RoPE position skipped.
                         let step = crate::continuous_batch::DecodeStep {
                             slot_id: region_u32,
+                            admission_epoch: sched.slots[region].admission_epoch,
                             token: sched.slots[region].last_token.unwrap(),
                             position: sched.slots[region].position,
                         };
@@ -1769,6 +3003,7 @@ impl LlamaBackend {
                     let slot = &sched.slots[region];
                     let step = crate::continuous_batch::DecodeStep {
                         slot_id: region_u32,
+                        admission_epoch: slot.admission_epoch,
                         token: slot.last_token.expect("decoding slot has last_token"),
                         position: slot.position,
                     };
@@ -1794,7 +3029,10 @@ impl LlamaBackend {
                     n_gen[p] = generated[p].len();
                     if d.finished {
                         prompt_done[p] = true;
-                        to_release.push(d.slot_id);
+                        to_release.push(crate::continuous_batch::SlotHandle {
+                            slot_id: d.slot_id,
+                            admission_epoch: d.admission_epoch,
+                        });
                     }
                 }
             }
@@ -1814,10 +3052,16 @@ impl LlamaBackend {
             //    so a later admission reuses it. The region's KV bytes are now stale
             //    but will be overwritten (position 0 up) when the next prompt prefills
             //    into it — never read across the reuse boundary.
-            for region_u32 in to_release {
-                let region = region_u32 as usize;
-                sched.release_slot(region_u32);
+            for handle in to_release {
+                let region = handle.slot_id as usize;
+                if !sched.release_slot(handle) {
+                    return Err(infer_err(backend)(candle_core::Error::Msg(format!(
+                        "stale release for slot {} epoch {}",
+                        handle.slot_id, handle.admission_epoch
+                    ))));
+                }
                 region_prompt[region] = None;
+                region_handle[region] = None;
                 region_cursor[region] = 0;
                 stats.releases += 1;
             }
@@ -1855,6 +3099,15 @@ impl LlamaBackend {
         max_tokens: u32,
     ) -> Result<Vec<(String, usize)>, RunError> {
         let backend = "batch_infer";
+        // An explicit speculative opt-in must cover the whole inference request,
+        // not only singleton buckets that happen to fall back to `generate` below.
+        // Until the multi-row transactional verifier lands, route every row through
+        // the proven single-stream loop. This may trade batched throughput for exact
+        // speculative coverage, but only behind the experimental opt-in; the default
+        // production path remains the established batched implementation.
+        if let Some(config) = candle_spec_config()? {
+            return self.generate_batch_speculative_rows(prompts, max_tokens, config);
+        }
         // Wrap + tokenize every prompt (same chat template as `generate`).
         let mut encoded: Vec<Vec<u32>> = Vec::with_capacity(prompts.len());
         for p in prompts {
@@ -1909,7 +3162,8 @@ impl LlamaBackend {
             }
             let plen = encoded[members[0]].len();
             let available_gb = crate::hardware::read_memory_snapshot().available_gb;
-            let width_cap = batch_width_cap(kv_bytes_per_token, plen, max_tokens as usize, available_gb);
+            let width_cap =
+                batch_width_cap(kv_bytes_per_token, plen, max_tokens as usize, available_gb);
             for members in members.chunks(width_cap) {
                 if members.len() == 1 {
                     singletons.push(members[0]);
@@ -2041,8 +3295,12 @@ impl LlamaBackend {
                 // huge band still splits into memory-safe sub-batches.
                 let pad_len = members.iter().map(|&m| encoded[m].len()).max().unwrap();
                 let available_gb = crate::hardware::read_memory_snapshot().available_gb;
-                let width_cap =
-                    batch_width_cap(kv_bytes_per_token, pad_len, max_tokens as usize, available_gb);
+                let width_cap = batch_width_cap(
+                    kv_bytes_per_token,
+                    pad_len,
+                    max_tokens as usize,
+                    available_gb,
+                );
                 for members in members.chunks(width_cap) {
                     if members.len() == 1 {
                         let m = members[0];
@@ -2051,13 +3309,511 @@ impl LlamaBackend {
                         continue;
                     }
                     let results = self.generate_padded_bucket(&encoded, members, max_tokens)?;
-                    for (&m, (text, n)) in members.iter().zip(results.into_iter()) {
+                    for (&m, (text, n)) in members.iter().zip(results) {
                         out[m] = (text, n);
                     }
                 }
             }
         }
         Ok(out)
+    }
+
+    /// Coverage-first adapter for the owned speculative loop. Exact wrapped-token
+    /// lengths are grouped into small synchronized cohorts, while singleton/ragged
+    /// rows retain the already-proven single-stream state machine. Keeping routing
+    /// in one helper prevents inference entrypoints from bypassing the opt-in.
+    fn generate_batch_speculative_rows(
+        &mut self,
+        prompts: &[String],
+        max_tokens: u32,
+        config: CandleSpecConfig,
+    ) -> Result<Vec<(String, usize)>, RunError> {
+        self.generate_batch_speculative_rows_with_stats(prompts, max_tokens, config)
+            .map(|(outputs, _stats)| outputs)
+    }
+
+    fn generate_batch_speculative_rows_with_stats(
+        &mut self,
+        prompts: &[String],
+        max_tokens: u32,
+        config: CandleSpecConfig,
+    ) -> Result<(Vec<(String, usize)>, CandleSpecBatchStats), RunError> {
+        let backend = "batch_infer";
+        if prompts.is_empty() {
+            return Ok((Vec::new(), CandleSpecBatchStats::default()));
+        }
+        if max_tokens == 0 {
+            return Ok((
+                vec![(String::new(), 0); prompts.len()],
+                CandleSpecBatchStats {
+                    rows: prompts.len(),
+                    ..CandleSpecBatchStats::default()
+                },
+            ));
+        }
+
+        // Tokenize once for exact-length cohort planning and once without the chat
+        // wrapper for prompt lookup, matching the scalar speculative path exactly.
+        let mut encoded = Vec::with_capacity(prompts.len());
+        let mut draft_seeds = Vec::with_capacity(prompts.len());
+        for prompt in prompts {
+            let wrapped = format!(
+                "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{prompt}<|eot_id|>\
+                 <|start_header_id|>assistant<|end_header_id|>\n\n"
+            );
+            encoded.push(
+                self.tokenizer
+                    .encode(wrapped, true)
+                    .map_err(infer_err(backend))?
+                    .get_ids()
+                    .to_vec(),
+            );
+            draft_seeds.push(
+                self.tokenizer
+                    .encode(prompt.as_str(), false)
+                    .map_err(infer_err(backend))?
+                    .get_ids()
+                    .to_vec(),
+            );
+        }
+
+        let mut buckets: std::collections::BTreeMap<usize, Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for (row, ids) in encoded.iter().enumerate() {
+            buckets.entry(ids.len()).or_default().push(row);
+        }
+
+        let mut outputs = vec![(String::new(), 0usize); prompts.len()];
+        let mut aggregate = CandleSpecBatchStats {
+            rows: prompts.len(),
+            ..CandleSpecBatchStats::default()
+        };
+        let kv_bytes_per_token = self.model.kv_bytes_per_token_per_row();
+
+        for members in buckets.values() {
+            let prompt_len = encoded[members[0]].len();
+            let available_gb = crate::hardware::read_memory_snapshot().available_gb;
+            let memory_width = batch_width_cap(
+                kv_bytes_per_token,
+                prompt_len,
+                max_tokens as usize,
+                available_gb,
+            );
+            let cohort_width = memory_width.clamp(1, SPEC_SYNC_COHORT_MAX);
+
+            for cohort in members.chunks(cohort_width) {
+                if cohort.len() < 2 {
+                    let row = cohort[0];
+                    let (output, stats) = self.generate_speculative_ngram_with_stats(
+                        &prompts[row],
+                        max_tokens,
+                        config,
+                    )?;
+                    aggregate.serial_rows += 1;
+                    aggregate.attempted_tokens += stats.attempted_tokens;
+                    aggregate.accepted_tokens += stats.accepted_tokens;
+                    aggregate.target_calls += stats.target_calls;
+                    aggregate.rounds += stats.rounds;
+                    aggregate.output_tokens += output.1;
+                    outputs[row] = output;
+                    continue;
+                }
+
+                let cohort_encoded: Vec<Vec<u32>> =
+                    cohort.iter().map(|&row| encoded[row].clone()).collect();
+                let cohort_seeds: Vec<Vec<u32>> =
+                    cohort.iter().map(|&row| draft_seeds[row].clone()).collect();
+                let (cohort_outputs, stats) = self.generate_speculative_exact_cohort_with_stats(
+                    &cohort_encoded,
+                    &cohort_seeds,
+                    max_tokens,
+                    config,
+                )?;
+                aggregate.batched_cohorts += 1;
+                aggregate.max_cohort_width = aggregate.max_cohort_width.max(cohort.len());
+                aggregate.attempted_tokens += stats.attempted_tokens;
+                aggregate.accepted_tokens += stats.accepted_tokens;
+                aggregate.synchronized_clamp_tokens += stats.synchronized_clamp_tokens;
+                aggregate.target_calls += stats.target_calls;
+                aggregate.rounds += stats.rounds;
+                aggregate.output_tokens += stats.output_tokens;
+                aggregate.selector_dense_rounds += stats.selector_dense_rounds;
+                aggregate.selector_probe_rounds += stats.selector_probe_rounds;
+                aggregate.selector_retry_rounds += stats.selector_retry_rounds;
+                aggregate.selector_confirmation_rounds += stats.selector_confirmation_rounds;
+                aggregate.selector_active_rounds += stats.selector_active_rounds;
+                aggregate.selector_terminal_rounds_excluded +=
+                    stats.selector_terminal_rounds_excluded;
+                aggregate.selector_activated_cohorts += stats.selector_activated_cohorts;
+                aggregate.selector_locked_cohorts += stats.selector_locked_cohorts;
+                aggregate.selector_credit_ns = aggregate
+                    .selector_credit_ns
+                    .saturating_add(stats.selector_credit_ns);
+                aggregate.selector_regret_ns = aggregate
+                    .selector_regret_ns
+                    .saturating_add(stats.selector_regret_ns);
+                for (&row, output) in cohort.iter().zip(cohort_outputs) {
+                    outputs[row] = output;
+                }
+            }
+        }
+
+        tracing::debug!(
+            batch_size = prompts.len(),
+            max_window = config.max_window,
+            serial_rows = aggregate.serial_rows,
+            batched_cohorts = aggregate.batched_cohorts,
+            max_cohort_width = aggregate.max_cohort_width,
+            attempted_tokens = aggregate.attempted_tokens,
+            accepted_tokens = aggregate.accepted_tokens,
+            synchronized_clamp_tokens = aggregate.synchronized_clamp_tokens,
+            target_calls = aggregate.target_calls,
+            output_tokens = aggregate.output_tokens,
+            selector_dense_rounds = aggregate.selector_dense_rounds,
+            selector_probe_rounds = aggregate.selector_probe_rounds,
+            selector_retry_rounds = aggregate.selector_retry_rounds,
+            selector_confirmation_rounds = aggregate.selector_confirmation_rounds,
+            selector_active_rounds = aggregate.selector_active_rounds,
+            selector_terminal_rounds_excluded = aggregate.selector_terminal_rounds_excluded,
+            selector_activated_cohorts = aggregate.selector_activated_cohorts,
+            selector_locked_cohorts = aggregate.selector_locked_cohorts,
+            selector_credit_ns = aggregate.selector_credit_ns,
+            selector_regret_ns = aggregate.selector_regret_ns,
+            "owned speculative inference batch completed"
+        );
+        Ok((outputs, aggregate))
+    }
+
+    /// Lossless dense-KV speculative decode for one exact-length cohort.
+    ///
+    /// Before each verifier call every active row's KV contains its wrapped prompt
+    /// and every generated token except the row's `pending` token. Because the
+    /// cohort commits the minimum accepted prefix, all survivors remain at one
+    /// `kv_len`; `forward_all_argmax` and one global transactional truncate are
+    /// therefore sufficient. Rows that reach EOS are compacted out immediately.
+    fn generate_speculative_exact_cohort_with_stats(
+        &mut self,
+        encoded: &[Vec<u32>],
+        draft_seeds: &[Vec<u32>],
+        max_tokens: u32,
+        config: CandleSpecConfig,
+    ) -> Result<(Vec<(String, usize)>, CandleSpecBatchStats), RunError> {
+        let backend = "batch_infer";
+        let bsz = encoded.len();
+        if !(2..=SPEC_SYNC_COHORT_MAX).contains(&bsz) || draft_seeds.len() != bsz {
+            return Err(RunError::Inference {
+                backend,
+                msg: format!(
+                    "synchronized speculative cohort must contain 2..={SPEC_SYNC_COHORT_MAX} rows; encoded={bsz}, draft_seeds={}",
+                    draft_seeds.len()
+                ),
+            });
+        }
+        if max_tokens == 0 {
+            return Ok((
+                vec![(String::new(), 0); bsz],
+                CandleSpecBatchStats {
+                    rows: bsz,
+                    ..CandleSpecBatchStats::default()
+                },
+            ));
+        }
+        let prompt_len = encoded[0].len();
+        if prompt_len == 0 || encoded.iter().any(|row| row.len() != prompt_len) {
+            return Err(RunError::Inference {
+                backend,
+                msg: "synchronized speculative cohort requires equal, non-empty prompt lengths"
+                    .to_string(),
+            });
+        }
+
+        let requested_end =
+            speculative_cache_end(prompt_len, max_tokens).ok_or_else(|| RunError::Inference {
+                backend,
+                msg: "speculative cohort prompt + cached generation overflowed the context length"
+                    .to_string(),
+            })?;
+        if requested_end > crate::quantized_llama_batched::MAX_SEQ_LEN {
+            return Err(RunError::Inference {
+                backend,
+                msg: format!(
+                    "context length exceeded: prompt={prompt_len} + cached_generation={} = {requested_end}, beyond MAX_SEQ_LEN={}",
+                    (max_tokens as usize).saturating_sub(1),
+                    crate::quantized_llama_batched::MAX_SEQ_LEN
+                ),
+            });
+        }
+
+        let mut drafts = Vec::with_capacity(bsz);
+        for seed in draft_seeds {
+            let mut draft = NgramDraft::try_new(config.ngram_order, config.max_window)
+                .map_err(infer_err(backend))?;
+            draft.reset(seed);
+            drafts.push(draft);
+        }
+        let mut draft_context = draft_seeds.to_vec();
+        let mut generated: Vec<Vec<u32>> = vec![Vec::with_capacity(max_tokens as usize); bsz];
+
+        // One true B-row prefill. `forward` returns the final prompt-position
+        // distribution for every row, exactly the free first token used by the
+        // scalar state machine.
+        self.model.set_next_seq_cap(Some(requested_end));
+        let mut flat_prompt = Vec::with_capacity(bsz * prompt_len);
+        for row in encoded {
+            flat_prompt.extend_from_slice(row);
+        }
+        let prompt_input = Tensor::from_vec(flat_prompt, (bsz, prompt_len), &self.device)
+            .map_err(infer_err(backend))?;
+        let prompt_next = self
+            .model
+            .forward(&prompt_input, 0)
+            .map_err(infer_err(backend))?
+            .argmax(1)
+            .map_err(infer_err(backend))?
+            .to_vec1::<u32>()
+            .map_err(infer_err(backend))?;
+        if prompt_next.len() != bsz {
+            return Err(RunError::Inference {
+                backend,
+                msg: format!(
+                    "synchronized prefill returned {} rows for cohort width {bsz}",
+                    prompt_next.len()
+                ),
+            });
+        }
+
+        let mut stats = CandleSpecBatchStats {
+            rows: bsz,
+            batched_cohorts: 1,
+            max_cohort_width: bsz,
+            target_calls: 1,
+            rounds: 1,
+            ..CandleSpecBatchStats::default()
+        };
+        let mut active = Vec::with_capacity(bsz);
+        let mut pending = Vec::with_capacity(bsz);
+        let mut prefill_keep = Vec::with_capacity(bsz);
+        for (row, token) in prompt_next.into_iter().enumerate() {
+            if token == self.eos {
+                continue;
+            }
+            drafts[row].commit(&[token]);
+            draft_context[row].push(token);
+            generated[row].push(token);
+            active.push(row);
+            pending.push(token);
+            prefill_keep.push(row);
+        }
+        if !active.is_empty() && active.len() != bsz {
+            self.model
+                .compact_kv_cache(&prefill_keep)
+                .map_err(infer_err(backend))?;
+        }
+
+        let mut kv_len = prompt_len;
+        // Unlike the scalar lane, synchronized verifier economics vary with B.
+        // Seed the cohort-local policy at the selector's build-hashed calibrated
+        // probe width so B=4's K=3 experiment is not silently capped to K=2.
+        let mut policy = CandleSpecPolicy::new_with_initial_window(
+            config.max_window,
+            candle_spec_profit_probe_width(bsz),
+        );
+        let mut profit_selector = CandleSpecProfitSelector::new(bsz);
+        while !active.is_empty() && generated[active[0]].len() < max_tokens as usize {
+            debug_assert!(active
+                .iter()
+                .all(|&row| generated[row].len() == generated[active[0]].len()));
+            debug_assert_eq!(active.len(), pending.len());
+            let round_started = std::time::Instant::now();
+            let round_batch = active.len();
+            let remaining = max_tokens as usize - generated[active[0]].len();
+            let policy_width = policy.window_for_round(true, remaining);
+            let requested_width =
+                profit_selector.requested_width(round_batch, policy_width, remaining);
+
+            let mut proposals = Vec::with_capacity(active.len());
+            for &row in &active {
+                let proposal = drafts[row].propose(&draft_context[row], requested_width);
+                if proposal.len() > requested_width {
+                    return Err(RunError::Inference {
+                        backend,
+                        msg: format!(
+                            "synchronized drafter exceeded its bounded request: proposed={} want={requested_width}",
+                            proposal.len()
+                        ),
+                    });
+                }
+                proposals.push(proposal);
+            }
+            // A dense verifier cannot omit a row. Restrict every row to the
+            // shortest proposal; width zero degenerates to ordinary batched greedy.
+            let width = proposals.iter().map(Vec::len).min().unwrap_or(0);
+            let span_len = width + 1;
+            let mut flat_span = Vec::with_capacity(active.len() * span_len);
+            for (row, proposal) in pending.iter().zip(&proposals) {
+                flat_span.push(*row);
+                flat_span.extend_from_slice(&proposal[..width]);
+            }
+            let span_input = Tensor::from_vec(flat_span, (active.len(), span_len), &self.device)
+                .map_err(infer_err(backend))?;
+            let targets = match synchronized_verifier_path(width) {
+                CandleSpecVerifierPath::DenseForward => {
+                    // Once the selector requests K=0, use the exact production
+                    // batched-greedy primitive. `forward_all_argmax` retains every
+                    // sequence position and carries measurable fixed overhead even
+                    // for Bx1, which would make a locked dense fallback slower than
+                    // the path it is supposed to recover.
+                    let target_tokens = match self
+                        .model
+                        .forward(&span_input, kv_len)
+                        .and_then(|logits| logits.argmax(1))
+                        .and_then(|tokens| tokens.to_vec1::<u32>())
+                    {
+                        Ok(tokens) => tokens,
+                        Err(error) => {
+                            // `forward` may fail after one or more layers appended
+                            // KV. Restore the same pre-round checkpoint guaranteed
+                            // by the transactional speculative primitive.
+                            self.model
+                                .truncate_kv_cache(kv_len)
+                                .map_err(infer_err(backend))?;
+                            return Err(infer_err(backend)(error));
+                        }
+                    };
+                    match synchronized_dense_targets(target_tokens, active.len()) {
+                        Ok(targets) => targets,
+                        Err(msg) => {
+                            self.model
+                                .truncate_kv_cache(kv_len)
+                                .map_err(infer_err(backend))?;
+                            return Err(RunError::Inference { backend, msg });
+                        }
+                    }
+                }
+                CandleSpecVerifierPath::SpeculativeForwardAll => {
+                    let target_tensor = self
+                        .model
+                        .forward_all_argmax(&span_input, kv_len)
+                        .map_err(infer_err(backend))?;
+                    match target_tensor.to_vec2::<u32>() {
+                        Ok(targets) => targets,
+                        Err(error) => {
+                            self.model
+                                .truncate_kv_cache(kv_len)
+                                .map_err(infer_err(backend))?;
+                            return Err(infer_err(backend)(error));
+                        }
+                    }
+                }
+            };
+            stats.target_calls += 1;
+            stats.rounds += 1;
+            let (common_accept, per_row_accept) =
+                match synchronized_accept_prefix(&proposals, &targets, width) {
+                    Ok(acceptance) => acceptance,
+                    Err(msg) => {
+                        self.model
+                            .truncate_kv_cache(kv_len)
+                            .map_err(infer_err(backend))?;
+                        return Err(RunError::Inference { backend, msg });
+                    }
+                };
+
+            // Finish all fallible host-side validation before changing the live KV
+            // boundary. If assembly ever rejects malformed verifier data, restore
+            // the pre-round checkpoint exactly like the tensor-shape path above.
+            let mut round_emits = Vec::with_capacity(active.len());
+            for batch_row in 0..active.len() {
+                match synchronized_emit(
+                    &proposals[batch_row],
+                    &targets[batch_row],
+                    common_accept,
+                    self.eos,
+                ) {
+                    Ok(emission) => round_emits.push(emission),
+                    Err(msg) => {
+                        self.model
+                            .truncate_kv_cache(kv_len)
+                            .map_err(infer_err(backend))?;
+                        return Err(RunError::Inference { backend, msg });
+                    }
+                }
+            }
+
+            // Commit pending + the common accepted prefix. Any wider accepted
+            // prefix and every rejected proposal are transactionally discarded and
+            // overwritten by the next call.
+            let keep_len = kv_len + 1 + common_accept;
+            self.model
+                .truncate_kv_cache(keep_len)
+                .map_err(infer_err(backend))?;
+            stats.attempted_tokens += width * active.len();
+            let visible_accepts: Vec<usize> = round_emits
+                .iter()
+                .map(|(emit, _hit_eos)| common_accept.min(emit.len()))
+                .collect();
+            stats.accepted_tokens += visible_accepts.iter().sum::<usize>();
+            stats.synchronized_clamp_tokens += per_row_accept
+                .iter()
+                .map(|&accepted| accepted - common_accept)
+                .sum::<usize>();
+            policy.observe(width, visible_accepts.iter().copied().min().unwrap_or(0));
+
+            let mut keep_rows = Vec::with_capacity(active.len());
+            let mut next_active = Vec::with_capacity(active.len());
+            let mut next_pending = Vec::with_capacity(active.len());
+            for ((batch_row, &row), (emit, hit_eos)) in active.iter().enumerate().zip(round_emits) {
+                let bonus = targets[batch_row][common_accept];
+                drafts[row].commit(&emit);
+                draft_context[row].extend_from_slice(&emit);
+                generated[row].extend_from_slice(&emit);
+
+                if !hit_eos {
+                    keep_rows.push(batch_row);
+                    next_active.push(row);
+                    next_pending.push(bonus);
+                }
+            }
+            if !keep_rows.is_empty() && keep_rows.len() != active.len() {
+                self.model
+                    .compact_kv_cache(&keep_rows)
+                    .map_err(infer_err(backend))?;
+            }
+            let terminal_eos = keep_rows.len() != active.len();
+            let visible_yield = 1 + visible_accepts.iter().copied().min().unwrap_or(0);
+            profit_selector.observe(CandleSpecRoundObservation {
+                active_batch: round_batch,
+                width,
+                visible_yield,
+                elapsed_ns: round_started.elapsed().as_nanos(),
+                terminal_eos,
+            });
+            active = next_active;
+            pending = next_pending;
+            kv_len = keep_len;
+        }
+
+        stats.selector_dense_rounds = profit_selector.dense_rounds;
+        stats.selector_probe_rounds = profit_selector.probe_rounds;
+        stats.selector_retry_rounds = profit_selector.retry_rounds;
+        stats.selector_confirmation_rounds = profit_selector.confirmation_rounds;
+        stats.selector_active_rounds = profit_selector.active_rounds;
+        stats.selector_terminal_rounds_excluded = profit_selector.terminal_rounds_excluded;
+        stats.selector_activated_cohorts = usize::from(profit_selector.ever_activated);
+        stats.selector_locked_cohorts = usize::from(profit_selector.ever_locked);
+        stats.selector_credit_ns = profit_selector.bank_ns;
+        stats.selector_regret_ns = profit_selector.regret_ns;
+
+        let mut outputs = Vec::with_capacity(bsz);
+        for row in generated {
+            let text = self
+                .tokenizer
+                .decode(&row, true)
+                .map_err(infer_err(backend))?;
+            stats.output_tokens += row.len();
+            outputs.push((text.trim().to_string(), row.len()));
+        }
+        Ok((outputs, stats))
     }
 
     /// PATCH (P-padbucket, Inference Hot Path 7.5→8 / Batching Efficiency 7→7.5,
@@ -2114,19 +3870,18 @@ impl LlamaBackend {
                 flat.push(filler);
             }
         }
-        let input = Tensor::from_vec(flat, (bsz, pad_len), &self.device)
-            .map_err(infer_err(backend))?;
+        let input =
+            Tensor::from_vec(flat, (bsz, pad_len), &self.device).map_err(infer_err(backend))?;
         // Per-row global positions for the prefill: row r's slot i is at global
         // position i (real for i<real_len[r]; pad slots keep their positional
         // slot but are masked out). q_global_pos matches for mask + rotary.
-        let prefill_pos: Vec<Vec<usize>> =
-            (0..bsz).map(|_| (0..pad_len).collect()).collect();
+        let prefill_pos: Vec<Vec<usize>> = (0..bsz).map(|_| (0..pad_len).collect()).collect();
         let pos_flat: Vec<u32> = prefill_pos
             .iter()
             .flat_map(|r| r.iter().map(|&p| p as u32))
             .collect();
-        let positions = Tensor::from_vec(pos_flat, (bsz, pad_len), &self.device)
-            .map_err(infer_err(backend))?;
+        let positions =
+            Tensor::from_vec(pos_flat, (bsz, pad_len), &self.device).map_err(infer_err(backend))?;
         let mask = crate::quantized_llama_batched::build_padded_mask(
             &real_len,
             &prefill_pos,
@@ -2177,9 +3932,8 @@ impl LlamaBackend {
         // real prefix `0..active_real0[r]` and every decode key `>= pad_len` are
         // real keys the row must attend to. `active_real0` is the row's real prefix
         // length, parallel to `active`, carried unchanged across EOS shrink.
-        let mut cached_len = pad_len;
         let mut active_real0: Vec<usize> = active.iter().map(|&r| real_len[r]).collect();
-        for _ in 1..max_tokens as usize {
+        for cached_len in (pad_len..).take((max_tokens as usize).saturating_sub(1)) {
             if active.is_empty() {
                 break;
             }
@@ -2190,8 +3944,8 @@ impl LlamaBackend {
             let input = Tensor::from_vec(active_last.clone(), (abz, 1), &self.device)
                 .map_err(infer_err(backend))?;
             let pos_flat: Vec<u32> = active_pos.iter().map(|&p| p as u32).collect();
-            let positions = Tensor::from_vec(pos_flat, (abz, 1), &self.device)
-                .map_err(infer_err(backend))?;
+            let positions =
+                Tensor::from_vec(pos_flat, (abz, 1), &self.device).map_err(infer_err(backend))?;
             let logits = self
                 .model
                 .forward_padded(&input, &positions, &mask, false, seq_cap)
@@ -2203,7 +3957,6 @@ impl LlamaBackend {
                 .map_err(infer_err(backend))?
                 .to_vec1::<u32>()
                 .map_err(infer_err(backend))?;
-            cached_len += 1;
             let mut keep: Vec<usize> = Vec::with_capacity(abz);
             let mut new_active: Vec<usize> = Vec::with_capacity(abz);
             let mut new_last: Vec<u32> = Vec::with_capacity(abz);
@@ -2318,6 +4071,16 @@ impl LlamaBackend {
         if prompts.is_empty() {
             return Ok(Vec::new());
         }
+        // Classification and JSON extraction normally take this shared-prefix
+        // fast path instead of `generate_batch`. Honor the same explicit
+        // speculative opt-in here so those inference lanes cannot silently bypass
+        // it. Exact-length rows use the synchronized transactional cohort; ragged
+        // rows keep the scalar reference path until prefix-KV sharing and per-row
+        // speculative positions can be composed safely. Default/off execution below
+        // remains unchanged.
+        if let Some(config) = candle_spec_config()? {
+            return self.generate_batch_speculative_rows(prompts, max_tokens, config);
+        }
         // Tokenize every prompt with the SAME chat wrap as `generate`/`generate_batch`
         // so the token sequences (and thus the outputs) are identical to serial.
         let mut encoded: Vec<Vec<u32>> = Vec::with_capacity(prompts.len());
@@ -2392,8 +4155,12 @@ impl LlamaBackend {
             // since that is this bucket's real total sequence length.
             let plen_total = prefix_len + rlen;
             let available_gb = crate::hardware::read_memory_snapshot().available_gb;
-            let width_cap =
-                batch_width_cap(kv_bytes_per_token, plen_total, max_tokens as usize, available_gb);
+            let width_cap = batch_width_cap(
+                kv_bytes_per_token,
+                plen_total,
+                max_tokens as usize,
+                available_gb,
+            );
             for members in members.chunks(width_cap) {
                 let bsz = members.len();
                 if bsz == 1 {
@@ -2406,14 +4173,15 @@ impl LlamaBackend {
                     self.model
                         .restore_kv_cache(&prefix_kv)
                         .map_err(infer_err(backend))?;
-                    let (text, n) = self.decode_from_index_pos(
-                        &[ids[prefix_len..].to_vec()],
-                        prefix_len,
-                        max_tokens,
-                        backend,
-                    )?
-                    .pop()
-                    .expect("single-row decode returns exactly one result");
+                    let (text, n) = self
+                        .decode_from_index_pos(
+                            &[ids[prefix_len..].to_vec()],
+                            prefix_len,
+                            max_tokens,
+                            backend,
+                        )?
+                        .pop()
+                        .expect("single-row decode returns exactly one result");
                     out[m] = (text, n);
                     continue;
                 }
@@ -2421,9 +4189,9 @@ impl LlamaBackend {
                 // batch-decode the remainder with the same active-set-shrink loop
                 // `generate_batch` uses. PATCH (P-rightsize): size the KV cache to
                 // this bucket's real prefix+remainder+max_tokens, not the worst case.
-                let seq_cap = plen_total.saturating_add(max_tokens as usize).min(
-                    crate::quantized_llama_batched::MAX_SEQ_LEN,
-                );
+                let seq_cap = plen_total
+                    .saturating_add(max_tokens as usize)
+                    .min(crate::quantized_llama_batched::MAX_SEQ_LEN);
                 self.model.set_next_seq_cap(Some(seq_cap));
                 self.model
                     .restore_kv_cache_broadcast(&prefix_kv, bsz)
@@ -2484,8 +4252,8 @@ impl LlamaBackend {
             } else {
                 (active_last.clone(), 1usize)
             };
-            let input = Tensor::from_vec(rows, (abz, seq_len), &self.device)
-                .map_err(infer_err(backend))?;
+            let input =
+                Tensor::from_vec(rows, (abz, seq_len), &self.device).map_err(infer_err(backend))?;
             let logits = self
                 .model
                 .forward(&input, index_pos)
@@ -2519,7 +4287,10 @@ impl LlamaBackend {
         }
         let mut out = Vec::with_capacity(bsz);
         for g in gen {
-            let text = self.tokenizer.decode(&g, true).map_err(infer_err(backend))?;
+            let text = self
+                .tokenizer
+                .decode(&g, true)
+                .map_err(infer_err(backend))?;
             out.push((text.trim().to_string(), g.len()));
         }
         Ok(out)
@@ -3328,8 +5099,7 @@ impl CrossEncoder {
         // zeros because it embeds one sentence at a time.)
         let token_type =
             Tensor::from_vec(types, (bsz, seq), &self.device).map_err(infer_err(backend))?;
-        let attn =
-            Tensor::from_vec(mask, (bsz, seq), &self.device).map_err(infer_err(backend))?;
+        let attn = Tensor::from_vec(mask, (bsz, seq), &self.device).map_err(infer_err(backend))?;
 
         // [bsz, seq, hidden]
         let hidden = self
@@ -3360,9 +5130,9 @@ impl CrossEncoder {
             .map_err(infer_err(backend))?
             .tanh()
             .map_err(infer_err(backend))?; // [bsz, hidden]
-        // Classifier: logit = pooled · Wᵀ + b, num_labels == 1 → [bsz, 1] → [bsz].
-        // Identity output activation (per the model card), so the raw logit IS the
-        // relevance score.
+                                           // Classifier: logit = pooled · Wᵀ + b, num_labels == 1 → [bsz, 1] → [bsz].
+                                           // Identity output activation (per the model card), so the raw logit IS the
+                                           // relevance score.
         let logits = pooled
             .matmul(
                 &self
@@ -3393,9 +5163,9 @@ impl CrossEncoder {
 /// backend, so the lock serializes forward passes. `Result` is not cached — a
 /// failed load (offline, missing file) falls back to the bi-encoder every time and
 /// can succeed later once the weights are present.
-fn cross_encoder_cache(
-) -> &'static std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::Mutex<CrossEncoder>>>>
-{
+fn cross_encoder_cache() -> &'static std::sync::Mutex<
+    std::collections::HashMap<String, std::sync::Arc<std::sync::Mutex<CrossEncoder>>>,
+> {
     static CACHE: std::sync::OnceLock<
         std::sync::Mutex<
             std::collections::HashMap<String, std::sync::Arc<std::sync::Mutex<CrossEncoder>>>,
@@ -3496,9 +5266,7 @@ impl JobRunner for RerankRunner {
         };
 
         if let Some(cross) = cross {
-            return self
-                .run_cross_encoder(cross, items, top_k, started)
-                .await;
+            return self.run_cross_encoder(cross, items, top_k, started).await;
         }
         self.run_bi_encoder(pool, manifest, items, top_k, started)
             .await
@@ -4535,11 +6303,23 @@ impl JobRunner for CustomRunner {
 /// returns the first whose `can_run` is true. `ClusterRunner` is FIRST so a giant
 /// model on a cluster worker routes to the Plane B seam (not to BatchInferRunner,
 /// which would try to load it on one node); for every non-cluster worker its
-/// `can_run` is false, so normal dispatch is unchanged. `CustomRunner` is the
+/// `can_run` is false, so normal dispatch is unchanged. An explicitly configured,
+/// fully pinned render-preview runner is inserted after the cluster seam; absent
+/// configuration is inert, while a partial configuration is a startup error.
+/// The production runtime matrix does not advertise that preview type yet, so
+/// this registration is a typed polling scaffold rather than a billable lane.
+/// `CustomRunner` is the
 /// general-compute seam (ACCRETION.md §7-8): it claims the `custom` job type so such
 /// a job reaches an honest `NotImplemented` boundary instead of a generic NoRunner.
-pub fn default_runners() -> Vec<Box<dyn JobRunner>> {
-    vec![
+pub fn default_runners() -> Result<Vec<Box<dyn JobRunner>>, String> {
+    let preview = crate::render_preview::SpecRenderPreviewRunner::for_live_cycles_from_env()?;
+    Ok(default_runners_with_preview(preview))
+}
+
+fn default_runners_with_preview(
+    preview: Option<crate::render_preview::SpecRenderPreviewRunner>,
+) -> Vec<Box<dyn JobRunner>> {
+    let mut runners: Vec<Box<dyn JobRunner>> = vec![
         Box::new(ClusterRunner),
         Box::new(EmbedRunner),
         Box::new(BatchInferRunner),
@@ -4548,7 +6328,11 @@ pub fn default_runners() -> Vec<Box<dyn JobRunner>> {
         Box::new(JsonExtractionRunner),
         Box::new(RerankRunner),
         Box::new(CustomRunner),
-    ]
+    ];
+    if let Some(preview) = preview {
+        runners.insert(1, Box::new(preview));
+    }
+    runners
 }
 
 /// Select the first runner that can handle `manifest` on `cap`, else an explicit
@@ -4593,7 +6377,12 @@ const LATENCY_ITERS: usize = 12;
 /// "can't compute a real cap, don't fabricate one" fallback. Always returns at
 /// least 1, so a single oversized row is still attempted (never silently
 /// dropped) rather than the cap collapsing to a batch of nothing.
-fn batch_width_cap(kv_bytes_per_token: usize, plen: usize, max_tokens: usize, available_gb: f32) -> usize {
+fn batch_width_cap(
+    kv_bytes_per_token: usize,
+    plen: usize,
+    max_tokens: usize,
+    available_gb: f32,
+) -> usize {
     if kv_bytes_per_token == 0 || available_gb <= 0.0 {
         return usize::MAX;
     }
@@ -4643,10 +6432,7 @@ fn percentile_ms(mut samples: Vec<f64>, pct: f64) -> u32 {
 /// `BatchInferRunner::can_run` uses (see `bench_llama_big`) so a worker
 /// too small to ever be handed that job doesn't attempt a multi-GB
 /// download/load just to produce a benchmark row.
-pub async fn run_benchmarks(
-    pool: &crate::pool::ModelPool,
-    memory_gb: f32,
-) -> Vec<BenchResult> {
+pub async fn run_benchmarks(pool: &crate::pool::ModelPool, memory_gb: f32) -> Vec<BenchResult> {
     let mut out = Vec::new();
     match bench_embed(pool).await {
         Ok(b) => out.push(b),
@@ -4654,11 +6440,15 @@ pub async fn run_benchmarks(
     }
     match bench_llama(pool).await {
         Ok(b) => out.push(b),
-        Err(e) => tracing::warn!(error = %e, "llama (1B) benchmark unavailable (model load failed)"),
+        Err(e) => {
+            tracing::warn!(error = %e, "llama (1B) benchmark unavailable (model load failed)")
+        }
     }
     match bench_llama_big(pool, memory_gb).await {
         Ok(b) => out.push(b),
-        Err(e) => tracing::warn!(error = %e, "llama (7B) benchmark unavailable (model load failed or worker too small)"),
+        Err(e) => {
+            tracing::warn!(error = %e, "llama (7B) benchmark unavailable (model load failed or worker too small)")
+        }
     }
     match bench_whisper(pool).await {
         Ok(b) => out.push(b),
@@ -4879,7 +6669,8 @@ impl LiveThroughputMonitor {
 /// complements), not a new plumbing path end to end. Cleared at the start of each
 /// new task (a resolved throttle from a prior task must never haunt the next
 /// one) via `clear_live_throttle`.
-static LIVE_THROTTLE_DETECTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LIVE_THROTTLE_DETECTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// True if any currently/just-running task's live monitor has flagged a real
 /// sustained throughput drop since the last `clear_live_throttle`.
@@ -5147,6 +6938,664 @@ mod tests {
     static METAL_HARDWARE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
+    fn candle_spec_config_is_bounded_and_fail_closed() {
+        assert_eq!(parse_candle_spec_config(None, None, None).unwrap(), None);
+        assert_eq!(
+            parse_candle_spec_config(Some("ngram"), None, None).unwrap(),
+            Some(CandleSpecConfig {
+                max_window: DEFAULT_SPEC_WINDOW,
+                ngram_order: DEFAULT_SPEC_NGRAM_ORDER,
+            })
+        );
+        assert_eq!(
+            parse_candle_spec_config(Some("1"), Some("32"), Some("64")).unwrap(),
+            Some(CandleSpecConfig {
+                max_window: MAX_SPEC_WINDOW,
+                ngram_order: MAX_SPEC_NGRAM_ORDER,
+            })
+        );
+        for bad in [
+            parse_candle_spec_config(Some("maybe"), None, None),
+            parse_candle_spec_config(Some("ngram"), Some("0"), None),
+            parse_candle_spec_config(Some("ngram"), Some("33"), None),
+            parse_candle_spec_config(Some("ngram"), None, Some("65")),
+            parse_candle_spec_config(Some("ngram"), Some("NaN"), None),
+        ] {
+            assert!(
+                bad.is_err(),
+                "invalid speculative configuration must fail closed"
+            );
+        }
+        // Disabled mode does not parse irrelevant knobs, allowing an operator to
+        // turn the lane off even while repairing a stale bad experimental value.
+        assert_eq!(
+            parse_candle_spec_config(Some("off"), Some("bad"), Some("bad")).unwrap(),
+            None
+        );
+    }
+
+    #[cfg(feature = "spec-receipt-bridge")]
+    #[test]
+    fn completed_candle_stats_map_to_parked_common_receipts() {
+        let scalar = CandleSpecStats {
+            attempted_tokens: 8,
+            accepted_tokens: 6,
+            target_calls: 3,
+            rounds: 3,
+            speculation_enabled: true,
+            ..CandleSpecStats::default()
+        };
+        let scalar_receipt = scalar
+            .try_common_receipt(
+                "candle-production-observation-v1",
+                "request-11",
+                9,
+                std::time::Duration::from_millis(12),
+            )
+            .unwrap();
+        assert_eq!(scalar_receipt.accepted_fraction, 0.75);
+        assert_eq!(
+            scalar_receipt.details["inference_path"],
+            serde_json::json!("scalar")
+        );
+        assert!(!scalar_receipt.artifact_verified);
+        assert!(scalar_receipt.speedup_vs_baseline.is_none());
+        assert!(!scalar_receipt.delivery_eligible());
+
+        let batch = CandleSpecBatchStats {
+            rows: 4,
+            attempted_tokens: 12,
+            accepted_tokens: 9,
+            synchronized_clamp_tokens: 2,
+            target_calls: 4,
+            rounds: 4,
+            output_tokens: 16,
+            ..CandleSpecBatchStats::default()
+        };
+        let batch_receipt = batch
+            .try_common_receipt(
+                "candle-production-observation-v1",
+                "batch-12",
+                std::time::Duration::from_millis(20),
+            )
+            .unwrap();
+        assert_eq!(batch_receipt.units, 1);
+        assert_eq!(batch_receipt.accepted_fraction, 0.75);
+        assert_eq!(
+            batch_receipt.details["inference_path"],
+            serde_json::json!("batch")
+        );
+        assert_eq!(batch_receipt.details["rows"], serde_json::json!(4));
+        assert_eq!(
+            batch_receipt.details["synchronized_clamp_tokens"],
+            serde_json::json!(2)
+        );
+        assert_eq!(batch_receipt.total_product_time_s, 0.02);
+        assert!(!batch_receipt.artifact_verified);
+
+        let disabled = CandleSpecStats {
+            attempted_tokens: 1,
+            accepted_tokens: 1,
+            target_calls: 1,
+            rounds: 1,
+            speculation_enabled: false,
+            ..CandleSpecStats::default()
+        };
+        assert!(disabled
+            .try_common_receipt(
+                "candle-production-observation-v1",
+                "request-disabled",
+                1,
+                std::time::Duration::from_nanos(1),
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn speculative_context_budget_matches_greedy_at_the_ceiling() {
+        let ceiling = crate::quantized_llama_batched::MAX_SEQ_LEN;
+        assert_eq!(speculative_cache_end(ceiling, 1), Some(ceiling));
+        assert_eq!(speculative_cache_end(ceiling - 3, 4), Some(ceiling));
+        assert_eq!(speculative_cache_end(ceiling - 3, 5), Some(ceiling + 1));
+        assert_eq!(speculative_cache_end(usize::MAX, 2), None);
+    }
+
+    #[test]
+    fn synchronized_width_zero_uses_dense_path_and_preserves_target_contract() {
+        assert_eq!(
+            synchronized_verifier_path(0),
+            CandleSpecVerifierPath::DenseForward
+        );
+        for width in 1..=MAX_SPEC_WINDOW {
+            assert_eq!(
+                synchronized_verifier_path(width),
+                CandleSpecVerifierPath::SpeculativeForwardAll
+            );
+        }
+
+        let targets = synchronized_dense_targets(vec![10, 20, 30], 3).unwrap();
+        assert_eq!(targets, vec![vec![10], vec![20], vec![30]]);
+        let proposals = vec![Vec::new(), Vec::new(), Vec::new()];
+        let (common, per_row) = synchronized_accept_prefix(&proposals, &targets, 0).unwrap();
+        assert_eq!(common, 0);
+        assert_eq!(per_row, vec![0, 0, 0]);
+        for row in 0..targets.len() {
+            let (emit, hit_eos) =
+                synchronized_emit(&proposals[row], &targets[row], common, u32::MAX).unwrap();
+            assert!(!hit_eos);
+            assert_eq!(emit, targets[row]);
+        }
+        assert!(synchronized_dense_targets(vec![10, 20], 3).is_err());
+    }
+
+    #[test]
+    fn synchronized_accept_uses_the_common_exact_prefix() {
+        // Rows could individually accept 4, 2, and 3 tokens. The dense cache may
+        // commit only two, which is still an exact target prefix for every row.
+        let targets = vec![
+            vec![10, 11, 12, 13, 14],
+            vec![20, 21, 22, 23, 24],
+            vec![30, 31, 32, 33, 34],
+        ];
+        let proposals = vec![
+            vec![10, 11, 12, 13],
+            vec![20, 21, 999, 999],
+            vec![30, 31, 32, 999],
+        ];
+        let (common, per_row) = synchronized_accept_prefix(&proposals, &targets, 4).unwrap();
+        assert_eq!(per_row, vec![4, 2, 3]);
+        assert_eq!(common, 2);
+
+        for row in 0..proposals.len() {
+            let (emit, hit_eos) =
+                synchronized_emit(&proposals[row], &targets[row], common, u32::MAX).unwrap();
+            assert!(!hit_eos);
+            assert_eq!(
+                emit,
+                targets[row][..=common],
+                "committed draft prefix plus bonus must be that row's exact greedy stream"
+            );
+        }
+    }
+
+    #[test]
+    fn synchronized_accept_is_lossless_for_all_small_acceptance_patterns() {
+        // Exhaust every three-row acceptance combination through width five. The
+        // verifier values after a row's first mismatch are deliberately garbage:
+        // the common prefix must never inspect or emit off-distribution suffixes.
+        for width in 0..=5usize {
+            for a in 0..=width {
+                for b in 0..=width {
+                    for c in 0..=width {
+                        let cuts = [a, b, c];
+                        let mut proposals = Vec::new();
+                        let mut targets = Vec::new();
+                        for (row, &cut) in cuts.iter().enumerate() {
+                            let truth: Vec<u32> = (0..=width)
+                                .map(|column| 1000 + row as u32 * 100 + column as u32)
+                                .collect();
+                            let mut proposal = truth[..width].to_vec();
+                            if cut < width {
+                                proposal[cut] = 99_000 + row as u32;
+                                for token in &mut proposal[cut + 1..] {
+                                    *token = 88_000 + row as u32;
+                                }
+                            }
+                            proposals.push(proposal);
+                            targets.push(truth);
+                        }
+                        let (common, per_row) =
+                            synchronized_accept_prefix(&proposals, &targets, width).unwrap();
+                        assert_eq!(per_row, cuts);
+                        assert_eq!(common, *cuts.iter().min().unwrap());
+                        for row in 0..cuts.len() {
+                            let (emit, hit_eos) =
+                                synchronized_emit(&proposals[row], &targets[row], common, u32::MAX)
+                                    .unwrap();
+                            assert!(!hit_eos);
+                            assert_eq!(emit, targets[row][..=common]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn synchronized_emit_stops_before_eos_and_validates_shapes() {
+        let (emit, hit_eos) = synchronized_emit(&[7, 8, 42], &[7, 8, 42, 10], 3, 42).unwrap();
+        assert!(hit_eos);
+        assert_eq!(
+            emit,
+            vec![7, 8],
+            "EOS and every token after it are excluded"
+        );
+
+        assert!(synchronized_accept_prefix(&[], &[], 0).is_err());
+        assert!(synchronized_accept_prefix(&[vec![1]], &[vec![1]], 1).is_err());
+        assert!(synchronized_emit(&[], &[], 0, 42).is_err());
+    }
+
+    fn selector_observe_dense(selector: &mut CandleSpecProfitSelector, batch: usize, ns: u128) {
+        selector.observe(CandleSpecRoundObservation {
+            active_batch: batch,
+            width: 0,
+            visible_yield: 1,
+            elapsed_ns: ns,
+            terminal_eos: false,
+        });
+    }
+
+    fn selector_observe_calibrated_probe(
+        selector: &mut CandleSpecProfitSelector,
+        batch: usize,
+        visible_yield: usize,
+        ns: u128,
+    ) {
+        let width = selector.probe_width;
+        selector.observe(CandleSpecRoundObservation {
+            active_batch: batch,
+            width,
+            visible_yield,
+            elapsed_ns: ns,
+            terminal_eos: false,
+        });
+    }
+
+    #[test]
+    fn profit_selector_probes_before_forced_dense_counterfactual() {
+        let mut selector = CandleSpecProfitSelector::new(2);
+
+        // Preserve the original first eligible suffix instead of changing it with
+        // a mandatory warmup token before draft discovery.
+        assert_eq!(selector.requested_width(2, 4, 64), 2);
+        selector_observe_calibrated_probe(&mut selector, 2, 3, 250);
+        assert_eq!(selector.mode, CandleSpecProfitMode::Counterfactual);
+        assert_eq!(selector.pending_probe, Some((3, 250)));
+        assert_eq!(selector.bank_ns, 0);
+
+        for sample in [110, 100] {
+            assert_eq!(selector.requested_width(2, 4, 64), 0);
+            selector_observe_dense(&mut selector, 2, sample);
+        }
+        assert_eq!(selector.dense_lcb_ns, Some(100));
+        assert_eq!(selector.mode, CandleSpecProfitMode::Confirm);
+        assert_eq!(selector.bank_ns, 50);
+
+        assert_eq!(selector.requested_width(2, 4, 64), 2);
+        selector_observe_calibrated_probe(&mut selector, 2, 3, 250);
+        assert_eq!(selector.mode, CandleSpecProfitMode::Active);
+        assert_eq!(selector.bank_ns, 100);
+        assert_eq!(selector.requested_width(2, 4, 64), 2);
+
+        selector.observe(CandleSpecRoundObservation {
+            active_batch: 2,
+            width: 2,
+            visible_yield: 3,
+            elapsed_ns: 250,
+            terminal_eos: false,
+        });
+        assert_eq!(selector.bank_ns, 150);
+        assert_eq!(selector.active_rounds, 1);
+        assert_eq!(selector.requested_width(2, 4, 64), 3);
+        assert!(selector.ever_activated);
+        assert!(!selector.ever_locked);
+    }
+
+    #[test]
+    fn profit_selector_batch_calibrated_probe_respects_policy_and_tail_caps() {
+        assert_eq!(candle_spec_profit_probe_width(2), 2);
+        assert_eq!(candle_spec_profit_probe_width(3), 2);
+        assert_eq!(candle_spec_profit_probe_width(4), 3);
+
+        let mut b3 = CandleSpecProfitSelector::new(3);
+        assert_eq!(b3.requested_width(3, 4, 64), 2);
+        let mut b4 = CandleSpecProfitSelector::new(4);
+        assert_eq!(b4.requested_width(4, 4, 64), 3);
+
+        let mut b4_policy =
+            CandleSpecPolicy::new_with_initial_window(4, candle_spec_profit_probe_width(4));
+        assert_eq!(b4_policy.window_for_round(true, 64), 3);
+        let mut config_capped_policy =
+            CandleSpecPolicy::new_with_initial_window(2, candle_spec_profit_probe_width(4));
+        assert_eq!(config_capped_policy.window_for_round(true, 64), 2);
+
+        let mut policy_capped = CandleSpecProfitSelector::new(2);
+        assert_eq!(policy_capped.requested_width(2, 1, 64), 1);
+
+        let mut tail_capped = CandleSpecProfitSelector::new(2);
+        assert_eq!(tail_capped.requested_width(2, 4, 2), 1);
+
+        let mut no_tail = CandleSpecProfitSelector::new(2);
+        assert_eq!(no_tail.requested_width(2, 4, 1), 0);
+    }
+
+    #[test]
+    fn profit_selector_b4_keeps_k3_through_confirmation_and_activation() {
+        let mut selector = CandleSpecProfitSelector::new(4);
+        assert_eq!(selector.requested_width(4, 4, 64), 3);
+        selector_observe_calibrated_probe(&mut selector, 4, 4, 350);
+        for _ in 0..SPEC_PROFIT_DENSE_SAMPLES {
+            selector_observe_dense(&mut selector, 4, 100);
+        }
+        assert_eq!(selector.mode, CandleSpecProfitMode::Confirm);
+        assert_eq!(selector.bank_ns, 50);
+
+        assert_eq!(selector.requested_width(4, 4, 64), 3);
+        selector_observe_calibrated_probe(&mut selector, 4, 4, 350);
+        assert_eq!(selector.mode, CandleSpecProfitMode::Active);
+        assert_eq!(selector.approved_width, 3);
+        assert_eq!(selector.requested_width(4, 4, 64), 3);
+        assert_eq!(selector.retry_rounds, 0);
+    }
+
+    #[test]
+    fn profit_selector_partial_loss_gets_one_repaying_retry_then_confirmation() {
+        let mut selector = CandleSpecProfitSelector::new(4);
+        // K=3 accepted two drafts (visible yield 3), but lost 20ns versus three
+        // dense rounds. That useful prefix earns exactly one delayed phase retry.
+        selector_observe_calibrated_probe(&mut selector, 4, 3, 320);
+        for _ in 0..SPEC_PROFIT_DENSE_SAMPLES {
+            selector_observe_dense(&mut selector, 4, 100);
+        }
+        assert_eq!(selector.mode, CandleSpecProfitMode::Retry);
+        assert_eq!(selector.bank_ns, -20);
+        assert_eq!(selector.retry_rounds, 0);
+
+        assert_eq!(selector.requested_width(4, 4, 64), 3);
+        selector_observe_calibrated_probe(&mut selector, 4, 4, 350);
+        assert_eq!(selector.mode, CandleSpecProfitMode::Confirm);
+        assert_eq!(selector.bank_ns, 30, "retry must repay the stored loss");
+        assert_eq!(selector.retry_rounds, 1);
+
+        assert_eq!(selector.requested_width(4, 4, 64), 3);
+        selector_observe_calibrated_probe(&mut selector, 4, 4, 350);
+        assert_eq!(selector.mode, CandleSpecProfitMode::Active);
+        assert_eq!(selector.bank_ns, 80);
+        assert_eq!(selector.confirmation_rounds, 1);
+    }
+
+    #[test]
+    fn profit_selector_partial_loss_retry_is_single_and_must_repay_bank() {
+        let mut selector = CandleSpecProfitSelector::new(4);
+        selector_observe_calibrated_probe(&mut selector, 4, 3, 320);
+        for _ in 0..SPEC_PROFIT_DENSE_SAMPLES {
+            selector_observe_dense(&mut selector, 4, 100);
+        }
+        assert_eq!(selector.mode, CandleSpecProfitMode::Retry);
+
+        // This retry itself saves 10ns, but not enough to repay the stored 20ns.
+        selector_observe_calibrated_probe(&mut selector, 4, 4, 390);
+        assert_eq!(selector.mode, CandleSpecProfitMode::DenseLocked);
+        assert_eq!(selector.bank_ns, -10);
+        assert_eq!(selector.regret_ns, 10);
+        assert_eq!(selector.retry_rounds, 1);
+        assert_eq!(selector.confirmation_rounds, 0);
+        assert_eq!(selector.requested_width(4, 4, 64), 0);
+    }
+
+    #[test]
+    fn profit_selector_retry_proposal_unavailable_locks_without_searching() {
+        let mut selector = CandleSpecProfitSelector::new(4);
+        selector_observe_calibrated_probe(&mut selector, 4, 3, 320);
+        for _ in 0..SPEC_PROFIT_DENSE_SAMPLES {
+            selector_observe_dense(&mut selector, 4, 100);
+        }
+        assert_eq!(selector.mode, CandleSpecProfitMode::Retry);
+
+        // The selector requested K=3 but the cohort had no common proposal, so
+        // the actual round is dense and the one-shot search ends immediately.
+        selector_observe_dense(&mut selector, 4, 100);
+        assert_eq!(selector.mode, CandleSpecProfitMode::DenseLocked);
+        assert_eq!(selector.retry_rounds, 0);
+        assert_eq!(selector.probe_rounds, 1);
+        assert_eq!(selector.regret_ns, 20);
+        assert_eq!(selector.requested_width(4, 4, 64), 0);
+    }
+
+    #[test]
+    fn profit_selector_natural_dense_round_does_not_delay_first_available_probe() {
+        let mut selector = CandleSpecProfitSelector::new(2);
+        assert_eq!(selector.requested_width(2, 4, 64), 2);
+        // Proposal intersection may be empty even though the selector asked for
+        // K=2. Count that target call as baseline, but keep the next eligible
+        // suffix as the request's one and only probe.
+        selector_observe_dense(&mut selector, 2, 100);
+        assert_eq!(selector.mode, CandleSpecProfitMode::Probe);
+        assert_eq!(selector.requested_width(2, 4, 64), 2);
+
+        selector_observe_calibrated_probe(&mut selector, 2, 3, 250);
+        assert_eq!(selector.mode, CandleSpecProfitMode::Counterfactual);
+        assert_eq!(selector.requested_width(2, 4, 64), 0);
+        selector_observe_dense(&mut selector, 2, 100);
+        assert_eq!(selector.mode, CandleSpecProfitMode::Confirm);
+        assert_eq!(selector.probe_rounds, 1);
+        assert_eq!(selector.bank_ns, 50);
+    }
+
+    #[test]
+    fn profit_selector_zero_accept_probe_locks_without_retry_or_reprobe() {
+        let mut selector = CandleSpecProfitSelector::new(4);
+        assert_eq!(selector.requested_width(4, 4, 64), 3);
+        selector_observe_calibrated_probe(&mut selector, 4, 1, 125);
+        assert_eq!(selector.mode, CandleSpecProfitMode::Counterfactual);
+        for _ in 0..SPEC_PROFIT_DENSE_SAMPLES {
+            assert_eq!(selector.requested_width(4, 4, 64), 0);
+            selector_observe_dense(&mut selector, 4, 100);
+        }
+        assert_eq!(selector.mode, CandleSpecProfitMode::DenseLocked);
+        assert_eq!(selector.bank_ns, -25);
+        assert_eq!(selector.regret_ns, 25);
+        for _ in 0..64 {
+            assert_eq!(selector.requested_width(4, 4, 64), 0);
+            selector_observe_dense(&mut selector, 4, 100);
+        }
+        assert_eq!(selector.probe_rounds, 1);
+        assert_eq!(selector.retry_rounds, 0);
+        assert_eq!(selector.confirmation_rounds, 0);
+        assert_eq!(
+            selector.regret_ns, 25,
+            "dense fallback cannot compound regret"
+        );
+    }
+
+    #[test]
+    fn profit_selector_replays_measured_profitable_and_unprofitable_regimes() {
+        // Normalize the dense round to 1ms. A K=2 probe yields at most three dense
+        // tokens; derive its elapsed time from the measured end-to-end speed ratio.
+        let replay = |speedup: f64| {
+            let mut selector = CandleSpecProfitSelector::new(2);
+            let elapsed = (3_000_000f64 / speedup).round() as u128;
+            selector_observe_calibrated_probe(&mut selector, 2, 3, elapsed);
+            for _ in 0..SPEC_PROFIT_DENSE_SAMPLES {
+                selector_observe_dense(&mut selector, 2, 1_000_000);
+            }
+            if selector.mode == CandleSpecProfitMode::Retry {
+                selector_observe_calibrated_probe(&mut selector, 2, 3, elapsed);
+            }
+            selector
+        };
+
+        for profitable in [1.209, 1.091] {
+            let selector = replay(profitable);
+            assert_eq!(selector.mode, CandleSpecProfitMode::Confirm);
+            assert!(selector.bank_ns > 0);
+        }
+        for unprofitable in [0.936, 0.840] {
+            let selector = replay(unprofitable);
+            assert_eq!(selector.mode, CandleSpecProfitMode::DenseLocked);
+            assert!(selector.regret_ns > 0);
+        }
+    }
+
+    #[test]
+    fn profit_selector_confirmation_prevents_noisy_probe_activation() {
+        let mut selector = CandleSpecProfitSelector::new(2);
+        selector_observe_calibrated_probe(&mut selector, 2, 3, 250);
+        for _ in 0..SPEC_PROFIT_DENSE_SAMPLES {
+            selector_observe_dense(&mut selector, 2, 100);
+        }
+        assert_eq!(selector.mode, CandleSpecProfitMode::Confirm);
+        assert_eq!(selector.bank_ns, 50);
+
+        selector_observe_calibrated_probe(&mut selector, 2, 1, 175);
+        assert_eq!(selector.mode, CandleSpecProfitMode::DenseLocked);
+        assert_eq!(selector.bank_ns, -25);
+        assert_eq!(selector.regret_ns, 25);
+        assert!(!selector.ever_activated);
+        assert_eq!(selector.probe_rounds, 1);
+        assert_eq!(selector.confirmation_rounds, 1);
+    }
+
+    #[test]
+    fn profit_selector_credit_cannot_hide_cumulative_regression() {
+        let mut selector = CandleSpecProfitSelector::new(2);
+        selector_observe_calibrated_probe(&mut selector, 2, 3, 250);
+        for _ in 0..SPEC_PROFIT_DENSE_SAMPLES {
+            selector_observe_dense(&mut selector, 2, 100);
+        }
+        selector_observe_calibrated_probe(&mut selector, 2, 3, 250);
+        assert_eq!(selector.mode, CandleSpecProfitMode::Active);
+        assert_eq!(selector.bank_ns, 100);
+        selector.observe(CandleSpecRoundObservation {
+            active_batch: 2,
+            width: 2,
+            visible_yield: 1,
+            elapsed_ns: 250,
+            terminal_eos: false,
+        });
+        assert_eq!(selector.mode, CandleSpecProfitMode::DenseLocked);
+        assert_eq!(selector.bank_ns, -50);
+        assert_eq!(selector.regret_ns, 50);
+    }
+
+    #[test]
+    fn profit_selector_excludes_eos_and_locks_on_batch_change() {
+        let mut selector = CandleSpecProfitSelector::new(4);
+        assert_eq!(selector.requested_width(4, 4, 64), 3);
+        selector.observe(CandleSpecRoundObservation {
+            active_batch: 4,
+            width: 3,
+            visible_yield: 4,
+            elapsed_ns: 1,
+            terminal_eos: true,
+        });
+        assert_eq!(selector.mode, CandleSpecProfitMode::Probe);
+        assert_eq!(
+            selector.bank_ns, 0,
+            "terminal timing must not create credit"
+        );
+        assert_eq!(selector.probe_rounds, 0);
+        assert_eq!(selector.terminal_rounds_excluded, 1);
+        assert_eq!(selector.requested_width(3, 4, 64), 0);
+        assert_eq!(selector.mode, CandleSpecProfitMode::DenseLocked);
+    }
+
+    #[test]
+    fn profit_selector_checked_arithmetic_fails_closed() {
+        let mut selector = CandleSpecProfitSelector::new(2);
+        let huge = i128::MAX as u128;
+        selector_observe_calibrated_probe(&mut selector, 2, usize::MAX, 1);
+        assert_eq!(selector.mode, CandleSpecProfitMode::Counterfactual);
+        for _ in 0..SPEC_PROFIT_DENSE_SAMPLES {
+            selector_observe_dense(&mut selector, 2, huge);
+        }
+        assert_eq!(selector.mode, CandleSpecProfitMode::DenseLocked);
+        assert!(selector.ever_locked);
+    }
+
+    #[test]
+    fn candle_spec_policy_low_epoch_enters_bounded_cooldown() {
+        let mut policy = CandleSpecPolicy::new(4);
+        // Repeated half-accepted proposals are evaluated as a bounded epoch,
+        // instead of contaminating a lifetime average or disabling forever.
+        for _ in 0..4 {
+            assert!(policy.window_for_round(true, 64) > 0);
+            policy.observe(2, 1);
+        }
+        assert_eq!(policy.cooldown_entries, 1);
+        assert_eq!(policy.current_window, 1);
+        assert!(!policy.ready_to_speculate());
+        for _ in 0..SPEC_POLICY_BASE_COOLDOWN {
+            assert_eq!(policy.window_for_round(true, 64), 0);
+        }
+        // Cooldown always ends in a cheap probe; it is not a one-way disable.
+        assert_eq!(policy.window_for_round(true, 64), 1);
+        assert_eq!(policy.cooldown_rounds, SPEC_POLICY_BASE_COOLDOWN);
+    }
+
+    #[test]
+    fn candle_spec_policy_acceptance_boundary_is_conservative() {
+        let mut at_boundary = CandleSpecPolicy::new(4);
+        at_boundary.observe(4, 3);
+        at_boundary.observe(4, 3);
+        assert_eq!(at_boundary.cooldown_entries, 0, "75% is retained");
+        assert_eq!(at_boundary.epoch_attempted, 0);
+
+        let mut below_boundary = CandleSpecPolicy::new(4);
+        for _ in 0..4 {
+            below_boundary.observe(2, 1);
+        }
+        assert_eq!(below_boundary.cooldown_entries, 1, "50% backs off by epoch");
+        assert_eq!(below_boundary.cooldown_remaining, SPEC_POLICY_BASE_COOLDOWN);
+    }
+
+    #[test]
+    fn candle_spec_policy_perfect_single_token_drafts_are_not_misclassified() {
+        let mut policy = CandleSpecPolicy::new(4);
+        // Some prompt-lookup contexts structurally offer only one token. Four
+        // complete hits meet their width-normalized yield target and must not
+        // create the repeated cooldowns seen with a hard two-token target.
+        for _ in 0..SPEC_POLICY_EPOCH_ROUNDS {
+            policy.observe(1, 1);
+        }
+        assert_eq!(policy.cooldown_entries, 0);
+        assert_eq!(policy.epoch_attempted, 0);
+        assert_eq!(policy.epoch_yield_target, 0);
+        assert!(policy.ready_to_speculate());
+    }
+
+    #[test]
+    fn candle_spec_policy_reprobes_and_recovers_a_later_copy_span() {
+        let mut policy = CandleSpecPolicy::new(4);
+        assert_eq!(policy.window_for_round(true, 64), 2);
+        policy.observe(2, 0);
+
+        for _ in 0..SPEC_POLICY_BASE_COOLDOWN {
+            assert_eq!(policy.window_for_round(true, 64), 0);
+        }
+        // The narrow post-cooldown probe hits a newly reached copied span, then
+        // consecutive complete accepts restore the configured width quickly.
+        assert_eq!(policy.window_for_round(true, 64), 1);
+        policy.observe(1, 1);
+        assert_eq!(policy.window_for_round(true, 64), 2);
+        policy.observe(2, 2);
+        assert_eq!(policy.window_for_round(true, 64), 3);
+        policy.observe(3, 3);
+        assert_eq!(policy.window_for_round(true, 64), 4);
+        assert_eq!(policy.cooldown_entries, 1);
+        assert!(policy.ready_to_speculate());
+        assert_eq!(policy.backoff_level, 0);
+    }
+
+    #[test]
+    fn candle_spec_policy_repeated_misses_cap_backoff_but_never_disable() {
+        let mut policy = CandleSpecPolicy::new(4);
+        let expected = [4usize, 8, 16, 32, 32];
+        for expected_cooldown in expected {
+            let want = policy.window_for_round(true, 128);
+            assert!(want > 0, "every completed cooldown must permit a probe");
+            policy.observe(want, 0);
+            assert_eq!(policy.cooldown_remaining, expected_cooldown);
+            for _ in 0..expected_cooldown {
+                assert_eq!(policy.window_for_round(true, 128), 0);
+            }
+        }
+        assert_eq!(policy.cooldown_entries, expected.len());
+        assert_eq!(policy.window_for_round(true, 128), 1);
+    }
+
+    #[test]
     fn jsonl_parse_text_and_prompt() {
         let input = b"{\"id\":\"a\",\"text\":\"hello\"}\n{\"id\":\"b\",\"prompt\":\"world\"}\n";
         let items: Vec<TextItem> = parse_jsonl(input, "embed").unwrap();
@@ -5194,9 +7643,21 @@ mod tests {
         // A model that could not report real dimensions, or no memory reading at
         // all, must never fabricate a cap — disable it (usize::MAX = never
         // split) rather than guess a number that could wrongly starve every job.
-        assert_eq!(batch_width_cap(0, 64, 64, 8.0), usize::MAX, "zero kv cost must disable the cap");
-        assert_eq!(batch_width_cap(65536, 64, 64, 0.0), usize::MAX, "zero available memory must disable the cap");
-        assert_eq!(batch_width_cap(65536, 64, 64, -1.0), usize::MAX, "negative available memory must disable the cap");
+        assert_eq!(
+            batch_width_cap(0, 64, 64, 8.0),
+            usize::MAX,
+            "zero kv cost must disable the cap"
+        );
+        assert_eq!(
+            batch_width_cap(65536, 64, 64, 0.0),
+            usize::MAX,
+            "zero available memory must disable the cap"
+        );
+        assert_eq!(
+            batch_width_cap(65536, 64, 64, -1.0),
+            usize::MAX,
+            "negative available memory must disable the cap"
+        );
     }
 
     #[test]
@@ -5247,9 +7708,15 @@ mod tests {
         assert!(!m.record(110.0), "a single dip must not trip the flag");
         // Recovery resets the consecutive-low counter.
         assert!(!m.record(171.0));
-        assert!(!m.record(90.0), "counting must restart from the recovered sample");
+        assert!(
+            !m.record(90.0),
+            "counting must restart from the recovered sample"
+        );
         assert!(!m.record(90.0));
-        assert!(!m.is_throttling(), "only 2 consecutive low samples since recovery — must not have tripped yet");
+        assert!(
+            !m.is_throttling(),
+            "only 2 consecutive low samples since recovery — must not have tripped yet"
+        );
     }
 
     #[test]
@@ -5362,6 +7829,192 @@ mod tests {
         assert_eq!(v["job_type"], "audio_transcribe");
         assert_eq!(v["text"], "hello world");
         assert_eq!(v["segments"][0]["end"], 1.5);
+    }
+
+    fn pcm16_wav_bytes(spec: hound::WavSpec, samples: &[i16]) -> Vec<u8> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = hound::WavWriter::new(&mut buf, spec).unwrap();
+            for &sample in samples {
+                writer.write_sample(sample).unwrap();
+            }
+            writer.finalize().unwrap();
+        }
+        buf.into_inner()
+    }
+
+    fn wav_bytes_b64(bytes: &[u8]) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    fn audio_bad_input_message(result: Result<Vec<f32>, RunError>) -> String {
+        match result {
+            Err(RunError::BadInput { job, msg }) => {
+                assert_eq!(job, "audio_transcribe");
+                msg
+            }
+            other => panic!("expected audio_transcribe BadInput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_wav_b64_accepts_only_bounded_pcm16_mono_16khz() {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: whisper::SAMPLE_RATE as u32,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let encoded = wav_bytes_b64(&pcm16_wav_bytes(spec, &[i16::MIN, 0, i16::MAX]));
+        let pcm = decode_wav_b64(&encoded).expect("valid PCM16 WAV");
+        assert_eq!(pcm, vec![-1.0, 0.0, i16::MAX as f32 / 32768.0]);
+    }
+
+    #[test]
+    fn whisper_sample_count_accepts_exact_closed_bounds() {
+        assert!(validate_whisper_sample_count(1).is_ok());
+        assert!(validate_whisper_sample_count(whisper::N_SAMPLES).is_ok());
+        assert!(validate_whisper_sample_count(0).is_err());
+        assert!(validate_whisper_sample_count(whisper::N_SAMPLES + 1).is_err());
+    }
+
+    #[test]
+    fn whisper_options_are_honest_about_fixed_english_no_timestamp_mode() {
+        assert!(validate_whisper_options(None, false).is_ok());
+        assert!(validate_whisper_options(Some("en"), false).is_ok());
+        assert!(validate_whisper_options(Some(" English "), false).is_ok());
+        for result in [
+            validate_whisper_options(Some("fr"), false),
+            validate_whisper_options(None, true),
+        ] {
+            match result {
+                Err(RunError::BadInput { job, .. }) => assert_eq!(job, "audio_transcribe"),
+                other => panic!("unsupported Whisper option did not fail as bad input: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn decode_wav_b64_rejects_nonconforming_wav_specs() {
+        let pcm16_spec = |channels, sample_rate| hound::WavSpec {
+            channels,
+            sample_rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let stereo = pcm16_wav_bytes(pcm16_spec(2, 16_000), &[0, 0]);
+        let wrong_rate = pcm16_wav_bytes(pcm16_spec(1, 8_000), &[0]);
+
+        let mut float_buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = hound::WavWriter::new(
+                &mut float_buf,
+                hound::WavSpec {
+                    channels: 1,
+                    sample_rate: 16_000,
+                    bits_per_sample: 32,
+                    sample_format: hound::SampleFormat::Float,
+                },
+            )
+            .unwrap();
+            writer.write_sample(0.0f32).unwrap();
+            writer.finalize().unwrap();
+        }
+
+        let mut pcm32_buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = hound::WavWriter::new(
+                &mut pcm32_buf,
+                hound::WavSpec {
+                    channels: 1,
+                    sample_rate: 16_000,
+                    bits_per_sample: 32,
+                    sample_format: hound::SampleFormat::Int,
+                },
+            )
+            .unwrap();
+            writer.write_sample(0i32).unwrap();
+            writer.finalize().unwrap();
+        }
+
+        for bytes in [
+            stereo,
+            wrong_rate,
+            float_buf.into_inner(),
+            pcm32_buf.into_inner(),
+        ] {
+            let msg = audio_bad_input_message(decode_wav_b64(&wav_bytes_b64(&bytes)));
+            assert!(
+                msg.contains("16-bit integer PCM, mono, at 16000 Hz"),
+                "unclear format rejection: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_wav_b64_enforces_encoded_decoded_and_sample_bounds() {
+        let too_much_base64 = "A".repeat(MAX_WHISPER_WAV_BASE64_BYTES + 1);
+        let msg = audio_bad_input_message(decode_wav_b64(&too_much_base64));
+        assert!(msg.contains("encoded limit"), "{msg}");
+
+        // One extra decoded byte shares the same padded base64 length as the
+        // limit, proving the post-decode check is independent of the pre-check.
+        let too_many_bytes = vec![0u8; MAX_WHISPER_WAV_BYTES + 1];
+        let encoded = wav_bytes_b64(&too_many_bytes);
+        assert!(encoded.len() <= MAX_WHISPER_WAV_BASE64_BYTES);
+        let msg = audio_bad_input_message(decode_wav_b64(&encoded));
+        assert!(msg.contains("decoded WAV exceeds"), "{msg}");
+
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let too_many_samples = vec![0i16; whisper::N_SAMPLES + 1];
+        let encoded = wav_bytes_b64(&pcm16_wav_bytes(spec, &too_many_samples));
+        let msg = audio_bad_input_message(decode_wav_b64(&encoded));
+        assert!(msg.contains("480000 samples"), "{msg}");
+
+        let empty = wav_bytes_b64(&pcm16_wav_bytes(spec, &[]));
+        let msg = audio_bad_input_message(decode_wav_b64(&empty));
+        assert!(msg.contains("1..=480000 samples"), "{msg}");
+    }
+
+    #[test]
+    fn decode_wav_b64_propagates_truncated_sample_errors() {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut bytes = pcm16_wav_bytes(spec, &[1, 2]);
+        bytes.pop();
+        let msg = audio_bad_input_message(decode_wav_b64(&wav_bytes_b64(&bytes)));
+        assert!(
+            msg.contains("invalid PCM16 WAV sample data"),
+            "sample read error was not propagated: {msg}"
+        );
+    }
+
+    #[test]
+    fn shape_whisper_mel_frames_truncates_each_band_in_time() {
+        // Band-major source: two bands, three frames each.
+        let shaped = shape_whisper_mel_frames(vec![1.0, 2.0, 3.0, 10.0, 20.0, 30.0], 2, 2)
+            .expect("shape mel");
+        assert_eq!(shaped, vec![1.0, 2.0, 10.0, 20.0]);
+    }
+
+    #[test]
+    fn shape_whisper_mel_frames_zero_pads_each_band_in_time() {
+        let shaped = shape_whisper_mel_frames(vec![1.0, 2.0, 3.0, 10.0, 20.0, 30.0], 2, 5)
+            .expect("shape mel");
+        assert_eq!(
+            shaped,
+            vec![1.0, 2.0, 3.0, 0.0, 0.0, 10.0, 20.0, 30.0, 0.0, 0.0]
+        );
     }
 
     #[test]
@@ -5557,8 +8210,10 @@ mod tests {
         // A probe that always trips, with a specific reason — proves the exact
         // string round-trips uninterpreted (the runner logs/wraps it verbatim
         // into RunError::OomPreempt).
-        let always_trips = Checkpointer::new(None, 30, reqwest::Client::new())
-            .with_preempt_check(|| Some("synthetic memory pressure: 96% used >= 85% ceiling".to_string()));
+        let always_trips =
+            Checkpointer::new(None, 30, reqwest::Client::new()).with_preempt_check(|| {
+                Some("synthetic memory pressure: 96% used >= 85% ceiling".to_string())
+            });
         assert_eq!(
             always_trips.check_preemption().as_deref(),
             Some("synthetic memory pressure: 96% used >= 85% ceiling")
@@ -5578,8 +8233,16 @@ mod tests {
                     Some("pressure appeared".to_string())
                 }
             });
-        assert_eq!(flips_after_two_calls.check_preemption(), None, "call 1: clear");
-        assert_eq!(flips_after_two_calls.check_preemption(), None, "call 2: clear");
+        assert_eq!(
+            flips_after_two_calls.check_preemption(),
+            None,
+            "call 1: clear"
+        );
+        assert_eq!(
+            flips_after_two_calls.check_preemption(),
+            None,
+            "call 2: clear"
+        );
         assert_eq!(
             flips_after_two_calls.check_preemption().as_deref(),
             Some("pressure appeared"),
@@ -5667,16 +8330,15 @@ mod tests {
         // starts) — proving the preemption boundary is "between slices", never
         // mid-slice.
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let ckpt = Checkpointer::new(Some(partial_url), 1, reqwest::Client::new()).with_preempt_check(
-            move || {
+        let ckpt = Checkpointer::new(Some(partial_url), 1, reqwest::Client::new())
+            .with_preempt_check(move || {
                 let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 if n == 0 {
                     None // slice 1 is allowed to start
                 } else {
                     Some("synthetic memory pressure for test".to_string())
                 }
-            },
-        );
+            });
 
         let runner = BatchInferRunner;
         let result = runner
@@ -6344,18 +9006,22 @@ mod tests {
         base64::engine::general_purpose::STANDARD.encode(buf.into_inner())
     }
 
-    // Whisper runs end-to-end on the already-cached whisper-tiny. A synthetic
-    // tone won't yield real words, but this proves load + mel + encode + greedy
-    // decode + result JSON all execute on real weights. Run with:
+    // Whisper runs end-to-end on the already-cached whisper-tiny. The 16.1-second
+    // fixture deliberately crosses Candle's 15-second mel-padding boundary: it
+    // produces 4,500 raw frames and therefore exercises the band-wise crop to
+    // the encoder's exact 3,000-frame input. A synthetic tone won't yield real
+    // words, but this proves load + mel + encode + greedy decode + result JSON
+    // all execute on real weights. Run with:
     //   cargo test --release whisper_runs_real -- --ignored --nocapture
     #[test]
     #[ignore = "loads whisper-tiny weights and runs a real encode/decode pass"]
     fn whisper_runs_real() {
-        let b64 = synthetic_wav_b64(1.0);
+        let clip_secs = 16.1f32;
+        let b64 = synthetic_wav_b64(clip_secs);
         let input = format!("{{\"id\":\"a\",\"audio_b64\":\"{b64}\"}}\n");
         let manifest = test_manifest(JobType::AudioTranscribe {
             language: None,
-            timestamps: true,
+            timestamps: false,
         });
         let pool = ModelPool::new();
         let out = tokio::runtime::Runtime::new()
@@ -6365,7 +9031,157 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&out.result).unwrap();
         assert_eq!(v["job_type"], "audio_transcribe");
         assert_eq!(v["segments"].as_array().unwrap().len(), 1);
+        let end = v["segments"][0]["end"].as_f64().unwrap();
+        assert!((end - clip_secs as f64).abs() < 0.001, "segment end={end}");
         eprintln!("whisper OK: result={}", serde_json::to_string(&v).unwrap());
+    }
+
+    // Cheap falsification gate before implementing a transactional multi-token
+    // Whisper verifier. The caller supplies hashed transcript-bearing PCM WAVs
+    // in CX_WHISPER_TRACE_WAV_DIR, named `cal-*.wav` or `held-*.wav`. We run the
+    // real production greedy decoder once per clip, preserve exact token ids
+    // (including terminal EOT), then use only the POC's MockTarget + NgramDraft
+    // to measure proposal coverage/acceptance. Wall time from this mock screen is
+    // never an audio speed claim. Run with:
+    //   CX_WHISPER_TRACE_WAV_DIR=/path/to/wavs \
+    //     cargo test --release whisper_ngram_acceptance_screen_real_speech \
+    //       -- --ignored --nocapture
+    #[test]
+    #[ignore = "requires a local directory of transcript-bearing PCM16 WAV fixtures"]
+    fn whisper_ngram_acceptance_screen_real_speech() {
+        use base64::Engine;
+        use sha2::{Digest, Sha256};
+        use token_spec_poc::{try_run_spec_decode, MockTarget, SpecUnit};
+
+        let fixture_dir = std::env::var("CX_WHISPER_TRACE_WAV_DIR")
+            .expect("CX_WHISPER_TRACE_WAV_DIR must name the fixture directory");
+        let mut fixtures: Vec<std::path::PathBuf> = std::fs::read_dir(&fixture_dir)
+            .expect("read fixture directory")
+            .map(|entry| entry.expect("fixture directory entry").path())
+            .filter(|path| {
+                path.extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|value| value.eq_ignore_ascii_case("wav"))
+            })
+            .collect();
+        fixtures.sort();
+        assert!(
+            !fixtures.is_empty(),
+            "fixture directory contains no WAV files"
+        );
+
+        let mut backend = WhisperBackend::load("whisper-tiny").expect("load whisper-tiny");
+        let prompt = vec![
+            backend.sot,
+            backend.english,
+            backend.transcribe,
+            backend.no_timestamps,
+        ];
+        let mut rows = Vec::new();
+        let mut calibration = 0usize;
+        let mut held_out = 0usize;
+
+        for path in fixtures {
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .expect("UTF-8 fixture name")
+                .to_string();
+            let split = if name.starts_with("cal-") {
+                calibration += 1;
+                "calibration"
+            } else if name.starts_with("held-") {
+                held_out += 1;
+                "held_out"
+            } else {
+                panic!("fixture {name:?} must start with cal- or held-");
+            };
+            let wav = std::fs::read(&path).expect("read WAV fixture");
+            let wav_sha256 = format!("{:x}", Sha256::digest(&wav));
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&wav);
+            let pcm = decode_wav_b64(&encoded).expect("decode strict WAV fixture");
+            let duration_seconds = pcm.len() as f64 / whisper::SAMPLE_RATE as f64;
+            let trace = backend
+                .transcribe_trace(&pcm)
+                .expect("real greedy Whisper trace");
+            let mut truth = trace.generated_tokens.clone();
+            if trace.terminated_by_eot {
+                truth.push(backend.eot);
+            }
+            assert!(
+                !truth.is_empty(),
+                "fixture {name:?} produced no target tokens"
+            );
+
+            let mut configs = Vec::new();
+            for order in 1usize..=3 {
+                for window in [2usize, 4] {
+                    let unit = SpecUnit {
+                        unit_id: name.clone(),
+                        modality: "token".to_string(),
+                        prompt: prompt.clone(),
+                        max_new_tokens: truth.len(),
+                        eos: backend.eot,
+                    };
+                    let mut target = MockTarget::new(prompt.len(), truth.clone());
+                    let mut draft = NgramDraft::try_new(order, window).expect("n-gram config");
+                    let outcome = try_run_spec_decode(
+                        &unit,
+                        &mut draft,
+                        &mut target,
+                        window,
+                        "whisper-ngram-acceptance-screen",
+                    )
+                    .expect("mock acceptance screen");
+                    assert_eq!(
+                        outcome.output, truth,
+                        "mock speculation changed target truth for {name} order={order} window={window}"
+                    );
+                    configs.push(serde_json::json!({
+                        "order": order,
+                        "window": window,
+                        "attempted_tokens": outcome.receipt.attempted_units,
+                        "accepted_tokens": outcome.receipt.accepted_units,
+                        "accepted_fraction": outcome.receipt.accepted_fraction,
+                        "fallback_rounds": outcome.receipt.fallback_units,
+                        "repair_rounds": outcome.receipt.repaired_units,
+                        "rounds": outcome.receipt.meta.rounds,
+                        "target_calls": outcome.receipt.meta.target_calls,
+                        "target_call_reduction_x": outcome.receipt.meta.target_call_reduction_x,
+                        "candidate_exact": outcome.receipt.meta.candidate_exact,
+                        "output_exact": outcome.receipt.exact
+                    }));
+                }
+            }
+            rows.push(serde_json::json!({
+                "fixture": name,
+                "split": split,
+                "wav_bytes": wav.len(),
+                "wav_sha256": wav_sha256,
+                "duration_seconds": duration_seconds,
+                "transcript": trace.text,
+                "generated_tokens_excluding_eot": trace.generated_tokens.len(),
+                "terminated_by_eot": trace.terminated_by_eot,
+                "truth_tokens_including_eot": truth.len(),
+                "configs": configs
+            }));
+        }
+        assert!(calibration >= 2, "need at least two calibration fixtures");
+        assert!(held_out >= 2, "need at least two held-out fixtures");
+        let report = serde_json::json!({
+            "schema_version": 1,
+            "kind": "whisper_ngram_acceptance_screen",
+            "evidence": "measured token traces plus mock target; wall time not claimable",
+            "model": "whisper-tiny",
+            "device_label": models::device_label(),
+            "prompt_token_ids": prompt,
+            "eot_token_id": backend.eot,
+            "fixtures": rows
+        });
+        eprintln!(
+            "WHISPER_NGRAM_ACCEPTANCE_SCREEN_JSON={}",
+            serde_json::to_string(&report).unwrap()
+        );
     }
 
     // BatchInfer runs end-to-end on a small quantized GGUF llama. Downloads the
@@ -6392,6 +9208,718 @@ mod tests {
             "batch_infer OK: completion={}",
             serde_json::to_string(c).unwrap()
         );
+    }
+
+    /// Real-model capstone for the target-side primitives used by greedy speculative
+    /// decoding. A four-token span is evaluated in one `forward_all_logits` pass and
+    /// every row's argmax is compared with the same tokens evaluated incrementally by
+    /// an independent model instance. The test then exercises the low-readback
+    /// `forward_all_argmax` surface, accepts only half the span, truncates the target
+    /// KV cache, and overwrites both rejected positions. Continued target tokens must
+    /// match a reset reference that never exposed the rejected suffix.
+    ///
+    /// The GGUF and tokenizer are already used by the other real-model gates. With a
+    /// populated Hugging Face cache this command performs no download:
+    /// `HF_HUB_OFFLINE=1 cargo test --release --features metal
+    /// speculative_target_all_positions_and_rollback_match_serial_real_model
+    /// -- --ignored --nocapture --test-threads=1`.
+    #[test]
+    #[ignore = "uses the cached Llama-3.2-1B Q4_K_M GGUF and a real accelerator to prove all-position target parity plus speculative KV rollback"]
+    fn speculative_target_all_positions_and_rollback_match_serial_real_model() {
+        let _metal_test_guard = METAL_HARDWARE_TEST_LOCK.lock().unwrap();
+        let mut speculative =
+            LlamaBackend::load("llama-3.2-1b-instruct-q4").expect("load speculative target");
+        let mut reference =
+            LlamaBackend::load("llama-3.2-1b-instruct-q4").expect("load serial reference");
+
+        let wrapped = "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n\
+                       The capital of France is<|eot_id|><|start_header_id|>assistant\
+                       <|end_header_id|>\n\n";
+        let encoded = speculative
+            .tokenizer
+            .encode(wrapped, true)
+            .expect("encode real prompt");
+        let ids = encoded.get_ids();
+        const SPAN: usize = 4;
+        const ACCEPTED: usize = 2;
+        assert!(
+            ids.len() > SPAN,
+            "real prompt must contain a non-empty prefix"
+        );
+        let prefix_len = ids.len() - SPAN;
+        let prefix = &ids[..prefix_len];
+        let proposals = &ids[prefix_len..];
+        let row = |token_ids: &[u32], device: &Device| {
+            Tensor::new(token_ids, device)
+                .expect("tokens on device")
+                .unsqueeze(0)
+                .expect("batch dimension")
+        };
+
+        // Both paths start from exactly the same real-model prefix KV.
+        speculative
+            .model
+            .forward(&row(prefix, &speculative.device), 0)
+            .expect("speculative prefix prefill");
+        reference
+            .model
+            .forward(&row(prefix, &reference.device), 0)
+            .expect("reference prefix prefill");
+        assert_eq!(speculative.model.kv_cache_len().unwrap(), prefix_len);
+        assert_eq!(reference.model.kv_cache_len().unwrap(), prefix_len);
+
+        // Full-logit verifier surface: retain every row and argmax on-device.
+        let all_logits_started = std::time::Instant::now();
+        let all_logits = speculative
+            .model
+            .forward_all_logits(&row(proposals, &speculative.device), prefix_len)
+            .expect("one-pass all-position target logits");
+        let (batch, span, vocab) = all_logits.dims3().expect("(batch, span, vocab)");
+        assert_eq!((batch, span), (1, SPAN));
+        assert!(vocab > 4, "real model must expose a non-trivial vocabulary");
+        let argmax_from_logits = all_logits
+            .argmax(2)
+            .expect("argmax full logits")
+            .squeeze(0)
+            .expect("drop batch")
+            .to_vec1::<u32>()
+            .expect("copy four token ids");
+        // `to_vec1` above is the synchronization point, so this includes the actual
+        // accelerator work rather than merely timing asynchronous command encoding.
+        let all_logits_wall = all_logits_started.elapsed();
+
+        // Roll back the first verifier call, then exercise the token-only fast surface
+        // over the identical span. This also proves replay overwrites an invisible tail.
+        speculative
+            .model
+            .truncate_kv_cache(prefix_len)
+            .expect("rollback first verifier pass");
+        let direct_argmax_started = std::time::Instant::now();
+        let direct_argmax = speculative
+            .model
+            .forward_all_argmax(&row(proposals, &speculative.device), prefix_len)
+            .expect("one-pass token-only target argmax")
+            .squeeze(0)
+            .expect("drop batch")
+            .to_vec1::<u32>()
+            .expect("copy direct argmax ids");
+        let direct_argmax_wall = direct_argmax_started.elapsed();
+        assert_eq!(
+            direct_argmax, argmax_from_logits,
+            "forward_all_argmax must equal argmax(forward_all_logits) at every position"
+        );
+
+        // Independent oracle: process the same four inputs one at a time through the
+        // ordinary production forward path and compare every predicted position.
+        let serial_started = std::time::Instant::now();
+        let mut serial_argmax = Vec::with_capacity(SPAN);
+        for (offset, &token) in proposals.iter().enumerate() {
+            let logits = reference
+                .model
+                .forward(&row(&[token], &reference.device), prefix_len + offset)
+                .expect("serial target step")
+                .squeeze(0)
+                .expect("drop serial batch");
+            serial_argmax.push(
+                logits
+                    .argmax(0)
+                    .expect("serial argmax")
+                    .to_scalar::<u32>()
+                    .expect("serial token id"),
+            );
+        }
+        let serial_wall = serial_started.elapsed();
+        assert_eq!(
+            direct_argmax, serial_argmax,
+            "one target pass must match incremental target argmax at every proposal position"
+        );
+        eprintln!(
+            "diagnostic timing only (local/model/device; not a benchmark claim): \
+             model=llama-3.2-1b-instruct-q4 device={:?} span={SPAN} \
+             one_pass_all_logits_plus_device_argmax={:.3}ms \
+             one_pass_device_argmax={:.3}ms serial_{SPAN}_passes={:.3}ms \
+             serial/one_pass_argmax={:.3}x",
+            speculative.device,
+            all_logits_wall.as_secs_f64() * 1_000.0,
+            direct_argmax_wall.as_secs_f64() * 1_000.0,
+            serial_wall.as_secs_f64() * 1_000.0,
+            serial_wall.as_secs_f64() / direct_argmax_wall.as_secs_f64().max(f64::MIN_POSITIVE)
+        );
+
+        // Accept two proposals and reject two. Rebuild the oracle from position zero
+        // using only the committed prefix, so it is a true never-speculated KV path.
+        let committed_len = prefix_len + ACCEPTED;
+        speculative
+            .model
+            .truncate_kv_cache(committed_len)
+            .expect("commit accepted proposal prefix");
+        let mut committed = prefix.to_vec();
+        committed.extend_from_slice(&proposals[..ACCEPTED]);
+        reference
+            .model
+            .forward(&row(&committed, &reference.device), 0)
+            .expect("reset reference to never-speculated committed prefix");
+        assert_eq!(speculative.model.kv_cache_len().unwrap(), committed_len);
+        assert_eq!(reference.model.kv_cache_len().unwrap(), committed_len);
+
+        // Feed two replacement tokens, each deliberately different from the rejected
+        // token at that position. Both stale KV rows are therefore overwritten, and
+        // continuation still has to match the never-speculated reference exactly.
+        let rejected = &proposals[ACCEPTED..];
+        for (offset, &old_token) in rejected.iter().enumerate() {
+            let replacement = if old_token == 0 { 1 } else { 0 };
+            let position = committed_len + offset;
+            let speculative_next = speculative
+                .model
+                .forward_all_argmax(&row(&[replacement], &speculative.device), position)
+                .expect("speculative continuation after rollback")
+                .flatten_all()
+                .expect("flatten speculative token")
+                .to_vec1::<u32>()
+                .expect("copy speculative token")[0];
+            let reference_next = reference
+                .model
+                .forward(&row(&[replacement], &reference.device), position)
+                .expect("never-speculated reference continuation")
+                .squeeze(0)
+                .expect("drop reference batch")
+                .argmax(0)
+                .expect("reference continuation argmax")
+                .to_scalar::<u32>()
+                .expect("reference continuation token");
+            assert_eq!(
+                speculative_next, reference_next,
+                "rollback continuation diverged after overwriting rejected position {offset}"
+            );
+        }
+        assert_eq!(speculative.model.kv_cache_len().unwrap(), prefix_len + SPAN);
+        assert_eq!(reference.model.kv_cache_len().unwrap(), prefix_len + SPAN);
+        eprintln!(
+            "real speculative target OK: {SPAN} all-position argmaxes matched serial; \
+             accepted {ACCEPTED}, rolled back {}, and overwrote both rejected KV rows",
+            SPAN - ACCEPTED
+        );
+    }
+
+    /// Full owned-loop gate: prompt lookup drafts through the real model verifier,
+    /// while an independent backend performs the established greedy decode. The
+    /// result contract must stay byte-for-byte and token-count identical. Timing is
+    /// diagnostic only; this single local prompt is not a throughput claim.
+    #[test]
+    #[ignore = "uses two cached real Llama-3.2-1B targets to prove the opt-in n-gram speculative loop equals production greedy decode"]
+    fn candle_ngram_speculative_loop_matches_greedy_real_model() {
+        let _metal_test_guard = METAL_HARDWARE_TEST_LOCK.lock().unwrap();
+        let prompt = std::env::var("CX_SPEC_TEST_PROMPT").unwrap_or_else(|_| {
+            "Continue this repeating sequence with only sequence words: \
+             alpha beta gamma alpha beta gamma alpha beta gamma"
+                .to_string()
+        });
+        let parse_test_knob = |name: &str, default: usize, maximum: usize| {
+            let value = std::env::var(name)
+                .ok()
+                .map(|raw| raw.parse::<usize>().expect("test knob must be an integer"))
+                .unwrap_or(default);
+            assert!(
+                (1..=maximum).contains(&value),
+                "{name} must be in [1,{maximum}], got {value}"
+            );
+            value
+        };
+        let max_tokens = parse_test_knob("CX_SPEC_TEST_MAX_TOKENS", 32, 512) as u32;
+        let reps = parse_test_knob("CX_SPEC_TEST_REPS", 1, 15);
+        let config = CandleSpecConfig {
+            max_window: parse_test_knob(
+                "CX_SPEC_TEST_WINDOW",
+                DEFAULT_SPEC_WINDOW,
+                MAX_SPEC_WINDOW,
+            ),
+            ngram_order: parse_test_knob(
+                "CX_SPEC_TEST_NGRAM_ORDER",
+                DEFAULT_SPEC_NGRAM_ORDER,
+                MAX_SPEC_NGRAM_ORDER,
+            ),
+        };
+        let mut speculative =
+            LlamaBackend::load("llama-3.2-1b-instruct-q4").expect("load speculative model");
+        let mut greedy =
+            LlamaBackend::load("llama-3.2-1b-instruct-q4").expect("load greedy reference");
+
+        // Warm both complete paths before timing. Metal pipeline compilation and
+        // first-use allocation are real cold-start costs, but charging them only
+        // to whichever branch happens to execute first would not compare decode.
+        // Warm the complete configured horizon. A short prefix does not exercise
+        // every adaptive K bucket (or its corresponding Metal pipeline), which
+        // would charge first-use compilation only to the timed speculative run.
+        speculative
+            .generate_speculative_ngram_with_stats(&prompt, max_tokens, config)
+            .expect("warm speculative path");
+        greedy
+            .generate_greedy(&prompt, max_tokens)
+            .expect("warm greedy path");
+
+        fn median(values: &[f64]) -> f64 {
+            let mut sorted = values.to_vec();
+            sorted.sort_by(|a, b| a.total_cmp(b));
+            let middle = sorted.len() / 2;
+            if sorted.len().is_multiple_of(2) {
+                (sorted[middle - 1] + sorted[middle]) / 2.0
+            } else {
+                sorted[middle]
+            }
+        }
+
+        let mut trials = Vec::with_capacity(reps);
+        let mut speculative_times = Vec::with_capacity(reps);
+        let mut greedy_times = Vec::with_capacity(reps);
+        let mut paired_ratios = Vec::with_capacity(reps);
+        let mut stable_output: Option<(String, usize)> = None;
+        let mut stable_stats: Option<CandleSpecStats> = None;
+
+        for trial in 0..reps {
+            let spec_first = trial % 2 == 0;
+            let (spec, stats, spec_wall, reference, greedy_wall) = if spec_first {
+                let spec_started = std::time::Instant::now();
+                let (spec, stats) = speculative
+                    .generate_speculative_ngram_with_stats(&prompt, max_tokens, config)
+                    .expect("real speculative generation");
+                let spec_wall = spec_started.elapsed();
+                let greedy_started = std::time::Instant::now();
+                let reference = greedy
+                    .generate_greedy(&prompt, max_tokens)
+                    .expect("real greedy generation");
+                (spec, stats, spec_wall, reference, greedy_started.elapsed())
+            } else {
+                let greedy_started = std::time::Instant::now();
+                let reference = greedy
+                    .generate_greedy(&prompt, max_tokens)
+                    .expect("real greedy generation");
+                let greedy_wall = greedy_started.elapsed();
+                let spec_started = std::time::Instant::now();
+                let (spec, stats) = speculative
+                    .generate_speculative_ngram_with_stats(&prompt, max_tokens, config)
+                    .expect("real speculative generation");
+                (spec, stats, spec_started.elapsed(), reference, greedy_wall)
+            };
+
+            assert_eq!(
+                spec, reference,
+                "owned speculative loop must preserve production text and token count in trial {trial}"
+            );
+            if let Some(expected) = &stable_output {
+                assert_eq!(
+                    &spec, expected,
+                    "real model output changed across repeated trial {trial}"
+                );
+            } else {
+                stable_output = Some(spec.clone());
+            }
+            if let Some(expected) = &stable_stats {
+                assert_eq!(
+                    &stats, expected,
+                    "adaptive policy stats changed across repeated trial {trial}"
+                );
+            } else {
+                stable_stats = Some(stats);
+            }
+
+            let spec_ms = spec_wall.as_secs_f64() * 1_000.0;
+            let greedy_ms = greedy_wall.as_secs_f64() * 1_000.0;
+            let ratio = greedy_ms / spec_ms.max(f64::MIN_POSITIVE);
+            speculative_times.push(spec_ms);
+            greedy_times.push(greedy_ms);
+            paired_ratios.push(ratio);
+            trials.push((
+                if spec_first {
+                    "spec->greedy"
+                } else {
+                    "greedy->spec"
+                },
+                spec_ms,
+                greedy_ms,
+                ratio,
+            ));
+        }
+
+        let output = stable_output.expect("at least one diagnostic repetition");
+        let stats = stable_stats.expect("at least one diagnostic repetition");
+        eprintln!(
+            "diagnostic timing only (one local prompt): reps={reps} \
+             speculative_median={:.3}ms greedy_median={:.3}ms \
+             paired_ratio_median={:.3}x trials={trials:?} output_tokens={} \
+             stats={stats:?} text={:?}",
+            median(&speculative_times),
+            median(&greedy_times),
+            median(&paired_ratios),
+            output.1,
+            output.0
+        );
+    }
+
+    /// Multi-request real-model parity corpus for the complete adaptive loop.
+    /// This is deliberately broader than the single timing prompt: alternative
+    /// Metal reductions may be numerically close yet still change an argmax, and
+    /// sequential requests also prove that KV rollback/reset state cannot leak.
+    #[test]
+    #[ignore = "uses two cached real Llama-3.2-1B targets across a diverse prompt corpus"]
+    fn candle_ngram_speculative_corpus_matches_greedy_real_model() {
+        let _metal_test_guard = METAL_HARDWARE_TEST_LOCK.lock().unwrap();
+        let cases = [
+            (
+                "factual-no-match",
+                "What is the capital of France? Answer with only the city name.",
+                24u32,
+            ),
+            (
+                "json",
+                "Return one compact JSON object with keys name and count for three apples.",
+                32,
+            ),
+            (
+                "code",
+                "Write a Rust function that adds two u32 values. Output code only.",
+                32,
+            ),
+            ("short-eos", "Reply with exactly: OK", 24),
+            (
+                "repeated-sequence",
+                "Continue with sequence words only: red blue green red blue green red blue green",
+                32,
+            ),
+            (
+                "tagged-copy",
+                "Copy exactly: <copy>alpha beta gamma alpha beta gamma alpha beta gamma</copy>",
+                32,
+            ),
+            (
+                "long-copy",
+                "Output only this text: one two three one two three one two three one two three one two three one two three",
+                32,
+            ),
+            (
+                "unicode-punctuation",
+                "Repeat exactly, including punctuation: café — Toronto — rocket!",
+                24,
+            ),
+        ];
+        let config = CandleSpecConfig {
+            max_window: DEFAULT_SPEC_WINDOW,
+            ngram_order: 2,
+        };
+        let mut speculative =
+            LlamaBackend::load("llama-3.2-1b-instruct-q4").expect("load speculative model");
+        let mut greedy =
+            LlamaBackend::load("llama-3.2-1b-instruct-q4").expect("load greedy reference");
+
+        for (index, (name, prompt, max_tokens)) in cases.into_iter().enumerate() {
+            let (spec, stats) = speculative
+                .generate_speculative_ngram_with_stats(prompt, max_tokens, config)
+                .unwrap_or_else(|error| panic!("speculative corpus case {name} failed: {error}"));
+            let reference = greedy
+                .generate_greedy(prompt, max_tokens)
+                .unwrap_or_else(|error| panic!("greedy corpus case {name} failed: {error}"));
+            assert_eq!(
+                spec, reference,
+                "real speculative corpus diverged in case {index} ({name})"
+            );
+            eprintln!(
+                "real speculative corpus case {index} ({name}) OK: output_tokens={} stats={stats:?}",
+                spec.1
+            );
+        }
+    }
+
+    /// Real-model gate for the first dense multi-row verifier. Identical prompts
+    /// guarantee exact wrapped-token lengths and identical draft regimes, isolating
+    /// the Bx(1+K) target path from ragged scheduling. B=2 and B=4 must equal the
+    /// independent greedy oracle and the established serial speculative loop. AB/BA
+    /// timing is diagnostic until a broader fleet corpus establishes a default-on
+    /// threshold; actual shared target-call reduction is asserted directly.
+    #[test]
+    #[ignore = "uses two cached Llama-3.2-1B targets to prove B=2/B=4 synchronized speculative parity and print AB/BA timing"]
+    fn candle_ngram_speculative_exact_cohorts_match_greedy_and_benchmark_real_model() {
+        let _metal_test_guard = METAL_HARDWARE_TEST_LOCK.lock().unwrap();
+        assert!(
+            candle_spec_config().expect("valid spec environment").is_none(),
+            "run the cohort benchmark with CX_SPEC_DECODE=off so generate_batch is an independent batched-greedy baseline"
+        );
+        let prompt = std::env::var("CX_SPEC_BATCH_TEST_PROMPT").unwrap_or_else(|_| {
+            "Output only this text: one two three one two three one two three one two three one two three one two three one two three one two three one two three one two three"
+                .to_string()
+        });
+        let parse_knob = |name: &str, default: usize, maximum: usize| {
+            let value = std::env::var(name)
+                .ok()
+                .map(|raw| {
+                    raw.parse::<usize>()
+                        .expect("batch spec test knob must be an integer")
+                })
+                .unwrap_or(default);
+            assert!((1..=maximum).contains(&value), "{name} out of range");
+            value
+        };
+        let max_tokens = parse_knob("CX_SPEC_BATCH_TEST_MAX_TOKENS", 64, 256) as u32;
+        let reps = parse_knob("CX_SPEC_BATCH_TEST_REPS", 3, 9);
+        // Exercise the production order-3 drafter by default. The override is a
+        // diagnostic knob only; the order-2 poor-yield control below stays fixed.
+        let config = CandleSpecConfig {
+            max_window: parse_knob(
+                "CX_SPEC_BATCH_TEST_WINDOW",
+                DEFAULT_SPEC_WINDOW,
+                MAX_SPEC_WINDOW,
+            ),
+            ngram_order: parse_knob(
+                "CX_SPEC_BATCH_TEST_ORDER",
+                DEFAULT_SPEC_NGRAM_ORDER,
+                MAX_SPEC_NGRAM_ORDER,
+            ),
+        };
+        let mut cohort_model =
+            LlamaBackend::load("llama-3.2-1b-instruct-q4").expect("load cohort model");
+        let mut serial_model =
+            LlamaBackend::load("llama-3.2-1b-instruct-q4").expect("load serial model");
+
+        fn median(values: &[f64]) -> f64 {
+            let mut sorted = values.to_vec();
+            sorted.sort_by(|a, b| a.total_cmp(b));
+            let middle = sorted.len() / 2;
+            if sorted.len().is_multiple_of(2) {
+                (sorted[middle - 1] + sorted[middle]) / 2.0
+            } else {
+                sorted[middle]
+            }
+        }
+
+        let oracle = serial_model
+            .generate_greedy(&prompt, max_tokens)
+            .expect("greedy oracle");
+        for width in [2usize, SPEC_SYNC_COHORT_MAX] {
+            let prompts = vec![prompt.clone(); width];
+
+            // Warm every path and batch width before timing so first-use Metal
+            // compilation/allocation is never charged to only one ordering.
+            cohort_model
+                .generate_batch_speculative_rows_with_stats(&prompts, max_tokens, config)
+                .expect("warm synchronized cohort");
+            for prompt in &prompts {
+                serial_model
+                    .generate_speculative_ngram_with_stats(prompt, max_tokens, config)
+                    .expect("warm serial speculative row");
+            }
+
+            let mut cohort_ms = Vec::with_capacity(reps);
+            let mut serial_ms = Vec::with_capacity(reps);
+            let mut paired_speedups = Vec::with_capacity(reps);
+            for trial in 0..reps {
+                let cohort_first = trial % 2 == 0;
+                let run_cohort = |model: &mut LlamaBackend| {
+                    let started = std::time::Instant::now();
+                    let result = model
+                        .generate_batch_speculative_rows_with_stats(&prompts, max_tokens, config)
+                        .expect("synchronized cohort generation");
+                    (result, started.elapsed())
+                };
+                let run_serial = |model: &mut LlamaBackend| {
+                    let started = std::time::Instant::now();
+                    let mut outputs = Vec::with_capacity(width);
+                    let mut target_calls = 0usize;
+                    for prompt in &prompts {
+                        let (output, stats) = model
+                            .generate_speculative_ngram_with_stats(prompt, max_tokens, config)
+                            .expect("serial speculative generation");
+                        outputs.push(output);
+                        target_calls += stats.target_calls;
+                    }
+                    ((outputs, target_calls), started.elapsed())
+                };
+
+                let (
+                    ((cohort_outputs, cohort_stats), cohort_wall),
+                    ((serial_outputs, serial_target_calls), serial_wall),
+                ) = if cohort_first {
+                    (run_cohort(&mut cohort_model), run_serial(&mut serial_model))
+                } else {
+                    let serial = run_serial(&mut serial_model);
+                    let cohort = run_cohort(&mut cohort_model);
+                    (cohort, serial)
+                };
+
+                assert_eq!(cohort_outputs, serial_outputs, "B={width} trial={trial}");
+                assert!(
+                    cohort_outputs.iter().all(|output| output == &oracle),
+                    "B={width} synchronized output must equal independent greedy"
+                );
+                assert_eq!(cohort_stats.serial_rows, 0);
+                assert_eq!(cohort_stats.batched_cohorts, 1);
+                assert_eq!(cohort_stats.max_cohort_width, width);
+                assert_eq!(cohort_stats.synchronized_clamp_tokens, 0);
+                assert!(
+                    cohort_stats.attempted_tokens > 0 && cohort_stats.accepted_tokens > 0,
+                    "B={width} copy-heavy gate must exercise and accept a true K>0 proposal; stats={cohort_stats:?}"
+                );
+                assert_eq!(
+                    cohort_stats.selector_activated_cohorts, 1,
+                    "B={width} calibrated high-copy case must clear counterfactual+optional-retry+confirmation and activate; stats={cohort_stats:?}"
+                );
+                assert_eq!(cohort_stats.selector_probe_rounds, 1);
+                assert!(
+                    cohort_stats.selector_retry_rounds <= 1,
+                    "B={width} selector retry must remain one-shot; stats={cohort_stats:?}"
+                );
+                assert_eq!(cohort_stats.selector_confirmation_rounds, 1);
+                assert!(
+                    cohort_stats.selector_credit_ns > 0,
+                    "B={width} high-copy case must finish with measured credit; stats={cohort_stats:?}"
+                );
+                assert!(
+                    cohort_stats.target_calls < serial_target_calls,
+                    "B={width} must share target calls: cohort={} serial={serial_target_calls}",
+                    cohort_stats.target_calls
+                );
+
+                let cohort = cohort_wall.as_secs_f64() * 1_000.0;
+                let serial = serial_wall.as_secs_f64() * 1_000.0;
+                cohort_ms.push(cohort);
+                serial_ms.push(serial);
+                paired_speedups.push(serial / cohort.max(f64::MIN_POSITIVE));
+                eprintln!(
+                    "synchronized spec B={width} trial={trial} order={} cohort={cohort:.3}ms serial={serial:.3}ms speedup={:.3}x calls={}/{} stats={cohort_stats:?}",
+                    if cohort_first { "cohort->serial" } else { "serial->cohort" },
+                    paired_speedups.last().unwrap(),
+                    cohort_stats.target_calls,
+                    serial_target_calls,
+                );
+            }
+            eprintln!(
+                "synchronized spec B={width} AB/BA summary: reps={reps} cohort_median={:.3}ms serial_median={:.3}ms paired_speedup_median={:.3}x",
+                median(&cohort_ms),
+                median(&serial_ms),
+                median(&paired_speedups),
+            );
+
+            // The deployment decision is not serial-spec versus cohort-spec; it
+            // is cohort-spec versus the already-fast production batched-greedy
+            // path. Measure that independently in alternating order and keep it
+            // diagnostic until hardware-class/corpus promotion gates exist.
+            serial_model
+                .generate_batch(&prompts, max_tokens)
+                .expect("warm batched greedy baseline");
+            let mut greedy_batch_ms = Vec::with_capacity(reps);
+            let mut cohort_vs_greedy = Vec::with_capacity(reps);
+            for trial in 0..reps {
+                let cohort_first = trial % 2 == 0;
+                let run_cohort = |model: &mut LlamaBackend| {
+                    let started = std::time::Instant::now();
+                    let outputs = model
+                        .generate_batch_speculative_rows_with_stats(&prompts, max_tokens, config)
+                        .expect("cohort-versus-greedy speculative generation")
+                        .0;
+                    (outputs, started.elapsed())
+                };
+                let run_greedy = |model: &mut LlamaBackend| {
+                    let started = std::time::Instant::now();
+                    let outputs = model
+                        .generate_batch(&prompts, max_tokens)
+                        .expect("batched greedy generation");
+                    (outputs, started.elapsed())
+                };
+                let ((cohort_outputs, cohort_wall), (greedy_outputs, greedy_wall)) = if cohort_first
+                {
+                    (run_cohort(&mut cohort_model), run_greedy(&mut serial_model))
+                } else {
+                    let greedy = run_greedy(&mut serial_model);
+                    let cohort = run_cohort(&mut cohort_model);
+                    (cohort, greedy)
+                };
+                assert_eq!(
+                    cohort_outputs, greedy_outputs,
+                    "B={width} greedy trial={trial}"
+                );
+                let cohort = cohort_wall.as_secs_f64() * 1_000.0;
+                let greedy = greedy_wall.as_secs_f64() * 1_000.0;
+                greedy_batch_ms.push(greedy);
+                cohort_vs_greedy.push(greedy / cohort.max(f64::MIN_POSITIVE));
+            }
+            eprintln!(
+                "synchronized spec B={width} vs batched greedy: reps={reps} greedy_median={:.3}ms paired_speedup_median={:.3}x",
+                median(&greedy_batch_ms),
+                median(&cohort_vs_greedy),
+            );
+        }
+    }
+
+    /// Measured negative-control companion for the profitability selector. This
+    /// exact 58%-acceptance workload regressed the unselected cohort to 0.936x at
+    /// B=2 and 0.840x at B=4 on the reference build. The selector may spend one
+    /// bounded probe/confirmation experiment (K=2 at B2, calibrated K=3 at B4),
+    /// but must then lock to dense Bx1, preserve greedy bytes, and expose the
+    /// measured regret in its stats.
+    #[test]
+    #[ignore = "uses two cached Llama-3.2-1B targets to prove the measured poor-yield cohort locks to dense greedy"]
+    fn candle_ngram_speculative_selector_locks_on_measured_poor_case_real_model() {
+        let _metal_test_guard = METAL_HARDWARE_TEST_LOCK.lock().unwrap();
+        assert!(
+            candle_spec_config()
+                .expect("valid spec environment")
+                .is_none(),
+            "run the selector negative control with CX_SPEC_DECODE=off"
+        );
+        let prompt = "Output only this text: one two three one two three one two three one two three one two three one two three".to_string();
+        let max_tokens = 32u32;
+        let config = CandleSpecConfig {
+            max_window: 4,
+            ngram_order: 2,
+        };
+        let mut selector_model =
+            LlamaBackend::load("llama-3.2-1b-instruct-q4").expect("load selector model");
+        let mut greedy_model =
+            LlamaBackend::load("llama-3.2-1b-instruct-q4").expect("load greedy model");
+
+        for width in [2usize, SPEC_SYNC_COHORT_MAX] {
+            let prompts = vec![prompt.clone(); width];
+            selector_model
+                .generate_batch_speculative_rows_with_stats(&prompts, max_tokens, config)
+                .expect("warm selector negative control");
+            greedy_model
+                .generate_batch(&prompts, max_tokens)
+                .expect("warm greedy negative control");
+
+            let started = std::time::Instant::now();
+            let (selected, stats) = selector_model
+                .generate_batch_speculative_rows_with_stats(&prompts, max_tokens, config)
+                .expect("selected negative control");
+            let selected_wall = started.elapsed();
+            let started = std::time::Instant::now();
+            let greedy = greedy_model
+                .generate_batch(&prompts, max_tokens)
+                .expect("greedy negative control");
+            let greedy_wall = started.elapsed();
+
+            assert_eq!(
+                selected, greedy,
+                "B={width} selector must preserve greedy bytes"
+            );
+            assert!(stats.selector_dense_rounds >= SPEC_PROFIT_DENSE_SAMPLES);
+            assert!(stats.selector_probe_rounds <= 1);
+            assert_eq!(
+                stats.selector_retry_rounds, 0,
+                "B={width} zero-accept poor case must not earn a retry; stats={stats:?}"
+            );
+            assert!(stats.selector_confirmation_rounds <= 1);
+            assert_eq!(
+                stats.selector_locked_cohorts, 1,
+                "B={width} measured poor case must lock dense; stats={stats:?}"
+            );
+            assert!(
+                stats.selector_regret_ns > 0,
+                "B={width} bounded failed experiment must expose its regret; stats={stats:?}"
+            );
+            eprintln!(
+                "selector negative control B={width}: selected={:.3}ms greedy={:.3}ms ratio={:.3}x stats={stats:?}",
+                selected_wall.as_secs_f64() * 1_000.0,
+                greedy_wall.as_secs_f64() * 1_000.0,
+                greedy_wall.as_secs_f64() / selected_wall.as_secs_f64().max(f64::MIN_POSITIVE),
+            );
+        }
     }
 
     /// Context-ceiling bounds check, on the REAL model (Workload & Model Breadth
@@ -6594,7 +10122,10 @@ mod tests {
                 max_tokens: 16,
                 temperature: 0.0,
             });
-            assert!(runner.can_run(&infer, &cap).await, "wired lane: small-GGUF batch_infer");
+            assert!(
+                runner.can_run(&infer, &cap).await,
+                "wired lane: small-GGUF batch_infer"
+            );
             // NOT wired → must fall through to the Candle runners unchanged.
             let classify = test_manifest(JobType::BatchClassification {
                 labels: vec!["a".into(), "b".into()],
@@ -6901,7 +10432,7 @@ mod tests {
             assert!(!EmbedRunner.can_run(&m, &cap).await);
 
             // dispatch routes a custom job to CustomRunner (not NoRunner).
-            let runners = default_runners();
+            let runners = default_runners_with_preview(None);
             let picked = dispatch(&m, &cap, &runners).await.expect("custom routes");
             assert_eq!(picked.backend_name(), "custom");
 
@@ -7023,7 +10554,7 @@ mod tests {
         // scorer-agnostic.
         let scores = [0.1f32, 0.9, 0.9, 0.3];
         assert_eq!(order_by_scores(&scores, 0), vec![1, 2, 3, 0]); // 0.9(1), 0.9(2 tie), 0.3, 0.1
-        // top_k truncates AFTER ordering.
+                                                                   // top_k truncates AFTER ordering.
         assert_eq!(order_by_scores(&scores, 2), vec![1, 2]);
         // Cross-encoder logits are unbounded (not cosine in [-1,1]); the same
         // helper orders raw logits correctly, negatives included.
@@ -7534,7 +11065,7 @@ mod tests {
         assert_eq!(out.dims(), [2, 2, 3, 2]);
         let got: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
         let mut want: Vec<f32> = Vec::new();
-        want.extend_from_slice(&data[1 * per_row..2 * per_row]);
+        want.extend_from_slice(&data[per_row..2 * per_row]);
         want.extend_from_slice(&data[3 * per_row..4 * per_row]);
         assert_eq!(got, want, "kept rows must be copied verbatim and in order");
     }
@@ -7608,8 +11139,14 @@ mod tests {
 
         assert_eq!(unsplit.len(), split.len());
         for (i, (u, s)) in unsplit.iter().zip(split.iter()).enumerate() {
-            assert_eq!(u.0, s.0, "prompt {i}: split-batch text must equal one unsplit batch");
-            assert_eq!(u.1, s.1, "prompt {i}: split-batch token count must equal one unsplit batch");
+            assert_eq!(
+                u.0, s.0,
+                "prompt {i}: split-batch text must equal one unsplit batch"
+            );
+            assert_eq!(
+                u.1, s.1,
+                "prompt {i}: split-batch token count must equal one unsplit batch"
+            );
         }
         println!("correctness: OK · splitting a bucket into sub-batches == running it whole");
     }
@@ -7679,7 +11216,9 @@ mod tests {
                     lens[i]
                 );
             }
-            println!("correctness: OK · [{label}] padded == serial byte-for-byte on lengths {lens:?}");
+            println!(
+                "correctness: OK · [{label}] padded == serial byte-for-byte on lengths {lens:?}"
+            );
         };
 
         // Scenario A — same PAD_BUCKET(=16) band, small spread, staggered finishes.
@@ -7704,9 +11243,11 @@ mod tests {
                 "Say ok.".to_string(),
                 "Give me one word.".to_string(),
                 "Describe the ocean in a couple of short, plain sentences for me.".to_string(),
-                "Explain, briefly, why the sky appears blue during a clear daytime sky.".to_string(),
+                "Explain, briefly, why the sky appears blue during a clear daytime sky."
+                    .to_string(),
                 "Name a fruit.".to_string(),
-                "Count backwards from four to one, one number per line, nothing else at all.".to_string(),
+                "Count backwards from four to one, one number per line, nothing else at all."
+                    .to_string(),
                 "What is two plus two? Answer with only the number.".to_string(),
             ],
         );
@@ -7768,7 +11309,10 @@ mod tests {
             println!(
                 "HAWKING {prompt:?}\n  hawking: {htext:?} ({hn} tok)\n  serial:  {stext:?} ({sn} tok)"
             );
-            assert!(hn > 0, "hawking must generate at least one token for {prompt:?}");
+            assert!(
+                hn > 0,
+                "hawking must generate at least one token for {prompt:?}"
+            );
             assert!(
                 htext.to_lowercase().contains(needle),
                 "hawking-decoded output for {prompt:?} must be COHERENT (contain {needle:?}); got {htext:?}. \
@@ -7792,7 +11336,9 @@ mod tests {
         // the flat multi-region KV; each must equal its own solo serial generation.
         let a = "The capital of France is".to_string();
         let b = "List the first three prime numbers.".to_string();
-        let together = be.hawking_generate(&[a.clone(), b.clone()], max).expect("batched hawking");
+        let together = be
+            .hawking_generate(&[a.clone(), b.clone()], max)
+            .expect("batched hawking");
         let solo_a = be.generate(&a, max).expect("serial a");
         let solo_b = be.generate(&b, max).expect("serial b");
         println!(
@@ -7916,7 +11462,11 @@ mod tests {
         // (max_concurrent == pool_size), and at least four admissions landed in a
         // region a prior finished prompt had vacated (6 prompts through 2 slots forces
         // >= 4 reuses by pigeonhole).
-        assert_eq!(stats.admissions, prompts.len(), "every prompt must be admitted once");
+        assert_eq!(
+            stats.admissions,
+            prompts.len(),
+            "every prompt must be admitted once"
+        );
         assert_eq!(stats.releases, prompts.len(), "every prompt must retire");
         assert_eq!(
             stats.max_concurrent, pool_size,
@@ -7990,8 +11540,14 @@ mod tests {
         let (b, _) = be
             .hawking_generate_churn(&[near_tie.clone(), filler.clone()], &[0, 0], 2, max)
             .expect("churn pool=2 cobatch");
-        assert_eq!(b[0].0, solo_nt, "near-tie must equal solo when co-batched from tick 0");
-        assert_eq!(b[1].0, solo_fill, "filler must be unaffected by co-batching");
+        assert_eq!(
+            b[0].0, solo_nt,
+            "near-tie must equal solo when co-batched from tick 0"
+        );
+        assert_eq!(
+            b[1].0, solo_fill,
+            "filler must be unaffected by co-batching"
+        );
 
         // (c) Near-tie admitted mid-flight (pool=2, staggered): enters at tick 1 into a
         //     slot the filler is already 1 token deep in. Still equals solo here, and
@@ -7999,8 +11555,14 @@ mod tests {
         let (c, _) = be
             .hawking_generate_churn(&[filler.clone(), near_tie.clone()], &[0, 1], 2, max)
             .expect("churn pool=2 staggered");
-        assert_eq!(c[1].0, solo_nt, "near-tie must equal solo when admitted mid-flight");
-        assert_eq!(c[0].0, solo_fill, "filler must be unaffected by staggered admission");
+        assert_eq!(
+            c[1].0, solo_nt,
+            "near-tie must equal solo when admitted mid-flight"
+        );
+        assert_eq!(
+            c[0].0, solo_fill,
+            "filler must be unaffected by staggered admission"
+        );
 
         // (d) The exact 5-way membership that DOES tip the tie. The near-tie output may
         //     legitimately differ from solo here — but it must stay COHERENT (list the
@@ -8021,7 +11583,10 @@ mod tests {
         let (d, _) = be
             .hawking_generate_churn(&five, &[0, 0, 1, 3, 6], 2, max)
             .expect("churn 5-way");
-        println!("5-way near-tie churn: {:?}\n         solo:          {:?}", d[2].0, solo_five[2]);
+        println!(
+            "5-way near-tie churn: {:?}\n         solo:          {:?}",
+            d[2].0, solo_five[2]
+        );
         // The near-tie output stays coherent (all three primes present) even if it
         // took the other coherent branch.
         for prime in ["2", "3", "5"] {
@@ -8155,7 +11720,11 @@ mod tests {
             // (b)+(c): input order, solo-serial byte-equality, real tokens.
             let mut total_tokens = 0u64;
             for (i, c) in completions.iter().enumerate() {
-                assert_eq!(c["index"].as_u64().unwrap() as usize, i, "input order preserved");
+                assert_eq!(
+                    c["index"].as_u64().unwrap() as usize,
+                    i,
+                    "input order preserved"
+                );
                 let text = c["text"].as_str().unwrap();
                 let tokens = c["tokens"].as_u64().unwrap();
                 assert_eq!(
@@ -8168,7 +11737,10 @@ mod tests {
                     tokens as usize, solo[i].1,
                     "prompt {i} token count must be the REAL generated count (== solo serial)"
                 );
-                assert!(tokens >= 1, "prompt {i} must have generated at least one token");
+                assert!(
+                    tokens >= 1,
+                    "prompt {i} must have generated at least one token"
+                );
                 total_tokens += tokens;
             }
             assert_eq!(
@@ -8772,7 +12344,9 @@ mod tests {
         }
         fn embed_input() -> Vec<u8> {
             (0..8)
-                .map(|i| format!("{{\"id\":\"{i}\",\"text\":\"contention benchmark sentence {i}\"}}\n"))
+                .map(|i| {
+                    format!("{{\"id\":\"{i}\",\"text\":\"contention benchmark sentence {i}\"}}\n")
+                })
                 .collect::<String>()
                 .into_bytes()
         }
@@ -8839,7 +12413,13 @@ mod tests {
                 .expect("solo batch_infer");
             t.elapsed()
         }
-        async fn run_concurrent(pool: &ModelPool) -> (std::time::Duration, std::time::Duration, std::time::Duration) {
+        async fn run_concurrent(
+            pool: &ModelPool,
+        ) -> (
+            std::time::Duration,
+            std::time::Duration,
+            std::time::Duration,
+        ) {
             let started = std::time::Instant::now();
             let embed_pool = pool.clone();
             let llama_pool = pool.clone();
@@ -8923,7 +12503,8 @@ mod tests {
         let mean_concurrent_wall = mean(&concurrent_wall_times);
         let mean_concurrent_llama_leg = mean(&concurrent_llama_times);
         let worst_case_serial_sum = mean_solo_embed + mean_solo_llama;
-        let concurrent_wall_spread = max_of(&concurrent_wall_times) - min_of(&concurrent_wall_times);
+        let concurrent_wall_spread =
+            max_of(&concurrent_wall_times) - min_of(&concurrent_wall_times);
         let concurrent_llama_leg_spread =
             max_of(&concurrent_llama_times) - min_of(&concurrent_llama_times);
         let llama_slowdown_factor = mean_concurrent_llama_leg / mean_solo_llama.max(1e-9);
@@ -9100,7 +12681,6 @@ mod tests {
             }),
         );
         let concurrent_wall = t.elapsed();
-        let llama_dt = llama_dt;
         let _busy_dt = _busy_dt.expect("busy loop join");
 
         let slowdown = llama_dt.as_secs_f64() / solo.as_secs_f64().max(1e-9);
@@ -9143,19 +12723,27 @@ mod tests {
         let n = 16usize; // matches BATCH_LEN in coalescer_two_concurrent_tasks_faster_than_serial
         let mut be6a = LlamaBackend::load("llama-3.2-1b-instruct-q4").expect("load a");
         let t = std::time::Instant::now();
-        let _ = be6a.generate_batch(&make_batch("a", n), max_tokens).unwrap();
+        let _ = be6a
+            .generate_batch(&make_batch("a", n), max_tokens)
+            .unwrap();
         let bsz6_once = t.elapsed();
 
         let mut be12 = LlamaBackend::load("llama-3.2-1b-instruct-q4").expect("load b");
         let t = std::time::Instant::now();
-        let _ = be12.generate_batch(&make_batch("b", n * 2), max_tokens).unwrap();
+        let _ = be12
+            .generate_batch(&make_batch("b", n * 2), max_tokens)
+            .unwrap();
         let bsz12_once = t.elapsed();
 
         let mut be6b = LlamaBackend::load("llama-3.2-1b-instruct-q4").expect("load c");
         let mut be6c = LlamaBackend::load("llama-3.2-1b-instruct-q4").expect("load d");
         let t = std::time::Instant::now();
-        let _ = be6b.generate_batch(&make_batch("c", n), max_tokens).unwrap();
-        let _ = be6c.generate_batch(&make_batch("d", n), max_tokens).unwrap();
+        let _ = be6b
+            .generate_batch(&make_batch("c", n), max_tokens)
+            .unwrap();
+        let _ = be6c
+            .generate_batch(&make_batch("d", n), max_tokens)
+            .unwrap();
         let bsz6_twice_serial = t.elapsed();
 
         println!(
@@ -9185,6 +12773,7 @@ mod tests {
     ///   cargo test --release --features metal probe_coalescer_round_trip_overhead -- --ignored --nocapture
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "diagnostic only: downloads the GGUF llama (~800MB); measures coalescer overhead"]
+    #[allow(clippy::await_holding_lock)]
     async fn probe_coalescer_round_trip_overhead() {
         let _metal_test_guard = METAL_HARDWARE_TEST_LOCK.lock().unwrap();
         use crate::pool::ModelPool;
@@ -9256,13 +12845,19 @@ mod tests {
         // unlike probe_bsz_scaling_is_linear_not_bandwidth_bound which used
         // separate backends — eliminating load-order/JIT variance entirely).
         let t = std::time::Instant::now();
-        let _ = backend.generate_batch(&make_batch("a", n), max_tokens).unwrap();
-        let _ = backend.generate_batch(&make_batch("b", n), max_tokens).unwrap();
+        let _ = backend
+            .generate_batch(&make_batch("a", n), max_tokens)
+            .unwrap();
+        let _ = backend
+            .generate_batch(&make_batch("b", n), max_tokens)
+            .unwrap();
         let twice_16 = t.elapsed();
 
         // bsz=32 once, the SAME warm backend, run immediately after.
         let t = std::time::Instant::now();
-        let _ = backend.generate_batch(&make_batch("c", n * 2), max_tokens).unwrap();
+        let _ = backend
+            .generate_batch(&make_batch("c", n * 2), max_tokens)
+            .unwrap();
         let once_32 = t.elapsed();
 
         println!(
@@ -9275,12 +12870,18 @@ mod tests {
         // Repeat in the OPPOSITE order to rule out warm-up/thermal drift bias
         // between the two arms (the first arm run is always colder/cooler).
         let t = std::time::Instant::now();
-        let _ = backend.generate_batch(&make_batch("d", n * 2), max_tokens).unwrap();
+        let _ = backend
+            .generate_batch(&make_batch("d", n * 2), max_tokens)
+            .unwrap();
         let once_32_second = t.elapsed();
 
         let t = std::time::Instant::now();
-        let _ = backend.generate_batch(&make_batch("e", n), max_tokens).unwrap();
-        let _ = backend.generate_batch(&make_batch("f", n), max_tokens).unwrap();
+        let _ = backend
+            .generate_batch(&make_batch("e", n), max_tokens)
+            .unwrap();
+        let _ = backend
+            .generate_batch(&make_batch("f", n), max_tokens)
+            .unwrap();
         let twice_16_second = t.elapsed();
 
         println!(
@@ -9486,10 +13087,7 @@ mod tests {
             "Just okay..",
         ];
         let width = raw_texts.iter().map(|t| t.len()).max().unwrap();
-        let texts: Vec<String> = raw_texts
-            .iter()
-            .map(|t| format!("{t:<width$}"))
-            .collect();
+        let texts: Vec<String> = raw_texts.iter().map(|t| format!("{t:<width$}")).collect();
         let prompts: Vec<String> = texts
             .iter()
             .map(|t| classification_prompt(t, &labels))
@@ -9818,14 +13416,20 @@ mod tests {
         let embed = by_job_type
             .get("embed")
             .expect("embed benchmark must produce a real row");
-        assert!(embed.eps > 0.0, "embed eps must be a real measured positive number");
+        assert!(
+            embed.eps > 0.0,
+            "embed eps must be a real measured positive number"
+        );
 
         // batch_infer (1B): always expected to load on any box.
         let llama_1b = results
             .iter()
             .find(|b| b.job_type == "batch_infer" && b.model_id == "llama-3.2-1b-instruct-q4")
             .expect("1B llama benchmark must produce a real row");
-        assert!(llama_1b.tps > 0.0, "1B llama tps must be a real measured positive number");
+        assert!(
+            llama_1b.tps > 0.0,
+            "1B llama tps must be a real measured positive number"
+        );
 
         // whisper: newly benched this pass — must be a real non-fabricated row.
         let whisper = by_job_type
@@ -9854,7 +13458,10 @@ mod tests {
             let big = big_row.expect(
                 "this box clears BIG_LLAMA_MIN_MEMORY_GB — the 7B row must be real, not skipped",
             );
-            assert!(big.tps > 0.0, "7B tps must be a real measured positive number");
+            assert!(
+                big.tps > 0.0,
+                "7B tps must be a real measured positive number"
+            );
         } else {
             assert!(
                 big_row.is_none(),

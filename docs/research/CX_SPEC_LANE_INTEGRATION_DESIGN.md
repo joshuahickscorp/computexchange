@@ -10,6 +10,13 @@ staged-multiplier table this design must never violate),
 `docs/research/RENDER_REPAIR_LOOP_DESIGN.md` (the repair lever and its measured
 RUN 4 negative), `docs/research/SPEC_ENGINE_SUBSTRATE_DESIGN.md` (the engine).
 
+**2026-07-10 hardening update:** the historical evidence below was superseded by a bound 4K
+strict-delivery pass at **2.450894x** and an untuned scene sweep that cleared 1/3 scenes. Strict
+is achieved, not generalized. The product unlock condition is now authoritative job/artifact/
+policy binding and attestation, not the existence of a receipt. The v1 schema also now carries
+explicit overhead and artifact verification; legacy receipts park. See
+`SPEC_ENGINE_HARDENING_2026-07-10.md`.
+
 ## 1. What now exists (MEASURED where stated)
 
 - **The canonical wire schema** is `spec-engine/src/receipt.rs`: the plan spine
@@ -37,10 +44,10 @@ RUN 4 negative), `docs/research/SPEC_ENGINE_SUBSTRATE_DESIGN.md` (the engine).
   5.84x within 5%. Token lane: lossless ~1x floor on real prompts. Combined:
   NONE-YET.
 
-The product consequence of that record is load-bearing and appears throughout:
-**the only render tier the ledger has actually delivered at >1x is the 0.95/preview
-band — so that is the only tier the product may sell today.** Strict delivery
-(wt>=0.95) stays quotable as a target, never as a promise, until a receipt clears it.
+The current product consequence is narrower: strict delivery can be cited for its exact measured
+recipe, but a shape-only request cannot sell it. The untuned sweep passed only 1/3 scenes, and the
+request does not bind scene content or repair-policy/build digests. Unbound quotes therefore stay
+preview and carry no per-job speedup projection.
 
 ## 2. The precedent this design copies: the routing block (entries 93–94)
 
@@ -227,10 +234,9 @@ What the split means here, honestly bounded:
    type + the `speculation` block behind its honesty boundary, preview tier only
    (§1). Gate: quote/submit/receipt integration tests in the entry-93/94 style; a
    non-spec job's quote is byte-identical.
-4. **Delivery tier unlock**: ONLY after a strict-delivery receipt exists — the
-   next selector candidate is cross-denoiser disagreement (OIDN vs OptiX on the
-   same render, ~$0.75 to validate, per RUN 4's finding); a second decisive
-   negative parks the delivery tier rather than loosening the gate.
+4. **Bound delivery tier unlock**: strict receipts exist. Require job ID, input and delivered
+   artifact digests, exact verifier/repair policy and build digests, plus a trusted signature or
+   server-side artifact re-verification. Receipt JSON alone is not authority.
 5. **Combined jobs**: only after the plan's sequenced step 3 (a genuinely nested
    workload) produces the one legitimate end-to-end receipt.
 

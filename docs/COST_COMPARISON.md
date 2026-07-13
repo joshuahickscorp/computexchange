@@ -1,3 +1,4 @@
+<!-- CLAIM-SCOPE: internal-engineering-non-authoritative -->
 # Computexchange — Cost-per-Project Comparison
 
 *Honest calculator (DEEP_RESEARCH_V2 §6.1). CX numbers are the REAL catalogue prices; comparator numbers are published LIST prices (not measured runs) — swap in measured numbers before any external use.*
@@ -20,4 +21,3 @@
 - **Loses** to OpenAI's cheapest batch tier on commodity small-model embed/classify — gpt-4o-mini batch is hard to beat on raw price.
 - **Wins** on (1) **privacy** — regulated workloads that simply cannot use a shared cloud (no comparison; OpenAI isn't an option), (2) **large models on owned hardware** vs renting H100s by the hour, (3) **opaque GPU-second compute** (sim/render/HPC) the per-token APIs don't serve, and (4) **project pricing** (pay per completed deliverable, no ops).
 - The strategy is to price to THAT truth, lead with the OpenAI-compatible API on familiar terms, and upsell privacy + large-model + project pricing — not to claim a blanket price win that verification already refuted.
-

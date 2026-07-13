@@ -1,3 +1,4 @@
+<!-- CLAIM-SCOPE: internal-engineering-non-authoritative -->
 # Computexchange — Product Shape (Closed Alpha)
 
 This doc fixes the **app topology** for closed alpha. It is a decision record, not

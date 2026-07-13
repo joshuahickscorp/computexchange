@@ -519,10 +519,18 @@ type ClaimedTask struct {
 	JobID            uuid.UUID
 	JobType          string
 	ModelRef         string
+	ModelKind        string
+	RuntimeCellID    string
+	RuntimeID        string
+	RuntimeMatrixSHA string
 	InputRef         string // this task's input chunk key (presigned to input_url)
 	ResultKey        string // where the worker writes its result (presigned to output_url)
 	OutputRef        string // the job-level merged output key (manifest)
 	Tier             string
+	MinMemoryGB      float32
+	HWClasses        []string
+	MaxDurationSecs  uint32
+	DataResidency    []string
 	VerifPolicy      []byte
 	JobTypeSpec      []byte // full submitted JobType JSON (tag + labels/schema/max_tokens/...)
 	OfferedRateUsdHr float32
@@ -530,8 +538,9 @@ type ClaimedTask struct {
 	IsHoneypot       bool
 }
 
-// ClaimTask atomically claims the single best eligible task for a worker using
-// FOR UPDATE SKIP LOCKED. This is the heart of the PG-backed queue:
+// ClaimTaskSQL builds the query that atomically claims the single best eligible
+// task for a worker using FOR UPDATE SKIP LOCKED. This is the heart of the
+// PG-backed queue:
 //
 //  1. compute the supplier's tier from reputation + lifetime completed tasks,
 //  2. scan visible queued/retrying tasks of non-cancelled jobs the worker is
@@ -557,8 +566,8 @@ type ClaimedTask struct {
 //     falls back to total memory before the first heartbeat — no regression)
 //   - throttle:  NOT w.throttled  (the worker is not pausing for memory pressure)
 //   - hardware:  j.hw_classes IS NULL OR w.hw_class = ANY(j.hw_classes)
-//   - job type:  w.supported_jobs @> ARRAY[j.job_type]
-//   - model:     job has no model_ref OR w.supported_models @> ARRAY[j.model_ref]
+//   - capability: an exact current-matrix row exists for
+//     (worker, job_type, model_ref); the legacy arrays are declarations only
 //   - residency: j.data_residency IS NULL OR s.data_country = ANY(j.data_residency)
 //   - tier gate: j.tier <> 'trusted' OR $2 >= 2
 //   - payout:    COALESCE(j.offered_rate_usd_hr,1e9) >= COALESCE(w.min_payout_usd_hr,0)
@@ -573,7 +582,7 @@ type ClaimedTask struct {
 // Path 7->8: a maintained cache, not a correlated subquery, since that rung),
 // and the full computed ORDER BY — is fixed, literal SQL text, identical to
 // what ClaimTask itself binds and executes via $1 (worker id), $2 (tier), $3
-// (selfCostRank).
+// (selfCostRank), $4 (current generated matrix SHA-256).
 //
 // PATCH (Control plane hot path 4.5->5, docs/internal/CREED_AND_PATH_TO_TEN.md
 // "Make the benchmark measure the real query"): this function is the ONE
@@ -592,14 +601,16 @@ type ClaimedTask struct {
 func ClaimTaskSQL(claimedByPredicate string) string {
 	return fmt.Sprintf(`WITH me AS (
 	   -- The ONE claiming worker + its supplier, resolved ONCE (w.id = $1). Every
-	   -- per-JOB hard filter below (memory, hw_classes, supported_jobs/models,
+	   -- per-JOB hard filter below (memory, hw_classes, exact runtime capability,
 	   -- residency, reputation, private-pool, tier, payout floor) compares the
 	   -- JOB against THIS worker/supplier — none of it depends on the individual
 	   -- task, so it belongs here, computed once per job, not once per task.
 	   SELECT w.id AS worker_id, w.supplier_id, w.hw_class,
-	          w.effective_memory_gb, w.memory_gb, w.supported_jobs,
-	          w.supported_models, w.min_payout_usd_hr, w.throttled,
-	          s.id AS supplier_id_s, s.status AS supplier_status,
+	          COALESCE(w.engine,'') AS engine, COALESCE(w.build_hash,'') AS build_hash,
+	          w.effective_memory_gb, w.memory_gb,
+		          w.min_payout_usd_hr, w.throttled,
+		          COALESCE(w.priority_claim_streak,0) AS priority_claim_streak,
+		          s.id AS supplier_id_s, s.status AS supplier_status,
 	          s.reputation, s.data_country
 	     FROM workers w
 	     JOIN suppliers s ON s.id = w.supplier_id
@@ -623,12 +634,22 @@ func ClaimTaskSQL(claimedByPredicate string) string {
 	 -- byte-identical full ordered task lists at every queue position).
 	 eligible_jobs AS MATERIALIZED (
 	   SELECT j.id AS job_id, j.tier, j.job_type, j.model_ref,
+	     me.worker_id AS claim_worker_id,
+	     me.supplier_id_s AS claim_supplier_id,
+	     me.hw_class AS claim_hw_class,
+		     me.engine AS claim_engine,
+		     me.build_hash AS claim_build_hash,
+		     me.priority_claim_streak,
+	     runtime_authority.cell_id AS runtime_cell_id,
+	     runtime_authority.runtime_id AS runtime_id,
+	     runtime_authority.matrix_sha256 AS runtime_matrix_sha256,
+	     runtime_authority.model_kind AS model_kind,
 	     -- Hardware-matched routing (cost preference, NOT a filter): is a strictly
 	     -- CHEAPER hardware class than THIS claiming worker ($3 = its hwClassCostRank)
 	     -- online AND eligible for this job right now? "Eligible" reuses the EXACT
 	     -- hard-filter predicates this claim applies (live <60s, supplier active, not
 	     -- throttled, enough effective/total memory, the job's hw_classes pin,
-	     -- supported_jobs, and supported_models), so we only defer a task a cheaper
+	     -- exact current-matrix capability), so we only defer a task a cheaper
 	     -- class could ACTUALLY take. When true, an expensive worker steps back (ORDER
 	     -- BY below sorts these last) and lets the cheaper class grab it — a small embed
 	     -- job never ties up an nvidia_180g/apple_silicon_ultra box while a cpu/base
@@ -647,8 +668,13 @@ func ClaimTaskSQL(claimedByPredicate string) string {
 	         AND (`+hwClassCostRankSQL("w2.hw_class")+`) < $3
 	         AND COALESCE(j.min_memory_gb,0) <= COALESCE(w2.effective_memory_gb, w2.memory_gb, 0)
 	         AND (j.hw_classes IS NULL OR w2.hw_class = ANY(j.hw_classes))
-	         AND COALESCE(w2.supported_jobs,'{}') @> ARRAY[j.job_type]
-	         AND (COALESCE(j.model_ref,'') = '' OR COALESCE(w2.supported_models,'{}') @> ARRAY[j.model_ref])
+	         AND EXISTS (
+	           SELECT 1 FROM worker_authorized_capabilities wac2
+	            WHERE wac2.worker_id = w2.id
+	              AND wac2.job_type = j.job_type
+	              AND wac2.model_ref = COALESCE(j.model_ref,'')
+	              AND wac2.matrix_sha256 = $4
+	         )
 	     ) AS cheaper_class_online,
 	     -- Dispatch-interleave fairness (Scheduling & Matching Engine 6.5->7,
 	     -- docs/internal/CREED_AND_PATH_TO_TEN.md): how many of THIS job's own
@@ -690,8 +716,27 @@ func ClaimTaskSQL(claimedByPredicate string) string {
 	         WHERE wms.worker_id = $1 AND wms.model_id = j.model_ref
 	           AND wms.last_seen_warm > now() - interval '60 seconds'
 	     )) AS warm_for_task
-	   FROM jobs j, me
+	   FROM jobs j
+	   CROSS JOIN me
+	   -- Resolve the ONE exact server-authorized runtime tuple that will be frozen
+	   -- onto the claimed task. LIMIT 1 is deterministic defense-in-depth if a future
+	   -- matrix accidentally contains two cells for the same worker/job/model; the
+	   -- registration projection remains the authority and no self-declared dispatch
+	   -- field participates. The model kind is generated from the canonical matrix and
+	   -- persisted with this exact registration row; the mutable DB model catalog is
+	   -- pricing/resolver metadata, never dispatch authority.
+	   CROSS JOIN LATERAL (
+	     SELECT wac.cell_id, wac.runtime_id, wac.matrix_sha256, wac.model_kind
+	       FROM worker_authorized_capabilities wac
+	      WHERE wac.worker_id = me.worker_id
+	        AND wac.job_type = j.job_type
+	        AND wac.model_ref = COALESCE(j.model_ref,'')
+	        AND wac.matrix_sha256 = $4
+	      ORDER BY wac.cell_id, wac.runtime_id
+	      LIMIT 1
+	   ) runtime_authority
 	   WHERE j.status NOT IN ('cancelled','failed')
+	     AND runtime_authority.model_kind <> ''
 	     -- Only jobs that ACTUALLY have a claimable task right now reach here. A job
 	     -- with no queued/retrying-and-visible task this worker could take can never
 	     -- produce a next-CTE row (the tasks join below filters it out anyway), so
@@ -719,8 +764,8 @@ func ClaimTaskSQL(claimedByPredicate string) string {
 	     -- never hand work to a worker pausing for memory pressure.
 	     AND NOT COALESCE(me.throttled, false)
 	     AND (j.hw_classes IS NULL OR me.hw_class = ANY(j.hw_classes))
-	     AND COALESCE(me.supported_jobs,'{}') @> ARRAY[j.job_type]
-	     AND (COALESCE(j.model_ref,'') = '' OR COALESCE(me.supported_models,'{}') @> ARRAY[j.model_ref])
+	     -- The LATERAL runtime_authority join above is the exact-cell hard filter.
+	     -- Array-only legacy workers and stale matrix rows produce no eligible row.
 	     AND (j.data_residency IS NULL OR me.data_country = ANY(j.data_residency))
 	     -- Elite-supplier gate (DEEP_RESEARCH_V2 §6.4 anti-defection): a high
 	     -- min_reputation job is claimable only by a supplier who earned that
@@ -736,12 +781,13 @@ func ClaimTaskSQL(claimedByPredicate string) string {
 	     -- Budget Governor (Plane C §12 / Plane D §14 D8): when the job has a hard
 	     -- spend cap, NEVER dispatch a new task whose projected charge would breach
 	     -- it. Projected = already-charged on this job's tasks (buyer_charge debits,
-	     -- same ledger shape failJobAndSettleOnce settles from) + the per-task estimate for
-	     -- every IN-FLIGHT (claimed, running, not-yet-committed) task of this job
+	     -- same ledger shape failJobAndSettleOnce settles from) + the immutable frozen
+	     -- charge for every IN-FLIGHT (claimed, running, not-yet-committed) task
 	     -- (each will charge at commit, so it is exposure-in-flight) + ONE more for
-	     -- the candidate. Counting in-flight work is what makes the cap hold under
+	     -- the candidate + the once-only SLA premium exposure. Counting in-flight
+	     -- work is what makes the cap hold under
 	     -- the agent's bounded concurrency ([2,4] permits): without it, several
-	     -- tasks could be claimed+running but uncommitted (contributing $0 charged)
+	     -- tasks could be claimed+running but uncommitted (contributing zero charged)
 	     -- and each then charge past the cap. A capped+exhausted job's tasks stay
 	     -- queued (the cap PREVENTS dispatch — it never refunds); jobs with no cap
 	     -- are unaffected (j.max_usd IS NULL). This is a per-JOB predicate, so it too
@@ -750,10 +796,12 @@ func ClaimTaskSQL(claimedByPredicate string) string {
 	           (SELECT COALESCE(SUM(-le.amount_usd),0) FROM ledger_entries le
 	            WHERE le.kind = 'buyer_charge'
 	              AND le.task_id IN (SELECT id FROM tasks WHERE job_id = j.id))
-	           + (SELECT count(*) FROM tasks it
-	                WHERE it.job_id = j.id AND it.status = 'running')
-	             * (COALESCE(j.estimated_usd,0) / NULLIF(j.task_count,0))
-	           + COALESCE(j.estimated_usd,0) / NULLIF(j.task_count,0)
+	           + (SELECT COUNT(*) FROM tasks it
+	                WHERE it.job_id = j.id AND it.status IN ('running','verifying'))
+	             * (SELECT p.buyer_charge_per_task_usd
+	                  FROM job_economic_plans p WHERE p.job_id=j.id)
+	           + (SELECT p.buyer_charge_per_task_usd + p.sla_premium_usd
+	                FROM job_economic_plans p WHERE p.job_id=j.id)
 	         ) <= j.max_usd)
 	 ),
 	 next AS (
@@ -773,7 +821,16 @@ func ClaimTaskSQL(claimedByPredicate string) string {
 	     ej.cheaper_class_online,
 	     ej.worker_tps,
 	     ej.warm_for_task,
-	     ej.job_dispatched_count
+	     ej.job_dispatched_count,
+	     ej.runtime_cell_id,
+	     ej.runtime_id,
+	     ej.runtime_matrix_sha256,
+	     ej.model_kind,
+	     ej.claim_worker_id,
+	     ej.claim_supplier_id,
+	     ej.claim_hw_class,
+	     ej.claim_engine,
+	     ej.claim_build_hash
 	   FROM tasks t
 	     -- Only the per-JOB-eligible jobs survive to here (eligible_jobs above), so
 	     -- this join IS the whole hard filter except the two per-task conditions
@@ -809,8 +866,62 @@ func ClaimTaskSQL(claimedByPredicate string) string {
 	          OR t.excluded_worker <> $1
 	          OR t.excluded_until IS NULL
 	          OR t.excluded_until <= now())
-	   -- Pinned-to-this-worker jumps the line, then priority tier, THEN the
-	   -- hardware-matched routing preference: within a tier, prefer tasks NO cheaper
+	     -- A redundancy row carrying hedged_from is a third-opinion task. Its
+	     -- verification class was frozen when the disagreement was planned, and
+	     -- every worker/supplier that has already executed this chunk is permanently
+	     -- ineligible. This predicate applies to BOTH the pinned and general claim
+	     -- branches: a profile/capability change cannot let an unsafe pin start, and
+	     -- FailTask/the stale reaper may clear the pin without handing a disputant
+	     -- (or another machine owned by that supplier) the third vote.
+	     AND (
+	       NOT (COALESCE(t.is_redundancy,false) AND t.hedged_from IS NOT NULL)
+	       OR (
+	         NULLIF(COALESCE(t.verification_hw_class,''),'') IS NOT NULL
+	         AND ej.claim_hw_class=t.verification_hw_class
+	         AND (COALESCE(t.verification_engine,'')=''
+	              OR ej.claim_engine=t.verification_engine)
+	         AND (COALESCE(t.verification_build_hash,'')=''
+	              OR ej.claim_build_hash=t.verification_build_hash)
+	         AND NOT EXISTS (
+	           SELECT 1
+	             FROM (
+	               -- Current durable task projections cover pre-history rows and
+	               -- completed disputants whose worker_id remains attached.
+	               SELECT prior.execution_worker_id AS worker_id,
+	                      prior.execution_supplier_id AS supplier_id
+	                 FROM tasks prior
+	                WHERE prior.job_id=t.job_id
+	                  AND COALESCE(prior.chunk_index,0)=COALESCE(t.chunk_index,0)
+	                  AND prior.id<>t.id AND prior.execution_worker_id IS NOT NULL
+	               UNION ALL
+	               -- Durable commit snapshots freeze worker AND supplier identity;
+	               -- unlike a mutable worker profile, this survives retries and
+	               -- any later administrative supplier reassignment.
+	               SELECT work.worker_id,work.supplier_id
+	                 FROM verification_work work
+	                 JOIN tasks committed ON committed.id=work.task_id
+	                WHERE committed.job_id=t.job_id
+	                  AND COALESCE(committed.chunk_index,0)=COALESCE(t.chunk_index,0)
+	               UNION ALL
+	               -- Claim history survives every retry path that clears worker_id.
+	               SELECT history.worker_id,history.supplier_id
+	                 FROM task_execution_history history
+	                 JOIN tasks attempted ON attempted.id=history.task_id
+	                WHERE attempted.job_id=t.job_id
+	                  AND COALESCE(attempted.chunk_index,0)=COALESCE(t.chunk_index,0)
+	             ) executed
+	            WHERE executed.worker_id=ej.claim_worker_id
+	               OR executed.supplier_id=ej.claim_supplier_id
+	         )
+	       )
+	     )
+		   -- Pinned-to-this-worker jumps the line. For ordinary claims, priority wins
+		   -- until this worker has taken three consecutive priority tasks; while that
+		   -- durable debt is outstanding an eligible batch task wins one opportunity
+		   -- and resets the streak. If no batch task is eligible, priority may continue
+		   -- without idling the worker while the streak remains capped at three.
+		   -- After service-lane fairness, apply the
+		   -- hardware-matched routing preference: within a tier, prefer tasks NO cheaper
 	   -- eligible class is online for (cheaper_class_online = false sorts first), so
 	   -- an expensive worker defers work a cheaper idle class could take instead of
 	   -- tying itself up on it; THEN the throughput tiebreak (this worker's measured
@@ -823,28 +934,48 @@ func ClaimTaskSQL(claimedByPredicate string) string {
 	   -- served steps back so a smaller/newer job's tasks interleave, instead of a
 	   -- single multi-thousand-task job monopolizing every worker purely by being
 	   -- older; finally oldest-first as the last tiebreak. These preference terms
-	   -- all sit BELOW pin + priority on purpose — a hedge/tiebreak pinned here, and
-	   -- a priority job, are still served promptly even by an expensive, slower,
-	   -- cold, or already-well-served-job worker. Every term below pin+priority is
+		   -- all sit BELOW pin + service-lane fairness on purpose — a hedge/tiebreak
+		   -- pinned here is still served promptly, and ordinary priority retains a strict
+		   -- three-to-one preference whenever batch work is simultaneously eligible.
+		   -- Those jobs are still served promptly even by an expensive, slower,
+		   -- cold, or already-well-served-job worker. Every term below pin+priority is
 	   -- selection only (no output change): it only re-orders tasks the worker
 	   -- already passes; the hard filter above and SKIP LOCKED are unchanged. NB:
 	   -- (t.claimed_by = $1) is a constant within each branch (the WHERE above pins
 	   -- it), so it sorts consistently exactly as before the eligible_jobs split.
-	   ORDER BY (t.claimed_by = $1) DESC, (ej.tier = 'priority') DESC,
-	            cheaper_class_online ASC, worker_tps DESC, warm_for_task DESC,
+		   ORDER BY (t.claimed_by = $1) DESC,
+		            CASE WHEN ej.priority_claim_streak >= 3
+		                 THEN (ej.tier = 'batch')
+		                 ELSE (ej.tier = 'priority')
+		            END DESC,
+		            (ej.tier = 'priority') DESC,
+		            cheaper_class_online ASC, worker_tps DESC, warm_for_task DESC,
 	            job_dispatched_count ASC, t.created_at ASC
 	   FOR UPDATE OF t SKIP LOCKED
 	   LIMIT 1
 	 )
 	 UPDATE tasks
 	   SET claimed_by = $1, claimed_at = now(), worker_id = $1,
-	       status = 'running', started_at = now()
+	       status = 'running', started_at = now(),
+	       runtime_cell_id = next.runtime_cell_id,
+	       runtime_id = next.runtime_id,
+	       runtime_matrix_sha256 = next.runtime_matrix_sha256,
+	       model_kind = next.model_kind,
+	       execution_worker_id = next.claim_worker_id,
+	       execution_supplier_id = next.claim_supplier_id,
+	       execution_hw_class = next.claim_hw_class,
+	       execution_engine = next.claim_engine,
+	       execution_build_hash = next.claim_build_hash
 	 FROM next, jobs j
 	 WHERE tasks.id = next.id AND j.id = tasks.job_id
 	 RETURNING tasks.id, tasks.job_id, j.job_type, COALESCE(j.model_ref,''),
-	           COALESCE(tasks.input_ref,''), COALESCE(tasks.result_key,''),
-	           COALESCE(j.output_ref,''), j.tier,
-	           COALESCE(j.verification_policy,'{}'::jsonb),
+	           tasks.model_kind, tasks.runtime_cell_id, tasks.runtime_id,
+	           tasks.runtime_matrix_sha256,
+		           COALESCE(tasks.input_ref,''), COALESCE(tasks.result_key,''),
+		           COALESCE(j.output_ref,''), j.tier,
+		           COALESCE(j.min_memory_gb,0), j.hw_classes,
+		           COALESCE(j.max_duration_secs,0), j.data_residency,
+		           COALESCE(j.verification_policy,'{}'::jsonb),
 	           COALESCE(j.job_type_spec,'null'::jsonb),
 	           COALESCE(j.offered_rate_usd_hr,0), COALESCE(tasks.chunk_index,0),
 	           tasks.is_honeypot`,
@@ -870,7 +1001,10 @@ func (s *Store) ClaimTask(ctx context.Context, w WorkerAuth) (*ClaimedTask, erro
 	defer tx.Rollback(ctx)
 
 	// Reject unregistered workers loudly rather than silently claiming nothing.
-	// We also read the worker's hw_class here: it feeds its cost rank for the
+	// FOR UPDATE serializes claims made with the same worker credential. That makes
+	// priority_claim_streak a durable maximum-three sequence even if a duplicated
+	// token issues concurrent polls; unrelated workers still claim concurrently via
+	// SKIP LOCKED. We also read the worker's hw_class here: it feeds its cost rank for the
 	// hardware-matched routing preference below. (bw_gbps used to be read
 	// alongside it for the claim's tiebreak too, but that term was a no-op — the
 	// SAME worker's bw_gbps bound once per query execution, identical for every
@@ -878,7 +1012,7 @@ func (s *Store) ClaimTask(ctx context.Context, w WorkerAuth) (*ClaimedTask, erro
 	// see the P-warmtiebreak note on the claim query's ORDER BY below.)
 	var hwClass string
 	if err := tx.QueryRow(ctx,
-		`SELECT COALESCE(hw_class,'') FROM workers WHERE id = $1`, w.WorkerID,
+		`SELECT COALESCE(hw_class,'') FROM workers WHERE id = $1 FOR UPDATE`, w.WorkerID,
 	).Scan(&hwClass); errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound
 	} else if err != nil {
@@ -937,17 +1071,21 @@ func (s *Store) ClaimTask(ctx context.Context, w WorkerAuth) (*ClaimedTask, erro
 	claimTaskQuery := ClaimTaskSQL
 	scanClaim := func(claimedByPredicate string) error {
 		return tx.QueryRow(ctx, claimTaskQuery(claimedByPredicate),
-			w.WorkerID, int(tier), selfCostRank,
-		).Scan(&c.TaskID, &c.JobID, &c.JobType, &c.ModelRef, &c.InputRef, &c.ResultKey,
-			&c.OutputRef, &c.Tier, &c.VerifPolicy, &c.JobTypeSpec, &c.OfferedRateUsdHr,
+			w.WorkerID, int(tier), selfCostRank, generatedRuntimeMatrixSHA256,
+		).Scan(&c.TaskID, &c.JobID, &c.JobType, &c.ModelRef, &c.ModelKind,
+			&c.RuntimeCellID, &c.RuntimeID, &c.RuntimeMatrixSHA, &c.InputRef, &c.ResultKey,
+			&c.OutputRef, &c.Tier, &c.MinMemoryGB, &c.HWClasses, &c.MaxDurationSecs,
+			&c.DataResidency, &c.VerifPolicy, &c.JobTypeSpec, &c.OfferedRateUsdHr,
 			&c.ChunkIndex, &c.IsHoneypot)
 	}
 	// Pinned branch first: a tiebreak/hedge dispatch already chose this worker for
 	// a specific task (claimed_by = $1, not yet started) — cheap and rare. Only if
 	// nothing is pinned do we fall through to the general, now index-servable,
 	// claimed_by IS NULL branch.
+	pinnedClaim := true
 	err = scanClaim("t.claimed_by = $1 AND t.started_at IS NULL")
 	if errors.Is(err, pgx.ErrNoRows) {
+		pinnedClaim = false
 		err = scanClaim("t.claimed_by IS NULL")
 	}
 	// A REAL error (not "no eligible task") aborts; ErrNoRows just means no work —
@@ -959,6 +1097,53 @@ func (s *Store) ClaimTask(ctx context.Context, w WorkerAuth) (*ClaimedTask, erro
 	}
 	claimed := err == nil
 	if claimed {
+		// Preserve who actually started a THIRD-OPINION attempt before any later
+		// failure/stale recovery clears tasks.worker_id. The history insert is in the
+		// SAME claim transaction, so a worker can never receive a tiebreak without
+		// becoming part of its durable exclusion set. Ordinary tasks do not pay this
+		// extra write or create an unbounded duplicate dispatch log. A same-worker
+		// re-claim of an unchanged attempt (dead-claim rescue) is an exact no-op.
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO task_execution_history (task_id,attempt,worker_id,supplier_id)
+			SELECT t.id,COALESCE(t.retry_count,0),t.execution_worker_id,t.execution_supplier_id
+			  FROM tasks t
+			 WHERE t.id=$1 AND t.is_redundancy=true AND t.hedged_from IS NOT NULL
+			ON CONFLICT (task_id,attempt,worker_id) DO NOTHING`, c.TaskID); err != nil {
+			return nil, err
+		}
+		// Claims for the same capped job must serialize at the cap boundary. The
+		// SKIP-LOCKED candidate query protects individual task rows, but two workers
+		// can otherwise choose two different tasks from the same snapshot and both
+		// believe the remaining budget covers "one more". Lock the job, then recheck
+		// the exposure including THIS transaction's newly-running task. If another
+		// claimant committed first, READ COMMITTED sees it after the lock wait and
+		// this transaction rolls back its tentative task update instead of overspend.
+		var lockedJob uuid.UUID
+		if err := tx.QueryRow(ctx,
+			`SELECT id FROM jobs WHERE id=$1 FOR UPDATE`, c.JobID,
+		).Scan(&lockedJob); err != nil {
+			return nil, err
+		}
+		var withinCap bool
+		if err := tx.QueryRow(ctx, `
+			SELECT j.max_usd IS NULL OR COALESCE((
+			  (SELECT COALESCE(SUM(-le.amount_usd),0)
+			     FROM ledger_entries le
+			    WHERE le.kind='buyer_charge'
+			      AND le.task_id IN (SELECT id FROM tasks WHERE job_id=j.id))
+			  + (SELECT COUNT(*) FROM tasks t
+			       WHERE t.job_id=j.id AND t.status IN ('running','verifying'))
+			    * (SELECT p.buyer_charge_per_task_usd
+			         FROM job_economic_plans p WHERE p.job_id=j.id)
+			  + (SELECT p.sla_premium_usd FROM job_economic_plans p WHERE p.job_id=j.id)
+			) <= j.max_usd, false)
+			FROM jobs j WHERE j.id=$1`, c.JobID).Scan(&withinCap); err != nil {
+			return nil, err
+		}
+		if !withinCap {
+			return nil, nil // deferred rollback restores the candidate's prior queue/pin state
+		}
+
 		// First claim on a queued job moves the job to running.
 		if _, err := tx.Exec(ctx,
 			`UPDATE jobs SET status = 'running' WHERE id = $1 AND status = 'queued'`,
@@ -970,6 +1155,22 @@ func (s *Store) ClaimTask(ctx context.Context, w WorkerAuth) (*ClaimedTask, erro
 		// buyer sees the approach before the stop (Plane C §12 near_limit / warning).
 		if err := budgetWarnOnDispatch(ctx, tx, c.JobID); err != nil {
 			return nil, err
+		}
+		// Pinned verification/tiebreak work always jumps the line and does not consume
+		// or forgive ordinary service-lane debt. For an ordinary claim, priority grows
+		// the streak to its durable ceiling; batch supplies the required opportunity and
+		// resets it. Trusted work leaves the ordinary priority-vs-batch sequence intact.
+		if !pinnedClaim {
+			if _, err := tx.Exec(ctx, `
+				UPDATE workers
+				   SET priority_claim_streak = CASE
+				         WHEN $2 = 'priority' THEN LEAST(priority_claim_streak + 1, 3)
+				         WHEN $2 = 'batch' THEN 0
+				         ELSE priority_claim_streak
+				       END
+				 WHERE id = $1`, w.WorkerID, c.Tier); err != nil {
+				return nil, err
+			}
 		}
 	}
 	// PATCH (Control plane hot path 7->8, docs/internal/CREED_AND_PATH_TO_TEN.md
@@ -1093,8 +1294,19 @@ func (s *Store) SchedulerExplain(ctx context.Context, workerID uuid.UUID) (*Sche
 		          WHEN COALESCE(c.min_memory_gb,0) > COALESCE(w.effective_memory_gb, w.memory_gb, 0) THEN 'memory_mismatch'
 		          WHEN COALESCE(w.throttled, false) THEN 'throttled'
 		          WHEN NOT (c.hw_classes IS NULL OR w.hw_class = ANY(c.hw_classes)) THEN 'hw_class_mismatch'
-		          WHEN NOT (COALESCE(w.supported_jobs,'{}') @> ARRAY[c.job_type]) THEN 'job_type_mismatch'
-		          WHEN NOT (COALESCE(c.model_ref,'') = '' OR COALESCE(w.supported_models,'{}') @> ARRAY[c.model_ref]) THEN 'model_mismatch'
+		          WHEN NOT EXISTS (
+		            SELECT 1 FROM worker_authorized_capabilities wac_job
+		             WHERE wac_job.worker_id = w.id
+		               AND wac_job.job_type = c.job_type
+		               AND wac_job.matrix_sha256 = $3
+		          ) THEN 'job_type_mismatch'
+		          WHEN NOT EXISTS (
+		            SELECT 1 FROM worker_authorized_capabilities wac
+		             WHERE wac.worker_id = w.id
+		               AND wac.job_type = c.job_type
+		               AND wac.model_ref = COALESCE(c.model_ref,'')
+		               AND wac.matrix_sha256 = $3
+		          ) THEN 'model_mismatch'
 		          WHEN NOT (c.data_residency IS NULL OR s.data_country = ANY(c.data_residency)) THEN 'residency_mismatch'
 		          WHEN COALESCE(c.min_reputation,0) > s.reputation THEN 'reputation_too_low'
 		          WHEN COALESCE(c.private_pool,false) AND NOT EXISTS (SELECT 1 FROM private_pool_members m WHERE m.buyer_id = c.buyer_id AND m.supplier_id = s.id) THEN 'private_pool_excluded'
@@ -1116,7 +1328,7 @@ func (s *Store) SchedulerExplain(ctx context.Context, workerID uuid.UUID) (*Sche
 		   count(*) FILTER (WHERE reason = 'supplier_inactive'),
 		   count(*) FILTER (WHERE reason = 'eligible')
 		 FROM classified`,
-		workerID, int(tier),
+		workerID, int(tier), generatedRuntimeMatrixSHA256,
 	).Scan(&e.MemoryMismatch, &e.ModelMismatch, &e.JobTypeMismatch, &e.HWClassMismatch,
 		&e.ResidencyMismatch, &e.Throttled, &e.PayoutFloor, &e.SupplierInactive, &e.Eligible)
 	if err != nil {
@@ -1173,17 +1385,21 @@ func budgetNearLimit(chargedUSD, perTaskUSD, maxUSD float64) bool {
 
 // budgetProjectedExpr is the SQL fragment for a job's PROJECTED charge: everything
 // already charged on its tasks (buyer_charge debits, the same ledger shape
-// failJobAndSettleOnce settles from) PLUS one more task's estimated cost
-// (estimated_usd / task_count). It is the exact quantity the claim's budget gate
-// compares to max_usd, reused here so the warn/stop bookkeeping agrees with the
-// gate to the cent. `j` must be the alias of the jobs row in the enclosing query.
+// failJobAndSettleOnce settles from), every running/verifying task's immutable
+// frozen buyer charge, one additional frozen task charge, and the once-only SLA
+// premium exposure. A capped legacy/malformed job without a persisted plan yields
+// NULL and is therefore never admitted by the claim gate. `j` must be the jobs
+// alias in the enclosing query.
 const budgetProjectedExpr = `(
    (SELECT COALESCE(SUM(-le.amount_usd),0) FROM ledger_entries le
     WHERE le.kind = 'buyer_charge'
       AND le.task_id IN (SELECT id FROM tasks WHERE job_id = j.id))
-   + (SELECT count(*) FROM tasks it WHERE it.job_id = j.id AND it.status = 'running')
-     * (COALESCE(j.estimated_usd,0) / NULLIF(j.task_count,0))
-   + COALESCE(j.estimated_usd,0) / NULLIF(j.task_count,0)
+   + (SELECT COUNT(*) FROM tasks it
+        WHERE it.job_id = j.id AND it.status IN ('running','verifying'))
+     * (SELECT p.buyer_charge_per_task_usd
+          FROM job_economic_plans p WHERE p.job_id=j.id)
+   + (SELECT p.buyer_charge_per_task_usd + p.sla_premium_usd
+        FROM job_economic_plans p WHERE p.job_id=j.id)
  )`
 
 // budgetWarnOnDispatch emits a one-shot budget_warning event when a capped job's

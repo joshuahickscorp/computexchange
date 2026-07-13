@@ -93,6 +93,17 @@ JOB_TYPES = (
 )
 
 
+def _require_generic_json_job_type(job_type):
+    if job_type == "audio_transcribe":
+        raise ValueError(
+            "audio_transcribe requires the strict multipart WAV endpoints "
+            "POST /v1/audio/jobs/quote and POST /v1/audio/jobs; this SDK does "
+            "not expose that development-only surface yet"
+        )
+    if job_type not in JOB_TYPES:
+        raise ValueError(f"unknown job_type {job_type!r}; one of {JOB_TYPES}")
+
+
 class APIError(Exception):
     """A non-2xx response (or a transport failure). Carries the HTTP status and
     the raw server body so failures are never swallowed."""
@@ -213,19 +224,26 @@ class Client:
         quote_id=None,
         max_usd=None,
         s3_key=None,
-        model_kind="gguf",
+        model_kind=None,
     ):
         """Submit a job. Returns the 202 body
-        ``{job_id, task_count, estimated_usd, eta_secs, estimated_completion}``.
+        ``{job_id, task_count, estimated_usd, eta_secs, estimated_completion,
+        tier_semantics}``. When ``webhook_url`` is supplied, the response also
+        contains ``webhook_id`` and the per-registration ``webhook_secret``. Store
+        that secret immediately; CX uses it to HMAC-sign every callback and returns
+        it again only for an exact authenticated duplicate registration. The final
+        tier field explicitly distinguishes queue preference from reserved capacity
+        or an SLA.
 
         ``input`` is the inline JSONL as a single ``str`` (one JSON record per
         line). Pass ``s3_key=...`` instead to point at an already-uploaded
         object; then ``input`` is ignored. Variant fields (``labels`` for
         batch_classification, ``schema`` for json_extraction, ``top_k`` for
-        rerank, ``max_tokens``/``temperature`` for batch_infer,
-        ``language``/``timestamps`` for audio_transcribe, ``binary`` for embed)
-        are folded into the tagged ``job_type`` only when given, so the wire shape
-        matches. ``binary=True`` (embed only) requests the compact float32 artifact
+        rerank, ``max_tokens``/``temperature`` for batch_infer, and ``binary`` for
+        embed) are folded into the tagged ``job_type`` only when given, so the wire
+        shape matches. Audio transcription is deliberately refused here because its
+        strict multipart WAV endpoints are not yet exposed by this SDK.
+        ``binary=True`` (embed only) requests the compact float32 artifact
         (PLANE_D D5/D15) instead of JSON vectors.
 
         ``max_usd`` sets a hard buyer spend cap (Budget Governor, Plane C §12 /
@@ -237,8 +255,12 @@ class Client:
         invoice, and a mismatch is rejected with :class:`APIError` (409). Both are
         sent only when given, so the unbound/uncapped wire shape is unchanged.
         """
-        if job_type not in JOB_TYPES:
-            raise ValueError(f"unknown job_type {job_type!r}; one of {JOB_TYPES}")
+        _require_generic_json_job_type(job_type)
+        if language is not None or timestamps is not None:
+            raise ValueError(
+                "language/timestamps are reserved for the dedicated audio WAV surface, "
+                "which this SDK does not expose yet"
+            )
 
         jt = {"type": job_type}
         if batch_size is not None:
@@ -257,11 +279,6 @@ class Client:
             jt["labels"] = list(labels)
         if schema is not None:
             jt["schema"] = schema
-        if language is not None:
-            jt["language"] = language
-        if timestamps is not None:
-            jt["timestamps"] = bool(timestamps)
-
         if s3_key is not None:
             input_field = {"s3_key": s3_key}
         elif isinstance(input, str):
@@ -274,9 +291,12 @@ class Client:
         if split_size is not None:
             body_params["split_size"] = int(split_size)
 
+        model_field = {"ref": model}
+        if model_kind is not None:
+            model_field["kind"] = model_kind
         body = {
             "job_type": jt,
-            "model": {"kind": model_kind, "ref": model},
+            "model": model_field,
             "params": body_params or None,
             "constraints": {
                 "min_memory_gb": float(min_memory_gb),
@@ -407,7 +427,7 @@ class Client:
         min_memory_gb=0.0,
         redundancy_frac=0.0,
         honeypot_frac=0.0,
-        model_kind="gguf",
+        model_kind=None,
     ):
         """``POST /v1/quote`` (Plane C / Compute Autopilot) — scan the input and
         return a conservative quote WITHOUT spending or creating a job.
@@ -420,16 +440,18 @@ class Client:
         is a byte heuristic, not an exact tokenizer count — read
         ``confidence.reasons`` before trusting it.
         """
-        if job_type not in JOB_TYPES:
-            raise ValueError(f"unknown job_type {job_type!r}; one of {JOB_TYPES}")
+        _require_generic_json_job_type(job_type)
         if isinstance(input, str):
             input_field = input
         else:
             input_field = "".join(json.dumps(rec) + "\n" for rec in input)
         body_params = {"split_size": int(split_size)} if split_size else None
+        model_field = {"ref": model}
+        if model_kind is not None:
+            model_field["kind"] = model_kind
         body = {
             "job_type": {"type": job_type},
-            "model": {"kind": model_kind, "ref": model},
+            "model": model_field,
             "params": body_params,
             "constraints": {"min_memory_gb": float(min_memory_gb)},
             "verification": {

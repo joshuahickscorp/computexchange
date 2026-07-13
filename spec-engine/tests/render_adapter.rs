@@ -9,9 +9,18 @@ fn render_batch_aggregates_worst_wins_and_reference_repair() {
     let pipe = synth_render::pipeline("cx_render_it");
     // Delivery, Preview, Fail (see the adapter's residual->tier mapping).
     let tiles = vec![
-        RenderTile { id: 0, residual: 0.00 },
-        RenderTile { id: 1, residual: 0.05 },
-        RenderTile { id: 2, residual: 0.40 },
+        RenderTile {
+            id: 0,
+            residual: 0.00,
+        },
+        RenderTile {
+            id: 1,
+            residual: 0.05,
+        },
+        RenderTile {
+            id: 2,
+            residual: 0.40,
+        },
     ];
     let (outputs, receipt) = pipe.run_batch(
         &tiles,
@@ -43,6 +52,8 @@ fn render_batch_aggregates_worst_wins_and_reference_repair() {
     assert!((receipt.accepted_fraction - 2.0 / 3.0).abs() < 1e-9);
 
     // speedup = baseline / spec.
-    let sp = receipt.speedup_vs_baseline.expect("modeled baseline => Some");
+    let sp = receipt
+        .speedup_vs_baseline
+        .expect("modeled baseline => Some");
     assert!((sp - 2.0 / receipt.total_product_time_s).abs() < 1e-9);
 }

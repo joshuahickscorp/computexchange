@@ -166,15 +166,15 @@ func seedDemo(ctx context.Context, pool *pgxpool.Pool, storage *Storage) error {
 		sql  string
 		args []any
 	}{
-		// Active supplier (so its workers are eligible) with a healthy reputation.
+		// Active supplier (one non-capability eligibility gate) with healthy reputation.
 		{`INSERT INTO suppliers (id, email, reputation, tier, status)
 		  VALUES ($1, 'demo-supplier@example.com', 0.90, 2, 'active')
 		  ON CONFLICT (id) DO NOTHING`, []any{demoSupplierID}},
-		// A worker for that supplier, seen now so it passes liveness. It advertises
-		// the demo job types + models so the Scheduler V2 hard filter (ClaimTask)
-		// lets it claim the demo embed/infer jobs; min_payout_usd_hr 0 = takes any
-		// rate; thermal_ok true. supplier data_country is set so any data-residency
-		// constraint can match.
+		// A token-bound demo worker placeholder with legacy capability declarations.
+		// seedDemo deliberately does NOT create worker_authorized_capabilities rows:
+		// it remains inert until the real agent registers and the control plane
+		// intersects these declarations with the generated production matrix.
+		// min_payout_usd_hr 0 = takes any rate; thermal_ok true.
 		{`INSERT INTO workers (id, supplier_id, hw_class, memory_gb, bw_gbps, last_seen_at, version,
 		                       supported_jobs, supported_models, min_payout_usd_hr, thermal_ok)
 		  VALUES ($1, $2, 'apple_silicon_max', 64, 400, now(), 'seed',
@@ -192,7 +192,7 @@ func seedDemo(ctx context.Context, pool *pgxpool.Pool, storage *Storage) error {
 		// A SECOND supplier + worker + token, so a local multi-supplier run (two
 		// agent processes on one box — the local stand-in for "two+ Macs running
 		// real jobs end-to-end") has a distinct second identity. Same class +
-		// capabilities so within-class redundancy compares the two.
+		// declarations; each agent must re-register before exact authority exists.
 		{`INSERT INTO suppliers (id, email, reputation, tier, status)
 		  VALUES ($1, 'demo-supplier-2@example.com', 0.90, 2, 'active')
 		  ON CONFLICT (id) DO NOTHING`, []any{demoSupplierID2}},
@@ -227,6 +227,12 @@ func seedDemo(ctx context.Context, pool *pgxpool.Pool, storage *Storage) error {
 		  ON CONFLICT (id) DO NOTHING`, nil},
 		{`INSERT INTO models (id, family, quant, kind, dim, job_type, price_per_1k, price_per_unit, min_memory_gb, hf_repo)
 		  VALUES ('qwen2.5-7b-instruct-q4','qwen','q4_k_m','gguf',NULL,'batch_infer',0.00800000,NULL,40,'bartowski/Qwen2.5-7B-Instruct-GGUF')
+		  ON CONFLICT (id) DO NOTHING`, nil},
+		{`INSERT INTO models (id, family, quant, kind, dim, job_type, price_per_1k, price_per_unit, min_memory_gb, hf_repo)
+		  VALUES ('whisper-tiny','whisper',NULL,'whisper',NULL,'audio_transcribe',NULL,0.00400000,1,'openai/whisper-tiny')
+		  ON CONFLICT (id) DO NOTHING`, nil},
+		{`INSERT INTO models (id, family, quant, kind, dim, job_type, price_per_1k, price_per_unit, min_memory_gb, hf_repo)
+		  VALUES ('whisper-base','whisper',NULL,'whisper',NULL,'audio_transcribe',NULL,0.00500000,2,'openai/whisper-base')
 		  ON CONFLICT (id) DO NOTHING`, nil},
 		// A couple of honeypots with known answers so honeypot tasks have probes. The
 		// known_answer is a REAL measured embedding (demoHoneypotEmbedKnownAnswer's

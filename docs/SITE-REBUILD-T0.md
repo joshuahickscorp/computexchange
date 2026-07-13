@@ -1,3 +1,4 @@
+<!-- CLAIM-SCOPE: internal-engineering-non-authoritative -->
 # Site rebuild · T0 · teardown + claims audit (2026-07-02)
 
 Phase 0 of the interactive-hero rebuild. Nothing new is built until this is committed.

@@ -100,6 +100,10 @@ pub enum SlotState {
 pub struct Slot {
     /// Stable slot id == stable KV region index.
     pub id: u32,
+    /// Monotonic scheduler-wide admission generation. A slot id is reused after
+    /// release; this epoch prevents a delayed result for the previous occupant
+    /// from passing validation when token and position happen to match (ABA).
+    pub admission_epoch: u64,
     pub state: SlotState,
     /// The prompt's token ids (for prefix grouping + the prefill pass).
     pub prompt_ids: Vec<u32>,
@@ -107,7 +111,9 @@ pub struct Slot {
     pub generated_ids: Vec<u32>,
     /// The most recent token (the input to the next decode step).
     pub last_token: Option<u32>,
-    /// Absolute decode position (== prompt_ids.len() + generated_ids.len()).
+    /// Absolute zero-based position of `last_token` when it is consumed by the
+    /// next decode step. On admission this is the prompt's final position; after
+    /// each sampled token it advances to that token's position.
     pub position: usize,
     /// Hard cap on generated tokens for this request.
     pub max_new_tokens: usize,
@@ -122,6 +128,7 @@ impl Slot {
     pub fn idle(id: u32) -> Self {
         Self {
             id,
+            admission_epoch: 0,
             state: SlotState::Idle,
             prompt_ids: Vec::new(),
             generated_ids: Vec::new(),
@@ -140,12 +147,21 @@ impl Slot {
     /// Admit a prompt into this (idle) slot. Mirrors Hawking's `Slot::assign`,
     /// trimmed to the fields this skeleton keeps (no `req`/`sampler` object — the
     /// caller drives `SamplingParams` + a `Sampler` explicitly, see `sample_next`).
-    /// `last_token` seeds to the prompt's own last id (fed at `position =
-    /// prompt_ids.len()` by the first decode step) and `position` starts at the
-    /// prompt length, exactly as Hawking's `assign` does.
-    pub fn assign(&mut self, prompt_ids: Vec<u32>, max_new_tokens: usize, greedy: bool) {
+    /// `last_token` seeds to the prompt's own last id, whose absolute zero-based
+    /// position is `prompt_ids.len() - 1`. This must match
+    /// `hawking_decode_step`'s KV/RoPE contract: a token at prompt index `i` is
+    /// written at position `i`, and the first generated token is then consumed at
+    /// `prompt_ids.len()` on the following step.
+    pub fn assign(
+        &mut self,
+        prompt_ids: Vec<u32>,
+        max_new_tokens: usize,
+        greedy: bool,
+        admission_epoch: u64,
+    ) {
+        self.admission_epoch = admission_epoch;
         self.last_token = prompt_ids.last().copied();
-        self.position = prompt_ids.len();
+        self.position = prompt_ids.len().saturating_sub(1);
         self.prompt_ids = prompt_ids;
         self.generated_ids.clear();
         self.max_new_tokens = max_new_tokens;
@@ -194,6 +210,7 @@ impl Slot {
         }
         DecodedToken {
             slot_id: self.id,
+            admission_epoch: self.admission_epoch,
             token,
             finished: self.state == SlotState::Finishing,
         }
@@ -203,7 +220,11 @@ impl Slot {
     /// `Slot::release`.
     pub fn release(&mut self) {
         let id = self.id;
+        let admission_epoch = self.admission_epoch;
         *self = Self::idle(id);
+        // Preserve the generation across the idle interval. A later admission
+        // installs a strictly newer scheduler-wide epoch.
+        self.admission_epoch = admission_epoch;
     }
 }
 
@@ -213,8 +234,50 @@ impl Slot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecodedToken {
     pub slot_id: u32,
+    pub admission_epoch: u64,
     pub token: u32,
     pub finished: bool,
+}
+
+/// Identity of one concrete occupancy of a reusable slot/KV region. Slot ids are
+/// stable and reused; the epoch makes completion/cancellation operations safe
+/// against delayed work from an earlier occupant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SlotHandle {
+    pub slot_id: u32,
+    pub admission_epoch: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmitError {
+    EmptyPrompt,
+    ZeroMaxNewTokens,
+    EpochExhausted,
+}
+
+impl std::fmt::Display for AdmitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyPrompt => f.write_str("continuous-batch prompt must not be empty"),
+            Self::ZeroMaxNewTokens => {
+                f.write_str("continuous-batch max_new_tokens must be greater than zero")
+            }
+            Self::EpochExhausted => {
+                f.write_str("continuous-batch admission epoch space is exhausted")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AdmitError {}
+
+impl Slot {
+    fn handle(&self) -> SlotHandle {
+        SlotHandle {
+            slot_id: self.id,
+            admission_epoch: self.admission_epoch,
+        }
+    }
 }
 
 /// Deterministic-given-seed token sampler. Ported from Hawking's
@@ -372,6 +435,7 @@ pub struct LaneStats {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecodeStep {
     pub slot_id: u32,
+    pub admission_epoch: u64,
     pub token: u32,
     pub position: usize,
 }
@@ -498,6 +562,9 @@ pub struct Scheduler {
     /// Decode-lane stats accumulated across every `apply_decode_*`/`decode_step_metal`
     /// call this scheduler has driven. Ported from Hawking's `BatchDriver::lane_stats`.
     pub lane_stats: LaneStats,
+    /// Next unique slot-occupancy generation. Checked arithmetic makes epoch
+    /// exhaustion fail admission instead of wrapping into an ABA collision.
+    next_admission_epoch: u64,
 }
 
 impl Scheduler {
@@ -512,52 +579,79 @@ impl Scheduler {
             engine,
             samplers: (0..max_batch_size).map(|_| None).collect(),
             lane_stats: LaneStats::default(),
+            next_admission_epoch: 1,
         }
     }
 
     /// Admit a prompt into the first Idle slot. Mirrors Hawking's
     /// `Scheduler::admit`: installs a fresh `Sampler` (seeded from `seed`, or a
     /// slot-id-derived default so two concurrent admissions never accidentally
-    /// share a seed) and transitions the slot to `Prefilling`. Returns `None` when
-    /// every slot is occupied (the caller must wait for a release, never overwrite
-    /// a live slot).
+    /// share a seed) and transitions the slot to `Prefilling`. `Ok(None)` means
+    /// every slot is occupied; invalid requests and epoch exhaustion are distinct
+    /// typed errors. Errors are returned before any slot, sampler, or epoch is
+    /// mutated.
     pub fn admit(
         &mut self,
         prompt_ids: Vec<u32>,
         max_new_tokens: usize,
         greedy: bool,
         seed: Option<u64>,
-    ) -> Option<u32> {
-        let id = self.slots.iter().find(|s| s.state == SlotState::Idle)?.id;
-        let slot = self.slots.iter_mut().find(|s| s.id == id)?;
-        slot.assign(prompt_ids, max_new_tokens, greedy);
+    ) -> Result<Option<SlotHandle>, AdmitError> {
+        if prompt_ids.is_empty() {
+            return Err(AdmitError::EmptyPrompt);
+        }
+        if max_new_tokens == 0 {
+            return Err(AdmitError::ZeroMaxNewTokens);
+        }
+        let Some(id) = self
+            .slots
+            .iter()
+            .find(|s| s.state == SlotState::Idle)
+            .map(|slot| slot.id)
+        else {
+            return Ok(None);
+        };
+        let admission_epoch = self.next_admission_epoch;
+        let next_admission_epoch = admission_epoch
+            .checked_add(1)
+            .ok_or(AdmitError::EpochExhausted)?;
+        let slot = self
+            .slots
+            .iter_mut()
+            .find(|s| s.id == id)
+            .expect("idle slot selected from the same table");
+        slot.assign(prompt_ids, max_new_tokens, greedy, admission_epoch);
+        let handle = slot.handle();
+        self.next_admission_epoch = next_admission_epoch;
         let seed = seed.unwrap_or(0xD15A_0000_0000_0000u64 ^ id as u64);
         self.samplers[id as usize] = Some(Sampler::new(seed));
-        Some(id)
+        Ok(Some(handle))
     }
 
-    /// Prefill finished for slot `id`; ready to decode. Mirrors
-    /// `Scheduler::mark_prefill_complete`. Returns `false` for an unknown slot or
-    /// one that was not Prefilling.
-    pub fn mark_prefill_complete(&mut self, id: u32) -> bool {
-        let Some(slot) = self.slots.iter_mut().find(|s| s.id == id) else {
+    /// Prefill finished for this exact slot occupancy; ready to decode. The epoch
+    /// rejects a delayed completion for a prior occupant of the same region.
+    pub fn mark_prefill_complete(&mut self, handle: SlotHandle) -> bool {
+        let Some(slot) = self.slots.iter_mut().find(|s| s.id == handle.slot_id) else {
             return false;
         };
-        if slot.state != SlotState::Prefilling {
+        if slot.admission_epoch != handle.admission_epoch || slot.state != SlotState::Prefilling {
             return false;
         }
         slot.mark_decoding();
         true
     }
 
-    /// Free slot `id` back to Idle (and drop its sampler). Mirrors
-    /// `Scheduler::release_slot`. Returns `false` for an unknown slot.
-    pub fn release_slot(&mut self, id: u32) -> bool {
-        let Some(slot) = self.slots.iter_mut().find(|s| s.id == id) else {
+    /// Free this exact slot occupancy back to Idle (and drop its sampler). A
+    /// delayed cancellation/release for a prior occupant fails closed.
+    pub fn release_slot(&mut self, handle: SlotHandle) -> bool {
+        let Some(slot) = self.slots.iter_mut().find(|s| s.id == handle.slot_id) else {
             return false;
         };
+        if slot.admission_epoch != handle.admission_epoch || slot.state == SlotState::Idle {
+            return false;
+        }
         slot.release();
-        self.samplers[id as usize] = None;
+        self.samplers[handle.slot_id as usize] = None;
         true
     }
 
@@ -569,12 +663,12 @@ impl Scheduler {
             .count()
     }
 
-    /// The Prefilling slots to cover in the next prefill pass. Under `PrefixGrouped`,
+    /// The exact Prefilling occupancies to cover in the next prefill pass. Under `PrefixGrouped`,
     /// the shared-prefix cohort (Hawking's `prefill_slots_prefix_grouped`, min_shared=8);
     /// otherwise FIFO by slot id. PURE.
-    pub fn prefill_plan(&self, max: usize) -> Vec<u32> {
+    pub fn prefill_plan(&self, max: usize) -> Vec<SlotHandle> {
         let cap = max.min(self.max_batch_size);
-        match self.policy {
+        let ids = match self.policy {
             BatchPolicy::PrefixGrouped => group_by_prefix(&self.slots, cap, 8),
             BatchPolicy::Default => self
                 .slots
@@ -583,7 +677,15 @@ impl Scheduler {
                 .take(cap)
                 .map(|s| s.id)
                 .collect(),
-        }
+        };
+        ids.into_iter()
+            .filter_map(|id| {
+                self.slots
+                    .iter()
+                    .find(|slot| slot.id == id)
+                    .map(Slot::handle)
+            })
+            .collect()
     }
 
     /// The decode steps the next batched forward pass would cover, FIFO by slot id up to
@@ -600,6 +702,7 @@ impl Scheduler {
             .filter_map(|s| {
                 s.last_token.map(|token| DecodeStep {
                     slot_id: s.id,
+                    admission_epoch: s.admission_epoch,
                     token,
                     position: s.position,
                 })
@@ -639,6 +742,7 @@ impl Scheduler {
             .ok_or_else(|| format!("decode result for unknown slot {}", step.slot_id))?;
         let live = DecodeStep {
             slot_id: slot.id,
+            admission_epoch: slot.admission_epoch,
             token: slot.last_token.unwrap_or(u32::MAX),
             position: slot.position,
         };
@@ -647,6 +751,34 @@ impl Scheduler {
                 "stale decode result for slot {}: expected {:?}, got {:?}",
                 step.slot_id, live, step
             ));
+        }
+        Ok(())
+    }
+
+    /// Validate an entire accelerator result before any slot, sampler/RNG, or
+    /// statistics state is mutated. This gives `apply_decode_*` an all-or-nothing
+    /// host-side transaction even when a later row is stale or duplicated.
+    fn preflight_decode_batch(&self, batch: &[DecodeStep]) -> Result<(), String> {
+        if batch.is_empty() {
+            return Err("decode result batch must not be empty".to_string());
+        }
+        let mut seen = std::collections::HashSet::with_capacity(batch.len());
+        for step in batch {
+            if !seen.insert(step.slot_id) {
+                return Err(format!(
+                    "decode result contains duplicate slot {}",
+                    step.slot_id
+                ));
+            }
+            self.validate_step(step)?;
+            let sampler_present = usize::try_from(step.slot_id)
+                .ok()
+                .and_then(|index| self.samplers.get(index))
+                .and_then(Option::as_ref)
+                .is_some();
+            if !sampler_present {
+                return Err(format!("slot {} has no sampler", step.slot_id));
+            }
         }
         Ok(())
     }
@@ -670,11 +802,19 @@ impl Scheduler {
                 logits.len()
             ));
         }
+        let vocab = logits
+            .first()
+            .map(Vec::len)
+            .ok_or_else(|| "decode logits batch must not be empty".to_string())?;
+        if vocab == 0 || logits.iter().any(|row| row.len() != vocab) {
+            return Err(format!(
+                "decode logits rows must have one uniform nonzero vocabulary width, got {:?}",
+                logits.iter().map(Vec::len).collect::<Vec<_>>()
+            ));
+        }
+        self.preflight_decode_batch(batch)?;
         let mut out = Vec::with_capacity(batch.len());
-        let mut vocab = 0usize;
         for (step, row) in batch.iter().zip(logits.iter_mut()) {
-            self.validate_step(step)?;
-            vocab = row.len();
             let slot = self
                 .slots
                 .iter_mut()
@@ -682,10 +822,10 @@ impl Scheduler {
                 .expect("validated above");
             let sampler = self.samplers[step.slot_id as usize]
                 .as_mut()
-                .ok_or_else(|| format!("slot {} has no sampler", step.slot_id))?;
+                .expect("sampler was preflighted");
             let token = slot
                 .sample_next(row, sampler)
-                .ok_or_else(|| format!("slot {} cannot sample decode result", step.slot_id))?;
+                .expect("nonempty logits were preflighted");
             out.push(slot.apply_decoded_token(token, eos_id));
         }
         self.lane_stats.logits_steps += 1;
@@ -711,9 +851,9 @@ impl Scheduler {
                 token_ids.len()
             ));
         }
+        self.preflight_decode_batch(batch)?;
         let mut out = Vec::with_capacity(batch.len());
         for (step, token) in batch.iter().zip(token_ids) {
-            self.validate_step(step)?;
             let slot = self
                 .slots
                 .iter_mut()
@@ -724,9 +864,10 @@ impl Scheduler {
             // LATER step that flips this slot to sampling mode has continuous
             // history — mirrors Hawking's own note in `Slot::sample_next` that
             // skipping this made the penalty dead on the batch path.
-            if let Some(sampler) = self.samplers[step.slot_id as usize].as_mut() {
-                sampler.record(token);
-            }
+            self.samplers[step.slot_id as usize]
+                .as_mut()
+                .expect("sampler was preflighted")
+                .record(token);
             out.push(slot.apply_decoded_token(token, eos_id));
         }
         self.lane_stats.greedy_steps += 1;
@@ -801,7 +942,9 @@ pub mod metal_decode {
     /// Returns the raw attention output, `(batch.len(), n_heads, head_dim)` — the
     /// caller still owes the output projection + sampling (this crate's
     /// `Scheduler::apply_decode_tokens`/`apply_decode_logits` once logits exist).
+    #[allow(clippy::too_many_arguments)]
     pub fn decode_attention_step(
+        scheduler: &Scheduler,
         cache: &mut KvCache,
         batch: &[DecodeStep],
         q: &Tensor,
@@ -810,6 +953,15 @@ pub mod metal_decode {
         n_heads: usize,
         scale: f32,
     ) -> candle_core::Result<Tensor> {
+        // Epoch/liveness validation must happen before the scatter mutates device
+        // KV. Checking only in `apply_decode_*` is too late: a delayed plan for a
+        // previous occupant could overwrite the reused region and then be rejected
+        // on the host. Borrowing the scheduler immutably for this entire call also
+        // prevents safe Rust callers from releasing/reassigning a slot between the
+        // validation and scatter.
+        scheduler
+            .preflight_decode_batch(batch)
+            .map_err(candle_core::Error::Msg)?;
         let regions: Vec<u32> = batch.iter().map(|s| s.slot_id).collect();
         let positions: Vec<u32> = batch.iter().map(|s| s.position as u32).collect();
 
@@ -851,9 +1003,14 @@ pub mod metal_decode {
 mod tests {
     use super::*;
 
+    fn admitted(result: Result<Option<SlotHandle>, AdmitError>) -> SlotHandle {
+        result.expect("valid admission").expect("free slot")
+    }
+
     fn decoding(id: u32, last: u32, position: usize, max_new: usize, greedy: bool) -> Slot {
         Slot {
             id,
+            admission_epoch: u64::from(id) + 1,
             state: SlotState::Decoding,
             prompt_ids: Vec::new(),
             generated_ids: Vec::new(),
@@ -867,6 +1024,7 @@ mod tests {
     fn prefilling(id: u32, prompt: Vec<u32>) -> Slot {
         Slot {
             id,
+            admission_epoch: u64::from(id) + 1,
             state: SlotState::Prefilling,
             prompt_ids: prompt,
             generated_ids: Vec::new(),
@@ -901,11 +1059,13 @@ mod tests {
             vec![
                 DecodeStep {
                     slot_id: 0,
+                    admission_epoch: 1,
                     token: 10,
                     position: 5
                 },
                 DecodeStep {
                     slot_id: 1,
+                    admission_epoch: 2,
                     token: 11,
                     position: 5
                 },
@@ -946,7 +1106,19 @@ mod tests {
             Slot::idle(2),
             Slot::idle(3),
         ];
-        assert_eq!(s.prefill_plan(8), vec![0, 1]);
+        assert_eq!(
+            s.prefill_plan(8),
+            vec![
+                SlotHandle {
+                    slot_id: 0,
+                    admission_epoch: 1,
+                },
+                SlotHandle {
+                    slot_id: 1,
+                    admission_epoch: 2,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -967,11 +1139,12 @@ mod tests {
         ];
         let chosen = s.prefill_plan(4);
         assert!(
-            chosen.contains(&0) && chosen.contains(&1),
+            chosen.iter().any(|handle| handle.slot_id == 0)
+                && chosen.iter().any(|handle| handle.slot_id == 1),
             "shared-prefix pair must co-batch: {chosen:?}"
         );
         assert!(
-            !chosen.contains(&2),
+            !chosen.iter().any(|handle| handle.slot_id == 2),
             "unrelated slot must not join: {chosen:?}"
         );
     }
@@ -1005,36 +1178,110 @@ mod tests {
     #[test]
     fn admit_assigns_idle_slot_and_installs_sampler() {
         let mut s = Scheduler::new(2, "hawking");
-        let id = s.admit(vec![1, 2, 3], 8, true, Some(42)).expect("admit");
-        assert_eq!(id, 0);
+        let handle = admitted(s.admit(vec![1, 2, 3], 8, true, Some(42)));
+        assert_eq!(handle.slot_id, 0);
+        assert_eq!(handle.admission_epoch, 1);
         assert_eq!(s.slots[0].state, SlotState::Prefilling);
-        assert_eq!(s.slots[0].position, 3);
+        assert_eq!(s.slots[0].position, 2);
         assert_eq!(s.slots[0].last_token, Some(3));
         assert!(s.samplers[0].is_some());
         // Second admission takes the other idle slot.
-        let id2 = s.admit(vec![9], 4, true, None).expect("admit 2");
-        assert_eq!(id2, 1);
+        let handle2 = admitted(s.admit(vec![9], 4, true, None));
+        assert_eq!(handle2.slot_id, 1);
         // Pool full -> None, never overwrites a live slot.
-        assert!(s.admit(vec![5], 4, true, None).is_none());
+        assert_eq!(s.admit(vec![5], 4, true, None).unwrap(), None);
     }
 
     #[test]
     fn mark_prefill_complete_transitions_and_rejects_wrong_state() {
         let mut s = Scheduler::new(1, "hawking");
-        let id = s.admit(vec![1], 4, true, None).unwrap();
-        assert!(!s.mark_prefill_complete(99)); // unknown slot
-        assert!(s.mark_prefill_complete(id));
+        let handle = admitted(s.admit(vec![1], 4, true, None));
+        assert!(!s.mark_prefill_complete(SlotHandle {
+            slot_id: 99,
+            admission_epoch: handle.admission_epoch,
+        }));
+        assert!(s.mark_prefill_complete(handle));
         assert_eq!(s.slots[0].state, SlotState::Decoding);
-        assert!(!s.mark_prefill_complete(id)); // already Decoding, not Prefilling
+        assert!(!s.mark_prefill_complete(handle)); // already Decoding, not Prefilling
+    }
+
+    #[test]
+    fn first_decode_step_is_contiguous_with_zero_based_prompt_positions() {
+        let mut s = Scheduler::new(1, "hawking");
+        let handle = admitted(s.admit(vec![10, 20, 30], 4, true, None));
+        let id = handle.slot_id;
+        assert!(s.mark_prefill_complete(handle));
+
+        let first = s.decode_plan(1);
+        assert_eq!(
+            first,
+            vec![DecodeStep {
+                slot_id: id,
+                admission_epoch: handle.admission_epoch,
+                token: 30,
+                position: 2,
+            }],
+            "the prompt's last token must occupy prompt_len - 1, not leave a KV/RoPE hole"
+        );
+        s.apply_decode_tokens(&first, vec![40], None).unwrap();
+        assert_eq!(s.slots[id as usize].last_token, Some(40));
+        assert_eq!(
+            s.slots[id as usize].position, 3,
+            "the first generated token must occupy the immediately following position"
+        );
+    }
+
+    #[test]
+    fn production_style_prefill_to_decode_trace_is_contiguous_across_reuse() {
+        fn trace_first_generation(
+            scheduler: &mut Scheduler,
+            handle: SlotHandle,
+            prompt_len: usize,
+            first_token: u32,
+            eos: Option<u32>,
+        ) -> Vec<usize> {
+            let mut trace: Vec<usize> = (0..prompt_len).collect();
+            assert!(scheduler.mark_prefill_complete(handle));
+            let just_executed = scheduler.decode_plan(1);
+            assert_eq!(just_executed[0].position, prompt_len - 1);
+            let decoded = scheduler
+                .apply_decode_tokens(&just_executed, vec![first_token], eos)
+                .unwrap();
+            if !decoded[0].finished {
+                let next = scheduler.decode_plan(1);
+                assert_eq!(next[0].token, first_token);
+                trace.push(next[0].position);
+            }
+            trace
+        }
+
+        let mut s = Scheduler::new(1, "hawking");
+        let first = admitted(s.admit(vec![10, 20, 30], 4, true, None));
+        assert_eq!(
+            trace_first_generation(&mut s, first, 3, 40, None),
+            vec![0, 1, 2, 3]
+        );
+        assert!(s.release_slot(first));
+
+        let reused = admitted(s.admit(vec![99], 4, true, None));
+        assert_eq!(reused.slot_id, first.slot_id);
+        assert_ne!(reused.admission_epoch, first.admission_epoch);
+        assert_eq!(
+            trace_first_generation(&mut s, reused, 1, 2, Some(2)),
+            vec![0],
+            "EOS on a reused one-token prompt must not add or skip a decode position"
+        );
     }
 
     #[test]
     fn apply_decode_tokens_advances_slot_and_detects_eos() {
         let mut s = Scheduler::new(2, "hawking");
-        let a = s.admit(vec![10], 4, true, None).unwrap();
-        let b = s.admit(vec![20], 4, true, None).unwrap();
+        let a = admitted(s.admit(vec![10], 4, true, None));
+        let b = admitted(s.admit(vec![20], 4, true, None));
         s.mark_prefill_complete(a);
         s.mark_prefill_complete(b);
+        let a_id = a.slot_id;
+        let b_id = b.slot_id;
 
         let batch = s.decode_plan(8);
         assert_eq!(batch.len(), 2);
@@ -1042,11 +1289,27 @@ mod tests {
         let decoded = s
             .apply_decode_tokens(&batch, vec![1, 2], Some(2))
             .expect("apply tokens");
-        assert_eq!(decoded[0], DecodedToken { slot_id: a, token: 1, finished: false });
-        assert_eq!(decoded[1], DecodedToken { slot_id: b, token: 2, finished: true });
-        assert_eq!(s.slots[a as usize].last_token, Some(1));
-        assert_eq!(s.slots[a as usize].position, 2); // prompt_len(1) + 1 step
-        assert_eq!(s.slots[b as usize].state, SlotState::Finishing);
+        assert_eq!(
+            decoded[0],
+            DecodedToken {
+                slot_id: a_id,
+                admission_epoch: a.admission_epoch,
+                token: 1,
+                finished: false
+            }
+        );
+        assert_eq!(
+            decoded[1],
+            DecodedToken {
+                slot_id: b_id,
+                admission_epoch: b.admission_epoch,
+                token: 2,
+                finished: true
+            }
+        );
+        assert_eq!(s.slots[a_id as usize].last_token, Some(1));
+        assert_eq!(s.slots[a_id as usize].position, 1); // first generated token's position
+        assert_eq!(s.slots[b_id as usize].state, SlotState::Finishing);
         assert_eq!(s.lane_stats.greedy_steps, 1);
         assert_eq!(s.lane_stats.finished_slots, 1);
         assert_eq!(
@@ -1058,32 +1321,47 @@ mod tests {
     #[test]
     fn apply_decode_tokens_finishes_on_max_new_tokens_without_eos() {
         let mut s = Scheduler::new(1, "hawking");
-        let id = s.admit(vec![10], 1, true, None).unwrap(); // max_new_tokens=1
-        s.mark_prefill_complete(id);
+        let handle = admitted(s.admit(vec![10], 1, true, None)); // max_new_tokens=1
+        let id = handle.slot_id;
+        s.mark_prefill_complete(handle);
         let batch = s.decode_plan(8);
         let decoded = s
             .apply_decode_tokens(&batch, vec![777], Some(2))
             .expect("apply");
-        assert!(decoded[0].finished, "must finish on hitting max_new_tokens even without EOS");
+        assert!(
+            decoded[0].finished,
+            "must finish on hitting max_new_tokens even without EOS"
+        );
         assert_eq!(s.slots[id as usize].state, SlotState::Finishing);
     }
 
     #[test]
     fn apply_decode_tokens_rejects_stale_plan() {
         let mut s = Scheduler::new(1, "hawking");
-        let id = s.admit(vec![10], 4, true, None).unwrap();
-        s.mark_prefill_complete(id);
+        let old_handle = admitted(s.admit(vec![10], 4, true, None));
+        s.mark_prefill_complete(old_handle);
         let stale = s.decode_plan(8);
-        // Race: release the slot (as if another caller reused it) before applying.
-        s.release_slot(id);
+        let old_epoch = stale[0].admission_epoch;
+        // Race: release and reuse the same region for an identical request. Token,
+        // position, and slot id all repeat; only the admission epoch distinguishes
+        // the new occupant from the delayed old result.
+        s.release_slot(old_handle);
+        let reused = admitted(s.admit(vec![10], 4, true, None));
+        assert_eq!(reused.slot_id, old_handle.slot_id);
+        s.mark_prefill_complete(reused);
+        let live = s.decode_plan(8);
+        assert_eq!(stale[0].slot_id, live[0].slot_id);
+        assert_eq!(stale[0].token, live[0].token);
+        assert_eq!(stale[0].position, live[0].position);
+        assert_ne!(old_epoch, live[0].admission_epoch);
         assert!(s.apply_decode_tokens(&stale, vec![1], Some(2)).is_err());
     }
 
     #[test]
     fn apply_decode_logits_samples_greedy_and_advances() {
         let mut s = Scheduler::new(2, "hawking");
-        let a = s.admit(vec![10], 4, true, None).unwrap();
-        let b = s.admit(vec![20], 4, false, None).unwrap(); // non-greedy -> full logits lane
+        let a = admitted(s.admit(vec![10], 4, true, None));
+        let b = admitted(s.admit(vec![20], 4, false, None)); // non-greedy -> full logits lane
         s.mark_prefill_complete(a);
         s.mark_prefill_complete(b);
         let batch = s.decode_plan(8);
@@ -1097,17 +1375,115 @@ mod tests {
         assert_eq!(decoded[1].token, 2); // argmax of [0,1,5]; == eos -> finished
         assert!(decoded[1].finished);
         assert_eq!(s.lane_stats.logits_steps, 1);
-        assert_eq!(s.lane_stats.readback_bytes, (2 * 3 * std::mem::size_of::<f32>()) as u64);
+        assert_eq!(
+            s.lane_stats.readback_bytes,
+            (2 * 3 * std::mem::size_of::<f32>()) as u64
+        );
     }
 
     #[test]
     fn release_slot_frees_region_and_drops_sampler() {
         let mut s = Scheduler::new(1, "hawking");
-        let id = s.admit(vec![10], 4, true, None).unwrap();
-        assert!(s.release_slot(id));
+        let handle = admitted(s.admit(vec![10], 4, true, None));
+        assert!(s.release_slot(handle));
         assert_eq!(s.slots[0].state, SlotState::Idle);
         assert!(s.samplers[0].is_none());
-        assert!(!s.release_slot(99)); // unknown slot id
+        assert!(!s.release_slot(SlotHandle {
+            slot_id: 99,
+            admission_epoch: handle.admission_epoch,
+        }));
+    }
+
+    #[test]
+    fn invalid_admission_is_typed_and_does_not_mutate_scheduler() {
+        let mut s = Scheduler::new(1, "hawking");
+        let epoch = s.next_admission_epoch;
+        assert_eq!(
+            s.admit(Vec::new(), 4, true, None),
+            Err(AdmitError::EmptyPrompt)
+        );
+        assert_eq!(
+            s.admit(vec![1], 0, true, None),
+            Err(AdmitError::ZeroMaxNewTokens)
+        );
+        assert_eq!(s.next_admission_epoch, epoch);
+        assert_eq!(s.active_count(), 0);
+        assert!(s.samplers[0].is_none());
+    }
+
+    #[test]
+    fn stale_lifecycle_handles_cannot_touch_reused_occupant() {
+        let mut s = Scheduler::new(1, "hawking");
+        let old = admitted(s.admit(vec![10], 4, true, None));
+        assert!(s.release_slot(old));
+        let live = admitted(s.admit(vec![10], 4, true, None));
+        assert_eq!(old.slot_id, live.slot_id);
+        assert_ne!(old.admission_epoch, live.admission_epoch);
+
+        assert!(!s.mark_prefill_complete(old));
+        assert!(!s.release_slot(old));
+        let slot = &s.slots[live.slot_id as usize];
+        assert_eq!(slot.state, SlotState::Prefilling);
+        assert_eq!(slot.admission_epoch, live.admission_epoch);
+        assert!(s.samplers[live.slot_id as usize].is_some());
+        assert!(s.mark_prefill_complete(live));
+    }
+
+    #[test]
+    fn decode_apply_preflights_every_row_before_any_mutation() {
+        let mut s = Scheduler::new(2, "hawking");
+        let a = admitted(s.admit(vec![10], 4, false, Some(1)));
+        let b = admitted(s.admit(vec![20], 4, false, Some(2)));
+        assert!(s.mark_prefill_complete(a));
+        assert!(s.mark_prefill_complete(b));
+        let live = s.decode_plan(2);
+
+        let snapshot = |scheduler: &Scheduler| {
+            let slots = scheduler
+                .slots
+                .iter()
+                .map(|slot| {
+                    (
+                        slot.state,
+                        slot.generated_ids.clone(),
+                        slot.last_token,
+                        slot.position,
+                        slot.admission_epoch,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let recent = scheduler
+                .samplers
+                .iter()
+                .map(|sampler| sampler.as_ref().map(|sampler| sampler.recent.clone()))
+                .collect::<Vec<_>>();
+            (slots, recent, scheduler.lane_stats)
+        };
+        let before = snapshot(&s);
+
+        let mut stale_second = live.clone();
+        stale_second[1].admission_epoch += 1;
+        assert!(s
+            .apply_decode_tokens(&stale_second, vec![31, 41], None)
+            .is_err());
+        assert_eq!(snapshot(&s), before, "token apply must be atomic");
+
+        let mut logits = vec![vec![0.0, 1.0], vec![1.0, 0.0]];
+        let original_logits = logits.clone();
+        assert!(s
+            .apply_decode_logits(&stale_second, &mut logits, None)
+            .is_err());
+        assert_eq!(
+            logits, original_logits,
+            "preflight must not sample/mutate logits"
+        );
+        assert_eq!(snapshot(&s), before, "logit apply must be atomic");
+
+        let duplicate = vec![live[0], live[0]];
+        assert!(s
+            .apply_decode_tokens(&duplicate, vec![31, 41], None)
+            .is_err());
+        assert_eq!(snapshot(&s), before, "duplicate slots must fail atomically");
     }
 
     #[test]
@@ -1185,10 +1561,12 @@ mod tests {
             // Slot 0: a 5-token prompt. Slot 1: a 3-token prompt (DIFFERENT history
             // length) — the exact mismatched-length setup the continuous-batching
             // property must survive.
-            let slot_a = sched.admit(vec![1, 2, 3, 4, 5], 4, true, Some(1)).unwrap();
-            let slot_b = sched.admit(vec![9, 8, 7], 4, true, Some(2)).unwrap();
+            let slot_a = admitted(sched.admit(vec![1, 2, 3, 4, 5], 4, true, Some(1)));
+            let slot_b = admitted(sched.admit(vec![9, 8, 7], 4, true, Some(2)));
             sched.mark_prefill_complete(slot_a);
             sched.mark_prefill_complete(slot_b);
+            let slot_a_id = slot_a.slot_id;
+            let slot_b_id = slot_b.slot_id;
 
             let mut cache =
                 KvCache::zeros(&device, max_batch, max_seq_per_slot, n_kv_heads, head_dim).unwrap();
@@ -1197,7 +1575,7 @@ mod tests {
             // its own region, positions 0..position-1, with distinct pseudo-random
             // data per slot so the two slots are NOT accidentally identical.
             let mut seed = 100u64;
-            for &(region, prompt_len) in [(slot_a, 5usize), (slot_b, 3usize)].iter() {
+            for &(region, prompt_len) in [(slot_a_id, 5usize), (slot_b_id, 3usize)].iter() {
                 for t in 0..prompt_len - 1 {
                     let kv_dim = n_kv_heads * head_dim;
                     let mut k_row = vec![0f32; kv_dim];
@@ -1254,7 +1632,8 @@ mod tests {
                 let v_t = Tensor::from_vec(v_new, (bsz, n_kv_heads, head_dim), &device).unwrap();
 
                 let attn_out =
-                    decode_attention_step(cache, &batch, &q_t, &k_t, &v_t, n_heads, scale).unwrap();
+                    decode_attention_step(sched, cache, &batch, &q_t, &k_t, &v_t, n_heads, scale)
+                        .unwrap();
                 let attn_out: Vec<f32> = attn_out.flatten_all().unwrap().to_vec1().unwrap();
 
                 // Stand-in "logits": sum this slot's attention output into a tiny
@@ -1271,13 +1650,15 @@ mod tests {
                     // produce different tokens below.
                     tokens.push((sum.to_bits() % 1000) as u32);
                 }
-                sched.apply_decode_tokens(&batch, tokens, Some(u32::MAX)).unwrap()
+                sched
+                    .apply_decode_tokens(&batch, tokens, Some(u32::MAX))
+                    .unwrap()
             };
 
             let decoded_1 = run_step(&mut sched, &mut cache);
             assert_eq!(decoded_1.len(), 2);
-            assert_eq!(sched.slots[slot_a as usize].position, 6); // 5 + 1
-            assert_eq!(sched.slots[slot_b as usize].position, 4); // 3 + 1
+            assert_eq!(sched.slots[slot_a_id as usize].position, 5);
+            assert_eq!(sched.slots[slot_b_id as usize].position, 3);
             assert_eq!(sched.lane_stats.greedy_steps, 1);
 
             // Run a second wired step — proves the slot-strided KV persists and
@@ -1286,8 +1667,8 @@ mod tests {
             // a one-shot synthetic call).
             let decoded_2 = run_step(&mut sched, &mut cache);
             assert_eq!(decoded_2.len(), 2);
-            assert_eq!(sched.slots[slot_a as usize].position, 7);
-            assert_eq!(sched.slots[slot_b as usize].position, 5);
+            assert_eq!(sched.slots[slot_a_id as usize].position, 6);
+            assert_eq!(sched.slots[slot_b_id as usize].position, 4);
             assert_eq!(sched.lane_stats.greedy_steps, 2);
             assert_eq!(
                 sched.lane_stats.readback_bytes,
@@ -1301,12 +1682,14 @@ mod tests {
             // unaffected — mirrors hawking_metal_kernel's own
             // slots_are_independent_across_different_history_lengths, one layer up.
             let mut sched2 = Scheduler::new(max_batch, "hawking");
-            let a2 = sched2.admit(vec![1, 2, 3, 4, 5], 4, true, Some(1)).unwrap();
-            let b2 = sched2.admit(vec![9, 8, 7], 4, true, Some(2)).unwrap();
+            let a2 = admitted(sched2.admit(vec![1, 2, 3, 4, 5], 4, true, Some(1)));
+            let b2 = admitted(sched2.admit(vec![9, 8, 7], 4, true, Some(2)));
             sched2.mark_prefill_complete(a2);
             sched2.mark_prefill_complete(b2);
-            assert_eq!(a2, slot_a);
-            assert_eq!(b2, slot_b);
+            assert_eq!(a2.slot_id, slot_a_id);
+            assert_eq!(b2.slot_id, slot_b_id);
+            let a2_id = a2.slot_id;
+            let b2_id = b2.slot_id;
             let mut cache2 =
                 KvCache::zeros(&device, max_batch, max_seq_per_slot, n_kv_heads, head_dim).unwrap();
             // Seed identically to slot_a but DIFFERENTLY to slot_b.
@@ -1322,7 +1705,7 @@ mod tests {
                     *v = lcg_f32(&mut seed2);
                 }
                 let scatter = crate::hawking_metal_kernel::KvScatterAppend {
-                    regions: vec![slot_a],
+                    regions: vec![a2_id],
                     positions: vec![x as u32],
                     kv_dim,
                     slot_stride: cache2.slot_stride(),
@@ -1330,7 +1713,7 @@ mod tests {
                 let k_src = Tensor::from_vec(k_row, (1, kv_dim), &device).unwrap();
                 cache2.k.inplace_op2(&k_src, &scatter).unwrap();
                 let scatter_v = crate::hawking_metal_kernel::KvScatterAppend {
-                    regions: vec![slot_a],
+                    regions: vec![a2_id],
                     positions: vec![x as u32],
                     kv_dim,
                     slot_stride: cache2.slot_stride(),
@@ -1351,7 +1734,7 @@ mod tests {
                     *v = lcg_f32(&mut seed2b);
                 }
                 let scatter = crate::hawking_metal_kernel::KvScatterAppend {
-                    regions: vec![slot_b],
+                    regions: vec![b2_id],
                     positions: vec![x as u32],
                     kv_dim,
                     slot_stride: cache2.slot_stride(),
@@ -1359,7 +1742,7 @@ mod tests {
                 let k_src = Tensor::from_vec(k_row, (1, kv_dim), &device).unwrap();
                 cache2.k.inplace_op2(&k_src, &scatter).unwrap();
                 let scatter_v = crate::hawking_metal_kernel::KvScatterAppend {
-                    regions: vec![slot_b],
+                    regions: vec![b2_id],
                     positions: vec![x as u32],
                     kv_dim,
                     slot_stride: cache2.slot_stride(),
@@ -1368,13 +1751,57 @@ mod tests {
                 cache2.v.inplace_op2(&v_src, &scatter_v).unwrap();
             }
             let decoded_1b = run_step(&mut sched2, &mut cache2);
-            let tok_a_run1 = decoded_1.iter().find(|d| d.slot_id == slot_a).unwrap().token;
-            let tok_a_run2 = decoded_1b.iter().find(|d| d.slot_id == a2).unwrap().token;
+            let tok_a_run1 = decoded_1
+                .iter()
+                .find(|d| d.slot_id == slot_a_id)
+                .unwrap()
+                .token;
+            let tok_a_run2 = decoded_1b
+                .iter()
+                .find(|d| d.slot_id == a2_id)
+                .unwrap()
+                .token;
             assert_eq!(
                 tok_a_run1, tok_a_run2,
                 "slot a's decoded token must be UNCHANGED by slot b's history being \
                  perturbed in the same shared dispatch — the core continuous-batching \
                  no-cross-slot-corruption property, proven at the wired scheduler layer"
+            );
+        }
+
+        #[test]
+        #[ignore = "requires real Metal hardware; proves stale epochs are rejected before device KV mutation"]
+        fn stale_epoch_is_rejected_before_device_kv_scatter() {
+            let device = match Device::new_metal(0) {
+                Ok(device) => device,
+                Err(_) => return,
+            };
+            let mut scheduler = Scheduler::new(1, "hawking");
+            let old = admitted(scheduler.admit(vec![7], 4, true, None));
+            assert!(scheduler.mark_prefill_complete(old));
+            let stale = scheduler.decode_plan(1);
+            assert!(scheduler.release_slot(old));
+            let live = admitted(scheduler.admit(vec![7], 4, true, None));
+            assert!(scheduler.mark_prefill_complete(live));
+            assert_ne!(stale[0].admission_epoch, live.admission_epoch);
+
+            let mut cache = KvCache::zeros(&device, 1, 4, 1, 1).unwrap();
+            let before_k = cache.k.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+            let before_v = cache.v.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+            let q = Tensor::ones((1, 1, 1), candle_core::DType::F32, &device).unwrap();
+            let k = q.clone();
+            let v = q.clone();
+
+            let error = decode_attention_step(&scheduler, &mut cache, &stale, &q, &k, &v, 1, 1.0)
+                .expect_err("stale occupancy must fail before scatter");
+            assert!(error.to_string().contains("stale decode result"));
+            assert_eq!(
+                cache.k.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+                before_k
+            );
+            assert_eq!(
+                cache.v.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+                before_v
             );
         }
     }

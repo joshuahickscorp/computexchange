@@ -10,10 +10,12 @@
 #     storage.computexchange.net -> MinIO.
 #   - control receives Stripe/CX secrets via env_file: .env; infra wiring is set
 #     explicitly below (and overrides any stale localhost values in .env).
-#   - HA: a SECOND control instance (control-2) runs behind Caddy. The Postgres
-#     SKIP-LOCKED task queue is multi-instance-safe for dispatch; see
-#     docs/RUNBOOKS.md §HA for the honest single-writer caveats on the
-#     background sweeps and the Stripe webhook.
+#   - Process HA: a SECOND control instance (control-2) runs behind Caddy. The
+#     Postgres SKIP-LOCKED task queue is multi-instance-safe for dispatch, while
+#     a session advisory lock elects exactly one background-sweep owner and the
+#     standby takes over when that session disappears. Both replicas, Postgres,
+#     MinIO, and Caddy still share one host/failure domain; see docs/RUNBOOKS.md
+#     §HA for that explicit boundary.
 #   - Monitoring (Prometheus/Alertmanager/Grafana + exporters) ships under the
 #     `monitoring` profile, off by default. See monitoring/README.md.
 #
@@ -23,9 +25,11 @@
 #   docker compose -f docker-compose.prod.yml --profile monitoring up -d --build
 #
 # .env must define: POSTGRES_PASSWORD, MINIO_ROOT_USER, MINIO_ROOT_PASSWORD,
-# STRIPE_SECRET_KEY, STRIPE_PUBLISHABLE_KEY, CX_TOKEN_KEY, CX_STATE_SECRET,
-# ACME_EMAIL, and (once the webhook exists) STRIPE_WEBHOOK_SECRET. For monitoring
-# + offsite backups see the additional vars in .env.example.
+# STRIPE_SECRET_KEY, the two distinct Stripe endpoint secrets, CX_TOKEN_KEY,
+# CX_VERIFICATION_SAMPLE_SECRET, CX_PUBLIC_CONTROL_ORIGIN, the
+# five versioned CX_ECON_* pricing inputs, and ACME_EMAIL. The publishable Stripe
+# key is browser configuration and is not consumed by the control container. For
+# monitoring + offsite backups see the additional vars in .env.example.
 
 # E2 · bounded container logs. Without this the json-file driver grows
 # unbounded and eventually fills the droplet disk (which halts Postgres). Anchor
@@ -110,26 +114,17 @@ services:
     entrypoint: >
       /bin/sh -c "
       set -e;
-      psql -v ON_ERROR_STOP=1 -h postgres -U cx -d cx -f /schema.sql;
+      psql -v ON_ERROR_STOP=1 --single-transaction -h postgres -U cx -d cx -f /schema.sql;
       echo 'schema applied';
       "
     restart: "no"
 
   # ── HA control plane: two identical instances behind Caddy ─────────────────
-  # Both run the same image and the same code path, including the background
-  # worker loop (workers.Run: payout release / stale-task requeue / webhook
-  # sweep / reconcile / hedge / dispute). The Postgres task queue uses
-  # SELECT ... FOR UPDATE SKIP LOCKED, so dispatch/poll from both instances is
-  # safe (each claims distinct rows). HONEST CAVEATS, documented in full in
-  # docs/RUNBOOKS.md §HA:
-  #   - The background sweeps run in BOTH instances. Payout release is
-  #     idempotent (per-credit-row id is the rail idempotency key; a row already
-  #     'released' is a no-op), and stale-task requeue / fail-and-refund use the
-  #     same SKIP-LOCKED + exactly-once state transitions. The reconcile / hedge
-  #     / dispute sweeps double-RUN: correctness holds (each does its own
-  #     guarded state transition) but they do redundant work. There is no
-  #     env flag to disable the loop on instance 2 today; adding one
-  #     (leader-only sweeps) is the clean follow-up · tracked in RUNBOOKS.
+  # Both run the same image and enter PostgreSQL session-lock leader election
+  # for the background sweeps (payout / stale-task / webhook / reconcile / hedge
+  # / dispute). Exactly one replica runs side effects; the other remains an API
+  # standby and takes over automatically when the leader session disappears.
+  # The task claim path itself remains multi-active via SKIP LOCKED.
   #   - The Stripe webhook (POST /v1/stripe/webhook) is stateless + signature
   #     verified and idempotent on the event, so Caddy load-balancing it across
   #     both instances is safe.
@@ -137,7 +132,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.control
-    image: computexchange/control:latest   # built once; control-2 reuses this tag
+      args:
+        CX_BUILD_VERSION: ${CX_BUILD_VERSION:-dev}
+        CX_BUILD_COMMIT: ${CX_BUILD_COMMIT:-unknown}
+        CX_BUILD_DATE: ${CX_BUILD_DATE:-unknown}
+    image: computexchange/control:${CX_BUILD_COMMIT:-dev}   # immutable commit tag; control-2 reuses this exact image
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -150,8 +149,25 @@ services:
     env_file:
       - .env
     environment: &control-env
+      # Make the production safety contract explicit. This activates fail-closed
+      # startup even if an operator accidentally supplies a test key or no key.
+      CX_ENV: production
       DATABASE_URL: postgres://cx:${POSTGRES_PASSWORD}@postgres:5432/cx?sslmode=disable
       LISTEN_ADDR: ":8080"
+      CX_PUBLIC_CONTROL_ORIGIN: ${CX_PUBLIC_CONTROL_ORIGIN:?set CX_PUBLIC_CONTROL_ORIGIN in .env}
+      SITE_HOST: ${SITE_HOST:-computexchange.net}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:?set STRIPE_SECRET_KEY in .env}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:?set STRIPE_WEBHOOK_SECRET in .env}
+      CX_CONNECT_WEBHOOK_SECRET: ${CX_CONNECT_WEBHOOK_SECRET:?set CX_CONNECT_WEBHOOK_SECRET in .env}
+      CX_CONNECT_RETURN_URL: ${CX_CONNECT_RETURN_URL:?set CX_CONNECT_RETURN_URL in .env}
+      CX_CONNECT_REFRESH_URL: ${CX_CONNECT_REFRESH_URL:?set CX_CONNECT_REFRESH_URL in .env}
+      CX_TOKEN_KEY: ${CX_TOKEN_KEY:?set CX_TOKEN_KEY in .env}
+      CX_VERIFICATION_SAMPLE_SECRET: ${CX_VERIFICATION_SAMPLE_SECRET:?set CX_VERIFICATION_SAMPLE_SECRET in .env}
+      CX_ECON_SCHEDULE_VERSION: ${CX_ECON_SCHEDULE_VERSION:?set CX_ECON_SCHEDULE_VERSION in .env}
+      CX_PROCESSOR_PERCENT_BPS: ${CX_PROCESSOR_PERCENT_BPS:?set CX_PROCESSOR_PERCENT_BPS in .env}
+      CX_PROCESSOR_FIXED_USD: ${CX_PROCESSOR_FIXED_USD:?set CX_PROCESSOR_FIXED_USD in .env}
+      CX_CONTROL_PLANE_PER_TASK_USD: ${CX_CONTROL_PLANE_PER_TASK_USD:?set CX_CONTROL_PLANE_PER_TASK_USD in .env}
+      CX_TARGET_MARGIN_BPS: ${CX_TARGET_MARGIN_BPS:?set CX_TARGET_MARGIN_BPS in .env}
       # E1 · GC soft ceiling, set ~85% of the mem_limit below so the Go runtime GCs
       # harder before the cgroup OOM-kills the container. main.go applies a 300MiB
       # default only when this is unset; we set it explicitly here to match the cap.
@@ -167,7 +183,7 @@ services:
     expose:
       - "8080"
     healthcheck:
-      test: ["CMD", "/control", "healthcheck"]   # distroless self-probe of /healthz (no shell/curl in the image)
+      test: ["CMD", "/control", "healthcheck"]   # distroless self-probe of /readyz (DB + owned-sweep liveness)
       interval: 10s
       timeout: 4s
       retries: 5
@@ -184,7 +200,7 @@ services:
   # so the image exists, and on the data plane being healthy. Identical config ·
   # only the service name (hence network alias control-2) differs.
   control-2:
-    image: computexchange/control:latest
+    image: computexchange/control:${CX_BUILD_COMMIT:-dev}
     depends_on:
       control:
         condition: service_started
@@ -196,11 +212,9 @@ services:
       - .env
     environment:
       <<: *control-env
-      # HA secondary: API only. The PRIMARY (control) runs the background loops;
-      # running payout/dispute/reconcile sweeps from two instances could double-pay
-      # (the manual-export rail is a non-idempotent append). This instance serves
-      # requests and registers no tickers, so its /readyz reflects DB reachability only.
-      CX_RUN_WORKERS: "false"
+      # Same leader-election path as control. While it is a follower, /readyz
+      # reflects API/DB readiness; if the leader disappears this replica takes over.
+      CX_RUN_WORKERS: "true"
     expose:
       - "8080"
     healthcheck:

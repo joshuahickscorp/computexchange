@@ -1,3 +1,4 @@
+<!-- CLAIM-SCOPE: internal-engineering-non-authoritative -->
 # spec-lab — the deterministic distributed-speculation experiment engine
 
 A self-driving, money-safe experiment harness for the **distributed speculative
@@ -26,6 +27,64 @@ The primary architecture branch is CX-native speculation: `SpecUnit -> DraftProd
 -> Verifier -> AcceptancePolicy -> RepairPolicy -> SpecReceipt`. vLLM, Hawking,
 Cycles, ffmpeg, and future kernels are things to mine, fork, or compare when they
 help that branch; they are not the boundary of the design.
+
+Current closure (2026-07-13): exact-request byte transport is 6,815.52x median,
+the fresh two-render Spatial75 preview is 207.644x, and the deliberately ungated
+one-render ceiling is 339.701x. Only the exact repeat crosses 1,000x; none of
+these receipts authorizes a final whole-project render, billing, or production
+delivery. The strict project-bundle/v2 wire boundary, customer trade-offs,
+hardening ledger, and remaining isolation/artifact-authority gates are recorded
+in [`SPEC_ENGINE_WHOLE_PROJECT_PASS_2026-07-13.md`](../../docs/research/SPEC_ENGINE_WHOLE_PROJECT_PASS_2026-07-13.md).
+
+Latest Apple Metal milestone: the real resident Cycles preview path measured
+56.714589x on a 1080p classroom frame and 55.926238x on a materially different
+Pavilion exterior under a local-unattested dual regional + fixed-microtile preview
+contract. BMW27 cleared quality at 32+32 spp and measured 34.757412x, so the
+current three-scene matrix is honestly 2/3 above 50x, not an arbitrary-scene claim.
+An independently pinned official Fishy Cat particle-hair scene then reached
+54.541695x on a held-out end frame after lossless local PNG transport was removed
+from the charged critical path; it is a separate code generation, not a silent
+rewrite of that matrix.
+An eight-arm BMW integrator screen then pruned bounce caps, light-tree and
+adaptive-sampling variants: the best cross-session projection was 40.292637x,
+not a measured speedup. A separately hashed Stylized Levi derivative adds two
+meaningfully different armature/lattice poses; both pass the 1080p gate at 1+1
+spp, but its measured baseline slope projects only 35.697660x and prunes the
+4096-spp final.
+The untouched official Koro rigged/furry portrait scene then transferred at
+84.250743x on a locally operator-declared held-out frame (112.396726 s /
+1.334074 s), with no repair or prior rendered-result cache reuse and all
+product/4096 gates passing. Normal renderer/Metal caches were warm after the
+declared uncharged candidate warmup. This is a fourth bounded scene family above
+50x, not an arbitrary-character or production claim; retained files cannot prove
+the absence of an earlier or deleted held-out-frame run.
+The bounded Rust multi-frame wrapper also produced and fully validated an
+eight-frame silent H.264 VideoToolbox MP4, then repeated the path on a controlled
+BMW camera move (seven accepted drafts, one bounded repair). Receipts,
+limitations, rejected preliminary runs, and the remaining video/audio plan are in
+[`APPLE_METAL_SPEC_RENDER_STAGE_2026-07-12.md`](../../docs/research/APPLE_METAL_SPEC_RENDER_STAGE_2026-07-12.md).
+
+Recheck the local three-scene receipt matrix without network access:
+
+```bash
+python3 scripts/spec-lab/verify_render_transfer_matrix.py \
+  --matrix proof/performance/apple-metal-render-transfer-matrix-2026-07-12.json
+
+python3 scripts/spec-lab/verify_render_hair_transfer.py \
+  --require-local-artifacts
+
+python3 scripts/spec-lab/verify_render_bmw_integrator_screen.py \
+  --require-local-artifacts
+
+python3 scripts/spec-lab/verify_render_deformation_screen.py \
+  --require-local-artifacts
+
+python3 scripts/spec-lab/verify_render_koro_transfer.py \
+  --require-local-artifacts
+```
+
+The verifier distinguishes receipt-bound fields from v1 product/provenance data
+that can only be corroborated from the still-present local artifact roots.
 
 ## How it drives itself (deterministic auto-progression)
 

@@ -1,3 +1,4 @@
+<!-- CLAIM-SCOPE: internal-engineering-non-authoritative -->
 # web/assets/site · the asset interface contract
 
 Freezes the interface between the public site and the future photoreal device

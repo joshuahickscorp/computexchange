@@ -1,3 +1,4 @@
+<!-- CLAIM-SCOPE: internal-engineering-non-authoritative -->
 # NOTES-SITE.md · the narrative-shift change log
 
 The site shift's working ledger. Runs in a dedicated worktree (branch

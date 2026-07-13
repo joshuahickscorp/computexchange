@@ -15,6 +15,9 @@ build/
 # Python (sdk/) caches
 **/__pycache__/
 *.pyc
+sdk/python/build/
+sdk/python/dist/
+sdk/python/*.egg-info/
 
 # ── Local run artifacts ──────────────────────────────────────────────────────
 # scripts/prove-local.sh writes its throwaway Postgres/MinIO data, logs, and the
@@ -96,3 +99,7 @@ diag_images/
 
 # raw bulk tuning trace (69MB machine log; the distilled reports + smaller ledgers are the trail)
 docs/speed-lane-reports/spec-lab/tuning_ledger.jsonl
+
+# pytest's discovery cache is generated at every repository depth. The claim and
+# source-fingerprint scanners must never mistake it for a product document.
+**/.pytest_cache/

@@ -1,3 +1,4 @@
+<!-- CLAIM-SCOPE: internal-engineering-non-authoritative -->
 # Candle fork & patch surface
 
 > **Update (feat/perf-wave pass 1) — corrections + new patches.** The owned surface is larger

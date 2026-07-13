@@ -80,7 +80,7 @@ class CxNativeSpeculationLadderTest(unittest.TestCase):
         self.assertGreaterEqual(row["accepted_fraction"], 0.0)
         self.assertLessEqual(row["accepted_fraction"], 1.0)
 
-    def test_prefix_accept_policy_grows_fast_low_draft_acceptance_rows(self):
+    def test_prefix_accept_policy_parks_fast_unattested_rows(self):
         row = {
             "exact": True,
             "quality_gate": True,
@@ -90,6 +90,12 @@ class CxNativeSpeculationLadderTest(unittest.TestCase):
             "draft_token_acceptance": 0.03,
         }
 
+        self.assertEqual(ladder.decide_prefix_accept_row(row), "park")
+        row.update({
+            "evidence": "measured",
+            "baseline_source": "measured",
+            "artifact_verified": True,
+        })
         self.assertEqual(ladder.decide_prefix_accept_row(row), "grow")
 
     def test_context_copy_predictor_prefers_recent_verified_match(self):

@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"net/http"
 	"strings"
@@ -286,19 +285,24 @@ func sortedKeys(m map[string]bool) []string {
 // the bytes match what was quoted. bareID carries the parsed uuid to InsertQuote
 // without putting a redundant field on the wire.
 type Quote struct {
-	QuoteID     string          `json:"quote_id"`
-	JobType     string          `json:"job_type"`
-	Model       string          `json:"model"`
-	Tier        string          `json:"tier"`
-	Input       QuoteInputScan  `json:"input"`
-	Execution   QuoteExecution  `json:"execution"`
-	Cost        QuoteCost       `json:"cost"`
-	Time        QuoteTime       `json:"time"`
-	Confidence  QuoteConfidence `json:"confidence"`
-	Budget      QuoteBudget     `json:"budget"`
-	Warnings    []string        `json:"warnings"`
-	ExpiresAt   time.Time       `json:"expires_at"`   // quote stops being bindable after this (Plane D D7)
-	InputSHA256 string          `json:"input_sha256"` // sha256 of the scanned input bytes (best-effort submit match)
+	QuoteID string `json:"quote_id"`
+	JobType string `json:"job_type"`
+	Model   string `json:"model"`
+	Tier    string `json:"tier"`
+	// TierSemantics prevents a price multiplier from being mistaken for capacity
+	// reservation, wider fan-out, or an SLA. A separately populated SLA block is
+	// the only completion guarantee.
+	TierSemantics string               `json:"tier_semantics"`
+	Input         QuoteInputScan       `json:"input"`
+	AudioInput    *AudioUploadMetadata `json:"audio_input,omitempty"`
+	Execution     QuoteExecution       `json:"execution"`
+	Cost          QuoteCost            `json:"cost"`
+	Time          QuoteTime            `json:"time"`
+	Confidence    QuoteConfidence      `json:"confidence"`
+	Budget        QuoteBudget          `json:"budget"`
+	Warnings      []string             `json:"warnings"`
+	ExpiresAt     time.Time            `json:"expires_at"`   // quote stops being bindable after this (Plane D D7)
+	InputSHA256   string               `json:"input_sha256"` // sha256 of the scanned input bytes (best-effort submit match)
 	// PrivatePoolAttestation is the written guarantee of what "private" actually
 	// means (Buyer advantage & pricing edge 6->7: "Productize the privacy premium
 	// instead of leaving it a sentence") — populated only when sub.PrivatePool is
@@ -319,6 +323,10 @@ type Quote struct {
 	// decision is grounded in measured generative decode only, so any other
 	// job shape gets NO routing block rather than an unmeasured guess.
 	Routing *QuoteRouting `json:"routing,omitempty"`
+	// Economics is the complete versioned margin-guard decision. It exposes the
+	// schedule, frozen per-task amounts, reserve, scenarios, and minimum headroom
+	// needed to reproduce why this quote is or is not executable.
+	Economics EconomicPlan `json:"economics"`
 
 	bareID uuid.UUID // quotes.id primary key (the <uuid> inside QuoteID); not on the wire
 }
@@ -335,6 +343,17 @@ type QuoteRouting struct {
 	FleetETASecs   int     `json:"fleet_eta_secs"`
 	GPUModeledSecs float64 `json:"gpu_modeled_secs"`
 	Basis          string  `json:"basis"`
+}
+
+func serviceTierSemantics(tier string) string {
+	switch tier {
+	case "priority":
+		return "bounded queue preference per eligible worker; after three consecutive ordinary priority claims, one eligible batch opportunity is served; no device reservation, wider-fanout guarantee, or SLA"
+	case "trusted":
+		return "restricts execution to the trusted supplier tier; it is not queue priority, device reservation, wider fan-out, or an SLA"
+	default:
+		return "standard queue service with a bounded batch opportunity under priority contention; no device reservation, wider-fanout guarantee, or SLA"
+	}
 }
 
 // quoteRoutingBasis names the measured artifact behind every routing block's
@@ -434,8 +453,8 @@ const (
 	// which lands AFTER the last commit — the merge itself (mergeJobResults
 	// buffers + writes the artifact) plus, when the last commit's synchronous
 	// finalize does not fire (e.g. the final task resolved through a background
-	// path), one full webhook-sweep cadence (workers.go webhookInterval = 20s)
-	// before sweepAndDeliver merges instead. 60s = 3× that sweep cadence — a
+	// path), one full job-finalize cadence (workers.go finalizationInterval = 20s)
+	// before finalizeJobs merges instead. 60s = 3× that sweep cadence — a
 	// deliberate allowance, not a measured number, and labeled as such.
 	slaMergeAllowanceSecs = 60
 )
@@ -556,11 +575,20 @@ func sustainedBatchETASecs(peakP50Secs int, tier string, usedObservedHistory boo
 }
 
 type QuoteCost struct {
-	MinUSD                  float64 `json:"min_usd"`
-	ExpectedUSD             float64 `json:"expected_usd"`
-	MaxUSD                  float64 `json:"max_usd"`
+	MinUSD      float64 `json:"min_usd"`
+	ExpectedUSD float64 `json:"expected_usd"`
+	MaxUSD      float64 `json:"max_usd"`
+	// VerificationOverheadUSD is the buyer-facing incremental guarded charge for
+	// the initial redundancy/honeypot tasks. It is not merely their raw catalogue
+	// compute input: processor, control-plane, and configured margin protection
+	// apply to verification work just as they do to primary work. It is already
+	// included in ExpectedUSD and MaxUSD; buyers must not add it a second time.
 	VerificationOverheadUSD float64 `json:"verification_overhead_usd"`
-	PlatformTakeUSD         float64 `json:"platform_take_usd"`
+	// PlatformTakeUSD is the gross amount retained from the initial buyer charge
+	// after frozen supplier payout. Under the margin guard it includes modeled
+	// processor/control costs plus required margin; it is neither a flat-rate cut
+	// nor net profit. Actual realized margin is reconciled from ledger/Stripe facts.
+	PlatformTakeUSD float64 `json:"platform_take_usd"`
 	// PrivatePoolPremiumUSD is the real price of the privacy premium (Buyer
 	// advantage & pricing edge 6->7): already folded into ExpectedUSD/MinUSD/MaxUSD
 	// above, and broken out here so the buyer can see exactly what "private" costs
@@ -654,9 +682,30 @@ func worseRisk(a, b string) string {
 	return a
 }
 
-// The quote's platform-take line uses the same configurable rate as the ledger
-// (payment.go's platformTakeRate — a flat 1–5% via CX_PLATFORM_TAKE_PCT), so the
-// quote and the eventual invoice agree on the cut.
+// Executable quotes derive their gross retained amount from the same frozen
+// buyer-charge and supplier-payout amounts settlement will use. The legacy flat
+// platformTakeRate below is only a diagnostic fallback for a blocked plan; public
+// handlers refuse such a quote, so it is never an executable price promise.
+
+func (s *Server) quoteInitialEconomicTaskCount(ctx context.Context, sub jobSubmit, primaryTasks int) (int, error) {
+	if primaryTasks <= 0 {
+		return 0, nil
+	}
+	redundancy := fracCount(primaryTasks, sub.Verification.RedundancyFrac)
+	honeypots := fracCount(primaryTasks, sub.Verification.HoneypotFrac)
+	if !sub.Verification.SkipVerificationFloor &&
+		sub.Verification.RedundancyFrac <= 0 && sub.Verification.HoneypotFrac <= 0 && honeypots == 0 {
+		honeypots = 1
+	}
+	if honeypots > 0 {
+		available, err := s.store.AvailableSeedHoneypots(ctx, sub.JobType.Type, sub.Model.Ref, sub.JobType.MaxTokens, honeypots)
+		if err != nil {
+			return 0, err
+		}
+		honeypots = len(available)
+	}
+	return primaryTasks + redundancy + honeypots, nil
+}
 
 // buildQuote assembles a conservative quote from the scanned input + live exchange
 // state, reusing the same estimators the real submission path uses (so a quote and
@@ -665,8 +714,30 @@ func worseRisk(a, b string) string {
 // sub.PrivatePool is set (Buyer advantage & pricing edge 6->7) — every other
 // estimator here is buyer-independent, same as before this rung.
 func (s *Server) buildQuote(ctx context.Context, buyerID uuid.UUID, sub jobSubmit, inputBytes []byte) Quote {
+	schedule, err := LoadEconomicScheduleFromEnv()
+	if err != nil {
+		// Non-handler/internal callers still receive an explicitly blocked quote.
+		// Public handlers reject it below rather than treating missing configuration
+		// as an executable $0 schedule.
+		return s.buildQuoteWithSchedule(ctx, buyerID, sub, inputBytes, EconomicSchedule{})
+	}
+	return s.buildQuoteWithSchedule(ctx, buyerID, sub, inputBytes, schedule)
+}
+
+func (s *Server) buildQuoteWithSchedule(ctx context.Context, buyerID uuid.UUID, sub jobSubmit, inputBytes []byte, schedule EconomicSchedule) Quote {
 	jobType := sub.JobType.Type
 	tier := sub.Tier
+	if err := validateAudioAdmissionInput(sub, inputBytes); err != nil {
+		planInput := EconomicPlanInput{}
+		return Quote{
+			JobType:       jobType,
+			Model:         sub.Model.Ref,
+			Tier:          tier,
+			TierSemantics: serviceTierSemantics(tier),
+			Warnings:      []string{"audio admission blocked: " + err.Error()},
+			Economics:     blockedEconomicPlan(planInput, schedule, "audio admission: "+err.Error()),
+		}
+	}
 	scan := scanJSONL(inputBytes)
 
 	avgLineBytes := 0.0
@@ -695,7 +766,7 @@ func (s *Server) buildQuote(ctx context.Context, buyerID uuid.UUID, sub jobSubmi
 	// jobType + max_tokens drive the generative output-token cost term (Project
 	// Detection & Quotation 6->6.5): a batch_infer/json_extraction quote now moves
 	// with max_tokens, exactly as the eventual submission's charge will.
-	expected := s.estimateJobUSD(ctx, jobType, sub.Model.Ref, len(inputBytes), scan.Records, sub.JobType.MaxTokens, tier)
+	expected := s.estimateSubmissionUSD(ctx, sub, len(inputBytes), scan.Records)
 	verifOverhead := roundUSD(expected * float64(sub.Verification.RedundancyFrac+sub.Verification.HoneypotFrac))
 	// Verification floor (Verification & Result Trust 5->6,
 	// docs/internal/CREED_AND_PATH_TO_TEN.md): createJob unconditionally floors the
@@ -728,9 +799,27 @@ func (s *Server) buildQuote(ctx context.Context, buyerID uuid.UUID, sub jobSubmi
 		privatePoolPremium = roundUSD(expected * privatePoolPremiumRate)
 		expected = roundUSD(expected + privatePoolPremium)
 	}
+	initialEconomicTasks, economicCountErr := s.quoteInitialEconomicTaskCount(ctx, sub, tasks)
+	baseComputeUSD := expected
+	if tasks > 0 && initialEconomicTasks > 0 {
+		baseComputeUSD = roundEconomicUSD(expected * float64(initialEconomicTasks) / float64(tasks))
+		verifOverhead = roundEconomicUSD(math.Max(0, baseComputeUSD-expected))
+	}
 
 	costMin := roundUSD(expected * 0.85)
 	costMax := roundUSD((expected + verifOverhead) * 1.5)
+
+	// Real supply uses the buyer constraint or the catalogue model floor,
+	// whichever is stricter. Compute it before ETA so both the planner and its
+	// fallback count exactly the workers this job could claim.
+	minMem := sub.Constraints.MinMemoryGB
+	var modelMinMem float32
+	if m, err := s.store.GetModel(ctx, sub.Model.Ref); err == nil {
+		modelMinMem = m.MinMemoryGB
+		if modelMinMem > minMem {
+			minMem = modelMinMem
+		}
+	}
 
 	// ETA: the existing queue-depth/throughput estimate is the p50; band it up for
 	// p90/worst (cold starts, retries, contention) rather than promising a point.
@@ -742,7 +831,7 @@ func (s *Server) buildQuote(ctx context.Context, buyerID uuid.UUID, sub jobSubmi
 	// for the speed-SLA below. plannerBacked=false (disabled planner / thin rate
 	// cache) keeps the p50 identical to the pre-wave estimateETASecs value and
 	// forecloses any guarantee.
-	p50, conservativeSecs, plannerBacked := s.etaBandSecs(ctx, jobType, sub.Model.Ref, tasks)
+	p50, conservativeSecs, plannerBacked := s.etaBandSecs(ctx, jobType, sub.Model.Ref, minMem, tasks)
 	// Sustained-throughput honesty (Thermal 6->7): estimateETASecs' static
 	// fallback target is derived from the PEAK tok/s the business quotes, so a LONG
 	// batch job — which really runs for minutes and hits the measured 36.6%
@@ -757,15 +846,6 @@ func (s *Server) buildQuote(ctx context.Context, buyerID uuid.UUID, sub jobSubmi
 	p50 = sustainedBatchETASecs(p50, tier, usedObservedHistory)
 	eta := QuoteTime{P50Secs: p50, P90Secs: p50 * 2, WorstCaseSecs: p50 * 4}
 
-	// Real supply: workers that would pass the claim hard filter for THIS job.
-	var minMem float32 = sub.Constraints.MinMemoryGB
-	var modelMinMem float32
-	if m, err := s.store.GetModel(ctx, sub.Model.Ref); err == nil {
-		modelMinMem = m.MinMemoryGB
-		if modelMinMem > minMem {
-			minMem = modelMinMem // a job implicitly needs at least the model's floor
-		}
-	}
 	// Substrate routing (rubric dimension 4, routing.go): read the job's shape
 	// and say which substrate runs it fastest, grounded in the measured A100
 	// sweep. GENERATIVE + records > 0 only — the sweep measured generative
@@ -818,8 +898,36 @@ func (s *Server) buildQuote(ctx context.Context, buyerID uuid.UUID, sub jobSubmi
 	// passed AND the ETA was genuinely planner-backed (real measured rates) does
 	// the quote carry a time guarantee — priced at the documented premium, derived
 	// from the planner's conservative band + explicit margins (deriveQuoteSLA).
-	// Anything less honest stays a plain advisory quote, byte-identical to before.
-	quoteSLA := deriveQuoteSLA(slaEligible, plannerBacked, conservativeSecs, expected)
+	// Build once without the optional premium so the public Cost.Expected/Max contract
+	// remains the price of compute itself. The premium is still 15% of that public
+	// expected price, then a second deterministic plan freezes it as once-only buyer
+	// revenue. This avoids both circular premium math and double-counting it in the
+	// firm cap (which remains Cost.Max + SLA.Premium).
+	basePlanInput := EconomicPlanInput{
+		BaseComputeUSD:   baseComputeUSD,
+		InitialTaskCount: initialEconomicTasks,
+		ExtraTaskReserve: economicExtraTaskReserve(tasks),
+		SupplierShare:    supplierShareRate,
+	}
+	baseEconomicPlan := BuildEconomicPlan(basePlanInput, schedule)
+	if economicCountErr != nil {
+		baseEconomicPlan = blockedEconomicPlan(basePlanInput, schedule, "counting initial verification work: "+economicCountErr.Error())
+	}
+	if baseEconomicPlan.Executable && initialEconomicTasks >= tasks {
+		// QuoteCost is buyer-facing, so report the incremental GUARDED charge of
+		// verification tasks. Reporting only their raw base compute would materially
+		// understate what the buyer pays when the per-task processor fixed fee is the
+		// binding margin constraint (especially for small jobs).
+		verifOverhead = roundEconomicUSD(
+			baseEconomicPlan.BuyerChargePerTaskUSD * float64(initialEconomicTasks-tasks),
+		)
+	}
+	quoteSLA := deriveQuoteSLA(
+		slaEligible && baseEconomicPlan.Executable,
+		plannerBacked,
+		conservativeSecs,
+		baseEconomicPlan.InitialBuyerChargeUSD,
+	)
 	if quoteSLA != nil {
 		warnings = append(warnings, fmt.Sprintf(
 			"speed-SLA offer: guaranteed completion within %ds of submission for a $%.6f premium (auto-refunded on a miss); binds only when you submit with firm_quote=true and this quote_id",
@@ -852,6 +960,27 @@ func (s *Server) buildQuote(ctx context.Context, buyerID uuid.UUID, sub jobSubmi
 	if sub.PrivatePool {
 		attestation = privatePoolAttestation
 	}
+	slaPremium := 0.0
+	if quoteSLA != nil {
+		slaPremium = quoteSLA.PremiumUSD
+	}
+	planInput := basePlanInput
+	planInput.SLAPremiumUSD = slaPremium
+	economicPlan := BuildEconomicPlan(planInput, schedule)
+	if economicCountErr != nil {
+		economicPlan = blockedEconomicPlan(planInput, schedule, "counting initial verification work: "+economicCountErr.Error())
+	}
+	if economicPlan.Executable {
+		expected = baseEconomicPlan.InitialBuyerChargeUSD
+		costMax = baseEconomicPlan.ReservedBuyerChargeUSD
+		costMin = baseEconomicPlan.BuyerChargePerTaskUSD
+		platformTake = roundEconomicUSD(
+			baseEconomicPlan.InitialBuyerChargeUSD -
+				baseEconomicPlan.SupplierPayoutPerTaskUSD*float64(initialEconomicTasks),
+		)
+	} else {
+		warnings = append(warnings, "economics blocked: "+economicPlan.BlockReason)
+	}
 
 	return Quote{
 		QuoteID:                "q_" + bareID.String(),
@@ -861,10 +990,13 @@ func (s *Server) buildQuote(ctx context.Context, buyerID uuid.UUID, sub jobSubmi
 		JobType:                jobType,
 		Model:                  sub.Model.Ref,
 		Tier:                   tier,
+		TierSemantics:          serviceTierSemantics(tier),
 		Input:                  scan,
+		AudioInput:             audioUploadMetadata(sub.audioAdmission),
 		PrivatePoolAttestation: attestation,
 		SLA:                    quoteSLA,
 		Routing:                routing,
+		Economics:              economicPlan,
 		Execution: QuoteExecution{
 			RecommendedSplitSize:   split,
 			EstimatedTasks:         tasks,
@@ -1036,6 +1168,10 @@ func (s *Server) handleQuote(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "valid job_type.type is required")
 		return
 	}
+	if herr := rejectUntrustedAudioSubmission(sub); herr != nil {
+		writeErr(w, herr.status, herr.msg)
+		return
+	}
 	if sub.Tier == "" {
 		sub.Tier = "batch"
 	}
@@ -1043,22 +1179,42 @@ func (s *Server) handleQuote(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid tier: "+sub.Tier)
 		return
 	}
+	// Catalog membership alone is not runtime authority. Fail before resolving or
+	// reading input unless this exact job/model pair is a generated production cell.
+	canonicalModel, err := normalizeAdvertisedRuntimeModelRef(sub.JobType.Type, sub.Model)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	sub.Model = canonicalModel
+	schedule, err := LoadEconomicScheduleFromEnv()
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "economic schedule unavailable: "+err.Error())
+		return
+	}
 	inputReader, _, err := s.resolveInput(r.Context(), auth.BuyerID, sub.Input)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "resolving input: "+err.Error())
 		return
 	}
-	defer inputReader.Close()
 	// The quote-preview path (unlike the submission path this rung streams) needs the
 	// whole input in memory anyway to scan/hash it for buildQuote — a quote is a
 	// synchronous preview call, not the large async submission this rung targets, so a
 	// whole-buffer read here is the same behavior this endpoint always had.
-	inputBytes, err := io.ReadAll(inputReader)
+	inputBytes, err := readSynchronousInput(inputReader)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "reading input: "+err.Error())
+		status := http.StatusBadRequest
+		if errors.Is(err, errSynchronousInputTooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeErr(w, status, "reading input: "+err.Error())
 		return
 	}
-	q := s.buildQuote(r.Context(), auth.BuyerID, sub, inputBytes)
+	q := s.buildQuoteWithSchedule(r.Context(), auth.BuyerID, sub, inputBytes, schedule)
+	if !q.Economics.Executable {
+		writeErr(w, http.StatusConflict, "quote is not executable: "+q.Economics.BlockReason)
+		return
+	}
 	if err := s.store.InsertQuote(r.Context(), auth.BuyerID, q); err != nil {
 		// Persisting the quote is the load-bearing rule; a failure is a real error,
 		// not silently swallowed (the buyer still gets the quote, but we log loudly).
@@ -1102,15 +1258,29 @@ func (s *Server) handlePipelineQuote(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid tier: "+req.Tier)
 		return
 	}
+	for i, st := range req.Stages {
+		if st.Op == audioUploadJobType {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("stage %d: %s", i, audioUploadBoundaryError))
+			return
+		}
+	}
+	schedule, err := LoadEconomicScheduleFromEnv()
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "economic schedule unavailable: "+err.Error())
+		return
+	}
 	inputReader, _, err := s.resolveInput(r.Context(), auth.BuyerID, req.Input)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "resolving input: "+err.Error())
 		return
 	}
-	defer inputReader.Close()
-	inputBytes, err := io.ReadAll(inputReader)
+	inputBytes, err := readSynchronousInput(inputReader)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "reading input: "+err.Error())
+		status := http.StatusBadRequest
+		if errors.Is(err, errSynchronousInputTooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeErr(w, status, "reading input: "+err.Error())
 		return
 	}
 	stages := make([]Quote, 0, len(req.Stages))
@@ -1119,12 +1289,21 @@ func (s *Server) handlePipelineQuote(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "invalid stage job_type: "+st.Op)
 			return
 		}
-		stages = append(stages, s.buildQuote(r.Context(), auth.BuyerID, jobSubmit{
+		if err := validateAdvertisedRuntimeJobModel(st.Op, st.Model); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		q := s.buildQuoteWithSchedule(r.Context(), auth.BuyerID, jobSubmit{
 			JobType: JobType{Type: st.Op},
-			Model:   ModelRef{Kind: "gguf", Ref: st.Model},
+			Model:   generatedRuntimeModelRef(st.Op, st.Model),
 			Tier:    req.Tier,
 			Input:   req.Input,
-		}, inputBytes))
+		}, inputBytes, schedule)
+		if !q.Economics.Executable {
+			writeErr(w, http.StatusConflict, "pipeline stage quote is not executable: "+q.Economics.BlockReason)
+			return
+		}
+		stages = append(stages, q)
 	}
 	writeJSON(w, http.StatusOK, composeQuotes(stages))
 }
@@ -1132,8 +1311,8 @@ func (s *Server) handlePipelineQuote(w http.ResponseWriter, r *http.Request) {
 // --- store (quote-specific *Store methods live with the quote, per benchmark.go) ---
 
 // EligibleWorkerCount counts workers that would pass the claim hard filter for a
-// job of (jobType, modelRef, minMemGB) AND are live (seen <60s): supported job +
-// model, enough effective memory (falling back to total pre-heartbeat), not
+// job of (jobType, modelRef, minMemGB) AND are live (seen <60s): an exact
+// current-matrix capability row, enough effective memory (falling back to total), not
 // throttled, supplier active. This is the SAME predicate ClaimTask uses, so the
 // quote's `eligible_now` is the honest current supply, not a raw worker count.
 func (s *Store) EligibleWorkerCount(ctx context.Context, jobType, modelRef string, minMemGB float32) (int, error) {
@@ -1146,9 +1325,14 @@ func (s *Store) EligibleWorkerCount(ctx context.Context, jobType, modelRef strin
 		    AND s.status = 'active'
 		    AND NOT COALESCE(w.throttled, false)
 		    AND COALESCE($3,0) <= COALESCE(w.effective_memory_gb, w.memory_gb, 0)
-		    AND COALESCE(w.supported_jobs,'{}') @> ARRAY[$1]
-		    AND ($2 = '' OR COALESCE(w.supported_models,'{}') @> ARRAY[$2])`,
-		jobType, modelRef, minMemGB,
+		    AND EXISTS (
+		      SELECT 1 FROM worker_authorized_capabilities wac
+		       WHERE wac.worker_id = w.id
+		         AND wac.job_type = $1
+		         AND wac.model_ref = $2
+		         AND wac.matrix_sha256 = $4
+		    )`,
+		jobType, modelRef, minMemGB, generatedRuntimeMatrixSHA256,
 	).Scan(&n)
 	return n, err
 }
@@ -1173,10 +1357,15 @@ func (s *Store) EligibleVLLMWorkerCount(ctx context.Context, jobType, modelRef s
 		    AND s.status = 'active'
 		    AND NOT COALESCE(w.throttled, false)
 		    AND COALESCE($3,0) <= COALESCE(w.effective_memory_gb, w.memory_gb, 0)
-		    AND COALESCE(w.supported_jobs,'{}') @> ARRAY[$1]
-		    AND ($2 = '' OR COALESCE(w.supported_models,'{}') @> ARRAY[$2])
+		    AND EXISTS (
+		      SELECT 1 FROM worker_authorized_capabilities wac
+		       WHERE wac.worker_id = w.id
+		         AND wac.job_type = $1
+		         AND wac.model_ref = $2
+		         AND wac.matrix_sha256 = $4
+		    )
 		    AND w.engine = 'vllm'`,
-		jobType, modelRef, minMemGB,
+		jobType, modelRef, minMemGB, generatedRuntimeMatrixSHA256,
 	).Scan(&n)
 	return n, err
 }
@@ -1195,9 +1384,14 @@ func (s *Store) EligiblePoolReputation(ctx context.Context, jobType, modelRef st
 		    AND s.status = 'active'
 		    AND NOT COALESCE(w.throttled, false)
 		    AND COALESCE($3,0) <= COALESCE(w.effective_memory_gb, w.memory_gb, 0)
-		    AND COALESCE(w.supported_jobs,'{}') @> ARRAY[$1]
-		    AND ($2 = '' OR COALESCE(w.supported_models,'{}') @> ARRAY[$2])`,
-		jobType, modelRef, minMemGB,
+		    AND EXISTS (
+		      SELECT 1 FROM worker_authorized_capabilities wac
+		       WHERE wac.worker_id = w.id
+		         AND wac.job_type = $1
+		         AND wac.model_ref = $2
+		         AND wac.matrix_sha256 = $4
+		    )`,
+		jobType, modelRef, minMemGB, generatedRuntimeMatrixSHA256,
 	).Scan(&r)
 	return r, err
 }
@@ -1300,9 +1494,14 @@ func (s *Store) WarmEligibleWorkerCount(ctx context.Context, jobType, modelRef s
 		    AND s.status = 'active'
 		    AND NOT COALESCE(w.throttled, false)
 		    AND COALESCE($3,0) <= COALESCE(w.effective_memory_gb, w.memory_gb, 0)
-		    AND COALESCE(w.supported_jobs,'{}') @> ARRAY[$1]
-		    AND COALESCE(w.supported_models,'{}') @> ARRAY[$2]`,
-		jobType, modelRef, minMemGB,
+		    AND EXISTS (
+		      SELECT 1 FROM worker_authorized_capabilities wac
+		       WHERE wac.worker_id = w.id
+		         AND wac.job_type = $1
+		         AND wac.model_ref = $2
+		         AND wac.matrix_sha256 = $4
+		    )`,
+		jobType, modelRef, minMemGB, generatedRuntimeMatrixSHA256,
 	).Scan(&n)
 	return n, err
 }
@@ -1312,6 +1511,10 @@ func (s *Store) WarmEligibleWorkerCount(ctx context.Context, jobType, modelRef s
 // object is kept in quote_json.
 func (s *Store) InsertQuote(ctx context.Context, buyerID uuid.UUID, q Quote) error {
 	blob, err := json.Marshal(q)
+	if err != nil {
+		return err
+	}
+	planBlob, err := json.Marshal(q.Economics)
 	if err != nil {
 		return err
 	}
@@ -1332,14 +1535,16 @@ func (s *Store) InsertQuote(ctx context.Context, buyerID uuid.UUID, q Quote) err
 		    estimated_tokens, malformed_records, split_size, task_count, eligible_now,
 		    cost_expected_usd, cost_min_usd, cost_max_usd, eta_p50_secs, eta_p90_secs,
 		    oom_risk, confidence, quote_json, expires_at, input_sha256,
-		    sla_guaranteed_secs, sla_premium_usd)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)`,
+		    sla_guaranteed_secs, sla_premium_usd,
+		    economic_schedule_version, economic_plan, economic_executable)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)`,
 		q.bareID, buyerID, q.JobType, q.Model, q.Tier, q.Input.Records, q.Input.Bytes,
 		q.Input.EstimatedTokens, q.Input.MalformedRecords, q.Execution.RecommendedSplitSize,
 		q.Execution.EstimatedTasks, q.Execution.EligibleWorkersNow,
 		q.Cost.ExpectedUSD, q.Cost.MinUSD, q.Cost.MaxUSD, q.Time.P50Secs, q.Time.P90Secs,
 		q.Execution.OOMRisk, q.Confidence.Score, blob, q.ExpiresAt, q.InputSHA256,
 		slaSecs, slaPremium,
+		q.Economics.Schedule.Version, planBlob, q.Economics.Executable,
 	)
 	return err
 }
@@ -1378,8 +1583,11 @@ type boundQuote struct {
 	// 2A) into the submit binding: a firm_quote submission against an SLA-bearing
 	// quote binds the time guarantee alongside the price cap (createJob). Both 0
 	// when the quote carried no offer — the binding then stays price-only.
-	SLAGuaranteedSecs int
-	SLAPremiumUSD     float64
+	SLAGuaranteedSecs       int
+	SLAPremiumUSD           float64
+	EconomicScheduleVersion string
+	EconomicPlan            EconomicPlan
+	EconomicExecutable      bool
 }
 
 // GetBindableQuote loads a buyer's quote by id for binding a submission to it.
@@ -1389,22 +1597,30 @@ type boundQuote struct {
 // older rows still bind). The caller decides what a match requires.
 func (s *Store) GetBindableQuote(ctx context.Context, quoteID, buyerID uuid.UUID) (*boundQuote, error) {
 	var q boundQuote
+	var planBlob []byte
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, job_type, COALESCE(model_ref,''), COALESCE(tier,''),
 		        COALESCE(input_sha256,''), COALESCE(cost_expected_usd,0),
 		        COALESCE(cost_max_usd,0),
 		        (expires_at IS NOT NULL AND expires_at <= now()) AS expired,
-		        COALESCE(sla_guaranteed_secs,0), COALESCE(sla_premium_usd,0)::float8
+		        COALESCE(sla_guaranteed_secs,0), COALESCE(sla_premium_usd,0)::float8,
+		        COALESCE(economic_schedule_version,''), economic_plan,
+		        COALESCE(economic_executable,false)
 		   FROM quotes
 		  WHERE id = $1 AND buyer_id = $2`,
 		quoteID, buyerID,
 	).Scan(&q.ID, &q.JobType, &q.ModelRef, &q.Tier, &q.InputSHA256, &q.CostExpUSD, &q.CostMaxUSD, &q.Expired,
-		&q.SLAGuaranteedSecs, &q.SLAPremiumUSD)
+		&q.SLAGuaranteedSecs, &q.SLAPremiumUSD, &q.EconomicScheduleVersion, &planBlob, &q.EconomicExecutable)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound
 	}
 	if err != nil {
 		return nil, err
+	}
+	if len(planBlob) > 0 {
+		if err := json.Unmarshal(planBlob, &q.EconomicPlan); err != nil {
+			return nil, fmt.Errorf("decoding quote economic plan: %w", err)
+		}
 	}
 	return &q, nil
 }

@@ -3,11 +3,15 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"sort"
 
 	"github.com/google/uuid"
 )
@@ -45,11 +49,49 @@ const (
 // used to fetch the sibling result objects a 3-way tiebreak vote compares (it may
 // be nil in unit contexts that only exercise the 2-result fast paths).
 type Verifier struct {
-	store   *Store
-	storage *Storage
+	store                    verificationStore
+	storage                  *Storage
+	sampleSecret             []byte
+	samplingDecisionObserver func(uuid.UUID)
+	// planning is true only on the private clone used by PlanTaskResult. Database
+	// mutations are already captured by its recording verificationStore; this bit
+	// also keeps the legacy in-memory dispatch metric from being changed by a
+	// write-free plan.
+	planning bool
 }
 
-func NewVerifier(s *Store) *Verifier { return &Verifier{store: s} }
+const insecureDevelopmentSamplingSecret = "cx-insecure-development-sampling-secret"
+
+// NewVerifier binds reputation-weighted audit selection to a server secret. The
+// worker sees the task UUID before committing, so sampling directly from that UUID
+// gives a malicious worker an oracle for which tasks will not be checked. A keyed
+// HMAC keeps the decision deterministic for retries while making it unknowable to
+// workers. main.go refuses production/live-money startup without an explicit
+// CX_VERIFICATION_SAMPLE_SECRET; the fixed fallback is intentionally dev/test only.
+func NewVerifier(s *Store) *Verifier {
+	secret := os.Getenv("CX_VERIFICATION_SAMPLE_SECRET")
+	if secret == "" {
+		secret = insecureDevelopmentSamplingSecret
+	}
+	return &Verifier{store: s, sampleSecret: []byte(secret)}
+}
+
+// WithSamplingSecret is a test/local-proof seam. Production wiring uses the
+// environment-backed constructor above; callers cannot influence this through any
+// request or worker-controlled field.
+func (v *Verifier) WithSamplingSecret(secret []byte) *Verifier {
+	v.sampleSecret = append(v.sampleSecret[:0], secret...)
+	return v
+}
+
+// WithSamplingDecisionObserver is a test-only ordering seam. It runs at the exact
+// point a sampled audit decision is drawn, allowing the database integration proof
+// to observe that CommitTask's `verifying` transaction is already durable. Production
+// construction leaves it nil, so it cannot affect request behavior.
+func (v *Verifier) WithSamplingDecisionObserver(observer func(uuid.UUID)) *Verifier {
+	v.samplingDecisionObserver = observer
+	return v
+}
 
 // WithStorage attaches the object store so the verifier can run the 3-way
 // tiebreak vote (gather all committed results for a chunk and compare them).
@@ -98,6 +140,12 @@ func (v *Verifier) verifyTaskResult(ctx context.Context, info *CommitTaskInfo, c
 		}
 		return checkProbCached
 	}
+	checkSelected := func() bool {
+		if info.verificationCheckSampled != nil {
+			return *info.verificationCheckSampled
+		}
+		return v.checkSampled(info.TaskID, checkProb())
+	}
 
 	// Step 1: honeypot. The known answer is keyed by (job_type, input_ref) — the
 	// honeypot task's input chunk, NOT its result key — and we compare it against
@@ -108,7 +156,7 @@ func (v *Verifier) verifyTaskResult(ctx context.Context, info *CommitTaskInfo, c
 	// would. This is reduced audit FREQUENCY, never a fabricated honeypot pass: we
 	// only skip checks for suppliers already above the trusted floor, and even they
 	// keep a verifyCheckProbFloor chance of being checked every task.
-	if info.IsHoneypot && v.checkSampled(info.TaskID, checkProb()) {
+	if info.IsHoneypot && checkSelected() {
 		known, answerClass, err := v.store.GetHoneypotAnswer(ctx, jobTypeOf(info), info.InputRef)
 		if err != nil && !errors.Is(err, errNotFound) {
 			return OutcomeFail, err
@@ -134,7 +182,9 @@ func (v *Verifier) verifyTaskResult(ctx context.Context, info *CommitTaskInfo, c
 				if err := v.store.DockReputation(ctx, info.SupplierID, EventHoneypotFail); err != nil {
 					return OutcomeFail, err
 				}
-				_ = v.store.RecordVerificationEvent(ctx, info.JobID, info.TaskID, info.SupplierID, "honeypot_fail")
+				if err := v.store.RecordVerificationEvent(ctx, info.JobID, info.TaskID, info.SupplierID, "honeypot_fail"); err != nil {
+					return OutcomeFail, err
+				}
 				if err := v.store.ClawbackTaskCredit(ctx, info.SupplierID, info.TaskID); err != nil {
 					return OutcomeFail, err
 				}
@@ -149,7 +199,9 @@ func (v *Verifier) verifyTaskResult(ctx context.Context, info *CommitTaskInfo, c
 			if err := v.store.DockReputation(ctx, info.SupplierID, EventHoneypotPass); err != nil {
 				return OutcomePass, err
 			}
-			_ = v.store.RecordVerificationEvent(ctx, info.JobID, info.TaskID, info.SupplierID, "honeypot_pass")
+			if err := v.store.RecordVerificationEvent(ctx, info.JobID, info.TaskID, info.SupplierID, "honeypot_pass"); err != nil {
+				return OutcomePass, err
+			}
 			return OutcomePass, nil
 		}
 		// No known answer on file, OR a byte-exact answer that is class-blind/
@@ -184,6 +236,14 @@ func (v *Verifier) verifyTaskResult(ctx context.Context, info *CommitTaskInfo, c
 				{supplierID: info.peerSupplierID, bytes: redundancyBytes, engine: info.peerEngine, buildHash: info.peerBuildHash},
 			}
 		}
+		// A quorum is made of independent suppliers, not task rows. A supplier may
+		// legitimately have more than one completed row for a chunk when a
+		// redundancy task and an already-verifying hedge overlap. Counting those
+		// rows separately lets one operator manufacture a 2-of-3 majority. Collapse
+		// them to one deterministic representative before deciding whether a third
+		// independent opinion exists or is still required.
+		rawVotes := all
+		all = independentSupplierVotes(all)
 		switch {
 		case len(all) >= 3:
 			// A third opinion has arrived: a real N-way majority vote. The
@@ -208,7 +268,9 @@ func (v *Verifier) verifyTaskResult(ctx context.Context, info *CommitTaskInfo, c
 				// uncheckable coverage as pass_with_penalty (BLACKHOLE: never a
 				// fabricated clean pass) but do NOT dock and do NOT re-dispatch a
 				// tiebreak that would also be cross-class.
-				_ = v.store.RecordVerificationEvent(ctx, info.JobID, info.TaskID, info.SupplierID, "redundancy_cross_class")
+				if err := v.store.RecordVerificationEvent(ctx, info.JobID, info.TaskID, info.SupplierID, "redundancy_cross_class"); err != nil {
+					return OutcomePassWithPenalty, err
+				}
 				return OutcomePassWithPenalty, nil
 			}
 			// Two same-class results disagree — a real, DETECTED mismatch
@@ -220,8 +282,10 @@ func (v *Verifier) verifyTaskResult(ctx context.Context, info *CommitTaskInfo, c
 			// primary provisionally — no credit either way. A supplier at or below the
 			// trusted floor always gets the tiebreak. Detection is never suppressed:
 			// the outcome stays pass_with_penalty whether or not we re-dispatch.
-			_ = v.store.RecordVerificationEvent(ctx, info.JobID, info.TaskID, info.SupplierID, "redundancy_mismatch")
-			if v.checkSampled(info.TaskID, checkProb()) {
+			if err := v.store.RecordVerificationEvent(ctx, info.JobID, info.TaskID, info.SupplierID, "redundancy_mismatch"); err != nil {
+				return OutcomePassWithPenalty, err
+			}
+			if checkSelected() {
 				if err := v.dispatchTiebreak(ctx, info, all); err != nil {
 					return OutcomePassWithPenalty, err
 				}
@@ -235,13 +299,17 @@ func (v *Verifier) verifyTaskResult(ctx context.Context, info *CommitTaskInfo, c
 			// verified (do-not-mark-same-supplier-peers-independent, backlog P0 item 7).
 			// In that case record the gap and fall through to task success WITHOUT an
 			// independent redundancy-match credit.
-			if independentRedundancyMatch(all) {
+			if independentRedundancyMatch(rawVotes) {
 				if err := v.store.DockReputation(ctx, info.SupplierID, EventRedundancyMatch); err != nil {
 					return OutcomePass, err
 				}
-				_ = v.store.RecordVerificationEvent(ctx, info.JobID, info.TaskID, info.SupplierID, "redundancy_match")
+				if err := v.store.RecordVerificationEvent(ctx, info.JobID, info.TaskID, info.SupplierID, "redundancy_match"); err != nil {
+					return OutcomePass, err
+				}
 			} else {
-				_ = v.store.RecordVerificationEvent(ctx, info.JobID, info.TaskID, info.SupplierID, "redundancy_same_supplier")
+				if err := v.store.RecordVerificationEvent(ctx, info.JobID, info.TaskID, info.SupplierID, "redundancy_same_supplier"); err != nil {
+					return OutcomePass, err
+				}
 			}
 		}
 	} else if info.IsRedundancy {
@@ -276,10 +344,10 @@ func (v *Verifier) verifyTaskResult(ctx context.Context, info *CommitTaskInfo, c
 // single result, or an agreement across DIFFERENT (or unknown/uuid.Nil) suppliers,
 // qualifies. Pure, so the supplier-distinctness guarantee is unit-tested.
 func independentRedundancyMatch(all []chunkVote) bool {
-	if len(all) == 2 && all[0].supplierID == all[1].supplierID && all[0].supplierID != uuid.Nil {
-		return false
+	if len(all) <= 1 {
+		return true
 	}
-	return true
+	return len(independentSupplierVotes(all)) > 1
 }
 
 // Reputation-weighted verification tuning (V2).
@@ -345,26 +413,32 @@ func (v *Verifier) committingReputation(ctx context.Context, info *CommitTaskInf
 	return 0, false
 }
 
-// checkSampled draws a DETERMINISTIC per-task decision for whether to spend a
-// sampled probe, true meaning "run the check this time". prob >= 1.0 is always
+// checkSampled draws a SECRET, deterministic per-task decision for whether to spend
+// a sampled probe, true meaning "run the check this time". prob >= 1.0 is always
 // true (full checking), and a non-positive prob also returns true (defensive: the
 // floor keeps prob > 0, but a degenerate value must never disable checks). Otherwise
-// it compares a stable [0,1) value derived from the task id's own bytes against
-// prob, so the decision is identical across commit retries (idempotent) and
-// uniformly spread across tasks without any RNG state or new dependency.
+// it compares a stable [0,1) value derived from HMAC(secret, task id) against prob.
+// The result is identical across retries but cannot be predicted from the public
+// task UUID by a worker choosing whether to cheat.
 func (v *Verifier) checkSampled(taskID uuid.UUID, prob float64) bool {
+	if v.samplingDecisionObserver != nil {
+		v.samplingDecisionObserver(taskID)
+	}
 	if prob >= 1.0 || prob <= 0 {
 		return true
 	}
-	return taskSample(taskID) < prob
+	return taskSample(v.sampleSecret, taskID) < prob
 }
 
-// taskSample maps a task id to a stable, uniformly distributed value in [0,1) by
-// reading the first 8 bytes of its 16-byte UUID as a big-endian unsigned integer
-// and dividing by 2^64. Deterministic and dependency-free (encoding/binary is
-// already imported for the binary embed artifact).
-func taskSample(taskID uuid.UUID) float64 {
-	hi := binary.BigEndian.Uint64(taskID[:8])
+// taskSample maps a task id to a stable, uniformly distributed value in [0,1)
+// under a secret key. The domain separator prevents the same secret from being
+// accidentally reused as an equivalent MAC oracle elsewhere in the service.
+func taskSample(secret []byte, taskID uuid.UUID) float64 {
+	mac := hmac.New(sha256.New, secret)
+	_, _ = mac.Write([]byte("cx/verification-sample/v1\x00"))
+	_, _ = mac.Write(taskID[:])
+	sum := mac.Sum(nil)
+	hi := binary.BigEndian.Uint64(sum[:8])
 	return float64(hi) / float64(1<<64)
 }
 
@@ -380,6 +454,51 @@ type chunkVote struct {
 	bytes      []byte
 	engine     string
 	buildHash  string
+}
+
+// independentSupplierVotes returns at most one vote for each supplier. Production
+// votes always carry a frozen supplier id from verification_work; uuid.Nil is kept
+// as one conservative "unknown supplier" identity rather than allowing several
+// legacy/partial identities to manufacture independence.
+//
+// A supplier can have multiple task rows when a hedge was already verifying as a
+// redundancy result settled. The representative is the lexicographically-smallest
+// (task id, bytes, engine, build) tuple, and the returned representatives are sorted
+// by the same total order. Selection therefore does not depend on query/map order,
+// restart timing, or which duplicate happened to be encountered first.
+func independentSupplierVotes(all []chunkVote) []chunkVote {
+	if len(all) <= 1 {
+		return append([]chunkVote(nil), all...)
+	}
+	representatives := make(map[uuid.UUID]chunkVote, len(all))
+	for _, vote := range all {
+		current, exists := representatives[vote.supplierID]
+		if !exists || chunkVoteLess(vote, current) {
+			representatives[vote.supplierID] = vote
+		}
+	}
+	out := make([]chunkVote, 0, len(representatives))
+	for _, vote := range representatives {
+		out = append(out, vote)
+	}
+	sort.Slice(out, func(i, j int) bool { return chunkVoteLess(out[i], out[j]) })
+	return out
+}
+
+func chunkVoteLess(a, b chunkVote) bool {
+	if cmp := bytes.Compare(a.taskID[:], b.taskID[:]); cmp != 0 {
+		return cmp < 0
+	}
+	if cmp := bytes.Compare(a.supplierID[:], b.supplierID[:]); cmp != 0 {
+		return cmp < 0
+	}
+	if cmp := bytes.Compare(a.bytes, b.bytes); cmp != 0 {
+		return cmp < 0
+	}
+	if a.engine != b.engine {
+		return a.engine < b.engine
+	}
+	return a.buildHash < b.buildHash
 }
 
 // verificationClass is the byte-equality comparability key for a result's worker:
@@ -469,13 +588,46 @@ func (v *Verifier) gatherChunkResults(ctx context.Context, info *CommitTaskInfo,
 	if err != nil {
 		return nil, err
 	}
+	// No persisted sibling rows means this is a direct/unit two-blob context (or
+	// otherwise lacks DB-backed peer identity). Preserve the caller's established
+	// fallback, which votes the two byte slices it already supplied.
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	readLimit := info.resultMaxBytes
+	if readLimit <= 0 || readLimit > verificationArtifactAbsoluteMaxBytes {
+		// Compatibility for direct verifier callers created before immutable attempt
+		// snapshots carried the narrower policy. Production processor inputs always
+		// have a frozen resultMaxBytes.
+		readLimit = verificationArtifactAbsoluteMaxBytes
+	}
 	out := make([]chunkVote, 0, len(rows))
+	foundCommitting := false
 	for _, cr := range rows {
 		var b []byte
 		if cr.TaskID == info.TaskID {
+			foundCommitting = true
 			b = commitBytes // already in hand; avoid a redundant fetch
+		} else if cr.Artifact != nil {
+			// A same-class byte-exact peer with the same server digest is the
+			// committing slice already in memory.  Reuse it; the terminal artifact
+			// tuple remains the authority, but another object GET/buffer is needless.
+			if byteExactJobType(info.jobType) && cr.Artifact.SHA256 == info.ResultSHA256 &&
+				sameVerificationClass(info.engine, info.buildHash, cr.Engine, cr.BuildHash) {
+				b = commitBytes
+			} else {
+				b, err = v.storage.readSealedVerificationArtifactWithLimit(ctx, *cr.Artifact, readLimit)
+			}
+			if err != nil {
+				// Terminal verification_work is the authority. A missing, changed,
+				// or truncated sealed object invalidates the whole vote; never
+				// silently fall back to the mutable task projection.
+				return nil, fmt.Errorf("read sealed vote artifact for task %s: %w", cr.TaskID, err)
+			}
 		} else {
-			fetched, gerr := v.storage.GetObject(ctx, cr.ResultRef)
+			// Explicit pre-migration compatibility only. These bytes participate
+			// in the vote, but the legacy key is never hash-trusted.
+			fetched, gerr := v.storage.readVerificationObjectBounded(ctx, cr.ResultRef, readLimit, nil)
 			if gerr != nil {
 				// A sibling object we cannot read is a hard problem for the vote —
 				// surface it rather than silently voting on fewer results.
@@ -491,6 +643,19 @@ func (v *Verifier) gatherChunkResults(ctx context.Context, info *CommitTaskInfo,
 			buildHash:  cr.BuildHash,
 		})
 	}
+	// The committing task is intentionally still `verifying`, so ChunkResults
+	// (which exposes only already-accepted siblings) will not return it. Add the
+	// uploaded bytes already held by the handler; this preserves the two/three-way
+	// vote without marking the task complete before the verdict exists.
+	if !foundCommitting {
+		out = append(out, chunkVote{
+			supplierID: info.SupplierID,
+			taskID:     info.TaskID,
+			bytes:      commitBytes,
+			engine:     info.engine,
+			buildHash:  info.buildHash,
+		})
+	}
 	return out, nil
 }
 
@@ -500,6 +665,10 @@ func (v *Verifier) gatherChunkResults(ctx context.Context, info *CommitTaskInfo,
 // on a losing side is docked a mismatch (and the metric bumped). With no majority
 // (a 3-way split) no one is docked — an inconclusive vote must not punish.
 func (v *Verifier) resolveTiebreak(ctx context.Context, info *CommitTaskInfo, all []chunkVote) (VerifyOutcome, error) {
+	// Defense in depth for direct callers: verifyTaskResult already normalizes
+	// before choosing this branch, but the resolver itself must never treat two
+	// task rows owned by one supplier as two votes or emit duplicate effects.
+	all = independentSupplierVotes(all)
 	blobs := make([][]byte, len(all))
 	for i, c := range all {
 		blobs[i] = c.bytes
@@ -538,7 +707,9 @@ func (v *Verifier) resolveTiebreak(ctx context.Context, info *CommitTaskInfo, al
 			if err := v.store.DockReputation(ctx, c.supplierID, EventRedundancyMatch); err != nil {
 				return OutcomeFail, err
 			}
-			_ = v.store.RecordVerificationEvent(ctx, info.JobID, c.taskID, c.supplierID, "tiebreak_win")
+			if err := v.store.RecordVerificationEvent(ctx, info.JobID, c.taskID, c.supplierID, "tiebreak_win"); err != nil {
+				return OutcomeFail, err
+			}
 		case byteExact && !sameVerificationClass(winEngine, winBuild, c.engine, c.buildHash):
 			// Byte-exact loser in a DIFFERENT class than the winner: not a defect —
 			// the bytes legitimately differ across the class boundary. Do not dock;
@@ -547,16 +718,20 @@ func (v *Verifier) resolveTiebreak(ctx context.Context, info *CommitTaskInfo, al
 			if err := v.store.DockReputation(ctx, c.supplierID, EventRedundancyMatch); err != nil {
 				return OutcomeFail, err
 			}
-			_ = v.store.RecordVerificationEvent(ctx, info.JobID, c.taskID, c.supplierID, "tiebreak_cross_class")
+			if err := v.store.RecordVerificationEvent(ctx, info.JobID, c.taskID, c.supplierID, "tiebreak_cross_class"); err != nil {
+				return OutcomeFail, err
+			}
 		default:
 			mismatch = true
-			if c.taskID == info.TaskID {
+			if c.supplierID == info.SupplierID {
 				committerLost = true
 			}
 			if err := v.store.DockReputation(ctx, c.supplierID, EventMismatch); err != nil {
 				return OutcomeFail, err
 			}
-			_ = v.store.RecordVerificationEvent(ctx, info.JobID, c.taskID, c.supplierID, "tiebreak_loss")
+			if err := v.store.RecordVerificationEvent(ctx, info.JobID, c.taskID, c.supplierID, "tiebreak_loss"); err != nil {
+				return OutcomeFail, err
+			}
 			// Make cheating economically real (Verification & Result Trust 5.5->6):
 			// a confirmed tiebreak loser does not just get docked reputation — its
 			// payout for THIS losing task is clawed back. ClawbackTaskCredit is a
@@ -576,8 +751,11 @@ func (v *Verifier) resolveTiebreak(ctx context.Context, info *CommitTaskInfo, al
 		return OutcomeLossNoPayout, nil
 	}
 	if mismatch {
-		// A loser was docked — the chunk had a real disagreement the vote settled.
-		return OutcomePassWithPenalty, nil
+		// A loser was docked, but the currently committing task is on the proven
+		// majority side. Its own verdict is a final pass; the mismatch remains
+		// visible in the per-task events, while earlier provisional winners are
+		// promoted atomically when their tiebreak_win effects are applied.
+		return OutcomePass, nil
 	}
 	return OutcomePass, nil
 }
@@ -622,7 +800,9 @@ func (v *Verifier) dispatchTiebreak(ctx context.Context, info *CommitTaskInfo, a
 	if _, err := v.store.InsertTiebreakTask(ctx, info.JobID, info.TaskID, peer, info.InputRef, info.ChunkIndex); err != nil {
 		return err
 	}
-	metrics.tiebreaks.Add(1)
+	if !v.planning {
+		metrics.tiebreaks.Add(1)
+	}
 	return nil
 }
 
@@ -798,12 +978,6 @@ func canonicalJSON(raw json.RawMessage) ([]byte, bool) {
 	return b, true
 }
 
-// embeddingResult is the embed job's JSON result blob: a list of vectors, one per
-// input record.
-type embeddingResult struct {
-	Vectors [][]float64 `json:"vectors"`
-}
-
 // parseEmbeddingVectors decodes an embed result blob into rows of float64,
 // accepting BOTH the JSON `{"vectors":[...]}` shape and the opt-in binary float32
 // artifact (PLANE_D D5/D15, magic "CXEM"). Verification must agree on whichever
@@ -813,31 +987,28 @@ type embeddingResult struct {
 // disagreement, not a pass.
 func parseEmbeddingVectors(obj []byte) (vectors [][]float64, ok bool) {
 	if isEmbedBinary(obj) {
-		if len(obj) < embedBinHeaderLen || binary.LittleEndian.Uint32(obj[4:8]) != embedBinVersion {
+		envelope, err := parseEmbeddingBinaryEnvelope(obj, 0)
+		if err != nil {
 			return nil, false
 		}
-		dim := int(binary.LittleEndian.Uint32(obj[8:12]))
-		count := int(binary.LittleEndian.Uint32(obj[12:16]))
-		if dim < 0 || count < 0 || len(obj) != embedBinHeaderLen+dim*count*4 {
-			return nil, false
-		}
+		dim, count := int(envelope.Dim), int(envelope.Count)
 		rows := make([][]float64, count)
-		off := embedBinHeaderLen
+		off := 0
 		for r := 0; r < count; r++ {
 			row := make([]float64, dim)
 			for c := 0; c < dim; c++ {
-				row[c] = float64(math.Float32frombits(binary.LittleEndian.Uint32(obj[off : off+4])))
+				row[c] = float64(math.Float32frombits(binary.LittleEndian.Uint32(envelope.Body[off : off+4])))
 				off += 4
 			}
 			rows[r] = row
 		}
 		return rows, true
 	}
-	var r embeddingResult
-	if err := json.Unmarshal(obj, &r); err != nil {
+	rows, err := parseEmbeddingJSONVectors(obj, 0, 0, false)
+	if err != nil {
 		return nil, false
 	}
-	return r.Vectors, true
+	return rows, true
 }
 
 // meanCosine parses two embedding blobs (JSON or binary) and returns the mean of

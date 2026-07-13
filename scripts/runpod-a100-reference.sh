@@ -193,7 +193,8 @@ deploy_and_time() {
   # Base64 over the wire so the token never lands in a process arg / shell history on the pod.
   if [ -n "${HF_TOKEN:-}" ]; then
     local tok_b64; tok_b64="$(printf '%s' "$HF_TOKEN" | base64 | tr -d '\n')"
-    ssh "${SSH_OPTS[@]}" "root@$SSH_IP" "echo $tok_b64 | base64 -d > /root/.hf_token" \
+    printf '%s' "$tok_b64" | ssh "${SSH_OPTS[@]}" "root@$SSH_IP" \
+      'umask 077; base64 -d > /root/.hf_token' \
       || die "failed to write HF token to the pod"
     info "HF token staged on the pod (for the gated model download)"
   fi

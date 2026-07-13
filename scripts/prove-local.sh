@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Computexchange — prove-local: ONE command that proves every local capability.
+# Computexchange — prove-local: one broad, source-bound local contract harness.
 #
 # It provisions a throwaway stack (NATIVE Postgres + MinIO by default — no Docker
 # image pulls, reliable on this machine; USE_DOCKER=1 to use docker compose
@@ -10,10 +10,11 @@
 # REAL Rust supplier agent through LIVE Metal/Candle inference (embed + batch_infer,
 # whisper best-effort), scrapes metrics, checks logs, and prints a PROOF LEDGER.
 #
-# Honest by construction: every step fails LOUDLY, nothing is faked, and the one
-# capability that cannot be proven locally (the Stripe/Trolley payout transfer) is
-# asserted to stay BLOCKED, not pretended. Exit code is non-zero if any required
-# check fails. Artifacts + logs land in .artifacts/prove-local/ for inspection.
+# Honest by construction: every included step fails LOUDLY and nothing is faked.
+# A pass proves only the named ledger rows against one stable source snapshot; it
+# does not prove live money, physical fleet breadth, signed distribution, policies
+# in operation, market demand, or any other open 5/5 gate. Exit code is non-zero if
+# an included check fails. Artifacts + logs land in .artifacts/prove-local/.
 #
 # Usage:   scripts/prove-local.sh            (or: make prove-local)
 #   Env:   USE_DOCKER=1     use docker compose for deps instead of native
@@ -48,6 +49,12 @@ PG_LOG="$ART/pg.log"
 MINIO_LOG="$ART/minio.log"
 LEDGER_FILE="$ART/proof-ledger.txt"
 
+# Proof builds never execute a pre-existing ignored binary/cache artifact. Both
+# directories live under ART, which is wiped before the run, and are shared only
+# within this one invocation.
+export CARGO_TARGET_DIR="$ART/cargo-target"
+export GOCACHE="$ART/go-cache"
+
 CONTROL_URL="http://localhost:$CONTROL_PORT"
 export DATABASE_URL="postgres://cx@localhost:$PGPORT/cx?sslmode=disable"
 export S3_ENDPOINT="http://localhost:$MINIO_PORT"
@@ -66,6 +73,12 @@ export LISTEN_ADDR=":$CONTROL_PORT"
 # gate against the seeded demo buyer (0 sandbox credit) and every job-submit test
 # 402s, and worse, a proof run could hit the real Stripe account.
 unset STRIPE_SECRET_KEY STRIPE_PUBLISHABLE_KEY STRIPE_WEBHOOK_SECRET CX_CONNECT_WEBHOOK_SECRET
+# The verification sampler must never use its source-known development fallback in a
+# proof. Generate one secret per run, keep it out of the exported environment, and
+# pass it only to the integration/control processes. Agent children are launched via
+# `env -u` below so the worker side never receives the sampling oracle.
+unset CX_VERIFICATION_SAMPLE_SECRET
+PROOF_VERIFICATION_SAMPLE_SECRET=""
 
 # Demo credentials are fixed by control/seed.go.
 API_KEY="dev-api-key-0001"
@@ -86,6 +99,16 @@ say()  { printf '\033[1;36m[prove]\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m  ✓\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m  ⚠\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31m  ✗ %s\033[0m\n' "$*" >&2; }
+sha256_file() {
+  python3 - "$1" <<'PY'
+import hashlib,sys
+h=hashlib.sha256()
+with open(sys.argv[1],"rb") as f:
+    for block in iter(lambda:f.read(1024*1024),b""):
+        h.update(block)
+print(h.hexdigest())
+PY
+}
 
 # record <PASS|FAIL|SKIP> <capability> <detail...>
 record() {
@@ -148,14 +171,32 @@ wait_for() {
 say "$(b 'Computexchange — local release-candidate proof')"
 rm -rf "$ART"; mkdir -p "$ART"; : >"$LEDGER_FILE"
 
-# META line: the commit this proof run actually ran against + when it started.
-# scripts/site-build.mjs reads this to stamp the live page — the ledger is the
-# single source of truth for "what commit was this pass count proven on", not a
-# hand-typed figure re-derived some other way at build time.
-GIT_SHA="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+# META lines bind the ledger to the exact tested source, including dirty tracked
+# changes and non-ignored untracked files. HEAD alone is not reproducible evidence
+# for the normal development case where the proof runs before a commit. The end
+# fingerprint must match the start fingerprint or the proof fails as a mixed-source
+# run. The site build is read-only and never copies a test count into source.
+SOURCE_START_JSON="$(python3 scripts/source_fingerprint.py)" || die "source fingerprint failed"
+GIT_SHA="$(printf '%s' "$SOURCE_START_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["head"])')"
+SOURCE_FINGERPRINT_START="$(printf '%s' "$SOURCE_START_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["source_sha256"])')"
+SOURCE_STATUS_START="$(printf '%s' "$SOURCE_START_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status_sha256"])')"
+SOURCE_DIRTY_START="$(printf '%s' "$SOURCE_START_JSON" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["dirty"]).lower())')"
+SOURCE_FILE_COUNT="$(printf '%s' "$SOURCE_START_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["file_count"])')"
 RUN_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 printf 'META\tcommit\t%s\n' "$GIT_SHA" >>"$LEDGER_FILE"
+printf 'META\tdirty\t%s\n' "$SOURCE_DIRTY_START" >>"$LEDGER_FILE"
+printf 'META\tsource_sha256\t%s\n' "$SOURCE_FINGERPRINT_START" >>"$LEDGER_FILE"
+printf 'META\tstatus_sha256\t%s\n' "$SOURCE_STATUS_START" >>"$LEDGER_FILE"
+printf 'META\tsource_file_count\t%s\n' "$SOURCE_FILE_COUNT" >>"$LEDGER_FILE"
 printf 'META\tstarted_at\t%s\n' "$RUN_STARTED_AT" >>"$LEDGER_FILE"
+if [ "$SKIP_LIVE" = "1" ]; then
+  PROOF_MODE="contract_only"
+else
+  PROOF_MODE="full_local"
+fi
+printf 'META\tproof_mode\t%s\n' "$PROOF_MODE" >>"$LEDGER_FILE"
+printf 'META\tcargo_target\tfresh:%s\n' "$CARGO_TARGET_DIR" >>"$LEDGER_FILE"
+printf 'META\tgo_cache\tfresh:%s\n' "$GOCACHE" >>"$LEDGER_FILE"
 
 need=(go cargo psql curl python3)
 [ "$USE_DOCKER" = "1" ] && need+=(docker) || need+=(postgres initdb pg_ctl createdb minio)
@@ -163,6 +204,22 @@ for t in "${need[@]}"; do
   command -v "$t" >/dev/null 2>&1 || die "required tool '$t' not found on PATH"
 done
 record PASS preflight "toolchain present (${need[*]})"
+PROOF_VERIFICATION_SAMPLE_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')" \
+  || die "could not generate the verification-sampling proof secret"
+[ "${#PROOF_VERIFICATION_SAMPLE_SECRET}" -ge 48 ] \
+  || die "verification-sampling proof secret generation returned an undersized value"
+record PASS verification-sample-secret "fresh per-run secret passed only to control/test processes; exported worker environment remains unset"
+if python3 -m unittest -v \
+  scripts/test_source_fingerprint.py \
+  scripts/test_verify_proof_ledger.py \
+  scripts/test_five_by_five.py \
+  scripts/test_runtime_matrix.py >"$ART/source-fingerprint-test.log" 2>&1 && \
+  python3 scripts/runtime_matrix.py --check >>"$ART/source-fingerprint-test.log" 2>&1; then
+  record PASS evidence-envelope-contract "source identity, terminal ledger, runtime-matrix generation, non-vacuous run, and overwrite tests green"
+else
+  record FAIL evidence-envelope-contract "evidence-envelope tests failed — see $ART/source-fingerprint-test.log"
+  die "evidence-envelope contract failed"
+fi
 
 # ── Phase 1: provision deps ──────────────────────────────────────────────────
 if [ "$USE_DOCKER" = "1" ]; then
@@ -199,13 +256,14 @@ fi
 
 # ── Phase 2: schema + deterministic proof matrix ─────────────────────────────
 say "2/6 applying schema + running the deterministic proof matrix"
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/schema.sql >/dev/null || die "schema apply failed"
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction -f db/schema.sql >/dev/null || die "schema apply failed"
 record PASS db-migrate "db/schema.sql applied cleanly"
 
 # The integration suite self-seeds (TestMain runs seedDemo) and creates the bucket.
 MATRIX_LOG="$ART/integration.log"
 say "    go test -tags integration (this is the brutal matrix)…"
-if (cd control && go test -tags integration -count=1 -v ./... ) >"$MATRIX_LOG" 2>&1; then
+if (cd control && CX_VERIFICATION_SAMPLE_SECRET="$PROOF_VERIFICATION_SAMPLE_SECRET" \
+    go test -tags integration -count=1 -v ./... ) >"$MATRIX_LOG" 2>&1; then
   matrix_ok=1
 else
   matrix_ok=0
@@ -269,19 +327,25 @@ else
   # ── Phase 3: live control plane + real agent inference ─────────────────────
   say "3/6 building + starting the control plane"
   (cd control && go build -o "$ART/control" .) || die "control build failed"
-  ( "$ART/control" ) >"$CONTROL_LOG" 2>&1 &
+  record PASS control-binary-identity "fresh build sha256=$(sha256_file "$ART/control")"
+  ( CX_VERIFICATION_SAMPLE_SECRET="$PROOF_VERIFICATION_SAMPLE_SECRET" "$ART/control" ) >"$CONTROL_LOG" 2>&1 &
   CONTROL_PID=$!
   wait_for 30 "control healthz" bash -c "kill -0 $CONTROL_PID 2>/dev/null && curl -fsS '$CONTROL_URL/healthz'" \
     || die "control plane never became healthy"
   record PASS control-healthz "control plane healthy on :$CONTROL_PORT"
 
   # Seed demo creds (idempotent; integration suite already seeded, this re-confirms).
-  (cd control && "$ART/control" seed) >/dev/null 2>&1 || (cd control && go run . seed) >/dev/null 2>&1 || die "seed failed"
+  (cd control && CX_VERIFICATION_SAMPLE_SECRET="$PROOF_VERIFICATION_SAMPLE_SECRET" "$ART/control" seed) >/dev/null 2>&1 \
+    || (cd control && CX_VERIFICATION_SAMPLE_SECRET="$PROOF_VERIFICATION_SAMPLE_SECRET" go run . seed) >/dev/null 2>&1 \
+    || die "seed failed"
   record PASS seed "demo buyer api_key + worker_token minted"
 
   # Object flow + worker registration are also proven live (not just in the matrix).
   say "4/6 building the agent + driving live jobs"
   (cd agent && cargo build --release) >"$ART/agent-build.log" 2>&1 || die "agent build failed (see $ART/agent-build.log)"
+  AGENT_BIN="$CARGO_TARGET_DIR/release/cx-agent"
+  [ -x "$AGENT_BIN" ] || die "fresh agent binary missing at $AGENT_BIN"
+  record PASS agent-binary-identity "fresh build sha256=$(sha256_file "$AGENT_BIN")"
   # memory_headroom_gb=0 + max_memory_pct=0 ⇒ the dynamic memory GOVERNOR IS OFF
   # for the proof. The proof runs TWO live agents at once (multi-supplier + load
   # test), each loading Llama/MiniLM/whisper on Metal; on a memory-constrained dev
@@ -335,13 +399,17 @@ PY
   }
   # wait_job <job_id> <timeout> <label> → 0 complete, 1 timeout, 2 failed
   wait_job() {
-    local id="$1" to="$2" label="$3" deadline=$(( $(date +%s) + $2 )) s=""
+    local id="$1" to="$2" label="$3" s=""
+    local deadline=$(( $(date +%s) + to ))
     while :; do
       kill -0 "$AGENT_PID" 2>/dev/null || { echo "agent died" >&2; return 2; }
       s="$(job_status "$id")"
       [ "$s" = "complete" ] && return 0
       [ "$s" = "failed" ] || [ "$s" = "cancelled" ] && return 2
-      [ "$(date +%s)" -ge "$deadline" ] && return 1
+      if [ "$(date +%s)" -ge "$deadline" ]; then
+        echo "$label job $id timed out after ${to}s" >&2
+        return 1
+      fi
       sleep 3
     done
   }
@@ -391,8 +459,9 @@ PY
     '{"id":"x","text":"must never run on an incompatible worker"}' 0 1000 '["apple_silicon_ultra"]')"
 
   say "    starting agent (first model load may take a moment; models are cached)"
-  ( cd agent && CX_CONTROL_URL="$CONTROL_URL" CX_WORKER_TOKEN="$WORKER_TOKEN" CX_STATUS_PATH="$ART/status.json" \
-      exec "$ROOT/agent/target/release/cx-agent" run --config "$ART/agent.toml" ) >"$AGENT_LOG" 2>&1 &
+  ( cd agent && exec env -u CX_VERIFICATION_SAMPLE_SECRET \
+      CX_CONTROL_URL="$CONTROL_URL" CX_WORKER_TOKEN="$WORKER_TOKEN" CX_STATUS_PATH="$ART/status.json" \
+      "$AGENT_BIN" run --config "$ART/agent.toml" ) >"$AGENT_LOG" 2>&1 &
   AGENT_PID=$!
   # Worker registration shows up in the log + the admin endpoint shortly after start.
   if wait_for 30 "worker register" bash -c \
@@ -644,8 +713,9 @@ max_memory_pct = 0.0
 data_dir = "$ART/agent2-data"
 TOML
   mkdir -p "$ART/agent2-data"
-  ( cd agent && CX_CONTROL_URL="$CONTROL_URL" CX_WORKER_TOKEN="$WORKER_TOKEN2" CX_STATUS_PATH="$ART/status2.json" \
-      exec "$ROOT/agent/target/release/cx-agent" run --config "$ART/agent2.toml" ) >"$ART/agent2.log" 2>&1 &
+  ( cd agent && exec env -u CX_VERIFICATION_SAMPLE_SECRET \
+      CX_CONTROL_URL="$CONTROL_URL" CX_WORKER_TOKEN="$WORKER_TOKEN2" CX_STATUS_PATH="$ART/status2.json" \
+      "$AGENT_BIN" run --config "$ART/agent2.toml" ) >"$ART/agent2.log" 2>&1 &
   AGENT2_PID=$!
   # Wait for the SECOND agent to ACTUALLY register through the control plane. Logs are
   # WARN-level by default, and the seeded worker row starts fresh enough to fool a
@@ -742,14 +812,23 @@ TOML
     record FAIL install-check "install.sh --check failed"
   fi
 
-  # Menu-bar app compiles — the local, buildable half of the signed supplier app.
+  # Menu-bar enrollment/app contract — exercise the strict request/bundle codec,
+  # P-256/SecKey proof path, no-redirect exchange, probe-before-persist rollback,
+  # and then compile the release configuration. Signing/notarization and the
+  # authenticated account approval surface remain separate external/product gates.
   if command -v swift >/dev/null 2>&1; then
-    if swift build --package-path "$ROOT/macapp" >/dev/null 2>&1; then
-      record PASS macapp-build "menu-bar app compiles (swift build; signing/notarization external)"
+    if swift test --package-path "$ROOT/macapp" >"$ART/macapp-test.log" 2>&1; then
+      record PASS macapp-test "Swift enrollment/app contract tests pass (including SecKey proof and rollback)"
     else
-      record FAIL macapp-build "macapp swift build failed"
+      record FAIL macapp-test "macapp Swift tests failed — see macapp-test.log"
+    fi
+    if swift build --package-path "$ROOT/macapp" -c release >"$ART/macapp-release-build.log" 2>&1; then
+      record PASS macapp-build "menu-bar app release configuration compiles (signing/notarization external)"
+    else
+      record FAIL macapp-build "macapp release build failed — see macapp-release-build.log"
     fi
   else
+    record SKIP macapp-test "swift toolchain not available"
     record SKIP macapp-build "swift toolchain not available"
   fi
 
@@ -1051,17 +1130,19 @@ print("ok" if parked_ok and nowait_ok else "no")
     record FAIL claim-index "tasks_ready_unclaimed_idx missing or not valid (indisvalid/indisready != t)"
   fi
 
-  # The public site is served at the bare root (SITE_PATH=web/index.html): a 200
-  # whose body carries the receipts-ledger footnote. The operator surface stays at
-  # /admin (checked below). A missing file is an honest 404, so this can SKIP when
-  # web/index.html is absent at the control CWD, mirroring the admin-console check.
+  # The development-preview site is served at the bare root
+  # (SITE_PATH=web/index.html). Its visible non-launch boundary is load-bearing:
+  # serving the old receipt-count marketing page is a failure, even if the HTML is
+  # otherwise reachable. The operator surface stays at /admin (checked below). A
+  # missing file is an honest 404, so this can SKIP when web/index.html is absent.
   root_body="$(curl -fsS "$CONTROL_URL/" 2>/dev/null || true)"
-  if grep -qi 'SITE-CLAIMS' <<<"$root_body"; then
-    record PASS root-site "public site served at / (SITE_PATH=web/index.html)"
+  if grep -qi 'Development preview' <<<"$root_body" && \
+     grep -qi 'No live-money, market-liquidity, signed-distribution, or physical-fleet claim' <<<"$root_body"; then
+    record PASS root-site "development-preview site served at / with explicit non-launch claim boundary"
   elif [ -z "$root_body" ] && [ ! -f web/index.html ]; then
     record SKIP root-site "site not served (web/index.html missing at control CWD)"
   else
-    record FAIL root-site "/ did not serve the site (empty or missing the SITE-CLAIMS footnote)"
+    record FAIL root-site "/ did not serve the explicit development-preview claim boundary"
   fi
 
   # The passkey-gated operator console (Control Room) is served at /admin. The HTML
@@ -1090,6 +1171,29 @@ else
   record FAIL tests-rust "cargo unit tests failed — see $ART/cargo-test.log"
 fi
 
+# A passing matrix must describe one stable source snapshot. This catches an
+# editor, agent, or generator changing a tracked/untracked source file while the
+# long integration run is in flight. Ignored build outputs are intentionally not
+# part of the source identity.
+SOURCE_END_JSON="$(python3 scripts/source_fingerprint.py)" || die "final source fingerprint failed"
+SOURCE_FINGERPRINT_END="$(printf '%s' "$SOURCE_END_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["source_sha256"])')"
+SOURCE_STATUS_END="$(printf '%s' "$SOURCE_END_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status_sha256"])')"
+printf 'META\tsource_sha256_end\t%s\n' "$SOURCE_FINGERPRINT_END" >>"$LEDGER_FILE"
+printf 'META\tstatus_sha256_end\t%s\n' "$SOURCE_STATUS_END" >>"$LEDGER_FILE"
+if [ "$SOURCE_FINGERPRINT_START" = "$SOURCE_FINGERPRINT_END" ] && [ "$SOURCE_STATUS_START" = "$SOURCE_STATUS_END" ]; then
+  record PASS source-stability "start/end source + status fingerprints match ($SOURCE_FINGERPRINT_END)"
+else
+  record FAIL source-stability "source changed during proof (start=$SOURCE_FINGERPRINT_START end=$SOURCE_FINGERPRINT_END)"
+fi
+RUN_COMPLETED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+if grep -q '^FAIL' "$LEDGER_FILE"; then
+  RUN_STATUS="FAIL"
+else
+  RUN_STATUS="PASS"
+fi
+printf 'META\tcompleted_at\t%s\n' "$RUN_COMPLETED_AT" >>"$LEDGER_FILE"
+printf 'META\tstatus\t%s\n' "$RUN_STATUS" >>"$LEDGER_FILE"
+
 # ── Proof ledger ─────────────────────────────────────────────────────────────
 echo
 say "$(b '================  PROOF LEDGER  ================')"
@@ -1108,5 +1212,11 @@ echo
 if [ "${failc:-0}" -gt 0 ]; then
   die "$failc capability check(s) FAILED — not release-candidate clean"
 fi
-say "$(b 'LOCAL RELEASE-CANDIDATE PROOF: PASS') ✅"
-say "Remaining work is necessarily EXTERNAL — see RELEASE_CANDIDATE.md"
+if [ "$PROOF_MODE" = "contract_only" ]; then
+  say "$(b 'LOCAL CONTRACT PROOF: PASS') ✅"
+  say "Live agent/model execution was not selected; this is not a local release-candidate proof."
+else
+  say "$(b 'LOCAL RELEASE-CANDIDATE PROOF: PASS') ✅"
+fi
+say "This proves the selected local matrix, not product 5/5 or launch readiness."
+say "Run: python3 scripts/five-by-five.py  # remaining local + external gates"

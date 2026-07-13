@@ -207,7 +207,7 @@ func TestSubmitSubstrateRouting(t *testing.T) {
 	// row's routing columns must be NULL (routing_substrate IS NULL).
 	embed := routingSubmit(t, map[string]any{
 		"job_type":     map[string]any{"type": "embed"},
-		"model":        map[string]any{"kind": "gguf", "ref": "all-minilm-l6-v2"},
+		"model":        map[string]any{"kind": "hf", "ref": "all-minilm-l6-v2"},
 		"constraints":  map[string]any{"min_memory_gb": 2},
 		"verification": map[string]any{"redundancy_frac": 0, "honeypot_frac": 0, "skip_verification_floor": true},
 		"tier":         "batch",

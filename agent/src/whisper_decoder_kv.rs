@@ -11,8 +11,8 @@
 //! token sequence on every decode step (`x` is always the whole sequence so far), which is
 //! O(n^2) total decode compute even though the cross-attention K/V (over the fixed audio
 //! features) is already correctly cached and reused every step. This module adds a real
-//! self-attention KV cache: an initial multi-token PREFILL call (the 3-token
-//! `<sot><transcribe><notimestamps>` prompt, `flush_kv_cache=true`) seeds the cache and
+//! self-attention KV cache: an initial multi-token PREFILL call (the 4-token
+//! `<sot><en><transcribe><notimestamps>` prompt, `flush_kv_cache=true`) seeds the cache and
 //! runs the causal mask as upstream does; every subsequent call feeds ONLY the newly
 //! decoded token (`flush_kv_cache=false`), computes its K/V, concatenates it onto the
 //! growing per-layer self-attention cache, and attends the new token's query over the FULL
@@ -23,8 +23,9 @@
 //! the decoder's running position (`self.offset`) instead of always starting at 0, so an
 //! incremental call still looks up the correct absolute position for its new token(s).
 //!
-//! Verified bit-for-bit against the full-recompute-every-step reference behavior on
-//! synthetic weights in the test below (`incremental_matches_full_recompute`) — run it
+//! Verified against the full-recompute-every-step reference behavior on synthetic
+//! weights in the test below (`incremental_matches_full_recompute`): every logit is
+//! within 1e-4 and the greedy argmax token is identical at every checked step. Run it
 //! after any edit here: `cd agent && cargo test --no-default-features -- whisper_decoder_kv`.
 //! Any edit here changes `hardware::infer_content_id()` per the same rule as
 //! `quantized_llama_batched.rs`; see docs/CANDLE_FORK.md and docs/DETERMINISM_CLASS.md.
@@ -260,7 +261,7 @@ impl TextDecoderKV {
         })
     }
 
-    /// `x`: token ids for THIS call only — the 3-token prompt on the first
+    /// `x`: token ids for THIS call only — the 4-token prompt on the first
     /// (`flush_kv_cache=true`) call, exactly one newly-decoded token on every call after
     /// that (`flush_kv_cache=false`). Positions are tracked internally via `self.offset`.
     pub fn forward(&mut self, x: &Tensor, xa: &Tensor, flush_kv_cache: bool) -> Result<Tensor> {
@@ -427,8 +428,8 @@ mod tests {
     /// ways — (a) upstream's own pattern, full recompute + flush=true at every single
     /// step, feeding the whole growing prefix each time; (b) this module's incremental
     /// path, prefill once then one new token per step. Final-layer logits for the LAST
-    /// position must match bit-for-bit at every step, since that is the only thing greedy
-    /// decoding ever reads.
+    /// position must stay numerically close and select the same greedy argmax token at
+    /// every step, since that is the only decision production greedy decoding reads.
     #[test]
     fn incremental_matches_full_recompute() -> Result<()> {
         let n_state = 8;
@@ -440,9 +441,9 @@ mod tests {
 
         // (a) reference: full recompute + flush=true every call, upstream's own pattern.
         // Real usage (WhisperBackend::transcribe) only ever reads logits after the full
-        // 3-token prompt and after each token thereafter — never after 1 or 2 tokens — so
+        // 4-token prompt and after each token thereafter — never after 1..3 tokens — so
         // the reference only checks those same lengths for an apples-to-apples comparison.
-        let prefill_len_ref = 3;
+        let prefill_len_ref = 4;
         let (mut dec_ref, xa) = synthetic(n_state, n_head, n_layer, n_ctx)?;
         let mut ref_logits_last = Vec::new();
         for len in prefill_len_ref..=tokens.len() {
@@ -453,11 +454,11 @@ mod tests {
             ref_logits_last.push(last);
         }
 
-        // (b) patched: prefill once (flush=true, first 3 tokens as a stand-in prompt-sized
+        // (b) patched: prefill once (flush=true, first 4 tokens as a stand-in prompt-sized
         // chunk), then exactly one new token per subsequent call (flush=false).
         let (mut dec_kv, xa2) = synthetic(n_state, n_head, n_layer, n_ctx)?;
         let mut kv_logits_last = Vec::new();
-        let prefill_len = 3;
+        let prefill_len = 4;
         {
             let x = Tensor::from_vec(tokens[..prefill_len].to_vec(), (1, prefill_len), &dev)?;
             let out = dec_kv.forward(&x, &xa2, true)?;
@@ -477,6 +478,19 @@ mod tests {
             .zip(kv_logits_last.iter())
             .enumerate()
         {
+            let argmax = |values: &[f32]| {
+                values
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, left), (_, right)| left.total_cmp(right))
+                    .map(|(index, _)| index)
+                    .unwrap()
+            };
+            assert_eq!(
+                argmax(a),
+                argmax(b),
+                "step {step} selected a different greedy token"
+            );
             for (j, (av, bv)) in a.iter().zip(b.iter()).enumerate() {
                 assert!(
                     (av - bv).abs() < 1e-4,

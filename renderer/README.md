@@ -1,3 +1,4 @@
+<!-- CLAIM-SCOPE: internal-engineering-non-authoritative -->
 # cx-renderer — Track 3, Phase 0
 
 Rust-native, reuse-first renderer scaffold for ComputeExchange. Standalone crate
