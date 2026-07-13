@@ -140,7 +140,10 @@ def print_report(facets: list[dict[str, Any]]) -> None:
 
 
 def run_commands(
-    facets: list[dict[str, Any]], artifact_dir: pathlib.Path, registry_path: pathlib.Path
+    facets: list[dict[str, Any]],
+    artifact_dir: pathlib.Path,
+    registry_path: pathlib.Path,
+    skip_gates: frozenset[str] = frozenset(),
 ) -> int:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     ledger_path = artifact_dir / "ledger.jsonl"
@@ -184,6 +187,10 @@ def run_commands(
     atomic_json_write(partial_path, metadata)
     failures = 0
     commands_run = 0
+    # Gates whose command is deliberately excluded from THIS run (e.g. gates that
+    # require prove-local infra or built/gitignored artifacts absent in a clean
+    # CI checkout). Recorded explicitly in the metadata so a skip is never silent.
+    skipped: list[str] = []
     # A named artifact directory represents one run, never an append-only mixture
     # of old and new source snapshots.
     with ledger_path.open("w", encoding="utf-8") as ledger:
@@ -191,6 +198,11 @@ def run_commands(
             for gate in facet["gates"]:
                 command = gate.get("command") or gate.get("evidence_validator")
                 if not command:
+                    continue
+                gate_ref = f"{facet['id']}/{gate['id']}"
+                if gate_ref in skip_gates:
+                    skipped.append(gate_ref)
+                    print(f"SKIP {gate_ref}: excluded from this run (infra-dependent)")
                     continue
                 commands_run += 1
                 execution_kind = "command" if gate.get("command") else "evidence_validator"
@@ -248,6 +260,7 @@ def run_commands(
     metadata["source_end"] = source_end
     metadata["source_stable"] = stable
     metadata["commands_run"] = commands_run
+    metadata["skipped_gates"] = skipped
     metadata["command_failures"] = command_failures
     metadata["total_failures"] = failures
     metadata["run_status"] = "PASS" if failures == 0 else "FAIL"
@@ -267,6 +280,13 @@ def main() -> int:
     parser.add_argument("--facet", action="append", default=[], help="facet id (repeatable)")
     parser.add_argument("--run", action="store_true", help="run commands attached to selected gates")
     parser.add_argument(
+        "--skip-gate",
+        action="append",
+        default=[],
+        metavar="FACET/GATE",
+        help="gate id to exclude from --run execution, e.g. platform_runtime/exact_scheduler_capability_authority (repeatable)",
+    )
+    parser.add_argument(
         "--artifact-dir",
         type=pathlib.Path,
         default=ROOT / ".artifacts" / "5x5" / time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()),
@@ -280,7 +300,12 @@ def main() -> int:
         return 2
     print_report(facets)
     if args.run:
-        return run_commands(facets, args.artifact_dir.resolve(), args.registry.resolve())
+        return run_commands(
+            facets,
+            args.artifact_dir.resolve(),
+            args.registry.resolve(),
+            frozenset(args.skip_gate),
+        )
     return 0
 
 
