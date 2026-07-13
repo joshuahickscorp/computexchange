@@ -96,10 +96,36 @@ export function mountHero(canvas, opts) {
   };
   scene.add(groups['mac-studio'], groups['dgx-spark'], groups['gpu-rig']);
   const baseEmissive = new WeakMap();
+  // The rig shows a procedural stand-in INSTANTLY (no network wait), then upgrades to the
+  // baked photoreal rig glb the moment it loads. If the glb 404s or fails to parse, the
+  // stand-in simply stays · the rig beat never renders empty.
   buildRigStandIn(groups['gpu-rig'], baseEmissive);
 
   let loaded = false;
   const loader = new GLTFLoader();
+
+  // Real 6-card rig · a SEPARATE glb (built by build_rack.py, a different scene than the
+  // Studio/Spark oracles.glb) attached into the same gpu-rig group with the same beat, so
+  // the choreography is unchanged. On success we drop the stand-in and swap in the baked rig.
+  loader.load('/assets/site/rig.glb', (gltf) => {
+    const rigMeshes = [];
+    gltf.scene.traverse((o) => { if (o.isMesh) rigMeshes.push(o); });
+    if (!rigMeshes.length) return;                 // nothing usable · keep the stand-in
+    const rig = groups['gpu-rig'];
+    rig.position.set(0, 0, 0);                      // attach preserves WORLD transform · park at origin, placeCamera re-applies rgDX
+    for (let i = rig.children.length - 1; i >= 0; i--) rig.remove(rig.children[i]); // drop the stand-in
+    for (const o of rigMeshes) {
+      o.castShadow = true;
+      o.receiveShadow = true;
+      rig.attach(o);
+      if (o.material) {
+        o.material = o.material.clone();
+        baseEmissive.set(o.material, (o.material.emissive && o.material.emissive.clone()) || new THREE.Color(0, 0, 0));
+      }
+    }
+    renderer.shadowMap.needsUpdate = true;         // rig geometry changed · re-bake the frozen shadow once
+    frame();
+  }, undefined, () => { /* glb failed · the stand-in remains, beat still renders */ });
   loader.load('/assets/site/oracles.glb', (gltf) => {
     // Groups must sit at the ORIGIN while meshes attach (attach preserves world
     // transforms · a pre-applied S5 offset would bake in wrong). The next tick
@@ -176,7 +202,7 @@ export function mountHero(canvas, opts) {
     [0.000, -0.030,  0.045, 0.0, 0.58, 0.45, 1.00, 0.40, -0.60,  0.0, -0.9,  1.6], // 1 arrival · the Studio alone
     [1/7,    0.100,  0.035, 0.0, 0.50, 0.40, 1.00, 0.35, -0.90,  0.0, -0.9,  1.6], // 2 studio  · closer, its specs
     [2/7,    0.300,  0.020, 0.0, 0.46, 0.42, 1.00, 0.35, -0.85, -0.9,  0.0,  1.6], // 3 spark   · the swap · Spark in
-    [3/7,    0.220,  0.180, 0.0, 1.40, 0.52, 1.00, 0.42, -0.30, -0.9, -0.9,  0.0], // 4 rig     · the six-card rig alone (framed + verified headless)
+    [3/7,    0.220,  0.280, 0.0, 1.75, 0.50, 1.00, 0.42, -0.30, -0.9, -0.9,  0.0], // 4 rig     · the six-card rig alone · reframed for the real 0.56m-tall glb (verified headless)
     [4/7,    0.280,  0.050, 0.0, 0.95, 0.52, 1.00, 0.50, -0.25,  0.0,  0.0,  1.6], // 5 how     · side by side
     [5/7,    0.200,  0.240, 0.0, 1.15, 0.79, 0.32, 0.30,  0.00,  0.0,  0.0,  1.6], // 6 price   · sink + dim
     [6/7,    0.250,  0.040, 0.0, 0.72, 0.48, 1.00, 0.50, -0.35,  0.0,  0.0,  1.6], // 7 earn    · close pair, low
