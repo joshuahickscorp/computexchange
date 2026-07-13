@@ -186,7 +186,21 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "integration: DATABASE_URL unset — run via scripts/prove-local.sh (it provisions Postgres + MinIO)")
 		os.Exit(2)
 	}
-	pool, err := pgxpool.New(ctx, dsn)
+	poolCfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "integration: pgx config: %v\n", err)
+		os.Exit(2)
+	}
+	// pgx defaults MaxConns to max(4, runtime.NumCPU()). On a 2-vCPU CI runner
+	// that is 4, which starves the concurrency proofs — a lock holder + N blocked
+	// contenders + the pg_stat_activity poller all need a connection at once — and
+	// the SLA fake fleet, producing "context deadline exceeded" / "job not complete"
+	// flakes that never reproduce on a many-core dev box. Pin a generous ceiling so
+	// the client pool is never the bottleneck (Postgres max_connections is 100).
+	if poolCfg.MaxConns < 25 {
+		poolCfg.MaxConns = 25
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "integration: pgx pool: %v\n", err)
 		os.Exit(2)
