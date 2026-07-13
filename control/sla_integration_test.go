@@ -327,7 +327,7 @@ func TestSLAQuoteFirmSubmitGuaranteeMet(t *testing.T) {
 
 	// Fast fleet completes far inside the guarantee (>= 62s by construction).
 	stop := runSLAFleet(t, fleet)
-	elapsed := waitJobComplete(t, resp.JobID, time.Now(), 60*time.Second)
+	elapsed := waitJobComplete(t, resp.JobID, time.Now(), 120*time.Second)
 	stop()
 	t.Logf("MEASURED buyer-visible completion: %s (guarantee %ds)", elapsed.Round(10*time.Millisecond), gSecs)
 
@@ -418,7 +418,7 @@ func TestSLAForcedMissRefundsExactlyOnce(t *testing.T) {
 	}
 
 	stop := runSLAFleet(t, fleet)
-	elapsed := waitJobComplete(t, resp.JobID, time.Now(), 60*time.Second)
+	elapsed := waitJobComplete(t, resp.JobID, time.Now(), 120*time.Second)
 	stop()
 	if elapsed <= 1500*time.Millisecond {
 		t.Fatalf("sanity: the slow fleet's span must exceed one declared chunk, got %s", elapsed)

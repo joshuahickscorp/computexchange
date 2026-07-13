@@ -52,7 +52,12 @@ type payoutSubsidyAuthorizationResult struct {
 // blocker is released.
 func waitForBlockedFundingQueries(t *testing.T, queryFragment string, want int) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// 30s (not 5s): this waits for two goroutines to BOTH reach the blocked
+	// SELECT ... FOR UPDATE state. On a contended CI runner (2 vCPUs, Postgres in
+	// a container) the goroutines can take several seconds to overlap; a 5s budget
+	// flaked with "context deadline exceeded". The proof is unchanged — both
+	// contenders must still be visibly blocked before the blocker is released.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()

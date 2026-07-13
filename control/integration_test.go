@@ -38,6 +38,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -242,12 +243,28 @@ func TestMain(m *testing.M) {
 func reset(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := itPool.Exec(ctx,
-		`TRUNCATE tasks, jobs, webhooks, ledger_entries, benchmark_results, disputes,
+	// The TRUNCATE takes ACCESS EXCLUSIVE locks; if a prior test left a lingering
+	// locked transaction (e.g. a concurrency proof that a contended CI runner made
+	// flake), the reset can deadlock (SQLSTATE 40P01). Retry briefly instead of
+	// failing the whole suite on a teardown race — the truncate itself is unchanged.
+	const truncate = `TRUNCATE tasks, jobs, webhooks, ledger_entries, benchmark_results, disputes,
 		 buyer_charge_operations, stripe_webhook_events, stripe_charge_cash_state, stripe_dispute_cash_state,
 		 supplier_payout_funding_state, verification_events, charge_batches
-		 RESTART IDENTITY CASCADE`); err != nil {
-		t.Fatalf("reset truncate: %v", err)
+		 RESTART IDENTITY CASCADE`
+	var truncErr error
+	for attempt := 0; attempt < 20; attempt++ {
+		if _, truncErr = itPool.Exec(ctx, truncate); truncErr == nil {
+			break
+		}
+		var pgErr *pgconn.PgError
+		if errors.As(truncErr, &pgErr) && pgErr.Code == "40P01" {
+			time.Sleep(150 * time.Millisecond)
+			continue
+		}
+		t.Fatalf("reset truncate: %v", truncErr)
+	}
+	if truncErr != nil {
+		t.Fatalf("reset truncate still deadlocking after retries: %v", truncErr)
 	}
 	// Workers/worker_tokens are NOT truncated above (FK from worker_tokens). Drop
 	// every NON-demo worker a prior test left behind so peer selection (tiebreak,
