@@ -200,7 +200,10 @@ def run_commands(
                     command,
                     cwd=ROOT,
                     shell=True,
-                    executable="/bin/zsh",
+                    # /bin/bash is present on both macOS (dev) and the Ubuntu CI
+                    # runner; /bin/zsh is macOS-only and made this gate fail closed
+                    # on Linux with FileNotFoundError.
+                    executable="/bin/bash",
                     text=True,
                     capture_output=True,
                 )
