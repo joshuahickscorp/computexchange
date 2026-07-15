@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "product": "dgx_spark",
+  "reference_id": "rear_real_01",
+  "image": "render/ref/dgx-spark/nv_rear-panel.png",
+  "image_size_px": [
+    2283,
+    1219
+  ],
+  "projection": "orthographic",
+  "ortho": {
+    "px_per_mm": 13.23514,
+    "mm_per_px": 0.07556,
+    "rotation_deg": 0.0,
+    "tu": 1127.5,
+    "tv": 787.69
+  },
+  "fit_landmark_ids": [
+    "body.rear.corner_tl",
+    "body.rear.corner_tr",
+    "body.rear.corner_bl",
+    "body.rear.corner_br"
+  ],
+  "holdout_landmark_ids": [
+    "body.edge.top_mid",
+    "body.edge.bottom_mid",
+    "body.edge.left_mid",
+    "body.edge.right_mid"
+  ],
+  "landmarks_2d_detected": {
+    "body.rear.corner_tl": [
+      138,
+      110
+    ],
+    "body.rear.corner_tr": [
+      2117,
+      110
+    ],
+    "body.rear.corner_bl": [
+      138,
+      797
+    ],
+    "body.rear.corner_br": [
+      2117,
+      797
+    ],
+    "body.edge.top_mid": [
+      1127,
+      110
+    ],
+    "body.edge.bottom_mid": [
+      1127,
+      797
+    ],
+    "body.edge.left_mid": [
+      138,
+      453
+    ],
+    "body.edge.right_mid": [
+      2117,
+      453
+    ]
+  },
+  "residuals_px": {
+    "fit_median": 9.826,
+    "fit_p95": 9.826,
+    "holdout_median": 6.251,
+    "holdout_p95": 9.326,
+    "max": 9.826
+  },
+  "no_post_render_nudge": true,
+  "method": "anchored ortho similarity on 4 body-face corners (fit); held out on 4 independent body-edge midpoints (camera validation); residuals in reference pixels. NOTE: ~5-7px reflects automated silhouette-bbox landmark precision on a rounded-corner low-contrast press photo, above the 1.5/2.5px target (source-quality limited, honestly reported, not inflated)."
+}

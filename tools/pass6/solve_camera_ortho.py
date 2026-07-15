@@ -18,20 +18,18 @@ import numpy as np, cv2
 ref_path, out_json, out_overlay = sys.argv[1], sys.argv[2], sys.argv[3]
 REFERENCE_ID = sys.argv[4] if len(sys.argv) > 4 else "rear_real_01"
 IMAGE_REL = sys.argv[5] if len(sys.argv) > 5 else "render/ref/mac-studio/apple_back.jpg"
+HALF_W = float(sys.argv[6]) if len(sys.argv) > 6 else 98.5     # face half-width mm (Mac 98.5, DGX 75.0)
+FACE_H = float(sys.argv[7]) if len(sys.argv) > 7 else 95.0     # face height mm (Mac 95, DGX 50.5)
+PRODUCT = sys.argv[8] if len(sys.argv) > 8 else "mac_studio"
 
-# ---- 3D landmarks (mm), from the model builder (MCP-measured), face frame X=width Z=height ----
-# FIT: four body-face corners (rear face 197 wide, z 7.5..95). HOLDOUT: exhaust-vent field corners
-# (173 x 50, centered z=56 => x in [-86.5,86.5], z in [31,81]) -- independent of the body corners.
-BODY = {  # id -> (X_mm, Z_mm); full VISIBLE rear silhouette spans z 0..95 (body floats 7.5mm on a reveal,
-          # but the photo silhouette includes the base down to ground contact => use 0..95, not the mesh 7.5..95)
-  "body.rear.corner_tl": (-98.5, 95.0), "body.rear.corner_tr": (98.5, 95.0),
-  "body.rear.corner_bl": (-98.5, 0.0),  "body.rear.corner_br": (98.5, 0.0),
+# ---- 3D landmarks (mm), face frame X=width Z=height; FIT=4 body-face corners, HOLDOUT=4 edge midpoints ----
+BODY = {
+  "body.rear.corner_tl": (-HALF_W, FACE_H), "body.rear.corner_tr": (HALF_W, FACE_H),
+  "body.rear.corner_bl": (-HALF_W, 0.0),    "body.rear.corner_br": (HALF_W, 0.0),
 }
-# HOLDOUT = body silhouette EDGE MIDPOINTS (geometry-correct, sharply localizable on the outline,
-# independent of the 4 fit corners) -> validates the CAMERA, not model port placement.
 EDGEMID = {
-  "body.edge.top_mid": (0.0, 95.0), "body.edge.bottom_mid": (0.0, 0.0),
-  "body.edge.left_mid": (-98.5, 47.5), "body.edge.right_mid": (98.5, 47.5),
+  "body.edge.top_mid": (0.0, FACE_H), "body.edge.bottom_mid": (0.0, 0.0),
+  "body.edge.left_mid": (-HALF_W, FACE_H/2.0), "body.edge.right_mid": (HALF_W, FACE_H/2.0),
 }
 
 im = cv2.imread(ref_path); H, W = im.shape[:2]
@@ -77,7 +75,7 @@ def resid(ids):
 fit_r = resid(fit_ids); hold_r = resid(hold_ids)
 mm_per_px = 1.0/s  # s is px per mm
 solution = {
-  "schema_version": 1, "product":"mac_studio", "reference_id":REFERENCE_ID,
+  "schema_version": 1, "product":PRODUCT, "reference_id":REFERENCE_ID,
   "image":IMAGE_REL, "image_size_px":[W,H],
   "projection":"orthographic",
   "ortho":{"px_per_mm":round(s,5),"mm_per_px":round(mm_per_px,5),"rotation_deg":round(theta,4),
