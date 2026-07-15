@@ -67,6 +67,14 @@ analogue of Hawking's `shader_hash`. It folds into the agent's `build_hash`
 (`hardware::engine_build_hash`) so two vLLM workers on DIFFERENT pinned servers land in
 DIFFERENT verification classes automatically and are never byte-compared.
 
+The agent resolves that identity from the same complete production lock used by
+`docker/vllm/launch_pinned.py`. Set `CX_VLLM_RUNTIME_LOCK` to its path before starting
+an `inference_backend = "vllm"` worker. The build identity contains the SHA-256 of the
+exact lock bytes plus the decoded runtime/model/execution/speculation tuple. An unset,
+unreadable, candidate, placeholder-bearing, incomplete, or malformed lock makes the
+agent advertise an empty `build_hash` (the protocol's unknown/unverified sentinel), so
+it cannot participate in byte-exact verification until the runtime identity is proven.
+
 ## The within-`nvidia_*` byte-equality contract
 
 `nvidia_*` is a DISTINCT hardware family from Apple (`control/types.go validHWClasses`),

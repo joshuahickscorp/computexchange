@@ -25,6 +25,28 @@ The launcher requires the official image's `VLLM_BUILD_COMMIT` and an
 orchestrator-supplied `CX_VLLM_IMAGE_DIGEST` to match the lock. A tag such as
 `latest` or `v0.24.0` is never accepted as runtime identity.
 
+## ComputeExchange downstream mirrors
+
+The upstream source is now mirrored under organization-owned forks so experiments
+can be pinned, reviewed, and rebased without making the production lock depend on a
+moving upstream branch:
+
+| Repository | Baseline branch | Pinned commit |
+| --- | --- | --- |
+| <https://github.com/joshuahickscorp/vllm> | `cx/v0.24.0-baseline` | `ee0da84ab9e04ac7610e28580af62c365e898389` (zero-delta from upstream v0.24.0) |
+| <https://github.com/joshuahickscorp/vllm-metal> | `cx/v0.24.0-metal-baseline` | `4c18ee0e6e3ce2b594ab114d0a53ca24eafb1d58` |
+
+The first isolated core experiment is draft PR
+[joshuahickscorp/vllm#1](https://github.com/joshuahickscorp/vllm/pull/1). It adds a
+versioned full-context custom-proposer seam on top of the v0.24.0 baseline, allowing
+ComputeExchange scheduling and acceptance research without replacing vLLM's legacy
+proposer interface.
+
+Neither a fork URL nor a Git branch is a production runtime identity. A downstream
+patch becomes eligible only after its source commit, rebuilt image manifest, model,
+execution tuple, canary output, and speculative policy are captured in a completed
+runtime lock and pass the same soak/promotion gates as the upstream baseline.
+
 ## Model identity is locally resolved; CUDA behavior is not
 
 The existing local Hugging Face cache resolved the catalog artifact without a

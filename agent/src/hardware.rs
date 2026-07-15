@@ -371,12 +371,570 @@ pub fn infer_content_id() -> String {
         .collect()
 }
 
+/// The exact runtime lock consumed by the pinned vLLM launcher. A vLLM worker
+/// without this setting advertises an empty (unknown) build hash, so the control
+/// plane can never treat it as a byte-exact verification peer.
+pub const VLLM_RUNTIME_LOCK_ENV: &str = "CX_VLLM_RUNTIME_LOCK";
+
+const VLLM_RUNTIME_LOCK_MAX_BYTES: usize = 64 * 1024;
+
+// These types deliberately mirror docker/vllm/runtime-lock.schema.json. Keeping
+// every object deny-unknown means duplicate, missing, renamed, and newly added
+// fields fail closed until this identity reader is taught what they mean. The
+// Python launcher remains the detailed schema/runtime validator; this Rust copy
+// protects the worker verification class from an absent or ambiguous identity.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VllmRuntimeLock {
+    schema_version: u64,
+    status: String,
+    runtime: VllmRuntime,
+    model: VllmModel,
+    execution: VllmExecution,
+    speculative_decoding: VllmSpeculation,
+    sampling: VllmSampling,
+    canary: VllmCanary,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VllmRuntime {
+    vllm_version: String,
+    vllm_commit: String,
+    container_image: String,
+    container_index_digest: String,
+    container_platform: String,
+    wheel_sha256: String,
+    source_sdist_sha256: String,
+    cuda_runtime: String,
+    torch_version: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VllmModel {
+    catalog_id: String,
+    repository: String,
+    revision: String,
+    artifact_filename: String,
+    artifact_sha256: String,
+    tokenizer_repository: String,
+    tokenizer_revision: String,
+    served_model_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VllmExecution {
+    weight_format: String,
+    quantization: String,
+    dtype: String,
+    tensor_parallel_size: u64,
+    pipeline_parallel_size: u64,
+    data_parallel_size: u64,
+    resolved_kv_cache_dtype: String,
+    max_model_len: u64,
+    max_num_seqs: u64,
+    max_num_batched_tokens: u64,
+    gpu_memory_utilization: f64,
+    seed: u64,
+    trust_remote_code: bool,
+    attention: VllmAttention,
+    compilation: VllmCompilation,
+    network: VllmNetwork,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VllmAttention {
+    backend: String,
+    flash_attn_version: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VllmCompilation {
+    cudagraph_mode: String,
+    mode: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VllmNetwork {
+    host: String,
+    port: u16,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VllmSpeculation {
+    enabled: bool,
+    method: String,
+    num_speculative_tokens: u64,
+    prompt_lookup_min: Option<u64>,
+    prompt_lookup_max: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VllmSampling {
+    temperature: f64,
+    top_p: f64,
+    top_k: i64,
+    seed: u64,
+    n: u64,
+    presence_penalty: f64,
+    frequency_penalty: f64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VllmCanary {
+    prompt: String,
+    prompt_sha256: String,
+    max_tokens: u64,
+    expected_completion_sha256: String,
+    warmup_requests: u64,
+    measured_requests: u64,
+    minimum_acceptance_rate: f64,
+    minimum_output_match_rate: f64,
+}
+
+fn is_lower_hex(value: &str, len: usize) -> bool {
+    value.len() == len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn is_sha256(value: &str) -> bool {
+    is_lower_hex(value, 64) && value != "0".repeat(64) && value != "f".repeat(64)
+}
+
+fn contains_identity_placeholder(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(value) => {
+            let upper = value.to_ascii_uppercase();
+            [
+                "REQUIRED",
+                "PLACEHOLDER",
+                "CHANGEME",
+                "UNKNOWN",
+                "TODO",
+                "TBD",
+            ]
+            .iter()
+            .any(|marker| upper.contains(marker))
+        }
+        serde_json::Value::Array(values) => values.iter().any(contains_identity_placeholder),
+        serde_json::Value::Object(values) => values.values().any(contains_identity_placeholder),
+        _ => false,
+    }
+}
+
+fn validate_vllm_runtime_lock(lock: &VllmRuntimeLock) -> Result<(), String> {
+    if lock.schema_version != 1 {
+        return Err(format!(
+            "unsupported schema_version {} (expected 1)",
+            lock.schema_version
+        ));
+    }
+    if lock.status != "production" {
+        return Err(format!(
+            "runtime-lock status is {:?}, not production",
+            lock.status
+        ));
+    }
+
+    let runtime = &lock.runtime;
+    for (name, actual, expected) in [
+        ("runtime.vllm_version", runtime.vllm_version.as_str(), "0.24.0"),
+        (
+            "runtime.vllm_commit",
+            runtime.vllm_commit.as_str(),
+            "ee0da84ab9e04ac7610e28580af62c365e898389",
+        ),
+        (
+            "runtime.container_image",
+            runtime.container_image.as_str(),
+            "vllm/vllm-openai@sha256:f9de5cd9fa907fbf6dbba691eb7db095d48ad58ea283e3eba7142f9a91e186e8",
+        ),
+        (
+            "runtime.container_index_digest",
+            runtime.container_index_digest.as_str(),
+            "sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f",
+        ),
+        ("runtime.container_platform", runtime.container_platform.as_str(), "linux/amd64"),
+        (
+            "runtime.wheel_sha256",
+            runtime.wheel_sha256.as_str(),
+            "2d2831aeba311292250df0132dbc4d8e9f42c654536eaec48e6fe58acb1822cf",
+        ),
+        (
+            "runtime.source_sdist_sha256",
+            runtime.source_sdist_sha256.as_str(),
+            "0862453adc1f3339f1a0c9dca1179c34d6ed6e118f87b6e5bddd120af614ac66",
+        ),
+        ("runtime.cuda_runtime", runtime.cuda_runtime.as_str(), "13.0.2"),
+        ("runtime.torch_version", runtime.torch_version.as_str(), "2.11.0"),
+        (
+            "model.catalog_id",
+            lock.model.catalog_id.as_str(),
+            "llama-3.2-1b-instruct-q4",
+        ),
+        (
+            "model.repository",
+            lock.model.repository.as_str(),
+            "unsloth/Llama-3.2-1B-Instruct-GGUF",
+        ),
+        (
+            "model.served_model_name",
+            lock.model.served_model_name.as_str(),
+            "llama-3.2-1b-instruct-q4",
+        ),
+        ("execution.weight_format", lock.execution.weight_format.as_str(), "gguf"),
+        ("execution.quantization", lock.execution.quantization.as_str(), "q4_k_m"),
+        ("execution.dtype", lock.execution.dtype.as_str(), "float16"),
+    ] {
+        if actual != expected {
+            return Err(format!("{name} must equal {expected:?}"));
+        }
+    }
+    for (name, value) in [
+        ("runtime.vllm_version", runtime.vllm_version.as_str()),
+        (
+            "runtime.container_platform",
+            runtime.container_platform.as_str(),
+        ),
+        ("runtime.cuda_runtime", runtime.cuda_runtime.as_str()),
+        ("runtime.torch_version", runtime.torch_version.as_str()),
+        ("model.catalog_id", lock.model.catalog_id.as_str()),
+        ("model.repository", lock.model.repository.as_str()),
+        (
+            "model.artifact_filename",
+            lock.model.artifact_filename.as_str(),
+        ),
+        (
+            "model.tokenizer_repository",
+            lock.model.tokenizer_repository.as_str(),
+        ),
+        (
+            "model.served_model_name",
+            lock.model.served_model_name.as_str(),
+        ),
+        (
+            "execution.weight_format",
+            lock.execution.weight_format.as_str(),
+        ),
+        (
+            "execution.quantization",
+            lock.execution.quantization.as_str(),
+        ),
+        ("execution.dtype", lock.execution.dtype.as_str()),
+        (
+            "execution.resolved_kv_cache_dtype",
+            lock.execution.resolved_kv_cache_dtype.as_str(),
+        ),
+        (
+            "execution.attention.backend",
+            lock.execution.attention.backend.as_str(),
+        ),
+        (
+            "execution.compilation.cudagraph_mode",
+            lock.execution.compilation.cudagraph_mode.as_str(),
+        ),
+        (
+            "speculative_decoding.method",
+            lock.speculative_decoding.method.as_str(),
+        ),
+    ] {
+        if value.is_empty() {
+            return Err(format!("{name} must not be empty"));
+        }
+    }
+
+    for (name, value, len) in [
+        ("runtime.vllm_commit", runtime.vllm_commit.as_str(), 40),
+        ("model.revision", lock.model.revision.as_str(), 40),
+        (
+            "model.tokenizer_revision",
+            lock.model.tokenizer_revision.as_str(),
+            40,
+        ),
+    ] {
+        if !is_lower_hex(value, len) {
+            return Err(format!("{name} must be {len} lowercase hex characters"));
+        }
+    }
+    for (name, value) in [
+        ("runtime.wheel_sha256", runtime.wheel_sha256.as_str()),
+        (
+            "runtime.source_sdist_sha256",
+            runtime.source_sdist_sha256.as_str(),
+        ),
+        ("model.artifact_sha256", lock.model.artifact_sha256.as_str()),
+        ("canary.prompt_sha256", lock.canary.prompt_sha256.as_str()),
+        (
+            "canary.expected_completion_sha256",
+            lock.canary.expected_completion_sha256.as_str(),
+        ),
+    ] {
+        if !is_sha256(value) {
+            return Err(format!("{name} must be a non-sentinel SHA-256"));
+        }
+    }
+    let image_digest = runtime
+        .container_image
+        .split_once("@sha256:")
+        .map(|(_, digest)| digest)
+        .filter(|digest| is_sha256(digest))
+        .ok_or_else(|| "runtime.container_image must be pinned by @sha256 digest".to_string())?;
+    if !runtime.container_index_digest.starts_with("sha256:")
+        || !is_sha256(&runtime.container_index_digest[7..])
+    {
+        return Err("runtime.container_index_digest must be a SHA-256 digest".to_string());
+    }
+    // Keep the parsed value live in this validation: an accidental image ref
+    // parser regression must not silently accept an empty suffix.
+    debug_assert_eq!(image_digest.len(), 64);
+
+    let execution = &lock.execution;
+    if !matches!(
+        execution.resolved_kv_cache_dtype.as_str(),
+        "float16" | "bfloat16" | "fp8_e4m3" | "fp8_e5m2"
+    ) {
+        return Err("execution.resolved_kv_cache_dtype is unsupported".to_string());
+    }
+    if !matches!(
+        execution.attention.backend.as_str(),
+        "FLASH_ATTN" | "FLASHINFER" | "TRITON_ATTN"
+    ) {
+        return Err("execution.attention.backend is unsupported".to_string());
+    }
+    if !matches!(
+        execution.compilation.cudagraph_mode.as_str(),
+        "NONE" | "FULL" | "PIECEWISE" | "FULL_AND_PIECEWISE"
+    ) {
+        return Err("execution.compilation.cudagraph_mode is unsupported".to_string());
+    }
+    for (name, value, min, max) in [
+        (
+            "execution.tensor_parallel_size",
+            execution.tensor_parallel_size,
+            1,
+            64,
+        ),
+        (
+            "execution.pipeline_parallel_size",
+            execution.pipeline_parallel_size,
+            1,
+            64,
+        ),
+        (
+            "execution.data_parallel_size",
+            execution.data_parallel_size,
+            1,
+            64,
+        ),
+        (
+            "execution.max_model_len",
+            execution.max_model_len,
+            128,
+            131_072,
+        ),
+        ("execution.max_num_seqs", execution.max_num_seqs, 1, 4_096),
+        (
+            "execution.max_num_batched_tokens",
+            execution.max_num_batched_tokens,
+            128,
+            1_048_576,
+        ),
+        (
+            "execution.attention.flash_attn_version",
+            execution.attention.flash_attn_version,
+            2,
+            4,
+        ),
+        (
+            "execution.compilation.mode",
+            execution.compilation.mode,
+            0,
+            3,
+        ),
+    ] {
+        if !(min..=max).contains(&value) {
+            return Err(format!("{name} must be between {min} and {max}"));
+        }
+    }
+    if !(0.0 < execution.gpu_memory_utilization
+        && execution.gpu_memory_utilization <= 1.0
+        && execution.gpu_memory_utilization.is_finite())
+    {
+        return Err("execution.gpu_memory_utilization must be in (0, 1]".to_string());
+    }
+    if execution.seed > i32::MAX as u64 {
+        return Err("execution.seed is out of range".to_string());
+    }
+    if execution.trust_remote_code {
+        return Err("execution.trust_remote_code must be false".to_string());
+    }
+    if execution.network.host != "127.0.0.1" || execution.network.port < 1024 {
+        return Err("execution.network must use loopback and a non-privileged port".to_string());
+    }
+    if !lock.model.artifact_filename.ends_with(".gguf")
+        || lock.model.artifact_filename.contains('/')
+        || !lock.model.repository.contains('/')
+        || !lock.model.tokenizer_repository.contains('/')
+    {
+        return Err("model artifact or repository identity is invalid".to_string());
+    }
+
+    let speculation = &lock.speculative_decoding;
+    if !speculation.enabled || !(1..=16).contains(&speculation.num_speculative_tokens) {
+        return Err("speculative_decoding must be enabled with 1..=16 tokens".to_string());
+    }
+    match speculation.method.as_str() {
+        "ngram" => {
+            let (Some(min), Some(max)) =
+                (speculation.prompt_lookup_min, speculation.prompt_lookup_max)
+            else {
+                return Err("ngram speculation requires prompt lookup bounds".to_string());
+            };
+            if !(1..=32).contains(&min) || !(min..=32).contains(&max) {
+                return Err("ngram prompt lookup bounds are invalid".to_string());
+            }
+        }
+        "suffix"
+            if speculation.prompt_lookup_min.is_none()
+                && speculation.prompt_lookup_max.is_none() => {}
+        "suffix" => return Err("suffix speculation forbids prompt lookup bounds".to_string()),
+        _ => return Err("unsupported speculative_decoding.method".to_string()),
+    }
+
+    let sampling = &lock.sampling;
+    if sampling.temperature != 0.0
+        || sampling.top_p != 1.0
+        || sampling.top_k != -1
+        || sampling.n != 1
+        || sampling.presence_penalty != 0.0
+        || sampling.frequency_penalty != 0.0
+        || sampling.seed != execution.seed
+    {
+        return Err("sampling tuple is not deterministic greedy sampling".to_string());
+    }
+    if sampling.seed > i32::MAX as u64 {
+        return Err("sampling.seed is out of range".to_string());
+    }
+
+    let canary = &lock.canary;
+    if canary.prompt.is_empty() || canary.prompt.len() > 16_384 {
+        return Err("canary.prompt length is outside production bounds".to_string());
+    }
+    let actual_prompt_digest = {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(canary.prompt.as_bytes()))
+    };
+    if actual_prompt_digest != canary.prompt_sha256 {
+        return Err("canary.prompt_sha256 does not match the prompt bytes".to_string());
+    }
+    if !(1..=512).contains(&canary.max_tokens)
+        || canary.max_tokens > execution.max_model_len
+        || !(1..=10_000).contains(&canary.warmup_requests)
+        || !(1..=1_000_000).contains(&canary.measured_requests)
+        || !(0.0..=1.0).contains(&canary.minimum_acceptance_rate)
+        || canary.minimum_output_match_rate != 1.0
+    {
+        return Err("canary proof parameters are outside production bounds".to_string());
+    }
+    Ok(())
+}
+
+/// Resolve a production vLLM runtime identity from exact lock bytes. The raw
+/// SHA-256 is included (rather than hashing parsed/canonical JSON) so *every*
+/// lock change moves the verification class. The readable tuple is included as
+/// an audit guard and makes the byte-affecting selections explicit.
+fn vllm_runtime_identity_from_bytes(bytes: &[u8]) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+
+    if bytes.is_empty() {
+        return Err("runtime lock is empty".to_string());
+    }
+    if bytes.len() > VLLM_RUNTIME_LOCK_MAX_BYTES {
+        return Err(format!(
+            "runtime lock is {} bytes; maximum is {VLLM_RUNTIME_LOCK_MAX_BYTES}",
+            bytes.len()
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("runtime lock is not valid JSON: {error}"))?;
+    if contains_identity_placeholder(&value) {
+        return Err("runtime lock contains an unresolved placeholder".to_string());
+    }
+    // Deserialize separately into deny-unknown structs. Besides type checking,
+    // serde reports duplicate known fields instead of accepting last-one-wins.
+    let lock: VllmRuntimeLock = serde_json::from_slice(bytes)
+        .map_err(|error| format!("runtime lock shape is invalid: {error}"))?;
+    validate_vllm_runtime_lock(&lock)?;
+
+    let digest = format!("{:x}", Sha256::digest(bytes));
+    let runtime = &lock.runtime;
+    let model = &lock.model;
+    let execution = &lock.execution;
+    let speculation = &lock.speculative_decoding;
+    Ok(format!(
+        "vllm-lock-sha256={digest};vllm={}@{};image={};platform={};model={}@{}:{};tokenizer={}@{};format={};quant={};dtype={};tp={};pp={};dp={};kv={};max_len={};max_seqs={};max_batch_tokens={};gpu_mem={};seed={};attention={}:{};compile={}:{};spec={}:{}:{:?}:{:?};sampling=greedy:{}",
+        runtime.vllm_version,
+        runtime.vllm_commit,
+        runtime.container_image,
+        runtime.container_platform,
+        model.catalog_id,
+        model.revision,
+        model.artifact_sha256,
+        model.tokenizer_repository,
+        model.tokenizer_revision,
+        execution.weight_format,
+        execution.quantization,
+        execution.dtype,
+        execution.tensor_parallel_size,
+        execution.pipeline_parallel_size,
+        execution.data_parallel_size,
+        execution.resolved_kv_cache_dtype,
+        execution.max_model_len,
+        execution.max_num_seqs,
+        execution.max_num_batched_tokens,
+        execution.gpu_memory_utilization,
+        execution.seed,
+        execution.attention.backend,
+        execution.attention.flash_attn_version,
+        execution.compilation.cudagraph_mode,
+        execution.compilation.mode,
+        speculation.method,
+        speculation.num_speculative_tokens,
+        speculation.prompt_lookup_min,
+        speculation.prompt_lookup_max,
+        lock.sampling.seed,
+    ))
+}
+
+fn vllm_runtime_identity() -> Result<String, String> {
+    let path = std::env::var_os(VLLM_RUNTIME_LOCK_ENV)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("{VLLM_RUNTIME_LOCK_ENV} is unset or empty"))?;
+    let bytes =
+        std::fs::read(&path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    vllm_runtime_identity_from_bytes(&bytes)
+}
+
 /// Non-secret runtime switches that select different native inference math or
 /// scheduling. Raw values are intentionally retained: an invalid/unusual setting
 /// is over-separated rather than accidentally sharing a class with the default.
-fn inference_runtime_tuning_identity(engine: &str) -> String {
+fn inference_runtime_tuning_identity(engine: &str) -> Result<String, String> {
+    if engine == "vllm" {
+        return vllm_runtime_identity();
+    }
     if !matches!(engine, "candle" | "hawking") {
-        return "native-tuning=not-applicable".to_string();
+        return Ok("native-tuning=not-applicable".to_string());
     }
     let value = |name: &str, default: &str| {
         std::env::var(name)
@@ -393,7 +951,7 @@ fn inference_runtime_tuning_identity(engine: &str) -> String {
     } else {
         ("inactive".to_string(), "inactive".to_string())
     };
-    format!(
+    Ok(format!(
         "spec={spec_mode};window={spec_window};order={spec_order};q4k_splitk={};q4k_skinny_m={};dequant_f16={};fast_math={};metal_compute_per_buffer={};metal_command_pool_size={}",
         value("CX_Q4K_SPLITK", "0"),
         value("CX_Q4K_SKINNY_M", "0"),
@@ -401,15 +959,30 @@ fn inference_runtime_tuning_identity(engine: &str) -> String {
         value("CANDLE_METAL_ENABLE_FAST_MATH", "default"),
         value("CANDLE_METAL_COMPUTE_PER_BUFFER", "default"),
         value("CANDLE_METAL_COMMAND_POOL_SIZE", "default"),
-    )
+    ))
 }
 
 pub fn engine_build_hash(engine: &str, agent_version: &str) -> String {
+    let runtime_tuning_identity = match inference_runtime_tuning_identity(engine) {
+        Ok(identity) => identity,
+        Err(error) => {
+            // Empty is the protocol's explicit "unknown build" sentinel: such a
+            // worker receives provisional trust and is never byte-compared or
+            // auto-docked as though it shared a verified vLLM runtime class.
+            tracing::error!(
+                engine,
+                error = %error,
+                runtime_lock_env = VLLM_RUNTIME_LOCK_ENV,
+                "cannot establish inference runtime identity; advertising an unverified build"
+            );
+            return String::new();
+        }
+    };
     engine_build_hash_inner(
         engine,
         agent_version,
         &infer_content_id(),
-        &inference_runtime_tuning_identity(engine),
+        &runtime_tuning_identity,
     )
 }
 
@@ -643,29 +1216,44 @@ pub async fn detect_and_benchmark(
     let build_hash = engine_build_hash(engine, agent_version);
     let cache_key = bench_cache_key(agent_version, &build_hash, &brand, host_mem_gb);
 
-    let (memory_bw_gbps, benchmarks) = match load_bench_cache(&cache_key) {
-        Some(cached) => cached,
-        None => {
-            tracing::info!("resolving advertised memory bandwidth (real NVIDIA VRAM spec on a CUDA host; host streaming microbenchmark on Apple/CPU)...");
-            let memory_bw_gbps = advertised_memory_bw_gbps();
-            tracing::info!(memory_bw_gbps, "resolved advertised memory bandwidth");
+    let (memory_bw_gbps, benchmarks) = if engine != "candle" {
+        // `runners::run_benchmarks` exercises the in-process Candle ModelPool. Its
+        // numbers are useful only for a Candle verification class. Publishing (or
+        // even loading a previously cached) Candle row under vLLM/MLX/Hawking would
+        // make admission and pricing decisions from the wrong execution engine.
+        // Until each external engine has a native collector, advertise no per-model
+        // rows for it; the scheduler can still use the independently measured
+        // hardware/memory facts without receiving mislabeled throughput evidence.
+        tracing::warn!(
+            engine,
+            "no engine-native benchmark collector is wired; suppressing per-model benchmark rows"
+        );
+        (advertised_memory_bw_gbps(), Vec::new())
+    } else {
+        match load_bench_cache(&cache_key) {
+            Some(cached) => cached,
+            None => {
+                tracing::info!("resolving advertised memory bandwidth (real NVIDIA VRAM spec on a CUDA host; host streaming microbenchmark on Apple/CPU)...");
+                let memory_bw_gbps = advertised_memory_bw_gbps();
+                tracing::info!(memory_bw_gbps, "resolved advertised memory bandwidth");
 
-            // REAL per-model benchmarks: load each backend and measure it on a tiny
-            // workload. Models that fail to load (e.g. HF unreachable) are skipped with
-            // a warning inside `run_benchmarks` — never replaced by fabricated numbers.
-            tracing::info!(
+                // REAL per-model benchmarks: load each backend and measure it on a tiny
+                // workload. Models that fail to load (e.g. HF unreachable) are skipped with
+                // a warning inside `run_benchmarks` — never replaced by fabricated numbers.
+                tracing::info!(
                 device = crate::models::device_label(),
                 "running real model benchmarks (embed, llama 1B, llama 7B, whisper, rerank; ~20s each)…"
             );
-            let benchmarks = crate::runners::run_benchmarks(pool, memory_gb).await;
-            for b in &benchmarks {
-                tracing::info!(
-                    model = %b.model_id, eps = b.eps, tps = b.tps, p99_ms = b.p99_ms,
-                    thermal_ok = b.thermal_ok, "benchmark"
-                );
+                let benchmarks = crate::runners::run_benchmarks(pool, memory_gb).await;
+                for b in &benchmarks {
+                    tracing::info!(
+                        model = %b.model_id, eps = b.eps, tps = b.tps, p99_ms = b.p99_ms,
+                        thermal_ok = b.thermal_ok, "benchmark"
+                    );
+                }
+                save_bench_cache(&cache_key, memory_bw_gbps, &benchmarks);
+                (memory_bw_gbps, benchmarks)
             }
-            save_bench_cache(&cache_key, memory_bw_gbps, &benchmarks);
-            (memory_bw_gbps, benchmarks)
         }
     };
     // Production advertisement comes from the SAME generated exact-cell projection
@@ -866,6 +1454,19 @@ pub fn read_thermal_pressure() -> Option<crate::config::ThermalPressure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn production_vllm_lock_bytes() -> Vec<u8> {
+        let mut lock: serde_json::Value = serde_json::from_str(include_str!(
+            "../../docker/vllm/v0.24.0-candidate.template.json"
+        ))
+        .expect("checked-in vLLM lock template must be JSON");
+        lock["status"] = serde_json::json!("production");
+        lock["execution"]["attention"]["backend"] = serde_json::json!("FLASH_ATTN");
+        lock["speculative_decoding"]["method"] = serde_json::json!("ngram");
+        lock["canary"]["expected_completion_sha256"] =
+            serde_json::json!("1111111111111111111111111111111111111111111111111111111111111111");
+        serde_json::to_vec(&lock).expect("test lock serialization")
+    }
 
     #[test]
     fn classify_apple_variants() {
@@ -1083,6 +1684,126 @@ mod tests {
         assert!(
             cid.chars().all(|c| c.is_ascii_hexdigit()),
             "content id must be hex"
+        );
+    }
+
+    #[test]
+    fn vllm_runtime_identity_binds_raw_digest_and_execution_tuple() {
+        use sha2::{Digest, Sha256};
+
+        let bytes = production_vllm_lock_bytes();
+        let identity = vllm_runtime_identity_from_bytes(&bytes)
+            .expect("completed production lock must produce an identity");
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+
+        assert!(identity.starts_with(&format!("vllm-lock-sha256={digest};")));
+        assert!(identity.contains("vllm=0.24.0@ee0da84ab9e04ac7610e28580af62c365e898389"));
+        assert!(identity.contains("quant=q4_k_m;dtype=float16;tp=1;pp=1;dp=1"));
+        assert!(identity.contains("attention=FLASH_ATTN:3"));
+        assert!(identity.contains("spec=ngram:4:Some(2):Some(4)"));
+
+        // The raw lock digest is intentionally formatting-sensitive. Harmless
+        // reformatting may over-separate a class; it can never collapse two
+        // different runtime locks into one verification class.
+        let mut reformatted = bytes.clone();
+        reformatted.push(b'\n');
+        let reformatted_identity = vllm_runtime_identity_from_bytes(&reformatted)
+            .expect("JSON with trailing whitespace remains a valid exact lock");
+        assert_ne!(identity, reformatted_identity);
+    }
+
+    #[test]
+    fn vllm_runtime_identity_moves_when_execution_tuple_moves() {
+        let original = production_vllm_lock_bytes();
+        let mut changed: serde_json::Value =
+            serde_json::from_slice(&original).expect("test lock JSON");
+        changed["execution"]["max_num_seqs"] = serde_json::json!(64);
+        let changed = serde_json::to_vec(&changed).expect("changed lock serialization");
+
+        assert_ne!(
+            vllm_runtime_identity_from_bytes(&original).unwrap(),
+            vllm_runtime_identity_from_bytes(&changed).unwrap(),
+            "a scheduler/execution change must move the verification class"
+        );
+    }
+
+    #[test]
+    fn vllm_runtime_identity_rejects_nonproduction_and_placeholders() {
+        let candidate = include_bytes!("../../docker/vllm/v0.24.0-candidate.template.json");
+        let candidate_error = vllm_runtime_identity_from_bytes(candidate).unwrap_err();
+        assert!(
+            candidate_error.contains("unresolved placeholder"),
+            "checked-in candidate must remain visibly unverified: {candidate_error}"
+        );
+
+        let mut completed: serde_json::Value =
+            serde_json::from_slice(&production_vllm_lock_bytes()).unwrap();
+        completed["status"] = serde_json::json!("candidate");
+        let error =
+            vllm_runtime_identity_from_bytes(&serde_json::to_vec(&completed).unwrap()).unwrap_err();
+        assert!(error.contains("not production"));
+    }
+
+    #[test]
+    fn vllm_runtime_identity_rejects_ambiguous_or_incomplete_locks() {
+        let bytes = production_vllm_lock_bytes();
+        let text = String::from_utf8(bytes).unwrap();
+        let duplicate = text.replacen(
+            "\"status\":\"production\"",
+            "\"status\":\"production\",\"status\":\"production\"",
+            1,
+        );
+        assert!(vllm_runtime_identity_from_bytes(duplicate.as_bytes())
+            .unwrap_err()
+            .contains("duplicate field"));
+
+        let mut incomplete: serde_json::Value = serde_json::from_str(&text).unwrap();
+        incomplete["execution"]
+            .as_object_mut()
+            .unwrap()
+            .remove("dtype");
+        assert!(
+            vllm_runtime_identity_from_bytes(&serde_json::to_vec(&incomplete).unwrap())
+                .unwrap_err()
+                .contains("missing field")
+        );
+    }
+
+    #[test]
+    fn vllm_build_hash_uses_selected_lock_and_fails_closed_without_it() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os(VLLM_RUNTIME_LOCK_ENV);
+        let path = std::env::temp_dir().join(format!(
+            "cx-vllm-runtime-lock-{}-{}.json",
+            std::process::id(),
+            now_unix()
+        ));
+        let original = production_vllm_lock_bytes();
+        std::fs::write(&path, &original).unwrap();
+        std::env::set_var(VLLM_RUNTIME_LOCK_ENV, &path);
+        let original_hash = engine_build_hash("vllm", "0.1.0-test");
+        assert_eq!(original_hash.len(), 16);
+
+        let mut changed: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        changed["execution"]["max_num_seqs"] = serde_json::json!(64);
+        std::fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+        let changed_hash = engine_build_hash("vllm", "0.1.0-test");
+        assert_ne!(
+            original_hash, changed_hash,
+            "the selected runtime lock must participate in the public build hash"
+        );
+
+        std::env::remove_var(VLLM_RUNTIME_LOCK_ENV);
+        let hash = engine_build_hash("vllm", "0.1.0-test");
+
+        if let Some(previous) = previous {
+            std::env::set_var(VLLM_RUNTIME_LOCK_ENV, previous);
+        }
+        let _ = std::fs::remove_file(path);
+        assert!(
+            hash.is_empty(),
+            "missing lock must use the protocol's unknown/unverified build sentinel"
         );
     }
 

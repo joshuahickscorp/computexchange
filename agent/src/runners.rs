@@ -5759,13 +5759,12 @@ impl JobRunner for HawkingRunner {
 /// Environment variable an operator sets to point this seam at a running, PINNED
 /// vLLM OpenAI-compatible server (e.g. `http://127.0.0.1:8000`). Until it is set
 /// the lane is NOT configured and `run` returns an honest typed boundary — never a
-/// fabricated result. When it IS set, the wiring still shells out through the same
-/// locked-down sandbox path the `custom` lane uses (sandbox.rs), so the only egress
-/// is to the pinned server; the determinism contract (docs/VLLM_LANE.md) gates any
-/// throughput claim.
+/// fabricated result. When it IS set, the runner uses a bounded, optionally
+/// authenticated HTTP connection pool to the pinned server; the determinism contract
+/// (docs/VLLM_LANE.md) gates any throughput claim.
 const VLLM_SERVER_ENV: &str = "CX_VLLM_BASE_URL";
 
-/// Soak-mode escape hatch. The wired shell-out body below only ever runs when this
+/// Soak-mode escape hatch. The wired HTTP body below only ever runs when this
 /// is ALSO set to "1" — never from `CX_VLLM_BASE_URL` alone. It exists so
 /// `scripts/runpod-vllm-soak.sh` (the required de-risk spike, docs/VLLM_LANE.md
 /// steps 1-3) can exercise the REAL request/response mapping code end-to-end
@@ -5776,10 +5775,85 @@ const VLLM_SERVER_ENV: &str = "CX_VLLM_BASE_URL";
 /// to remove this flag requirement entirely once steps 1-5 are done.
 const VLLM_SOAK_MODE_ENV: &str = "CX_VLLM_SOAK_MODE";
 
+/// Optional bearer token for an authenticated vLLM OpenAI-compatible server.
+/// Candidate loopback soaks may leave it unset; production launchers can require
+/// it without needing a second runner implementation.
+const VLLM_API_KEY_ENV: &str = "CX_VLLM_API_KEY";
+
+/// Connection establishment and whole-request deadlines for the vLLM sidecar.
+/// Both are finite by default: a dead sidecar must fail the task cleanly rather
+/// than pinning a worker forever. Operators may raise them for unusually large
+/// models, but absurd or zero values fail closed as configuration errors.
+const VLLM_CONNECT_TIMEOUT_ENV: &str = "CX_VLLM_CONNECT_TIMEOUT_SECS";
+const VLLM_REQUEST_TIMEOUT_ENV: &str = "CX_VLLM_REQUEST_TIMEOUT_SECS";
+const DEFAULT_VLLM_CONNECT_TIMEOUT_SECS: u64 = 10;
+const DEFAULT_VLLM_REQUEST_TIMEOUT_SECS: u64 = 600;
+const MAX_VLLM_CONNECT_TIMEOUT_SECS: u64 = 120;
+const MAX_VLLM_REQUEST_TIMEOUT_SECS: u64 = 3_600;
+
+fn parse_vllm_timeout_secs(
+    name: &str,
+    raw: Option<&str>,
+    default: u64,
+    max: u64,
+) -> Result<std::time::Duration, String> {
+    let secs = match raw {
+        Some(raw) => raw
+            .parse::<u64>()
+            .map_err(|_| format!("{name} must be an integer in [1,{max}], got {raw:?}"))?,
+        None => default,
+    };
+    if !(1..=max).contains(&secs) {
+        return Err(format!("{name} must be in [1,{max}], got {secs}"));
+    }
+    Ok(std::time::Duration::from_secs(secs))
+}
+
+fn build_vllm_http_client(
+    connect_timeout: std::time::Duration,
+    request_timeout: std::time::Duration,
+) -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .connect_timeout(connect_timeout)
+        .timeout(request_timeout)
+        .build()
+}
+
+/// One process-wide connection pool for the configured vLLM sidecar. The agent's
+/// environment is startup configuration, so resolving these deadlines on first
+/// use is intentional; subsequent jobs reuse both the client and its keep-alive
+/// connections instead of constructing an unbounded default client per task.
+fn vllm_http_client() -> Result<&'static reqwest::Client, RunError> {
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> =
+        std::sync::OnceLock::new();
+    let client = CLIENT.get_or_init(|| {
+        let connect_raw = std::env::var(VLLM_CONNECT_TIMEOUT_ENV).ok();
+        let request_raw = std::env::var(VLLM_REQUEST_TIMEOUT_ENV).ok();
+        let connect_timeout = parse_vllm_timeout_secs(
+            VLLM_CONNECT_TIMEOUT_ENV,
+            connect_raw.as_deref(),
+            DEFAULT_VLLM_CONNECT_TIMEOUT_SECS,
+            MAX_VLLM_CONNECT_TIMEOUT_SECS,
+        )?;
+        let request_timeout = parse_vllm_timeout_secs(
+            VLLM_REQUEST_TIMEOUT_ENV,
+            request_raw.as_deref(),
+            DEFAULT_VLLM_REQUEST_TIMEOUT_SECS,
+            MAX_VLLM_REQUEST_TIMEOUT_SECS,
+        )?;
+        build_vllm_http_client(connect_timeout, request_timeout)
+            .map_err(|e| format!("building bounded vLLM HTTP client failed: {e}"))
+    });
+    client.as_ref().map_err(|msg| RunError::Inference {
+        backend: "vllm",
+        msg: format!("invalid vLLM HTTP configuration: {msg}"),
+    })
+}
+
 /// Greedy/temp=0 request to a vLLM (or any OpenAI-compatible) `/v1/completions`
 /// endpoint, batched — one call covers every prompt in `prompt`, matching the
 /// pinning contract in docs/VLLM_LANE.md (temperature=0, top_p=1, fixed seed, n=1,
-/// no penalties). `logprobs: Some(0)` asks the server to also return each choice's
+/// no penalties). `logprobs: 0` asks the server to also return each choice's
 /// token list, which is how per-choice token COUNTS are recovered (the OpenAI
 /// completions schema does not otherwise expose a per-choice count when `prompt`
 /// is an array — only an aggregate `usage`).
@@ -5798,7 +5872,7 @@ struct VllmCompletionsRequest<'a> {
 #[derive(Debug, Deserialize)]
 struct VllmLogprobs {
     #[serde(default)]
-    tokens: Vec<String>,
+    tokens: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5812,18 +5886,28 @@ struct VllmChoice {
 #[derive(Debug, Deserialize)]
 struct VllmCompletionsResponse {
     choices: Vec<VllmChoice>,
+    #[serde(default)]
+    usage: Option<VllmUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VllmUsage {
+    #[serde(default)]
+    completion_tokens: Option<usize>,
 }
 
 /// Call the pinned vLLM server's `/v1/completions` with every prompt in one
 /// batched request, returning `(text, token_count)` per prompt IN INPUT ORDER
 /// (choices are re-sorted by their `index`, never assumed to come back in order).
-/// `token_count` is the real per-choice token count when the server returns
-/// `logprobs.tokens` (requested via `logprobs: 0`); otherwise a whitespace-count
-/// fallback — a pure function of the (within-class, byte-identical) response text,
-/// so a fallback never breaks vLLM-vs-vLLM byte-equality between two pinned peers.
+/// `token_count` always comes from server-authored token metadata: per-choice
+/// `logprobs.tokens` (requested via `logprobs: 0`), or aggregate
+/// `usage.completion_tokens` only when there is exactly one choice. A batched
+/// response without per-choice token metadata fails honestly; whitespace is not a
+/// tokenizer and must never silently become billable/benchmark token accounting.
 async fn vllm_completions(
     http: &reqwest::Client,
     base_url: &str,
+    api_key: Option<&str>,
     model: &str,
     prompts: &[String],
     max_tokens: u32,
@@ -5839,15 +5923,21 @@ async fn vllm_completions(
         n: 1,
         logprobs: 0,
     };
-    let resp = http
-        .post(&url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| RunError::Inference {
+    let mut request = http.post(&url).json(&body);
+    if let Some(api_key) = api_key.filter(|key| !key.trim().is_empty()) {
+        request = request.bearer_auth(api_key.trim());
+    }
+    let resp = request.send().await.map_err(|e| {
+        let reason = if e.is_timeout() {
+            format!("request to {url} timed out: {e}")
+        } else {
+            format!("request to {url} failed: {e}")
+        };
+        RunError::Inference {
             backend: "vllm",
-            msg: format!("request to {url} failed: {e}"),
-        })?;
+            msg: reason,
+        }
+    })?;
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
@@ -5870,22 +5960,53 @@ async fn vllm_completions(
             ),
         });
     }
+    let aggregate_completion_tokens = parsed
+        .usage
+        .as_ref()
+        .and_then(|usage| usage.completion_tokens);
     let mut ordered: Vec<Option<(String, usize)>> = (0..prompts.len()).map(|_| None).collect();
     for choice in parsed.choices {
-        let tokens = match &choice.logprobs {
-            Some(lp) if !lp.tokens.is_empty() => lp.tokens.len(),
-            _ => choice.text.split_whitespace().count(),
+        let VllmChoice {
+            index,
+            text,
+            logprobs,
+        } = choice;
+        let tokens = match logprobs.and_then(|lp| lp.tokens) {
+            Some(tokens) => tokens.len(),
+            None if prompts.len() == 1 => {
+                aggregate_completion_tokens.ok_or_else(|| RunError::Inference {
+                    backend: "vllm",
+                    msg: format!(
+                        "{url} returned no authoritative completion-token metadata; expected \
+                         choices[0].logprobs.tokens or usage.completion_tokens"
+                    ),
+                })?
+            }
+            None => {
+                return Err(RunError::Inference {
+                    backend: "vllm",
+                    msg: format!(
+                        "{url} returned no per-choice logprobs.tokens for batched choice index \
+                         {index}; aggregate usage cannot be assigned without guessing"
+                    ),
+                })
+            }
         };
-        let idx = choice.index;
-        if idx >= ordered.len() {
+        if index >= ordered.len() {
             return Err(RunError::Inference {
                 backend: "vllm",
-                msg: format!("{url} returned out-of-range choice index {idx}"),
+                msg: format!("{url} returned out-of-range choice index {index}"),
             });
         }
-        ordered[idx] = Some((choice.text, tokens));
+        if ordered[index].is_some() {
+            return Err(RunError::Inference {
+                backend: "vllm",
+                msg: format!("{url} returned duplicate choice index {index}"),
+            });
+        }
+        ordered[index] = Some((text, tokens));
     }
-    ordered
+    let ordered: Vec<(String, usize)> = ordered
         .into_iter()
         .enumerate()
         .map(|(i, o)| {
@@ -5894,7 +6015,20 @@ async fn vllm_completions(
                 msg: format!("{url} response missing a choice for prompt index {i}"),
             })
         })
-        .collect()
+        .collect::<Result<_, _>>()?;
+    if let Some(reported) = aggregate_completion_tokens {
+        let counted = ordered.iter().map(|(_, tokens)| *tokens).sum::<usize>();
+        if counted != reported {
+            return Err(RunError::Inference {
+                backend: "vllm",
+                msg: format!(
+                    "{url} token metadata disagrees: per-choice total {counted}, \
+                     usage.completion_tokens {reported}"
+                ),
+            });
+        }
+    }
+    Ok(ordered)
 }
 
 /// Rerank prompt: ask for the doc indices (0-based, as printed in the numbered
@@ -6011,7 +6145,7 @@ impl JobRunner for VllmRunner {
             }
         };
 
-        // The verified shell-out path stays closed unless an operator has ALSO set the
+        // The verified HTTP path stays closed unless an operator has ALSO set the
         // explicit soak-mode flag (never from CX_VLLM_BASE_URL alone) — see
         // VLLM_SOAK_MODE_ENV's own doc comment. This is how scripts/runpod-vllm-soak.sh
         // exercises the real request/response mapping below against a real pinned
@@ -6021,7 +6155,7 @@ impl JobRunner for VllmRunner {
             return Err(RunError::NotImplemented {
                 job_type: "vllm",
                 detail: format!(
-                    "vLLM server configured at {VLLM_SERVER_ENV}, but the verified shell-out path is \
+                    "vLLM server configured at {VLLM_SERVER_ENV}, but the verified HTTP path is \
                      gated behind the within-nvidia_* byte-stability soak + hw_class-aware honeypot \
                      seeding (docs/VLLM_LANE.md). Refusing to emit unverified bytes onto the \
                      redundancy market — surface the boundary, never fabricate a result. \
@@ -6032,13 +6166,16 @@ impl JobRunner for VllmRunner {
         }
         tracing::warn!(
             base_url = %base_url,
-            "CX_VLLM_SOAK_MODE=1: shelling out to a pinned vLLM server for the REQUIRED \
+            "CX_VLLM_SOAK_MODE=1: calling a pinned vLLM server for the REQUIRED \
              de-risk soak (docs/VLLM_LANE.md) — this path is UNVERIFIED and must never be \
              used for real dispatch outside the soak harness."
         );
 
         let started = std::time::Instant::now();
-        let http = reqwest::Client::new();
+        let http = vllm_http_client()?;
+        let api_key = std::env::var(VLLM_API_KEY_ENV)
+            .ok()
+            .filter(|key| !key.trim().is_empty());
         let model = short_model_id(&manifest.model.model_ref, "vllm-model");
 
         let (bytes, total_tokens) = match &manifest.job_type {
@@ -6048,8 +6185,15 @@ impl JobRunner for VllmRunner {
                     .iter()
                     .map(|it| it.body().unwrap_or("").to_string())
                     .collect();
-                let results =
-                    vllm_completions(&http, &base_url, &model, &prompts, *max_tokens).await?;
+                let results = vllm_completions(
+                    http,
+                    &base_url,
+                    api_key.as_deref(),
+                    &model,
+                    &prompts,
+                    *max_tokens,
+                )
+                .await?;
                 let mut total = 0usize;
                 let completions: Vec<Completion> = results
                     .into_iter()
@@ -6086,7 +6230,9 @@ impl JobRunner for VllmRunner {
                     .iter()
                     .map(|it| classification_prompt(it.body().unwrap_or(""), labels))
                     .collect();
-                let results = vllm_completions(&http, &base_url, &model, &prompts, 12).await?;
+                let results =
+                    vllm_completions(http, &base_url, api_key.as_deref(), &model, &prompts, 12)
+                        .await?;
                 let mut total = 0usize;
                 let labels_out: Vec<LabelAssignment> = results
                     .into_iter()
@@ -6118,7 +6264,9 @@ impl JobRunner for VllmRunner {
                     .iter()
                     .map(|it| extraction_prompt(it.body().unwrap_or(""), schema))
                     .collect();
-                let results = vllm_completions(&http, &base_url, &model, &prompts, 256).await?;
+                let results =
+                    vllm_completions(http, &base_url, api_key.as_deref(), &model, &prompts, 256)
+                        .await?;
                 let mut total = 0usize;
                 let items_out: Vec<ExtractedItem> = results
                     .into_iter()
@@ -6153,7 +6301,9 @@ impl JobRunner for VllmRunner {
                     .iter()
                     .map(|it| rerank_prompt(it.query.as_deref().unwrap_or(""), &it.docs))
                     .collect();
-                let results = vllm_completions(&http, &base_url, &model, &prompts, 64).await?;
+                let results =
+                    vllm_completions(http, &base_url, api_key.as_deref(), &model, &prompts, 64)
+                        .await?;
                 let top_k = *top_k as usize;
                 let mut total = 0usize;
                 let rankings: Vec<Ranking> = results
@@ -10186,22 +10336,42 @@ mod tests {
     /// first, those route to it), declines embed (MiniLM stays on Candle), yields a
     /// giant cluster model to ClusterRunner, and its `run` surfaces the "not configured"
     /// boundary rather than fabricating a forward pass — even though the wired path is a
-    /// pinned-server shell-out, it stays gated behind the determinism soak.
-    /// Serializes every test that touches `CX_VLLM_BASE_URL`/`CX_VLLM_SOAK_MODE` —
-    /// both are process-wide env vars, so concurrent `cargo test` threads must not
-    /// interleave setting/reading/clearing them.
+    /// bounded pinned-server HTTP request, it stays gated behind the determinism soak.
+    /// Serializes every test that touches vLLM's process-wide environment, so
+    /// concurrent `cargo test` threads cannot interleave configuration changes.
     fn vllm_env_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 
-    /// RAII guard clearing both vLLM env vars on drop (including on an assertion
+    /// RAII guard clearing every vLLM env var on drop (including on an assertion
     /// panic), so one failing test can never leak env state into the next.
     struct VllmEnvGuard;
     impl Drop for VllmEnvGuard {
         fn drop(&mut self) {
             std::env::remove_var(VLLM_SERVER_ENV);
             std::env::remove_var(VLLM_SOAK_MODE_ENV);
+            std::env::remove_var(VLLM_API_KEY_ENV);
+            std::env::remove_var(VLLM_CONNECT_TIMEOUT_ENV);
+            std::env::remove_var(VLLM_REQUEST_TIMEOUT_ENV);
+        }
+    }
+
+    #[test]
+    fn vllm_timeout_configuration_is_finite_bounded_and_fail_closed() {
+        assert_eq!(
+            parse_vllm_timeout_secs("connect", None, 10, 120).unwrap(),
+            std::time::Duration::from_secs(10)
+        );
+        assert_eq!(
+            parse_vllm_timeout_secs("request", Some("45"), 600, 3_600).unwrap(),
+            std::time::Duration::from_secs(45)
+        );
+        for bad in [Some("0"), Some("3601"), Some("not-a-number")] {
+            assert!(
+                parse_vllm_timeout_secs("request", bad, 600, 3_600).is_err(),
+                "invalid timeout {bad:?} must fail closed"
+            );
         }
     }
 
@@ -10251,9 +10421,12 @@ mod tests {
     /// `127.0.0.1:0`: accepts exactly one connection, reads a request until it has
     /// the full `Content-Length` body, and replies with `response_body` as a JSON
     /// `200 OK`. Returns the `http://127.0.0.1:PORT` base URL to point the runner at.
-    async fn spawn_mock_vllm_server(response_body: String) -> String {
+    async fn spawn_mock_vllm_server(
+        response_body: String,
+    ) -> (String, tokio::sync::oneshot::Receiver<Vec<u8>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let (request_tx, request_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             let (mut socket, _) = listener.accept().await.unwrap();
@@ -10281,6 +10454,9 @@ mod tests {
                 let n = socket.read(&mut buf[total..]).await.unwrap();
                 total += n;
             }
+            request_tx
+                .send(buf[..header_end + content_length].to_vec())
+                .ok();
             let resp = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 response_body.len(),
@@ -10288,6 +10464,19 @@ mod tests {
             );
             socket.write_all(resp.as_bytes()).await.unwrap();
             socket.shutdown().await.ok();
+        });
+        (format!("http://{addr}"), request_rx)
+    }
+
+    /// Accept a request but never answer it within the test client's deadline.
+    /// This is a real socket-level proof that the configured whole-request timeout
+    /// interrupts a stuck vLLM request instead of leaving the worker hung.
+    async fn spawn_stalling_vllm_server() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         });
         format!("http://{addr}")
     }
@@ -10311,12 +10500,14 @@ mod tests {
                 "choices": [
                     {"index": 1, "text": " world", "logprobs": {"tokens": ["world"]}},
                     {"index": 0, "text": "hello there", "logprobs": {"tokens": ["hello", "there"]}}
-                ]
+                ],
+                "usage": {"completion_tokens": 3}
             })
             .to_string();
-            let base_url = spawn_mock_vllm_server(response).await;
+            let (base_url, request_rx) = spawn_mock_vllm_server(response).await;
             std::env::set_var(VLLM_SERVER_ENV, &base_url);
             std::env::set_var(VLLM_SOAK_MODE_ENV, "1");
+            std::env::set_var(VLLM_API_KEY_ENV, "test-vllm-key");
 
             let manifest = test_manifest(JobType::BatchInfer {
                 max_tokens: 16,
@@ -10336,6 +10527,114 @@ mod tests {
             assert_eq!(v["completions"][1]["text"], " world");
             assert_eq!(v["completions"][1]["tokens"], 1);
             assert_eq!(out.tokens_used, 3);
+
+            let request = request_rx.await.expect("mock server captured request");
+            let header_end = request
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .map(|pos| pos + 4)
+                .unwrap();
+            let headers = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
+            assert!(
+                headers.contains("authorization: bearer test-vllm-key\r\n"),
+                "configured API key must be sent as a Bearer credential"
+            );
+            let sent: serde_json::Value =
+                serde_json::from_slice(&request[header_end..]).expect("request JSON");
+            assert_eq!(sent["prompt"], serde_json::json!(["hi", "yo"]));
+            assert_eq!(sent["max_tokens"], 16);
+            assert_eq!(sent["temperature"], 0.0);
+            assert_eq!(sent["top_p"], 1.0);
+            assert_eq!(sent["seed"], 0);
+            assert_eq!(sent["n"], 1);
+            assert_eq!(sent["logprobs"], 0);
+        });
+    }
+
+    #[test]
+    fn vllm_completions_times_out_a_stalled_server() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let base_url = spawn_stalling_vllm_server().await;
+            let client = build_vllm_http_client(
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_millis(50),
+            )
+            .unwrap();
+            let prompts = vec!["hello".to_string()];
+            let started = std::time::Instant::now();
+            let err = vllm_completions(&client, &base_url, None, "test-model", &prompts, 4)
+                .await
+                .expect_err("stalled response must hit the request deadline");
+            assert!(started.elapsed() < std::time::Duration::from_secs(2));
+            match err {
+                RunError::Inference { backend, msg } => {
+                    assert_eq!(backend, "vllm");
+                    assert!(msg.to_ascii_lowercase().contains("timed out"), "{msg}");
+                }
+                other => panic!("expected vllm inference timeout, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn vllm_token_accounting_never_guesses_from_whitespace() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let client = build_vllm_http_client(
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(1),
+            )
+            .unwrap();
+
+            // For one choice, the server's aggregate usage is unambiguous and is
+            // therefore an honest fallback when logprobs are absent.
+            let single_response = serde_json::json!({
+                "choices": [{"index": 0, "text": "one whitespace-heavy completion"}],
+                "usage": {"completion_tokens": 7}
+            })
+            .to_string();
+            let (single_url, _) = spawn_mock_vllm_server(single_response).await;
+            let one = vllm_completions(
+                &client,
+                &single_url,
+                None,
+                "test-model",
+                &["prompt".to_string()],
+                8,
+            )
+            .await
+            .unwrap();
+            assert_eq!(one[0].1, 7, "server usage, not whitespace count");
+
+            // Aggregate usage cannot be apportioned across a batch. Refuse the
+            // response rather than inventing per-choice counts from decoded text.
+            let batch_response = serde_json::json!({
+                "choices": [
+                    {"index": 0, "text": "one word"},
+                    {"index": 1, "text": "several decoded words here"}
+                ],
+                "usage": {"completion_tokens": 9}
+            })
+            .to_string();
+            let (batch_url, _) = spawn_mock_vllm_server(batch_response).await;
+            let err = vllm_completions(
+                &client,
+                &batch_url,
+                None,
+                "test-model",
+                &["first".to_string(), "second".to_string()],
+                8,
+            )
+            .await
+            .expect_err("batched response without per-choice tokens must fail");
+            match err {
+                RunError::Inference { backend, msg } => {
+                    assert_eq!(backend, "vllm");
+                    assert!(msg.contains("cannot be assigned without guessing"), "{msg}");
+                }
+                other => panic!("expected vllm token-accounting error, got {other:?}"),
+            }
         });
     }
 
