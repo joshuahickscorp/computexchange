@@ -35,20 +35,16 @@ def build_perforated_panel(field_w_mm=173.0, field_h_mm=50.0, thickness_mm=3.0,
         while x <= W / 2.0 - margin:
             centers.append((cx + x, cz + z)); x += p
         z += dz; row += 1
-    # build ONE joined cutter mesh of cylinders (axis along Y), then a single boolean difference
+    # build ONE joined cutter mesh: accumulate all cylinders DIRECTLY in one bmesh (no per-cutter
+    # to_mesh round-trips, which previously dropped most cutters). Cone axis Z -> rotate to Y.
+    from mathutils import Matrix
     bm = bmesh.new()
+    rotX = Matrix.Rotation(math.radians(90), 3, 'X')
     for (hx, hz) in centers:
-        cutter = bmesh.new()
-        bmesh.ops.create_cone(cutter, cap_ends=True, segments=seg, radius1=r, radius2=r, depth=T * 2.0)
-        # cone default axis is Z; rotate to Y and move to (hx, cy, hz)
-        rot = Vector((math.radians(90), 0, 0))
-        bmesh.ops.rotate(cutter, verts=cutter.verts,
-                         matrix=__import__("mathutils").Matrix.Rotation(math.radians(90), 3, 'X'))
-        bmesh.ops.translate(cutter, verts=cutter.verts, vec=Vector((hx, cy, hz)))
-        me = bpy.data.meshes.new("c"); cutter.to_mesh(me); cutter.free()
-        for poly in me.polygons: pass
-        tmp = bmesh.new(); tmp.from_mesh(me); tmp.to_mesh(me)
-        bm.from_mesh(me); bpy.data.meshes.remove(me)
+        ret = bmesh.ops.create_cone(bm, cap_ends=True, segments=seg, radius1=r, radius2=r, depth=T * 2.0)
+        vnew = ret["verts"]
+        bmesh.ops.rotate(bm, verts=vnew, matrix=rotX)                       # Z-axis cylinder -> Y-axis
+        bmesh.ops.translate(bm, verts=vnew, vec=Vector((hx, cy, hz)))       # to hole center
     cutmesh = bpy.data.meshes.new(name + "-cutters"); bm.to_mesh(cutmesh); bm.free()
     cutobj = bpy.data.objects.new(name + "-cutters", cutmesh); bpy.context.collection.objects.link(cutobj)
     mod = panel.modifiers.new("perf", "BOOLEAN"); mod.operation = "DIFFERENCE"; mod.object = cutobj
@@ -56,7 +52,26 @@ def build_perforated_panel(field_w_mm=173.0, field_h_mm=50.0, thickness_mm=3.0,
     bpy.context.view_layer.objects.active = panel
     bpy.ops.object.modifier_apply(modifier="perf")
     bpy.data.objects.remove(cutobj, do_unlink=True)
-    return panel, len(centers)
+    return panel, centers
+
+
+def count_through_holes_raycast(panel, centers, thickness_mm=3.0):
+    """Ground-truth through-hole count: cast a ray along +Y at each hole center through the panel.
+    A clean THROUGH-hole => the axial ray hits nothing (passes through empty). A blind pit or solid
+    spot => the ray hits. Returns (through_count, blind_or_solid_count)."""
+    import bpy
+    from mathutils import Vector
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    mw = panel.matrix_world; mwi = mw.inverted()
+    t = thickness_mm / 1000.0
+    through = 0; hit = 0
+    for (hx, hz) in centers:
+        origin = mwi @ Vector((hx, -(t + 0.001), hz))          # just behind the panel, local space
+        direction = (mwi.to_3x3() @ Vector((0.0, 1.0, 0.0))).normalized()
+        res, loc, nrm, idx = panel.ray_cast(origin, direction, distance=2 * t + 0.002)
+        if res: hit += 1
+        else: through += 1
+    return through, hit
 
 
 def count_open_holes(panel):

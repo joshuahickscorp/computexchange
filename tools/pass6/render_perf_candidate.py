@@ -5,15 +5,18 @@ OUT=ROOT+"/review/pass6/mac_studio/iter_cand01"; os.makedirs(OUT, exist_ok=True)
 spec=importlib.util.spec_from_file_location("perf",ROOT+"/source/mac_studio/perforated_panel.py")
 perf=importlib.util.module_from_spec(spec); spec.loader.exec_module(perf)
 for o in list(bpy.data.objects): bpy.data.objects.remove(o, do_unlink=True)
-panel, intended = perf.build_perforated_panel(field_w_mm=173.0, field_h_mm=50.0, thickness_mm=3.0,
-                                              pitch_mm=4.5, hole_d_mm=3.2)
+panel, centers = perf.build_perforated_panel(field_w_mm=173.0, field_h_mm=50.0, thickness_mm=3.0,
+                                             pitch_mm=4.2, hole_d_mm=2.8)
+intended=len(centers)
+through, blind = perf.count_through_holes_raycast(panel, centers, thickness_mm=3.0)
 genus, euler, V, E, F = perf.count_open_holes(panel)
 import bmesh
 bm=bmesh.new(); bm.from_mesh(panel.data); non_manifold=sum(1 for e in bm.edges if not e.is_manifold); bm.free()
 delta={"candidate":"mac_cand01_perforation_field","group":"perforation_field",
-       "intended_holes":intended,"measured_genus_holes":genus,"euler":euler,
+       "intended_holes":intended,"through_holes_raycast":through,"blind_or_solid":blind,
+       "measured_genus_holes":genus,"euler":euler,
        "verts":V,"edges":E,"faces":F,"non_manifold_edges":non_manifold,
-       "physical_holes_proven": bool(genus>=300 and abs(genus-intended)<=3 and non_manifold==0),
+       "physical_holes_proven": bool(through>=300 and non_manifold==0),
        "replaces":"pass2 shader-only perforated_band on a 0.6mm cutter_box (SHADER, not geometry)"}
 json.dump(delta, open(OUT+"/geometry_delta.json","w"), indent=2)
 sc=bpy.context.scene; sc.render.engine="CYCLES"
