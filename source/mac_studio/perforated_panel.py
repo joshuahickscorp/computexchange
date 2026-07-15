@@ -52,6 +52,10 @@ def build_perforated_panel(field_w_mm=173.0, field_h_mm=50.0, thickness_mm=3.0,
     bpy.context.view_layer.objects.active = panel
     bpy.ops.object.modifier_apply(modifier="perf")
     bpy.data.objects.remove(cutobj, do_unlink=True)
+    # recompute normals (boolean output can leave inverted faces -> renders black); make consistent + outward
+    bm2 = bmesh.new(); bm2.from_mesh(panel.data)
+    bmesh.ops.recalc_face_normals(bm2, faces=bm2.faces)
+    bm2.to_mesh(panel.data); bm2.free(); panel.data.update()
     return panel, centers
 
 
