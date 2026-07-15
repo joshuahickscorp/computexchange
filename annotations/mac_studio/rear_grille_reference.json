@@ -1,0 +1,60 @@
+{
+  "reference": ".claude/worktrees/model-refinement/render/ref/mac-studio/apple_back.jpg",
+  "image_size_px": [
+    3840,
+    2160
+  ],
+  "mm_per_px": 0.08058,
+  "body_bbox_px": [
+    700,
+    497,
+    3139,
+    1688
+  ],
+  "body_size_px": [
+    2440,
+    1192
+  ],
+  "body_size_mm": [
+    196.62,
+    96.05
+  ],
+  "grille_bbox_px": [
+    856,
+    557,
+    2983,
+    1158
+  ],
+  "grille_size_mm": [
+    171.47,
+    48.51
+  ],
+  "grille_norm_bounds": {
+    "x0": 0.0639,
+    "x1": 0.9357,
+    "y0": 0.0503,
+    "y1": 0.5545,
+    "w": 0.8721,
+    "h": 0.505
+  },
+  "margins_mm": {
+    "left": 12.57,
+    "right": 12.57,
+    "top": 4.83,
+    "bottom": 42.71
+  },
+  "pitch_px": {
+    "x": 24,
+    "y": 2
+  },
+  "pitch_mm": {
+    "x": 1.934,
+    "y": 0.161
+  },
+  "hole_diameter_mm": 0.918,
+  "open_area_fraction": 0.4279,
+  "holes_detected_in_field": 3867,
+  "rows_est": 301,
+  "cols_est": 89,
+  "method": "texture(high-freq) field detection; pitch via 2D autocorrelation first peak; hole diameter from dark-blob median area; open area = dark fraction inside field"
+}

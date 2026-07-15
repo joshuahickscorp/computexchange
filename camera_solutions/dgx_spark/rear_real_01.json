@@ -69,5 +69,8 @@
     "max": 9.826
   },
   "no_post_render_nudge": true,
-  "method": "anchored ortho similarity on 4 body-face corners (fit); held out on 4 independent body-edge midpoints (camera validation); residuals in reference pixels. NOTE: ~5-7px reflects automated silhouette-bbox landmark precision on a rounded-corner low-contrast press photo, above the 1.5/2.5px target (source-quality limited, honestly reported, not inflated)."
+  "method": "anchored ortho similarity on 4 body-face corners (fit); held out on 4 independent body-edge midpoints (camera validation); residuals in reference pixels. NOTE: ~5-7px reflects automated silhouette-bbox landmark precision on a rounded-corner low-contrast press photo, above the 1.5/2.5px target (source-quality limited, honestly reported, not inflated).",
+  "classification": "body_bbox_registration",
+  "NOT_a_semantic_camera_solve": true,
+  "reclassification_reason": "Fit = body bbox corners; holdout midpoints are AFFINE-DEPENDENT on those same fitted corners -> not independent semantic holdouts. Real gate needs >=6 semantic INTERNAL features, fit/holdout from DIFFERENT groups."
 }
