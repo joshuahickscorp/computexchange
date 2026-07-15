@@ -16,20 +16,16 @@ out, patch_mm, depth_mm, pitch_mm, jitter, seed = (
     sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4]),
     float(sys.argv[5]), int(sys.argv[6]))
 rng = np.random.default_rng(seed)
-# jittered grid seed points (mm), padded one pitch beyond the patch so edges near the border are real
+# RANDOM (Poisson-like) seed points -> irregular polyhedral Voronoi cells = ORGANIC open-cell foam
+# (a jittered grid gives near-cubic cells that read as woven wire mesh, not foam). Density set by
+# pitch: expected nearest-neighbour spacing ~ pitch. `jitter` now perturbs an initial grid toward
+# full randomness (jitter>=0.5 => effectively Poisson); callers pass high jitter for organic cells.
 pad = pitch_mm
-nx = int((patch_mm + 2*pad)/pitch_mm) + 1
-nz = int((depth_mm + 2*pad)/pitch_mm) + 1
-xs = np.linspace(-pad, patch_mm+pad, nx)
-zs = np.linspace(-pad, depth_mm+pad, nz)
-pts = []
-for x in xs:
-    for y in xs:
-        for z in zs:
-            pts.append((x + rng.uniform(-jitter,jitter)*pitch_mm,
-                        y + rng.uniform(-jitter,jitter)*pitch_mm,
-                        z + rng.uniform(-jitter,jitter)*pitch_mm))
-pts = np.array(pts)
+vol = (patch_mm + 2*pad) * (patch_mm + 2*pad) * (depth_mm + 2*pad)
+n_pts = max(64, int(vol / (pitch_mm**3)))
+pts = rng.uniform([-pad, -pad, -pad],
+                  [patch_mm+pad, patch_mm+pad, depth_mm+pad],
+                  size=(n_pts, 3))
 vor = Voronoi(pts)
 V = vor.vertices
 # collect unique edges from ridge polygons; drop infinite (-1) and vertices far outside the patch
