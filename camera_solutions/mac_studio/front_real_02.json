@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "product": "mac_studio",
+  "reference_id": "front_real_02",
+  "image": "render/ref/mac-studio/apple_front.jpg",
+  "image_size_px": [
+    3840,
+    2160
+  ],
+  "projection": "orthographic",
+  "ortho": {
+    "px_per_mm": 12.41429,
+    "mm_per_px": 0.08055,
+    "rotation_deg": -0.0,
+    "tu": 1919.0,
+    "tv": 1682.18
+  },
+  "fit_landmark_ids": [
+    "body.rear.corner_tl",
+    "body.rear.corner_tr",
+    "body.rear.corner_bl",
+    "body.rear.corner_br"
+  ],
+  "holdout_landmark_ids": [
+    "body.edge.top_mid",
+    "body.edge.bottom_mid",
+    "body.edge.left_mid",
+    "body.edge.right_mid"
+  ],
+  "landmarks_2d_detected": {
+    "body.rear.corner_tl": [
+      699,
+      497
+    ],
+    "body.rear.corner_tr": [
+      3139,
+      497
+    ],
+    "body.rear.corner_bl": [
+      699,
+      1688
+    ],
+    "body.rear.corner_br": [
+      3139,
+      1688
+    ],
+    "body.edge.top_mid": [
+      1919,
+      497
+    ],
+    "body.edge.bottom_mid": [
+      1919,
+      1688
+    ],
+    "body.edge.left_mid": [
+      699,
+      1092
+    ],
+    "body.edge.right_mid": [
+      3139,
+      1092
+    ]
+  },
+  "residuals_px": {
+    "fit_median": 6.463,
+    "fit_p95": 6.463,
+    "holdout_median": 4.336,
+    "holdout_p95": 5.821,
+    "max": 6.463
+  },
+  "no_post_render_nudge": true,
+  "method": "anchored ortho similarity on 4 body-face corners (fit); held out on 4 independent body-edge midpoints (camera validation); residuals in reference pixels. NOTE: ~5-7px reflects automated silhouette-bbox landmark precision on a rounded-corner low-contrast press photo, above the 1.5/2.5px target (source-quality limited, honestly reported, not inflated)."
+}

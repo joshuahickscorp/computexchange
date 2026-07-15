@@ -16,6 +16,8 @@ import sys, json
 import numpy as np, cv2
 
 ref_path, out_json, out_overlay = sys.argv[1], sys.argv[2], sys.argv[3]
+REFERENCE_ID = sys.argv[4] if len(sys.argv) > 4 else "rear_real_01"
+IMAGE_REL = sys.argv[5] if len(sys.argv) > 5 else "render/ref/mac-studio/apple_back.jpg"
 
 # ---- 3D landmarks (mm), from the model builder (MCP-measured), face frame X=width Z=height ----
 # FIT: four body-face corners (rear face 197 wide, z 7.5..95). HOLDOUT: exhaust-vent field corners
@@ -75,8 +77,8 @@ def resid(ids):
 fit_r = resid(fit_ids); hold_r = resid(hold_ids)
 mm_per_px = 1.0/s  # s is px per mm
 solution = {
-  "schema_version": 1, "product":"mac_studio", "reference_id":"rear_real_01",
-  "image":"render/ref/mac-studio/apple_back.jpg", "image_size_px":[W,H],
+  "schema_version": 1, "product":"mac_studio", "reference_id":REFERENCE_ID,
+  "image":IMAGE_REL, "image_size_px":[W,H],
   "projection":"orthographic",
   "ortho":{"px_per_mm":round(s,5),"mm_per_px":round(mm_per_px,5),"rotation_deg":round(theta,4),
            "tu":round(tu,2),"tv":round(tv,2)},
