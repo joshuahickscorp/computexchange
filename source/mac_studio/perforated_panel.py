@@ -59,6 +59,47 @@ def build_perforated_panel(field_w_mm=173.0, field_h_mm=50.0, thickness_mm=3.0,
     return panel, centers
 
 
+def _hex_centers(cx, cz, W, Hh, p, margin):
+    centers = []; row = 0; z = -Hh/2.0 + margin
+    dz = p*0.866
+    while z <= Hh/2.0 - margin:
+        xoff = (p/2.0) if (row % 2) else 0.0
+        x = -W/2.0 + margin + xoff
+        while x <= W/2.0 - margin:
+            centers.append((cx + x, cz + z)); x += p
+        z += dz; row += 1
+    return centers
+
+
+def perforate_object(target, field_w_mm, field_h_mm, thickness_mm, pitch_mm, hole_d_mm,
+                     center, seg=12):
+    """Boolean-cut a hex through-hole field DIRECTLY into an existing mesh object `target`
+    (e.g. the baseline vent panel, already correctly positioned). Returns the hole count.
+    Cutter cylinders run along Y (through the rear face). Recomputes normals after."""
+    from mathutils import Matrix
+    W, Hh, T = _mm(field_w_mm), _mm(field_h_mm), _mm(thickness_mm)
+    p, r = _mm(pitch_mm), _mm(hole_d_mm)/2.0
+    cx, cy, cz = center
+    centers = _hex_centers(cx, cz, W, Hh, p, p)
+    bm = bmesh.new(); rotX = Matrix.Rotation(math.radians(90), 3, 'X')
+    for (hx, hz) in centers:
+        ret = bmesh.ops.create_cone(bm, cap_ends=True, segments=seg, radius1=r, radius2=r, depth=T*3.0)
+        vnew = ret["verts"]
+        bmesh.ops.rotate(bm, verts=vnew, matrix=rotX)
+        bmesh.ops.translate(bm, verts=vnew, vec=Vector((hx, cy, hz)))
+    cutmesh = bpy.data.meshes.new("cut"); bm.to_mesh(cutmesh); bm.free()
+    cutobj = bpy.data.objects.new("cut", cutmesh); bpy.context.collection.objects.link(cutobj)
+    mod = target.modifiers.new("perf", "BOOLEAN"); mod.operation = "DIFFERENCE"
+    mod.object = cutobj; mod.solver = "EXACT"
+    bpy.context.view_layer.objects.active = target
+    bpy.ops.object.modifier_apply(modifier="perf")
+    bpy.data.objects.remove(cutobj, do_unlink=True)
+    # NOTE: do NOT recalc_face_normals here — the boolean preserves the target's original (correct,
+    # camera-facing) face normals; a global recalc can flip the visible face to a backface (renders dark).
+    target.data.update()
+    return len(centers)
+
+
 def count_through_holes_raycast(panel, centers, thickness_mm=3.0):
     """Ground-truth through-hole count: cast a ray along +Y at each hole center through the panel.
     A clean THROUGH-hole => the axial ray hits nothing (passes through empty). A blind pit or solid

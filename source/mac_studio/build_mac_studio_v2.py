@@ -26,32 +26,27 @@ def build_mac_studio_v2(builder_path, perf_path, yaw_deg=0.0,
     for o in list(bpy.data.objects): bpy.data.objects.remove(o, do_unlink=True)
     g["build_mac_studio"](0.0, yaw_deg=yaw_deg)
     sys.argv = argv_bak
-    # 2) locate + REMOVE the pass-2 shader vent panel ("mac-vent-mesh") — it was a material illusion
-    vent = bpy.data.objects.get("mac-vent-mesh")
-    vent_center = None
-    removed = False
-    if vent is not None:
-        from mathutils import Vector
-        mn = Vector((1e9,)*3); mx = Vector((-1e9,)*3)
-        for c in vent.bound_box:
-            w = vent.matrix_world @ Vector(c)
-            for i in range(3): mn[i]=min(mn[i],w[i]); mx[i]=max(mx[i],w[i])
-        vent_center = ((mn.x+mx.x)/2, (mn.y+mx.y)/2, (mn.z+mx.z)/2)
-        bpy.data.objects.remove(vent, do_unlink=True); removed = True
-    # 3) build the REAL perforated panel at the vent location (rear face at +Y for yaw=0)
+    # 2) CUT real hex through-holes directly INTO the baseline vent panel (it is already correctly
+    #    positioned + visible in the baseline; no remove/replace -> no dark-void recess bug).
+    from mathutils import Vector
     perf = _load_module(perf_path, "perf")
-    # default vent center in model space: x=0, rear face y≈+D/2, z≈0.056 (from MCP measure)
-    cx, cy, cz = (0.0, 0.0999, 0.056) if vent_center is None else (0.0, vent_center[1], vent_center[2])
-    panel, centers = perf.build_perforated_panel(field_w_mm=173.0, field_h_mm=50.0, thickness_mm=3.0,
-                                                 pitch_mm=pitch_mm, hole_d_mm=hole_d_mm,
-                                                 center=(cx, cy, cz), name="mac-rear-perf-v2")
-    through, blind = perf.count_through_holes_raycast(panel, centers, thickness_mm=3.0)
-    # material: brushed aluminium (matches shell), so the panel reads as integrated, not a black plate
+    vent = bpy.data.objects.get("mac-vent-mesh")
+    if vent is None:
+        return {"error": "mac-vent-mesh not found in baseline"}
+    mn = Vector((1e9,)*3); mx = Vector((-1e9,)*3)
+    for c in vent.bound_box:
+        w = vent.matrix_world @ Vector(c)
+        for i in range(3): mn[i]=min(mn[i],w[i]); mx[i]=max(mx[i],w[i])
+    vw = (mx.x-mn.x)*1000.0; vh = (mx.z-mn.z)*1000.0
+    vx = (mn.x+mx.x)/2.0; vy = (mn.y+mx.y)/2.0; vz = (mn.z+mx.z)/2.0
+    n_holes = perf.perforate_object(vent, field_w_mm=vw*0.96, field_h_mm=vh*0.9, thickness_mm=1.0,
+                                    pitch_mm=pitch_mm, hole_d_mm=hole_d_mm, center=(vx, vy, vz))
+    # aluminium so the perforated grille reads as metal (replaces the shader illusion material)
     mat = bpy.data.materials.new("mac-rear-perf-alu"); mat.use_nodes = True
     pb = mat.node_tree.nodes["Principled BSDF"]; pb.inputs[0].default_value = (0.62,0.62,0.64,1)
     try: pb.inputs["Roughness"].default_value = 0.42; pb.inputs["Metallic"].default_value = 0.85
     except Exception: pass
-    panel.data.materials.append(mat)
-    return {"baseline_vent_removed": removed, "perf_intended": len(centers),
-            "perf_through_holes": through, "perf_blind": blind, "panel_name": panel.name,
-            "vent_center_m": [round(v,4) for v in (cx,cy,cz)]}
+    vent.data.materials.clear(); vent.data.materials.append(mat)
+    return {"baseline_vent_perforated": True, "perf_through_holes": n_holes,
+            "vent_extent_mm": [round(vw,1), round(vh,1)], "panel_name": vent.name,
+            "vent_center_m": [round(vx,4), round(vy,4), round(vz,4)]}

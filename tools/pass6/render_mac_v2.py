@@ -45,4 +45,4 @@ o=nt.nodes.new("ShaderNodeOutputMaterial"); e=nt.nodes.new("ShaderNodeEmission")
 nt.links.new(e.outputs[0],o.inputs[0]); vl.material_override=m
 rt(OUT+"/v2_rear_silhouette.png"); vl.material_override=None
 json.dump(info, open(OUT+"/v2_build_info.json","w"), indent=2)
-print("MAC V2 RENDER DONE through_holes=%d vent_removed=%s"%(info["perf_through_holes"],info["baseline_vent_removed"]))
+print("MAC V2 RENDER DONE through_holes=%d perforated=%s"%(info["perf_through_holes"],info.get("baseline_vent_perforated")))
