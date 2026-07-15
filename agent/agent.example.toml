@@ -11,7 +11,7 @@ worker_token = "REPLACE_WITH_WORKER_TOKEN"
 supplier_id = "00000000-0000-0000-0000-000000000000"
 
 # Resource controls (the supplier keeps their machine usable while earning).
-max_cpu_pct = 90.0          # cap CPU the agent may use
+max_cpu_pct = 90.0          # size host-local CPU admission capacity (not an OS thread throttle)
 power_only = false          # true = refuse to run on battery
 min_payout_usd_per_hr = 0.0 # decline work paying less than this
 data_dir = "/tmp/cx-agent"  # scratch dir (job data is wiped post-commit)
@@ -24,6 +24,13 @@ memory_headroom_gb = 8.0    # GB reserved for YOUR use; lower it on a dedicated 
 max_memory_pct = 85.0       # pause new work once physical memory use hits this %
 #   omit either field to take the conservative built-in default (8.0 GB / 85%).
 #   set BOTH to 0 to turn the memory governor OFF (dedicated box, run flat out).
+
+# Adaptive task admission is automatic. CX derives a CPU budget from the
+# machine's logical CPUs and max_cpu_pct, derives an allocatable RAM/VRAM pool
+# after memory_headroom_gb, then triages each task as parallel, stacked, or
+# exclusive. Set max_concurrent_tasks only to cap the local queued+running task
+# count; omit it (or let the Mac app write 0) for the greedy derived queue depth.
+# max_concurrent_tasks = 12
 
 # Intra-task checkpointing: at most every N seconds, PUT the rows completed so
 # far (marked "partial": true) to the control plane's presigned ".partial" URL —

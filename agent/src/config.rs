@@ -512,6 +512,7 @@ impl AgentConfig {
     /// roughly one slot per 8 GiB of RAM, clamped to `[2, 4]` (the warm models
     /// are the memory cost, and heavy compute serializes behind their mutexes, so
     /// a wide pool buys nothing but RAM pressure). Always at least 1.
+    #[cfg(test)]
     pub fn concurrency(&self, memory_gb: f32) -> usize {
         match self.max_concurrent_tasks {
             Some(n) => n.max(1),

@@ -148,18 +148,17 @@ pub struct AppliedPrefs {
 }
 
 impl AppliedPrefs {
-    /// Snapshot the effective operator prefs from the loaded config. `memory_gb` is
-    /// the box's advertised memory, used to resolve the concurrency permit count the
-    /// agent actually runs with (so an unset `max_concurrent_tasks` shows its derived
-    /// value, not a placeholder).
-    pub fn from_config(cfg: &AgentConfig, memory_gb: f32) -> Self {
+    /// Snapshot the effective operator prefs from the loaded config. The caller
+    /// passes the already-resolved adaptive queue ceiling so the app displays the
+    /// exact value the runtime uses, not the legacy static-memory derivation.
+    pub fn from_config(cfg: &AgentConfig, resolved_concurrency: usize) -> Self {
         Self {
             power_only: cfg.power_only,
             quiet_hours: cfg.quiet_hours,
             min_payout_usd_per_hr: cfg.min_payout_usd_per_hr,
             memory_headroom_gb: cfg.memory_headroom_gb,
             max_memory_pct: cfg.max_memory_pct,
-            max_concurrent_tasks: cfg.concurrency(memory_gb),
+            max_concurrent_tasks: resolved_concurrency,
         }
     }
 }

@@ -22,6 +22,7 @@ mod render_preview; // opt-in, pinned, non-billable generalized render-spec prev
 mod resident_engine; // host-side long-lived model actor scheduler (experimental, not routed)
 #[cfg(feature = "resident-spec-shadow")]
 mod resident_spec_shadow; // device-free resident/spec integration proof; never routed or billed
+mod resource_governor; // adaptive host-local CPU/RAM planning and weighted admission
 mod runners;
 mod runtime_matrix_generated;
 mod sandbox; // sandboxed BYO-container execution for the `custom` general-compute lane
@@ -2250,6 +2251,8 @@ struct WorkCtx {
     /// combined per task with the dispatch's `partial_put_url`.
     checkpoint_secs: u64,
     status: Arc<StatusWriter>,
+    resource_gate: resource_governor::ResourceGate,
+    resource_governor: resource_governor::ResourceGovernor,
 }
 
 /// The agent loop: register once, then run a BOUNDED-CONCURRENCY pipeline —
@@ -2279,7 +2282,21 @@ async fn run_agent(mut cfg: AgentConfig) -> Result<()> {
     )
     .await;
     let advertised_worker_id = cap.worker_id;
-    let permits = cfg.concurrency(cap.memory_gb);
+    let logical_cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let allocatable_memory_gb = (cap.memory_gb - cfg.memory_headroom_gb.max(0.0)).max(0.25);
+    let resource_governor = resource_governor::ResourceGovernor::new(
+        logical_cpus,
+        cfg.max_cpu_pct,
+        allocatable_memory_gb,
+        models::device_label() != "cpu",
+    );
+    let permits = cfg
+        .max_concurrent_tasks
+        .unwrap_or_else(|| resource_governor.queue_depth())
+        .max(1);
+    let resource_gate = resource_governor::ResourceGate::new(&resource_governor);
 
     let client = ControlPlaneClient::new(cfg.control_url.clone(), cfg.worker_token.clone())
         .context("building control-plane client (is worker_token set?)")?;
@@ -2299,7 +2316,7 @@ async fn run_agent(mut cfg: AgentConfig) -> Result<()> {
         .build()
         .context("building S3 client")?;
 
-    tracing::info!(worker_id = %advertised_worker_id, control = %cfg.control_url, max_concurrent_tasks = permits, "registering with control plane");
+    tracing::info!(worker_id = %advertised_worker_id, control = %cfg.control_url, queued_task_ceiling = permits, cpu_units = resource_governor.cpu_units(), allocatable_memory_gb = resource_governor.allocatable_memory_gb(), "registering with adaptive resource governor");
     let confirmed = client.register(&cap).await.context("registration failed")?;
     // The control plane binds worker/supplier identity from the token and echoes the
     // authoritative ids. Use those ids for every receipt/status/heartbeat after
@@ -2319,7 +2336,7 @@ async fn run_agent(mut cfg: AgentConfig) -> Result<()> {
     ));
     // Echo the APPLIED operator prefs (the effective config after the agent.prefs.toml
     // overlay) so the app shows agent truth, not just its local toggle state (item 26).
-    status.set_applied_prefs(status::AppliedPrefs::from_config(&cfg, cap.memory_gb));
+    status.set_applied_prefs(status::AppliedPrefs::from_config(&cfg, permits));
     status.registered();
 
     let ctx = WorkCtx {
@@ -2378,6 +2395,8 @@ async fn run_agent(mut cfg: AgentConfig) -> Result<()> {
         max_memory_pct: cfg.max_memory_pct,
         checkpoint_secs: cfg.checkpoint_secs,
         status: status.clone(),
+        resource_gate,
+        resource_governor,
     };
     let sem = Arc::new(Semaphore::new(permits));
     // In-flight tasks; drained as they finish so commits/errors surface promptly.
@@ -2649,17 +2668,16 @@ async fn poll_and_spawn(
         return Ok(()); // never started → control plane reassigns it
     }
 
-    ctx.client
-        .start_task(task.task_id)
-        .await
-        .context("start_task")?;
-    // Surface the running job to the menu bar (the operator sees the job_id; the
-    // task_id keys the in-flight set so concurrent tasks don't collide).
-    ctx.status.job_started(
-        task.task_id,
-        task.job_id,
-        task.manifest.job_type.tag(),
-        now_unix(),
+    let warm_models = ctx.pool.loaded_model_ids().await;
+    let resource_plan = ctx.resource_governor.plan(&task.manifest, &warm_models);
+    tracing::info!(
+        task = %task.task_id,
+        mode = resource_plan.mode.as_str(),
+        cpu_units = resource_plan.cpu_units,
+        memory_gb = resource_plan.memory_gb,
+        runtime = %resource_plan.runtime_key,
+        reason = resource_plan.reason,
+        "triaged task for adaptive admission"
     );
 
     // Spawn the heavy work so the loop returns to its `select!` immediately:
@@ -2671,6 +2689,23 @@ async fn poll_and_spawn(
         let _permit = permit;
         let task_id = task.task_id;
         let started = std::time::Instant::now();
+        let _resources = match ctx.resource_gate.acquire(&resource_plan).await {
+            Ok(lease) => lease,
+            Err(error) => {
+                tracing::error!(task = %task_id, error = %error, "resource admission gate closed");
+                return;
+            }
+        };
+        if let Err(error) = ctx.client.start_task(task_id).await {
+            tracing::error!(task = %task_id, error = %error, "start_task failed after resource admission");
+            return;
+        }
+        ctx.status.job_started(
+            task_id,
+            task.job_id,
+            task.manifest.job_type.tag(),
+            now_unix(),
+        );
         match execute_task(
             &task,
             &ctx.cap,
