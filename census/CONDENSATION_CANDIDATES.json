@@ -1,5 +1,5 @@
 {
-  "candidate_count": 611,
+  "candidate_count": 544,
   "candidates": [
     {
       "path": "agent/Cargo.lock",
@@ -1874,14 +1874,6 @@
       "deletion_risk": "low"
     },
     {
-      "path": "render/gltf/oracles.glb",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 1066896,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
       "path": "render/handoff/ASCENSION-GOAL-PROMPT.md",
       "reason": "relocate -\u003e computexchange-render-lab",
       "layer": "pack:computexchange-render-lab",
@@ -2458,46 +2450,6 @@
       "deletion_risk": "low"
     },
     {
-      "path": "render/previews/_smoke.png",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 76527,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/previews/dgx-spark-iter3@3x.png",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 1031804,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/previews/mac-studio-iter3@3x.png",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 1065417,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/previews/oracles-pair-iter2@3x.png",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 1629923,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/previews/oracles-pair-iter3@3x.png",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 1640007,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
       "path": "render/rack-audit-raw.json",
       "reason": "relocate -\u003e computexchange-render-lab",
       "layer": "pack:computexchange-render-lab",
@@ -2511,326 +2463,6 @@
       "layer": "pack:computexchange-render-lab",
       "bytes": 5908,
       "loc": 116,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/SOURCES.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 7496,
-      "loc": 87,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/dgx-spark-front-ref.jpg",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 454105,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/mac-studio-front-ref.jpg",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 40385,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/mac-studio/apple_LEGAL_NOTICE.rtf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 16924,
-      "loc": 157,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/mac-studio/dim_back-side.svg",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 22507,
-      "loc": 315,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/mac-studio/dim_top-front.svg",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 31461,
-      "loc": 375,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/pool-dark/SOURCES.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 855,
-      "loc": 8,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/D-ARCH.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 3485,
-      "loc": 46,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/RECON-D-ARCH.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 9551,
-      "loc": 121,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/RTX5090FE-SPEC.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 5132,
-      "loc": 68,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/SOURCES.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 9022,
-      "loc": 83,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/accessories/apc-ap8868-pdu-spec.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 982015,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/accessories/apc-ar8136blk-blanking-spec.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 113284,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/accessories/chatsworth-1521x-datasheet.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 348801,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/accessories/dell-rail-matrix.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 967053,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/accessories/tripplite-srcableduct1u-spec.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 49982,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/enclosure/apc-ar3100-datasheet.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 34511,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/enclosure/apc-netshelter-sx-manual.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 2966456,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/enclosure/tripplite-sr42ub-spec.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 56310,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/enclosure/tripplite-sr42ubcl-drawing.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 1063734,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/enclosure/tripplite-sr42ubdp48-drawing.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 1064757,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/enclosure/tripplite-sr42ubwd-drawing.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 674073,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/enclosure/tripplite-sr48ub-spec.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 53939,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/enclosure/tripplite-sr48ubdpwd-drawing.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 632221,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/enclosure/vertiv-vr-guide-spec.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 97742,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/enclosure/vertiv-vr-selection-guide.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 1001410,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/enclosure/vertiv-vr3100-submittal.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 421543,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/enclosure/vertiv-vr3107-submittal.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 366633,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/enclosure/vertiv-vr3150-submittal.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 302701,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/enclosure/vertiv-vr3307-submittal.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 372793,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/enclosure/vertiv-vr3350-submittal.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 316807,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/enclosure/vertiv-vr3357-submittal.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 312624,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/node/rosewill_rsv-l4500_manual.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 1051416,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/standards/eia-rs310-1968.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 180427,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/standards/intel-rack-compat-guide-r24.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 492817,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/switch/mikrotik-crs326-dimensions-cad.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 178336,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/switch/mikrotik-crs354-dimensions-cad.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 356267,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/ups/smt1500rm2uc-datasheet.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 61235,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/ups/smt2200rm2uc-datasheet.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 88979,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/ref/rack/ups/smt3000rm2u-datasheet.pdf",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 58948,
-      "loc": 0,
       "deletion_risk": "low"
     },
     {
@@ -2882,142 +2514,6 @@
       "deletion_risk": "low"
     },
     {
-      "path": "render/site/previews/continuity.png",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 358400,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/site/previews/dgx-spark-iter4@3x.png",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 1141862,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/site/previews/dgx-spark-iter5@3x.png",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 1147125,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/site/previews/dgx-spark-iter6@3x.png",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 1089148,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/site/previews/dgx-spark-iter7@3x.png",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 1090724,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/site/previews/mac-studio-iter10@3x.png",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 945851,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/site/previews/mac-studio-iter4@3x.png",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 982587,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/site/previews/mac-studio-iter5@3x.png",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 977427,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/site/previews/oracles-pair-iter10@3x.png",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 1889750,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/site/previews/oracles-pair-iter1@3x.png",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 1746662,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/site/previews/oracles-pair-iter2@3x.png",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 1789848,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/site/previews/oracles-pair-iter3@3x.png",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 1936990,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/site/previews/oracles-pair-iter4@3x.png",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 1989679,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/site/previews/oracles-pair-iter5@3x.png",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 1934362,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/site/previews/oracles-pair-iter6@3x.png",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 1936124,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/site/previews/oracles-pair-iter8@3x.png",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 1903256,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/site/previews/oracles-pair-iter9@3x.png",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 1913663,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
       "path": "render/site/webify.py",
       "reason": "relocate -\u003e computexchange-render-lab",
       "layer": "pack:computexchange-render-lab",
@@ -3031,38 +2527,6 @@
       "layer": "pack:computexchange-render-lab",
       "bytes": 4097,
       "loc": 84,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/verify/dgx-spark-front.png",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 1371181,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/verify/mac-studio-front-overlay.png",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 216820,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/verify/mac-studio-front-sidebyside.png",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 319258,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/verify/mac-studio-front.png",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 1544555,
-      "loc": 0,
       "deletion_risk": "low"
     },
     {
@@ -4890,7 +4354,7 @@
       "deletion_risk": "low"
     }
   ],
-  "pack_bytes_total": 78346493,
+  "pack_bytes_total": 28341910,
   "pack_rollup": {
     "computexchange-docs-archive": {
       "files": 114,
@@ -4901,12 +4365,12 @@
       "bytes": 21945181
     },
     "computexchange-render-lab": {
-      "files": 403,
-      "loc": 141504,
+      "files": 336,
+      "loc": 140244,
       "code": 0,
       "blank": 0,
       "comment": 0,
-      "bytes": 56401312
+      "bytes": 6396729
     }
   }
 }

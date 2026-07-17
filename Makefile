@@ -136,8 +136,8 @@ spec-test:
 # Deterministic for a fixed commit. This is the headline measurement now.
 loc: audit
 audit:
-	cd cli && go run . audit codebase --out ../census
-	@echo "— census/ written. Headline numbers:"
+	cd cli && go run . audit codebase --out census
+	@echo "— census/ written (relative to repo root). Headline numbers:"
 	@sed -n '3p' census/CODEBASE_CENSUS.md
 
 # Build the control-plane image standalone (CI / registry push).

@@ -49,7 +49,18 @@ dependency-free SDK (757 LOC) and Blender `bpy` scripts (in a pack) survive.
 ## Phase B — non-runtime physical reduction — IN PROGRESS
 
 Safe reductions only (no hot-path changes; Go build stays green; live-bound hashes
-unchanged). See [`CONDENSATION_LEDGER.jsonl`](CONDENSATION_LEDGER.jsonl) for per-commit metrics.
+unchanged). See [`CONDENSATION_LEDGER.jsonl`](CONDENSATION_LEDGER.jsonl) for per-commit metrics
+and [`PACK_MANIFESTS.json`](PACK_MANIFESTS.json) for pack definitions.
+
+**B1 — render-lab binary artifacts → pack (done).** Relocated 67 force-added binary
+files (preview/verify PNGs, reference rack PDFs/JPGs, the `.glb` master) — 50.0 MB —
+into `computexchange-render-lab`. **Tracked checkout 108.0 MB → 58.3 MB (−46%).**
+Verified: web ships `web/assets/site/*` independently; no build/CI/test reference to
+the moved files; proof-bound `render/handoff/**` kept. Go build/test green. Also fixed
+a `make audit --out` path bug. Files preserved in history + regenerable via builders.
+
+_Next B candidates (not yet done):_ docs-archive pack (archive-class `.md` reports),
+`scripts/spec-lab/` stays until Phase D (live CI/test dependency).
 
 ## Remaining (C–H)
 

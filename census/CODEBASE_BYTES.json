@@ -1,11 +1,11 @@
 {
   "bytes_by_language": {
-    "binary": 77114928,
-    "config": 34716,
-    "documentation": 2831052,
-    "go": 3343075,
+    "binary": 27216778,
+    "config": 35685,
+    "documentation": 2801949,
+    "go": 3375309,
     "javascript": 1459906,
-    "json": 13185610,
+    "json": 13365063,
     "lockfile": 237628,
     "other": 52442,
     "patch": 22301,
@@ -15,9 +15,9 @@
     "shell": 351145,
     "sql": 169236,
     "swift": 195329,
-    "text": 28061,
+    "text": 11137,
     "toml": 18529,
-    "web": 671378,
+    "web": 617410,
     "yaml": 74275
   },
   "largest_tracked_40": [
@@ -38,10 +38,6 @@
       "bytes": 3140052
     },
     {
-      "path": "render/ref/rack/enclosure/apc-netshelter-sx-manual.pdf",
-      "bytes": 2966456
-    },
-    {
       "path": "web/assets/site/oracles-pair@3x.png",
       "bytes": 2313625
     },
@@ -50,64 +46,12 @@
       "bytes": 2268203
     },
     {
-      "path": "render/site/previews/oracles-pair-iter4@3x.png",
-      "bytes": 1989679
-    },
-    {
-      "path": "render/site/previews/oracles-pair-iter3@3x.png",
-      "bytes": 1936990
-    },
-    {
-      "path": "render/site/previews/oracles-pair-iter6@3x.png",
-      "bytes": 1936124
-    },
-    {
-      "path": "render/site/previews/oracles-pair-iter5@3x.png",
-      "bytes": 1934362
-    },
-    {
-      "path": "render/site/previews/oracles-pair-iter9@3x.png",
-      "bytes": 1913663
-    },
-    {
-      "path": "render/site/previews/oracles-pair-iter8@3x.png",
-      "bytes": 1903256
-    },
-    {
-      "path": "render/site/previews/oracles-pair-iter10@3x.png",
-      "bytes": 1889750
-    },
-    {
-      "path": "render/site/previews/oracles-pair-iter2@3x.png",
-      "bytes": 1789848
-    },
-    {
-      "path": "render/site/previews/oracles-pair-iter1@3x.png",
-      "bytes": 1746662
-    },
-    {
       "path": "web/assets/site/mac-studio@3x.png",
       "bytes": 1651459
     },
     {
-      "path": "render/previews/oracles-pair-iter3@3x.png",
-      "bytes": 1640007
-    },
-    {
-      "path": "render/previews/oracles-pair-iter2@3x.png",
-      "bytes": 1629923
-    },
-    {
-      "path": "render/verify/mac-studio-front.png",
-      "bytes": 1544555
-    },
-    {
       "path": "web/assets/btn-add-payment-shell@3x.png",
       "bytes": 1448440
-    },
-    {
-      "path": "render/verify/dgx-spark-front.png",
-      "bytes": 1371181
     },
     {
       "path": "web/assets/site/vendor/three.module.js",
@@ -118,70 +62,126 @@
       "bytes": 1177044
     },
     {
-      "path": "render/site/previews/dgx-spark-iter5@3x.png",
-      "bytes": 1147125
-    },
-    {
-      "path": "render/site/previews/dgx-spark-iter4@3x.png",
-      "bytes": 1141862
-    },
-    {
-      "path": "render/site/previews/dgx-spark-iter7@3x.png",
-      "bytes": 1090724
-    },
-    {
-      "path": "render/site/previews/dgx-spark-iter6@3x.png",
-      "bytes": 1089148
-    },
-    {
-      "path": "render/gltf/oracles.glb",
-      "bytes": 1066896
-    },
-    {
       "path": "web/assets/site/oracles.glb",
       "bytes": 1066164
     },
     {
-      "path": "render/previews/mac-studio-iter3@3x.png",
-      "bytes": 1065417
+      "path": "web/assets/site/dgx-spark@3x.png",
+      "bytes": 905813
     },
     {
-      "path": "render/ref/rack/enclosure/tripplite-sr42ubdp48-drawing.pdf",
-      "bytes": 1064757
+      "path": "web/assets/btn-launch-shell@3x.png",
+      "bytes": 900273
     },
     {
-      "path": "render/ref/rack/enclosure/tripplite-sr42ubcl-drawing.pdf",
-      "bytes": 1063734
+      "path": "web/assets/site/mac-studio@2x.png",
+      "bytes": 818719
     },
     {
-      "path": "render/ref/rack/node/rosewill_rsv-l4500_manual.pdf",
-      "bytes": 1051416
+      "path": "logo/cx_logo.png",
+      "bytes": 790855
     },
     {
-      "path": "render/previews/dgx-spark-iter3@3x.png",
-      "bytes": 1031804
+      "path": "docs/speed-lane-reports/spec-lab/speculative_render_ladder_ledger.jsonl",
+      "bytes": 665497
     },
     {
-      "path": "render/ref/rack/enclosure/vertiv-vr-selection-guide.pdf",
-      "bytes": 1001410
+      "path": "agent/src/runners.rs",
+      "bytes": 637003
     },
     {
-      "path": "render/site/previews/mac-studio-iter4@3x.png",
-      "bytes": 982587
+      "path": "web/assets/knob-pressed@3x.png",
+      "bytes": 601320
     },
     {
-      "path": "render/ref/rack/accessories/apc-ap8868-pdu-spec.pdf",
-      "bytes": 982015
+      "path": "web/assets/knob-on@3x.png",
+      "bytes": 588538
     },
     {
-      "path": "render/site/previews/mac-studio-iter5@3x.png",
-      "bytes": 977427
+      "path": "web/assets/knob-gold@3x.png",
+      "bytes": 587220
     },
     {
-      "path": "render/ref/rack/accessories/dell-rail-matrix.pdf",
-      "bytes": 967053
+      "path": "web/assets/knob-red@3x.png",
+      "bytes": 577025
+    },
+    {
+      "path": "web/assets/site/dgx-spark@2x.png",
+      "bytes": 507523
+    },
+    {
+      "path": "web/assets/site/knob-off@3x.png",
+      "bytes": 504757
+    },
+    {
+      "path": "web/assets/knob-off@3x.png",
+      "bytes": 504757
+    },
+    {
+      "path": "web/admin.html",
+      "bytes": 466897
+    },
+    {
+      "path": "web/assets/site/tex/foam-normal.png",
+      "bytes": 441398
+    },
+    {
+      "path": "docs/internal/CREED_AND_PATH_TO_TEN.md",
+      "bytes": 428610
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/cycles_quality_ladder_ledger.jsonl",
+      "bytes": 387582
+    },
+    {
+      "path": "docs/screenshots/site-1440.png",
+      "bytes": 384607
+    },
+    {
+      "path": "control/store.go",
+      "bytes": 373718
+    },
+    {
+      "path": "control/integration_test.go",
+      "bytes": 358086
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/metal_src/quantized.metal",
+      "bytes": 336777
+    },
+    {
+      "path": "web/assets/site/oracles-pair@1x.png",
+      "bytes": 315086
+    },
+    {
+      "path": "web/assets/site/mac-studio@1x.png",
+      "bytes": 208364
+    },
+    {
+      "path": "web/assets/site/vendor/three.module.js.br",
+      "bytes": 200866
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/cycles_baseline_matrix_ledger.jsonl",
+      "bytes": 198610
+    },
+    {
+      "path": "control/api.go",
+      "bytes": 193496
+    },
+    {
+      "path": "web/assets/site/og-image.png",
+      "bytes": 181154
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_render_stack.py",
+      "bytes": 179664
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/ledger.jsonl",
+      "bytes": 175023
     }
   ],
   "note": "tracked-only (git ls-files). Excludes .git, model weights, dep caches, untracked artifacts.",
-  "tracked_bytes": 108044058
+  "tracked_bytes": 58258569
 }
