@@ -2,20 +2,19 @@
   "bytes_by_language": {
     "binary": 18276901,
     "config": 35951,
-    "documentation": 956358,
+    "documentation": 956325,
     "go": 3396184,
-    "javascript": 1459906,
-    "json": 1485490,
+    "javascript": 1450305,
+    "json": 591360,
     "lockfile": 237628,
     "other": 52442,
     "patch": 22301,
     "python": 1099600,
     "rust": 2244250,
     "shader": 609891,
-    "shell": 342324,
+    "shell": 331591,
     "sql": 169236,
     "swift": 195329,
-    "text": 11137,
     "toml": 18529,
     "web": 617410,
     "yaml": 74275
@@ -174,14 +173,14 @@
       "bytes": 126861
     },
     {
-      "path": "render/rack-audit-raw.json",
-      "bytes": 121519
-    },
-    {
       "path": "render/build_scene.py",
       "bytes": 114229
+    },
+    {
+      "path": "web/assets/site/vendor/addons/loaders/GLTFLoader.js",
+      "bytes": 108522
     }
   ],
   "note": "tracked-only (git ls-files). Excludes .git, model weights, dep caches, untracked artifacts.",
-  "tracked_bytes": 31305142
+  "tracked_bytes": 30379508
 }
