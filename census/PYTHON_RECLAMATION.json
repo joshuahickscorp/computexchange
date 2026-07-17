@@ -1,20 +1,20 @@
 {
   "by_plan": {
     "archive_research": {
-      "files": 33,
-      "loc": 4968,
+      "files": 10,
+      "loc": 2573,
       "code": 0,
       "blank": 0,
       "comment": 0,
-      "bytes": 216886
+      "bytes": 98177
     },
     "retain_blender_pack": {
-      "files": 14,
-      "loc": 5191,
+      "files": 5,
+      "loc": 4041,
       "code": 0,
       "blank": 0,
       "comment": 0,
-      "bytes": 297551
+      "bytes": 238710
     },
     "retain_sdk": {
       "files": 3,
@@ -46,51 +46,19 @@
       "docker/vllm/launch_pinned.py",
       "docker/vllm/test_runtime_lock.py",
       "docker/vllm/validate_runtime_lock.py",
-      "render/_checkpoint_export.py",
-      "render/_collage.py",
-      "render/_contact_sheet.py",
-      "render/_grain.py",
-      "render/_panel_agg.py",
-      "render/_panel_build.py",
-      "render/_panel_save.py",
-      "render/_pr_gate.py",
-      "render/clipcheck.py",
-      "render/contact_sheet.py",
       "render/foam_maps.py",
-      "render/measure.py",
-      "render/measure_fillet.py",
-      "render/measure_spark_bezel.py",
-      "render/measure_spark_front.py",
-      "render/overlay.py",
-      "render/portrait_compare.py",
-      "render/post_chain.py",
-      "render/rack_verify.py",
-      "render/rig_patches.py",
-      "render/settle_sheet.py",
       "render/site/continuity.py",
       "render/site/og.py",
       "render/site/webify.py",
-      "render/turnaround_sheet.py",
-      "render/verify_sheet.py",
-      "render/wave8_settle.py",
       "scripts/spec-lab/run_spec_render_token_end_to_end.py",
       "scripts/spec-lab/run_speculative_render_ladder.py",
       "scripts/spec-lab/run_token_spec_decode_ladder.py"
     ],
     "retain_blender_pack": [
-      "render/_audit_desktop.py",
-      "render/_foam3d_test.py",
-      "render/_rack_bakeoff.py",
-      "render/_rear_detail.py",
-      "render/_smoke.py",
       "render/build_rack.py",
       "render/build_scene.py",
       "render/build_trio.py",
       "render/site/oracles.py",
-      "scripts/cx_button.py",
-      "scripts/cx_knob.py",
-      "scripts/cx_logo.py",
-      "scripts/cx_marker.py",
       "scripts/cx_status.py"
     ],
     "retain_sdk": [
