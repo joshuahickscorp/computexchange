@@ -1,11 +1,11 @@
 {
   "bytes_by_language": {
-    "binary": 27216778,
-    "config": 35685,
-    "documentation": 2801949,
+    "binary": 18276901,
+    "config": 35877,
+    "documentation": 2418319,
     "go": 3375309,
     "javascript": 1459906,
-    "json": 13365063,
+    "json": 1638885,
     "lockfile": 237628,
     "other": 52442,
     "patch": 22301,
@@ -22,28 +22,8 @@
   },
   "largest_tracked_40": [
     {
-      "path": "docs/speed-lane-reports/spec-lab/denoiser_artifacts/cx_denoiser.pt",
-      "bytes": 4470485
-    },
-    {
-      "path": "docs/speed-lane-reports/spec-lab/denoiser_artifacts/cx_denoiser.onnx",
-      "bytes": 4469392
-    },
-    {
-      "path": "docs/speed-lane-reports/spec-lab/cx_native_speculation_ledger.jsonl",
-      "bytes": 3953453
-    },
-    {
-      "path": "docs/speed-lane-reports/spec-lab/spec_render_token_branch_ledger.jsonl",
-      "bytes": 3140052
-    },
-    {
       "path": "web/assets/site/oracles-pair@3x.png",
       "bytes": 2313625
-    },
-    {
-      "path": "docs/speed-lane-reports/spec-lab/cycles_sample_fanout_ledger.jsonl",
-      "bytes": 2268203
     },
     {
       "path": "web/assets/site/mac-studio@3x.png",
@@ -82,10 +62,6 @@
       "bytes": 790855
     },
     {
-      "path": "docs/speed-lane-reports/spec-lab/speculative_render_ladder_ledger.jsonl",
-      "bytes": 665497
-    },
-    {
       "path": "agent/src/runners.rs",
       "bytes": 637003
     },
@@ -110,11 +86,11 @@
       "bytes": 507523
     },
     {
-      "path": "web/assets/site/knob-off@3x.png",
+      "path": "web/assets/knob-off@3x.png",
       "bytes": 504757
     },
     {
-      "path": "web/assets/knob-off@3x.png",
+      "path": "web/assets/site/knob-off@3x.png",
       "bytes": 504757
     },
     {
@@ -128,10 +104,6 @@
     {
       "path": "docs/internal/CREED_AND_PATH_TO_TEN.md",
       "bytes": 428610
-    },
-    {
-      "path": "docs/speed-lane-reports/spec-lab/cycles_quality_ladder_ledger.jsonl",
-      "bytes": 387582
     },
     {
       "path": "docs/screenshots/site-1440.png",
@@ -162,10 +134,6 @@
       "bytes": 200866
     },
     {
-      "path": "docs/speed-lane-reports/spec-lab/cycles_baseline_matrix_ledger.jsonl",
-      "bytes": 198610
-    },
-    {
       "path": "control/api.go",
       "bytes": 193496
     },
@@ -178,10 +146,42 @@
       "bytes": 179664
     },
     {
-      "path": "docs/speed-lane-reports/spec-lab/ledger.jsonl",
-      "bytes": 175023
+      "path": "db/schema.sql",
+      "bytes": 169236
+    },
+    {
+      "path": "logo/Geist-VariableFont_wght.ttf",
+      "bytes": 168804
+    },
+    {
+      "path": "web/assets/site/dgx-spark@1x.png",
+      "bytes": 159226
+    },
+    {
+      "path": "agent/src/main.rs",
+      "bytes": 154796
+    },
+    {
+      "path": "web/assets/cx-metal-on@3x.png",
+      "bytes": 149174
+    },
+    {
+      "path": "scripts/spec-lab/cx_cycles_render_preview_backend.py",
+      "bytes": 142392
+    },
+    {
+      "path": "census/CONDENSATION_CANDIDATES.json",
+      "bytes": 137086
+    },
+    {
+      "path": "web/assets/site/tex/foam-ao.png",
+      "bytes": 133410
+    },
+    {
+      "path": "web/assets/cx-metal@3x.png",
+      "bytes": 127267
     }
   ],
   "note": "tracked-only (git ls-files). Excludes .git, model weights, dep caches, untracked artifacts.",
-  "tracked_bytes": 58258569
+  "tracked_bytes": 37209076
 }

@@ -22,6 +22,20 @@
       "hydration_command": "git checkout 96a4890 -- render/site/previews render/previews render/verify render/ref render/gltf",
       "regeneration": "re-run render/build_scene.py / render/build_rack.py / render/site/oracles.py (Blender + Metal) to rebuild the images and .glb.",
       "rollback": "the files remain at 96a4890 in git history; nothing is destroyed."
+    },
+    {
+      "name": "computexchange-benchmarks",
+      "version": "1",
+      "source_commit": "96a4890b5e9e3b3bb25742788f0d843c7f358d5d",
+      "reason": "Speed-lane + bench-local research outputs: the cx_denoiser .pt/.onnx model artifacts (~9 MB) and large spec-lab .jsonl ledgers (~12 MB). Referenced only by manual spec-lab research scripts (run_denoiser_experiment.py, eval_cx_denoiser.py) — NOT by the green Makefile/CI test path, and NOT proof/claim-bound (verified against proof/claims/claim-policy.json and source_fingerprint).",
+      "file_count": 78,
+      "bytes": 21048343,
+      "pack_digest": "215902cef88ab04e9468a4870378a71f4e8fd3e7910adabfcde5bbb08c875bda",
+      "digest_method": "sha256 over the sorted `sha256  path` list; per-file hashes in census/pack-benchmarks-files.json",
+      "globs": ["docs/speed-lane-reports/**", "docs/bench-local-reports/**"],
+      "hydration_command": "git checkout 96a4890 -- docs/speed-lane-reports docs/bench-local-reports",
+      "regeneration": "re-run the spec-lab bench drivers (scripts/spec-lab/run_*.py) / make bench-local.",
+      "rollback": "the files remain at 96a4890 in git history; nothing is destroyed."
     }
   ],
   "shipped_assets_unaffected": [

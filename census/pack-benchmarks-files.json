@@ -1,0 +1,321 @@
+{
+  "pack": "computexchange-benchmarks",
+  "source_commit": "96a4890",
+  "pack_digest": "215902cef88ab04e9468a4870378a71f4e8fd3e7910adabfcde5bbb08c875bda",
+  "file_count": 78,
+  "bytes": 21048343,
+  "files": [
+    {
+      "path": "docs/bench-local-reports/2026-07-05-claim-query-real-sql.md",
+      "sha256": "625e5aeefc2c3c040ca698f6edff8c82eda9c3156eb7a0fe35d766dc840cd419"
+    },
+    {
+      "path": "docs/bench-local-reports/2026-07-06-claim-flatness-cheaper-class-online-per-job.md",
+      "sha256": "65b352de2e22f246320c50ab3519f9bef46a70758b337dfce7267c9866b35854"
+    },
+    {
+      "path": "docs/speed-lane-reports/A100_CAPABILITY_SWEEP.md",
+      "sha256": "70f1c8c85de7c482ba81b6aafc33164fb939c2cde714caf97f89064639b3455c"
+    },
+    {
+      "path": "docs/speed-lane-reports/A100_REFERENCE_MEASURED.md",
+      "sha256": "766af0cf563fc90217f95511ec08e2c0943d4d01b27dd24d5d76a50abcb4ebc5"
+    },
+    {
+      "path": "docs/speed-lane-reports/FANOUT_PLANNER_WAVE1B.md",
+      "sha256": "9a0b950726fbde145488d3277e8c7baf646e9d8b9a6df36a4b226d63babce5f2"
+    },
+    {
+      "path": "docs/speed-lane-reports/HAWKING_REGATE_WAVE2B.md",
+      "sha256": "357480881a207352b5887f65cd733760ac0444fdb9061bdaaa86c2b0b62361b8"
+    },
+    {
+      "path": "docs/speed-lane-reports/SLA_QUOTE_WAVE2A.md",
+      "sha256": "4790d9c5193fc68758ee94419232c1c4b2f72bcb7676c6dab0ea5eaccca6637f"
+    },
+    {
+      "path": "docs/speed-lane-reports/STUDIO_SCALE_10_RECEIPTS_2026-07-09.md",
+      "sha256": "59df6f35e6188a126527a75f49915e8c660c52b73abe785b8eb6b8f531fce293"
+    },
+    {
+      "path": "docs/speed-lane-reports/SUBSTRATE_ROUTING_WAVE3.md",
+      "sha256": "5533074343f69107d6f82922e5b722e52d47e1789730ed03af22590157241df8"
+    },
+    {
+      "path": "docs/speed-lane-reports/VLLM_RESTART_SOAK_2026-07-06.md",
+      "sha256": "6f7f95e9e018c85ce76cb9b77282c5f583fcab50e5df3f16af7417c174941961"
+    },
+    {
+      "path": "docs/speed-lane-reports/artifacts/a100-sxm-capability-sweep-2026-07-06.jsonl",
+      "sha256": "1399b45d1f900569d2c1fbdcf642de9fa48ea491a37a687497d621255d51e86d"
+    },
+    {
+      "path": "docs/speed-lane-reports/artifacts/a100-sxm-reference-2026-07-06.json",
+      "sha256": "c3230391585651505d851fa83b1b4646fdf049a0d47bf14c0955c4c1506cc0d7"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/AUDACIOUS_TARGET.md",
+      "sha256": "7288b12d3c79f1e31c6156408695a66812a7bf8c4786d014ae8ea6d0fbaa2f28"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/CX_CYCLES_KILLER_OVERNIGHT_2026-07-09.md",
+      "sha256": "ab56e63168355756e05d9fe2e72557d0a440fed46f64fd728d09aa1b678c9c3e"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/CX_RENDER_AUTOPROBE_2026-07-09.md",
+      "sha256": "0bba3a138bfd155bdab72c4f555e2a050e1a8f045096a32c5844f4b131fab204"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/CYCLES_CHUNKED_FANOUT_2026-07-08.md",
+      "sha256": "748c152f7abc6d86324bdab211e9803ca8f7b4db48c3126184c2345771ca34fa"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/CYCLES_HEAVY_CHUNKED_PYMERGE_2026-07-08.md",
+      "sha256": "5d54acc2de5b0ebee20dafc9ddc37a492a40a319e99a6b783f6afbbc82df8606"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/CYCLES_HOPPER_BATCH_RUNTIME_TAR_2026-07-08.md",
+      "sha256": "0d811e234ab2c80a6151a97912618bb9e25a4ae5519014357c1e9042b863d179"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/CYCLES_HOPPER_NOBUILD_HEAVY_FANOUT_2026-07-08.md",
+      "sha256": "711abd2c51146320549e48d21de8be0734f052add250b9282e1b80b3a7bc5b41"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/CYCLES_HOPPER_PARALLEL_FANOUT_2026-07-08.md",
+      "sha256": "4319fd6521e54cc612362945a8f868859222eb4b9b6946985c101cd63da25bfe"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/CYCLES_HOPPER_RUNTIME_TAR_2026-07-08.md",
+      "sha256": "5723157e980e8980faf46588202559b3c9d6b077fc6171fa83f25d64c651350f"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/CYCLES_NO_REBUILD_VALIDATION_2026-07-08.md",
+      "sha256": "3b5fccdd53822989d836a8439f1e8768bd0d542146c33dd941b8a99735d03483"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/CYCLES_QUALITY_LADDER_AND_PROVISIONING_2026-07-08.md",
+      "sha256": "892b3c2c3e9b95016ff9844a63b35f69a28ba34be12bab0e2d213be06a6817ce"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/CYCLES_THROTTLED_PARALLEL_VALIDATION_2026-07-08.md",
+      "sha256": "75330453005f1c0f3440acd224cc841b93cd18b32744642646137c486ada7d10"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/EMPIRICAL_RENDERER_10X_PATH_2026-07-09.md",
+      "sha256": "2a4aba769482d25d3d91b1afd316ad9b669ebd710a1af09fa6989ddf7803928c"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/INTEGRATED_SPEC_RENDER_TOKEN_BENCHMARK_2026-07-09.md",
+      "sha256": "ad5482e20e5001e1232c08a965c48e8e21ec773e06246e5af8e7cbd2e8aec5ed"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/NEXT_FRONTIER_STATE.md",
+      "sha256": "9557398ec1179acdea8c7b59f8c1693af128de18bfbe5d0ed1ed7a15288700a2"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/OPTIMIZATION_DEEP_RESEARCH_2026-07-07.md",
+      "sha256": "88bd836967b0971c2ba42f4c685a7c90cedada6d5394766d3102230e778626d6"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/OVERNIGHT_CAMPAIGN_FINAL_REPORT.md",
+      "sha256": "238b7db6cb3aee9565c8d4a24dc5368f1a17f2d9de78ca51c7264fa1418ee81f"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/OVERNIGHT_CAMPAIGN_STATE.md",
+      "sha256": "17f8d4b5c23fc4cb4a18aac03e7a6220490ba4707085fe34e1f8b8c187c38810"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/RENDERER_5X_PUSH_AND_3AM_RESTART_2026-07-09.md",
+      "sha256": "2717b3b73d2abf71928fdb51b6ced1e3ddf538ddd173232450a704e91c0dfafb"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/RENDERER_FRONTIER_10X_AND_DIMINISHING_RETURNS_2026-07-09.md",
+      "sha256": "ce355b100b80b7dee84bc37d7becd7c96bc612ddf9f6f6d5d31035f4879d1d5f"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/RENDERER_FRONTIER_ITERATION_2026-07-09.md",
+      "sha256": "7e9b7a2fbd2b9855fcbae4635e54c3d54aea42e2143e3a3aa28a328882266885"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/RENDER_POLICY_TRAINING_2026-07-09.md",
+      "sha256": "644f3301b20db4534732a1c23777c16d91651cffa1270ef84a711608a2438540"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/RUN_2026-07-06.md",
+      "sha256": "461c7938e614048d44946ea093cf57fe30f4f189e1a6a6a4cf52279c93598765"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/SPECULATIVE_RENDER_LADDER_2026-07-09.md",
+      "sha256": "61d5eace82de57f032ccb97bcfe058561a94cd347b8b4d3bb0cc1e8d9f7ab161"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/SPEC_RENDER_AND_TOKEN_DECODE_ITERATION_2026-07-09.md",
+      "sha256": "e72d0264eda2ff1c12222e61d3bb8038bb91681305045d37356f3a5dbdba53dc"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/SPEC_RENDER_TOKEN_DECODE_BRANCH_LEDGER_2026-07-09.md",
+      "sha256": "677b8e35444723ce2ab15f180c371e1a22663bdf6a4c2eec11afa594cdff1124"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/TILE_REFINEMENT_2026-07-09.md",
+      "sha256": "f22d3ef4263acd7d3e42560af6b4e22f4aba24ab5c54a8fc7e441f79c8d9f9cb"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/TUNING_PLAN.md",
+      "sha256": "30b9d0af8eeb78e63c09468cceee778dd5b5fad42d4590dcd8c71cd5db6bf572"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/cross_arch_gate_ledger.jsonl",
+      "sha256": "d83a9efb71f6aed07c886ef39438a8f68869c238974a40877cc910145760de82"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/cross_denoiser_probe_ledger.jsonl",
+      "sha256": "eb4d777e725c73e41c0e1db47d3d182808871833370693f41117e919a10adad6"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/cross_scene_ledger.jsonl",
+      "sha256": "f192190e0a83f3c77e442e62e1e967e035f3dd2b2352fa5bff7cc33529f1f2cf"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/cx_native_speculation_ledger.jsonl",
+      "sha256": "1c859d09aa80d4562f4fc19ee84bf8bc85e25b1e91cdef07545ed8178aa3d84e"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/cx_render_autoprobe_ledger.jsonl",
+      "sha256": "0b5e0eea320707a24c02742bfce19d7a6340d48a747c5523895253292e01043b"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/cycles_baseline_matrix_ledger.jsonl",
+      "sha256": "7665ff942764ad0d40a782eae1689faf69604f329e8cdade8fb992f82387e1f5"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/cycles_device_diag_ledger.jsonl",
+      "sha256": "9c94e9cebbf1ca7ea6e8a79862fcdcda467e8cf7c4afcf9d9fd1ec2088003b2e"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/cycles_fork_ledger.jsonl",
+      "sha256": "731a08a04cd58eceac60ad0913cde3cffb15b1ca1e427da98651a364c234f33b"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/cycles_quality_ladder_ledger.jsonl",
+      "sha256": "839f41adf90ae57390eba1f2b41fde5bffb5e3e2016219ebd2b58e76b700d866"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/cycles_sample_fanout_ledger.jsonl",
+      "sha256": "82c56115d291105f192d6ee9d7bd779ef86a5b423e53a6bc5460d3831faf0779"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/cycles_sample_subset_ledger.jsonl",
+      "sha256": "a188c4f66d59e4ceda600d2b4979b0007181cac2df183947aadbcb8fefe6a204"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/denoiser_artifacts/cx_denoiser.onnx",
+      "sha256": "b154b90cfbadb27d0cbdc739e82620e7c122588bb8935789d978dc7f286b78fb"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/denoiser_artifacts/cx_denoiser.pt",
+      "sha256": "fbfa357413cfca303cb15ec7fdc93fbff7155a31c4aa2f6f3b1a7b3687de773a"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/denoiser_ledger.jsonl",
+      "sha256": "6798a0bee358c5ffc4094d90484ad301725a422fc244de0b174a42c4454a2cd8"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/guiding_ab_ledger.jsonl",
+      "sha256": "ed5dc5d3c91b23c09a51b2666b85f192c4dd358aca08791642e5794c49c03982"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/integrated_spec_render_token_ledger.jsonl",
+      "sha256": "800f372155f273a36b2a574c000c6fb1a8d7ac3c9f6722b8b2abd18c3bcf3f36"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/ledger.jsonl",
+      "sha256": "f02504ebc720ce2dd0738cf474c12e09fe2d292bfe385609a1f9fe5533c90cfb"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/local_metal_ledger.jsonl",
+      "sha256": "74617dbea6170a3d755c368ad955ac1c56d93bd47af100a635e4597d95908d8a"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/multi_selector_probe_ledger.jsonl",
+      "sha256": "db6f38e9c4078ee55684718975ca6bf727d42fe0d005063472622764ecbe9166"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/multipod_ledger.jsonl",
+      "sha256": "c965df0254a6007e939afde22b5593341fffb669b501432d0e160287c765aa73"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/prod_render_ledger.jsonl",
+      "sha256": "e77ae74bfb07158716eaf2c45154a878e3e2fc6016be0c933b5839d206950eb8"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/reference_consistency_ledger.jsonl",
+      "sha256": "abcf9ab3978356cc31ded9353d0e19dd9135fedf38467e1e8322220f61172ba1"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/render_policy_2026-07-09.json",
+      "sha256": "3764fc11e925188218858ca177167052e8399f832a8f7ad558d19e0ccfe55873"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/render_policy_training_ledger.jsonl",
+      "sha256": "d4c3fd9f208e1d0f849f603c96f897c74935625f845ff891be4762ed3d5b62e8"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/renderer_micro_ledger.jsonl",
+      "sha256": "c712fc095db1465c439bf3636414080f327bbc387798a6ea96a59a95a4c8bc2c"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/research_queue_ledger.jsonl",
+      "sha256": "27e85e06ecea8360fc0fbf405046508a6b07d66612985b2b36772cb9f493d91e"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/restir_build_ledger.jsonl",
+      "sha256": "d18bd96fe79842e292ef4abcf60f7082a1c063d534a8cf1859f4872e906573f3"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/scene_sweep_ledger.jsonl",
+      "sha256": "019c0ddeb339ceb94f433883aef0f86347b59b10810b8201daf5c36aaf1c40bc"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/spec_render_token_branch_ledger.jsonl",
+      "sha256": "9a7dd991be0f65ac6b362b1c7a8be5a5fc7f84c7cf01c621d9c8933bc2e128ca"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/speculative_render_ladder_ledger.jsonl",
+      "sha256": "e59972874258fa11d7aa1d5bc0b553af5b40ca38268c2d8796d384bdd048ec41"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/stack_analytical_tuner_ledger.jsonl",
+      "sha256": "209c83169a07c3e850dc17b7f64359a1e2459b177fe5a538f20bd45dd1aea2fc"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/stack_ladder_ledger.jsonl",
+      "sha256": "d61340dc1b176bc3fe254cfb0b9488cf850e0d6d0f9f17fdccaff2046d8555b0"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/stack_tuner_ledger.jsonl",
+      "sha256": "05545367d857705c4699d1361863f710343c1388d4a2dd000a91e2321840f23a"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/tile_refinement_ledger.jsonl",
+      "sha256": "02c73f60de1d01c1225afba142f1d0e539d53d78cfcecf589c188578e3b5605e"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/token_spec_decode_ledger.jsonl",
+      "sha256": "f690164f11d7de80cd83e817966799367e7c358f889e8c33bf1b2ee5e1a3e02e"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/track5_ledger.jsonl",
+      "sha256": "78bab646e7fc83de7b81bb6edcd787f1a7b7a248479de9d27f0f246a18abc66b"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/transcode_spec_ledger.jsonl",
+      "sha256": "32a1b4e2161e8e4fc143b257101507034498f310933e3678649ce616dadcb382"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/ultimate_ledger.jsonl",
+      "sha256": "e209461b4912a7e7db0320fd25379237de622353e7988c38b529cc2c5d4539cd"
+    }
+  ]
+}

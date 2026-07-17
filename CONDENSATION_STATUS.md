@@ -59,8 +59,16 @@ Verified: web ships `web/assets/site/*` independently; no build/CI/test referenc
 the moved files; proof-bound `render/handoff/**` kept. Go build/test green. Also fixed
 a `make audit --out` path bug. Files preserved in history + regenerable via builders.
 
-_Next B candidates (not yet done):_ docs-archive pack (archive-class `.md` reports),
-`scripts/spec-lab/` stays until Phase D (live CI/test dependency).
+**B2 — benchmark research outputs → pack (done).** Relocated 78 files (21.0 MB):
+`cx_denoiser.{pt,onnx}` model artifacts + large spec-lab `.jsonl` ledgers under
+`docs/speed-lane-reports/` and `docs/bench-local-reports/` into
+`computexchange-benchmarks`. Verified not in the green Makefile/CI test path and
+not proof/claim-bound. **Tracked checkout now 37.2 MB (108.0 → 37.2, −66% total).**
+
+_Next B candidates (not yet done):_ docs-archive pack is constrained — most
+top-level `docs/*.md` are **claim-bound** (proof evidence in `claim-policy.json`),
+so only non-claim-bound archive docs can move. `scripts/spec-lab/` stays until
+Phase D (live CI/test dependency).
 
 ## Remaining (C–H)
 

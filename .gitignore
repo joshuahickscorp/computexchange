@@ -102,8 +102,11 @@ __pycache__/
 # regenerable render diagnostics (pixel artifacts; the builders + ledgers are the trail)
 diag_images/
 
-# raw bulk tuning trace (69MB machine log; the distilled reports + smaller ledgers are the trail)
-docs/speed-lane-reports/spec-lab/tuning_ledger.jsonl
+# Benchmark research outputs (denoiser .pt/.onnx, spec-lab .jsonl ledgers, bench
+# reports) are relocated to the computexchange-benchmarks pack (PACK_MANIFESTS.json).
+# Not proof/CI/build bound. Regenerate via the bench/spec-lab drivers or hydrate.
+docs/speed-lane-reports/
+docs/bench-local-reports/
 
 # pytest's discovery cache is generated at every repository depth. The claim and
 # source-fingerprint scanners must never mistake it for a product document.
