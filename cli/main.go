@@ -185,6 +185,8 @@ func main() {
 		cmdAudit(args)
 	case "source-id":
 		cmdSourceID(args)
+	case "verify":
+		cmdVerify(args)
 	case "version":
 		cmdVersion(args)
 	case "-h", "--help", "help":
@@ -855,6 +857,7 @@ Usage:
   cx private-pool add|list|remove <supplier_id>
   cx audit codebase [--out DIR]        (authoritative census; retires make loc)
   cx source-id [--root DIR] [--field F] (source fingerprint; replaces scripts/source_fingerprint.py)
+  cx verify --ledger PATH [flags]      (validate a prove-local ledger; replaces verify_proof_ledger.py)
   cx version [--json]
 
 Env:
