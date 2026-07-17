@@ -2,10 +2,10 @@
   "bytes_by_language": {
     "binary": 18276901,
     "config": 35877,
-    "documentation": 2418319,
-    "go": 3375309,
+    "documentation": 2421777,
+    "go": 3396184,
     "javascript": 1459906,
-    "json": 1638885,
+    "json": 1631817,
     "lockfile": 237628,
     "other": 52442,
     "patch": 22301,
@@ -86,11 +86,11 @@
       "bytes": 507523
     },
     {
-      "path": "web/assets/knob-off@3x.png",
+      "path": "web/assets/site/knob-off@3x.png",
       "bytes": 504757
     },
     {
-      "path": "web/assets/site/knob-off@3x.png",
+      "path": "web/assets/knob-off@3x.png",
       "bytes": 504757
     },
     {
@@ -170,18 +170,18 @@
       "bytes": 142392
     },
     {
-      "path": "census/CONDENSATION_CANDIDATES.json",
-      "bytes": 137086
-    },
-    {
       "path": "web/assets/site/tex/foam-ao.png",
       "bytes": 133410
     },
     {
       "path": "web/assets/cx-metal@3x.png",
       "bytes": 127267
+    },
+    {
+      "path": "agent/src/quantized_llama_batched.rs",
+      "bytes": 126861
     }
   ],
   "note": "tracked-only (git ls-files). Excludes .git, model weights, dep caches, untracked artifacts.",
-  "tracked_bytes": 37209076
+  "tracked_bytes": 37226341
 }

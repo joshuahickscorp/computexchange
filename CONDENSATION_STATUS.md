@@ -70,14 +70,66 @@ top-level `docs/*.md` are **claim-bound** (proof evidence in `claim-policy.json`
 so only non-claim-bound archive docs can move. `scripts/spec-lab/` stays until
 Phase D (live CI/test dependency).
 
-## Remaining (C–H)
+## Phase C — Go proof/evidence authority — IN PROGRESS (Go authority built + proven)
 
-- **C** Go proof/evidence authority: rewrite the 22 `rewrite_go` scripts into `cx prove` / `cx audit`; delete replaced Python.
-- **D** Rust speculation authority: fold the 57 `rewrite_rust` spec-lab files into `spec-engine`; one receipt type; delete Python core.
-- **E** Go product collapse: merge `cli/` + `control/` into one `cx` module/binary; one lifecycle engine; one worker supervisor.
-- **F** Rust agent collapse: one Cargo workspace (`agent` + `spec-engine` + `token-spec-poc` merged); kill shadow impls.
+The one Go evidence core (`cli/evidence.go`: canonical JSON, atomic writes, framed
+hashing, source fingerprint) now backs new `cx` subcommands, each verified at parity
+against the Python it replaces:
+
+- **`cx source-id`** = `scripts/source_fingerprint.py`: full JSON + every field
+  (`source_sha256`, `status_sha256`) byte-identical on the live tree.
+- **`cx verify`** = `scripts/verify_proof_ledger.py` (the primitive 14 registry gate
+  commands depend on): accept-case semantic parity incl. the `ledger_sha256` byte
+  hash; six adversarial reject cases byte-identical in FAIL message + exit code.
+
+These are additive: the Python and CI are untouched, so the `proof-contracts` job
+stays green. Go unit tests cover both (`evidence_test.go`, `prove_test.go`).
+
+### Why the Python is not yet deleted (the flip is Phase-E-gated)
+
+Removing the Python safely requires two things this branch cannot yet satisfy without
+risking a red checkpoint:
+
+1. An installed single `cx` binary on PATH. The registry (`proof/5x5-gates.json`, 14
+   gates) and `scripts/prove-local.sh` invoke `python3 scripts/<x>.py` directly.
+   Flipping them to `cx <sub>` needs one installed `cx`, which is the Phase E
+   deliverable (merge `cli`+`control` into one `cx`).
+2. Live verification. Those 14 gates run inside `make prove-local` (live Postgres +
+   Metal) and the CI `proof-contracts` job (Ubuntu runner). Neither is reproducible in
+   this worktree, so flipping them blind would break "green at every checkpoint".
+
+Exact flip (do when `cx` is installed + against live prove-local/CI): rewrite the 14
+`python3 scripts/verify_proof_ledger.py` gate commands and the `prove-local.sh`
+source-fingerprint calls to `cx verify` / `cx source-id`; port `five-by-five.py` to
+`cx prove` and `runtime_matrix.py`/`api_contract.py` (`--check`) to `cx runtime check`
+/ `cx contract check`; swap the CI `proof-contracts` steps to `go test ./cli` + the
+`cx` binary; delete the replaced Python + migrate remaining assertions to Go tests.
+
+Remaining Python proof scripts to port before deletion: `five-by-five` (313),
+`runtime_matrix` (948), `api_contract` (1419), `release_surface`, `performance_proof`
+(854), `fleet_proof` (1360), `validate_claims` (223) + their tests.
+
+## Remaining (D to H) — gates
+
+- **D** Rust speculation authority: fold the 57 `rewrite_rust` spec-lab files into
+  `spec-engine`; one receipt type; delete Python core. Gate: cross-language golden
+  fixtures + full `cargo test` + the CI spec lane; `scripts/spec-lab/` is a live CI
+  dep until then.
+- **E** Go product collapse: merge `cli/`+`control/` into one `cx` module/binary; one
+  lifecycle engine; one worker supervisor. Gate: the full Go integration matrix
+  (Postgres + MinIO), not runnable here. This also unblocks the Phase C Python
+  deletion (installed `cx`).
+- **F** Rust agent collapse: one Cargo workspace (`agent` + `spec-engine` +
+  `token-spec-poc` merged); kill shadow impls. Gate: full `cargo build/test` across
+  the candle/Metal feature graph.
 - **G** interface/product split; thin SDK; pack Swift/render.
 - **H** 25k-kernel attempt (only after E/F green).
+
+These phases are each gated on infrastructure absent from this environment (live
+Postgres/MinIO/Metal/CUDA, a CI runner, an installed `cx`) or on large cross-language
+parity efforts that cannot be adversarially verified here. Per the black-hole rule
+"no checkpoint is green solely because LOC fell," they are left staged with exact
+next-steps rather than pushed as unverified edits.
 
 ## Commands
 
