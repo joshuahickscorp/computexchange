@@ -1,12 +1,12 @@
 {
   "by_plan": {
     "archive_research": {
-      "files": 10,
-      "loc": 2573,
+      "files": 11,
+      "loc": 2949,
       "code": 0,
       "blank": 0,
       "comment": 0,
-      "bytes": 98177
+      "bytes": 113158
     },
     "retain_blender_pack": {
       "files": 5,
@@ -50,6 +50,7 @@
       "render/site/continuity.py",
       "render/site/og.py",
       "render/site/webify.py",
+      "scripts/spec-lab/cx_agent_render_preview_driver.py",
       "scripts/spec-lab/run_spec_render_token_end_to_end.py",
       "scripts/spec-lab/run_speculative_render_ladder.py",
       "scripts/spec-lab/run_token_spec_decode_ladder.py"

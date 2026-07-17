@@ -33,6 +33,8 @@ by CI and `make spec-test`:
 
 - core: `cx_speculative_core`, `cx_render_spec_adapter`,
   `cx_transcode_spec_adapter`, `cx_integrated_speculation`
+- agent driver: `cx_agent_render_preview_driver` (invoked as a subprocess by the
+  Rust agent `render_preview.rs`; a live dependency, not research)
 - ladders: `run_cx_native_speculation_ladder`, `run_spec_render_token_end_to_end`,
   `run_speculative_render_ladder`, `run_token_spec_decode_ladder`
 - receipts: `emit_current_spec_receipts` (validated by `spec-engine` example)
