@@ -1,5 +1,5 @@
 {
-  "candidate_count": 300,
+  "candidate_count": 244,
   "candidates": [
     {
       "path": "agent/Cargo.lock",
@@ -562,75 +562,11 @@
       "deletion_risk": "low"
     },
     {
-      "path": "docs/concurrency-benchmark-reports/2026-07-05-coalescing-worker-and-gpu-contention.md",
-      "reason": "relocate -\u003e computexchange-docs-archive",
-      "layer": "pack:computexchange-docs-archive",
-      "bytes": 10871,
-      "loc": 201,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "docs/concurrency-benchmark-reports/2026-07-05-concurrency-knob.md",
-      "reason": "relocate -\u003e computexchange-docs-archive",
-      "layer": "pack:computexchange-docs-archive",
-      "bytes": 7098,
-      "loc": 136,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "docs/concurrency-benchmark-reports/2026-07-06-coalescer-width-sweep.md",
-      "reason": "relocate -\u003e computexchange-docs-archive",
-      "layer": "pack:computexchange-docs-archive",
-      "bytes": 5727,
-      "loc": 98,
-      "deletion_risk": "low"
-    },
-    {
       "path": "docs/idle-audit-reports/2026-07-05-first-run.md",
       "reason": "relocate -\u003e computexchange-docs-archive",
       "layer": "pack:computexchange-docs-archive",
       "bytes": 1664,
       "loc": 29,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "docs/internal/AGGRESSIVE_BACKLOG_MOUNTAIN.md",
-      "reason": "relocate -\u003e computexchange-docs-archive",
-      "layer": "pack:computexchange-docs-archive",
-      "bytes": 28193,
-      "loc": 513,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "docs/internal/BLACKHOLE.md",
-      "reason": "relocate -\u003e computexchange-docs-archive",
-      "layer": "pack:computexchange-docs-archive",
-      "bytes": 16499,
-      "loc": 87,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "docs/internal/BROKER_PIPELINE_AUDIT.md",
-      "reason": "relocate -\u003e computexchange-docs-archive",
-      "layer": "pack:computexchange-docs-archive",
-      "bytes": 19933,
-      "loc": 89,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "docs/internal/BUILD_STATUS.md",
-      "reason": "relocate -\u003e computexchange-docs-archive",
-      "layer": "pack:computexchange-docs-archive",
-      "bytes": 17929,
-      "loc": 134,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "docs/internal/COMPETITOR_AND_FRONTIER_RESEARCH_2026.md",
-      "reason": "relocate -\u003e computexchange-docs-archive",
-      "layer": "pack:computexchange-docs-archive",
-      "bytes": 8521,
-      "loc": 258,
       "deletion_risk": "low"
     },
     {
@@ -642,339 +578,11 @@
       "deletion_risk": "low"
     },
     {
-      "path": "docs/internal/CUSTOMIZATION_AND_OWNERSHIP_MAP.md",
-      "reason": "relocate -\u003e computexchange-docs-archive",
-      "layer": "pack:computexchange-docs-archive",
-      "bytes": 7436,
-      "loc": 282,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "docs/internal/FRONTIER_EXPANSION_ATLAS.md",
-      "reason": "relocate -\u003e computexchange-docs-archive",
-      "layer": "pack:computexchange-docs-archive",
-      "bytes": 23183,
-      "loc": 631,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "docs/internal/LAUNCH_REEVALUATION_2026-06.md",
-      "reason": "relocate -\u003e computexchange-docs-archive",
-      "layer": "pack:computexchange-docs-archive",
-      "bytes": 6130,
-      "loc": 84,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "docs/internal/PERF_AND_CAPABILITY_AUDIT.md",
-      "reason": "relocate -\u003e computexchange-docs-archive",
-      "layer": "pack:computexchange-docs-archive",
-      "bytes": 20132,
-      "loc": 120,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "docs/internal/PLANE_B.md",
-      "reason": "relocate -\u003e computexchange-docs-archive",
-      "layer": "pack:computexchange-docs-archive",
-      "bytes": 15032,
-      "loc": 243,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "docs/internal/PLANE_C.md",
-      "reason": "relocate -\u003e computexchange-docs-archive",
-      "layer": "pack:computexchange-docs-archive",
-      "bytes": 37500,
-      "loc": 1426,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "docs/internal/PLANE_C_ERRATA.md",
-      "reason": "relocate -\u003e computexchange-docs-archive",
-      "layer": "pack:computexchange-docs-archive",
-      "bytes": 9906,
-      "loc": 315,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "docs/internal/PLANE_D.md",
-      "reason": "relocate -\u003e computexchange-docs-archive",
-      "layer": "pack:computexchange-docs-archive",
-      "bytes": 29725,
-      "loc": 1040,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "docs/internal/ROADMAP_REVIEW.md",
-      "reason": "relocate -\u003e computexchange-docs-archive",
-      "layer": "pack:computexchange-docs-archive",
-      "bytes": 7730,
-      "loc": 84,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "docs/internal/ROADMAP_STATUS.md",
-      "reason": "relocate -\u003e computexchange-docs-archive",
-      "layer": "pack:computexchange-docs-archive",
-      "bytes": 4922,
-      "loc": 72,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "docs/internal/SELF_COMPETITION_WARGAME.md",
-      "reason": "relocate -\u003e computexchange-docs-archive",
-      "layer": "pack:computexchange-docs-archive",
-      "bytes": 9044,
-      "loc": 302,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "docs/load-test-reports/2026-07-05-adversarial-quarantine-bounds.md",
-      "reason": "relocate -\u003e computexchange-docs-archive",
-      "layer": "pack:computexchange-docs-archive",
-      "bytes": 13311,
-      "loc": 225,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "docs/load-test-reports/2026-07-05-claim-load-50k.md",
-      "reason": "relocate -\u003e computexchange-docs-archive",
-      "layer": "pack:computexchange-docs-archive",
-      "bytes": 13253,
-      "loc": 219,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "docs/load-test-reports/2026-07-06-claim-load-100k-500workers.md",
-      "reason": "relocate -\u003e computexchange-docs-archive",
-      "layer": "pack:computexchange-docs-archive",
-      "bytes": 5358,
-      "loc": 90,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "docs/research/BACKEND_COMPETITIVE_AUDIT_2026-07-13.md",
-      "reason": "relocate -\u003e computexchange-docs-archive",
-      "layer": "pack:computexchange-docs-archive",
-      "bytes": 17164,
-      "loc": 124,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "docs/research/BACKEND_CONSOLIDATION_AUDIT_2026-07-13.md",
-      "reason": "relocate -\u003e computexchange-docs-archive",
-      "layer": "pack:computexchange-docs-archive",
-      "bytes": 19861,
-      "loc": 340,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "docs/research/CX_CYCLES_FORK_GRADE_AND_POTENTIAL_AUDIT_2026-07-08.md",
-      "reason": "relocate -\u003e computexchange-docs-archive",
-      "layer": "pack:computexchange-docs-archive",
-      "bytes": 35116,
-      "loc": 630,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "docs/research/SPEED_LANE_AUDIT_2_AND_HANDOFF.md",
-      "reason": "relocate -\u003e computexchange-docs-archive",
-      "layer": "pack:computexchange-docs-archive",
-      "bytes": 35125,
-      "loc": 0,
-      "deletion_risk": "low"
-    },
-    {
       "path": "docs/thermal-sustained-reports/2026-07-05-m3pro-8min.json",
       "reason": "relocate -\u003e computexchange-docs-archive",
       "layer": "pack:computexchange-docs-archive",
       "bytes": 2974,
       "loc": 128,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/CONCERNS.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 15114,
-      "loc": 218,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/CX-ORACLES-GEOMETRY-TEN.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 9514,
-      "loc": 123,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/CX-ORACLES-MASTER-LOOP.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 21629,
-      "loc": 269,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/DGX-SPARK-360-SPEC.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 4977,
-      "loc": 64,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/FINAL-WAVE-COMPLETION.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 4641,
-      "loc": 56,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/FRONTIER-V2-CLOSURE.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 4752,
-      "loc": 62,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/GEOMETRY-AUDIT.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 4096,
-      "loc": 49,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/GRADER-RETURN-COMPLETION.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 4137,
-      "loc": 63,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/MAC-STUDIO-360-SPEC.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 3568,
-      "loc": 45,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/MEASUREMENTS.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 27768,
-      "loc": 238,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/MORNING-REPORT.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 19313,
-      "loc": 244,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/NOTES.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 58542,
-      "loc": 801,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/OVERNIGHT-LOOP.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 10614,
-      "loc": 134,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/PHOTOREAL-LEDGER.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 3762,
-      "loc": 24,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/PHOTOREAL-PANEL.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 16282,
-      "loc": 180,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/PHOTOREAL-SHIFT-REPORT.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 36172,
-      "loc": 499,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/RACK-BUILD-PLAN.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 12494,
-      "loc": 174,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/RACK-DETAIL-AUDIT.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 9027,
-      "loc": 110,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/RACK-GROUNDING.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 9785,
-      "loc": 123,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/RACK-LOOP.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 13869,
-      "loc": 175,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/RACK-NOTES.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 6292,
-      "loc": 88,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/SHIFT-REPORT.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 5832,
-      "loc": 85,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/SITE-SCROLL-TRIO.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 2945,
-      "loc": 40,
       "deletion_risk": "low"
     },
     {
@@ -1250,54 +858,6 @@
       "deletion_risk": "low"
     },
     {
-      "path": "render/handoff/ASCENSION-GOAL-PROMPT.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 16835,
-      "loc": 187,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/handoff/ASCENSION-HANDOFF.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 16102,
-      "loc": 191,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/handoff/ASCENSION-INDEX.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 4748,
-      "loc": 57,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/handoff/FABLE5-RESEARCH-PROMPT.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 4496,
-      "loc": 60,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/handoff/GRADING-REPORT.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 40561,
-      "loc": 251,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/handoff/HANDOFF.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 10633,
-      "loc": 128,
-      "deletion_risk": "low"
-    },
-    {
       "path": "render/handoff/README.md",
       "reason": "relocate -\u003e computexchange-render-lab",
       "layer": "pack:computexchange-render-lab",
@@ -1359,14 +919,6 @@
       "layer": "pack:computexchange-render-lab",
       "bytes": 3630,
       "loc": 93,
-      "deletion_risk": "low"
-    },
-    {
-      "path": "render/panel/PANEL-LOG.md",
-      "reason": "relocate -\u003e computexchange-render-lab",
-      "layer": "pack:computexchange-render-lab",
-      "bytes": 27393,
-      "loc": 330,
       "deletion_risk": "low"
     },
     {
@@ -2402,23 +1954,23 @@
       "deletion_risk": "low"
     }
   ],
-  "pack_bytes_total": 3154364,
+  "pack_bytes_total": 2303772,
   "pack_rollup": {
     "computexchange-docs-archive": {
-      "files": 36,
-      "loc": 12859,
+      "files": 10,
+      "loc": 5116,
       "code": 0,
       "blank": 0,
       "comment": 0,
-      "bytes": 896838
+      "bytes": 472139
     },
     "computexchange-render-lab": {
-      "files": 170,
-      "loc": 43595,
+      "files": 140,
+      "loc": 38527,
       "code": 0,
       "blank": 0,
       "comment": 0,
-      "bytes": 2257526
+      "bytes": 1831633
     }
   }
 }

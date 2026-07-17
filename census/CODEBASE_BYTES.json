@@ -2,10 +2,10 @@
   "bytes_by_language": {
     "binary": 18276901,
     "config": 35776,
-    "documentation": 2414646,
+    "documentation": 956359,
     "go": 3396184,
     "javascript": 1459906,
-    "json": 1582360,
+    "json": 1569564,
     "lockfile": 237628,
     "other": 52442,
     "patch": 22301,
@@ -86,11 +86,11 @@
       "bytes": 507523
     },
     {
-      "path": "web/assets/site/knob-off@3x.png",
+      "path": "web/assets/knob-off@3x.png",
       "bytes": 504757
     },
     {
-      "path": "web/assets/knob-off@3x.png",
+      "path": "web/assets/site/knob-off@3x.png",
       "bytes": 504757
     },
     {
@@ -183,5 +183,5 @@
     }
   ],
   "note": "tracked-only (git ls-files). Excludes .git, model weights, dep caches, untracked artifacts.",
-  "tracked_bytes": 33037675
+  "tracked_bytes": 31566592
 }
