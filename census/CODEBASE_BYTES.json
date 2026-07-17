@@ -1,18 +1,18 @@
 {
   "bytes_by_language": {
     "binary": 18276901,
-    "config": 35877,
-    "documentation": 2421777,
+    "config": 35776,
+    "documentation": 2414646,
     "go": 3396184,
     "javascript": 1459906,
-    "json": 1631817,
+    "json": 1582360,
     "lockfile": 237628,
     "other": 52442,
     "patch": 22301,
-    "python": 5400306,
+    "python": 1277150,
     "rust": 2244250,
     "shader": 609891,
-    "shell": 351145,
+    "shell": 342324,
     "sql": 169236,
     "swift": 195329,
     "text": 11137,
@@ -142,10 +142,6 @@
       "bytes": 181154
     },
     {
-      "path": "scripts/spec-lab/pod/exp_render_stack.py",
-      "bytes": 179664
-    },
-    {
       "path": "db/schema.sql",
       "bytes": 169236
     },
@@ -166,10 +162,6 @@
       "bytes": 149174
     },
     {
-      "path": "scripts/spec-lab/cx_cycles_render_preview_backend.py",
-      "bytes": 142392
-    },
-    {
       "path": "web/assets/site/tex/foam-ao.png",
       "bytes": 133410
     },
@@ -180,8 +172,16 @@
     {
       "path": "agent/src/quantized_llama_batched.rs",
       "bytes": 126861
+    },
+    {
+      "path": "render/rack-audit-raw.json",
+      "bytes": 121519
+    },
+    {
+      "path": "render/build_scene.py",
+      "bytes": 114229
     }
   ],
   "note": "tracked-only (git ls-files). Excludes .git, model weights, dep caches, untracked artifacts.",
-  "tracked_bytes": 37226341
+  "tracked_bytes": 33037675
 }
