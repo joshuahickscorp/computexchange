@@ -1,9 +1,32 @@
 # ComputExchange — Condensation Status
 
-_Black-hole condensation: the most verified, sellable compute delivered through the
-smallest physical, operational, and cognitive implementation._
+_The real target (System Reduction Plan): GLOBAL_OWNED_LOC <= 100,000 by net
+DELETION of maintained first-party source. Relocation gets zero credit._
 
-- **Base:** `origin/main` @ `96a4890` (local `main` d9bff10 is 6 commits behind — origin/main is authoritative)
+## Global descent (owned = tracked LOC minus unmodified vendored upstream)
+
+| checkpoint | GLOBAL_OWNED_LOC | net removed | how |
+|---|--:|--:|---|
+| baseline `96a4890` | ~352,583 | - | starting owned |
+| R1 | 256,593 | -95,990 | delete 163 spec-lab research/cloud drivers (condense to receipt) |
+| R2 | 231,683 | -24,910 | delete historical doc + render narrative (non-claim-bound) |
+| R3a | 225,121 | -6,562 | delete render one-offs + asset generators; untrack regenerable census dumps |
+| R3b | 205,984 | -19,106 | delete render/panel loop verdicts + render research artifacts |
+| R3c | 206,361 | +377 | restore cx_agent_render_preview_driver.py (live Rust dep the matrix caught) |
+| **now** | **~206,361** | **-146,222 (-41.5%)** | all deletion, not relocation |
+
+Validated by the native prove-local integration matrix (throwaway Postgres + MinIO):
+**559 Go checks PASS + source-stability PASS + `cargo test` 278/0**. Python 123,741
+-> 24,225. documentation 35,387 -> ~12,000.
+
+**Remaining to 100k (~106k) is product/test/proof reconstruction, not deletion:**
+control Go 62k -> 25k, agent Rust 44k -> 30k, tests 41k -> 20k, proof-python ~9k -> 0
+(port to Go + flip CI/registry), proof JSON fixtures. This needs the merged single
+`cx` module (Phase E), test-density refactor preserving all security/payment/lifecycle
+assertions, and iterative CI. The integration matrix runs natively here, so it is
+scope-bound (multi-cycle reconstruction), not infra-blocked.
+
+- **Base:** `origin/main` @ `96a4890` (local `main` d9bff10 is 6 commits behind; origin/main is authoritative)
 - **Branch / worktree:** `condense/black-hole` in `computexchange-condense/` (isolated; the dirty `codex/spec-decode-inference` checkout with 139 WIP files is NOT touched)
 - **No-touch boundary:** [`census/LIVE_BOUND_NO_TOUCH.json`](census/LIVE_BOUND_NO_TOUCH.json)
 - **Headline measurement:** `make audit` → `cx audit codebase` (retires the old `make loc`)
