@@ -1,0 +1,4912 @@
+{
+  "candidate_count": 611,
+  "candidates": [
+    {
+      "path": "agent/Cargo.lock",
+      "reason": "generated: prefer regenerate over track",
+      "layer": "generated",
+      "bytes": 100553,
+      "loc": 4092,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/src/runtime_matrix_generated.rs",
+      "reason": "generated: prefer regenerate over track",
+      "layer": "generated",
+      "bytes": 15461,
+      "loc": 496,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/.cargo_vcs_info.json",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 114,
+      "loc": 6,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/.gitignore",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 9,
+      "loc": 1,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/CX_PROVENANCE.md",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 5758,
+      "loc": 97,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/Cargo.lock",
+      "reason": "generated: prefer regenerate over track",
+      "layer": "vendored",
+      "bytes": 12797,
+      "loc": 498,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/Cargo.toml",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 1760,
+      "loc": 90,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/Cargo.toml.orig",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 792,
+      "loc": 39,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/LICENSE-APACHE",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 11357,
+      "loc": 201,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/LICENSE-LLAMA",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 1078,
+      "loc": 21,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/LICENSE-MIT",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 1023,
+      "loc": 23,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/LICENSE-MLX",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 1066,
+      "loc": 21,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/README.md",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 75,
+      "loc": 3,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/examples/metal_benchmarks.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 3777,
+      "loc": 129,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/err.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 2066,
+      "loc": 63,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/kernel.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 6155,
+      "loc": 202,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/kernels/affine.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 6136,
+      "loc": 195,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/kernels/binary.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 2824,
+      "loc": 83,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/kernels/cast.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 2161,
+      "loc": 64,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/kernels/convolution.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 10524,
+      "loc": 327,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/kernels/fill.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 917,
+      "loc": 26,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/kernels/indexing.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 5928,
+      "loc": 206,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/kernels/macros.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 2364,
+      "loc": 53,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/kernels/mlx_gemm.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 15356,
+      "loc": 455,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/kernels/mod.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 801,
+      "loc": 30,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/kernels/quantized.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 23732,
+      "loc": 788,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/kernels/random.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 2209,
+      "loc": 67,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/kernels/reduce.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 11640,
+      "loc": 421,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/kernels/sdpa.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 17506,
+      "loc": 547,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/kernels/sort.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 9039,
+      "loc": 292,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/kernels/ternary.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 2074,
+      "loc": 69,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/kernels/unary.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 5756,
+      "loc": 173,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/lib.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 1419,
+      "loc": 53,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/metal/buffer.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 1311,
+      "loc": 52,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/metal/command_buffer.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 3292,
+      "loc": 126,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/metal/commands.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 9852,
+      "loc": 268,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/metal/compute_pipeline.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 750,
+      "loc": 26,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/metal/device.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 5198,
+      "loc": 162,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/metal/encoder.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 5025,
+      "loc": 167,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/metal/library.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 4031,
+      "loc": 139,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/metal/mod.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 290,
+      "loc": 15,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/metal_src/affine.metal",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 4647,
+      "loc": 167,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/metal_src/binary.metal",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 6363,
+      "loc": 196,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/metal_src/cast.metal",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 2799,
+      "loc": 104,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/metal_src/conv.metal",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 22337,
+      "loc": 717,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/metal_src/fill.metal",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 1021,
+      "loc": 39,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/metal_src/indexing.metal",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 11953,
+      "loc": 360,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/metal_src/mlx_gemm.metal",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 46009,
+      "loc": 1483,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/metal_src/mlx_sort.metal",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 27157,
+      "loc": 856,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/metal_src/quantized.metal",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 336777,
+      "loc": 8000,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/metal_src/random.metal",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 7596,
+      "loc": 232,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/metal_src/reduce.metal",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 49706,
+      "loc": 1559,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/metal_src/scaled_dot_product_attention.metal",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 76917,
+      "loc": 2402,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/metal_src/sort.metal",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 3214,
+      "loc": 97,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/metal_src/ternary.metal",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 4425,
+      "loc": 125,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/metal_src/unary.metal",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 7982,
+      "loc": 277,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/metal_src/utils.metal",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 988,
+      "loc": 47,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/source.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 1243,
+      "loc": 34,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/tests.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 86953,
+      "loc": 2930,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "agent/vendor/candle-metal-kernels/src/utils.rs",
+      "reason": "vendored: account separately from owned",
+      "layer": "vendored",
+      "bytes": 6719,
+      "loc": 257,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "control/runtime_matrix_generated.go",
+      "reason": "generated: prefer regenerate over track",
+      "layer": "generated",
+      "bytes": 10833,
+      "loc": 171,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "docs/API_CLIENT_SUPPORT.md",
+      "reason": "generated: prefer regenerate over track",
+      "layer": "generated",
+      "bytes": 23468,
+      "loc": 337,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "docs/AUDIT_RESPONSE_2026-07-10.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 16624,
+      "loc": 195,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/RUNTIME_MATRIX.md",
+      "reason": "generated: prefer regenerate over track",
+      "layer": "generated",
+      "bytes": 13549,
+      "loc": 124,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "docs/SITE-REBUILD-REPORT.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 5915,
+      "loc": 95,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/batching-efficiency-reports/2026-07-05-m3pro-identical-reps3.json",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 2619,
+      "loc": 90,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/batching-efficiency-reports/2026-07-05-m3pro-identical.json",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 2524,
+      "loc": 90,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/batching-efficiency-reports/2026-07-05-m3pro-mixed-reps3.json",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 2612,
+      "loc": 90,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/batching-efficiency-reports/2026-07-05-m3pro-mixed.json",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 2517,
+      "loc": 90,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/batching-efficiency-reports/2026-07-06-m3pro-hawking-dispatch.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 6080,
+      "loc": 102,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/bench-local-reports/2026-07-05-claim-query-real-sql.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 7984,
+      "loc": 142,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/bench-local-reports/2026-07-06-claim-flatness-cheaper-class-online-per-job.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 4680,
+      "loc": 93,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/concurrency-benchmark-reports/2026-07-05-coalescing-worker-and-gpu-contention.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 10871,
+      "loc": 201,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/concurrency-benchmark-reports/2026-07-05-concurrency-knob.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 7098,
+      "loc": 136,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/concurrency-benchmark-reports/2026-07-06-coalescer-width-sweep.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 5727,
+      "loc": 98,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/idle-audit-reports/2026-07-05-first-run.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 1664,
+      "loc": 29,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/internal/AGGRESSIVE_BACKLOG_MOUNTAIN.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 28193,
+      "loc": 513,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/internal/BLACKHOLE.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 16499,
+      "loc": 87,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/internal/BROKER_PIPELINE_AUDIT.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 19933,
+      "loc": 89,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/internal/BUILD_STATUS.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 17929,
+      "loc": 134,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/internal/COMPETITOR_AND_FRONTIER_RESEARCH_2026.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 8521,
+      "loc": 258,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/internal/CREED_AND_PATH_TO_TEN.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 428610,
+      "loc": 4207,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/internal/CUSTOMIZATION_AND_OWNERSHIP_MAP.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 7436,
+      "loc": 282,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/internal/FRONTIER_EXPANSION_ATLAS.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 23183,
+      "loc": 631,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/internal/LAUNCH_REEVALUATION_2026-06.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 6130,
+      "loc": 84,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/internal/PERF_AND_CAPABILITY_AUDIT.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 20132,
+      "loc": 120,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/internal/PLANE_B.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 15032,
+      "loc": 243,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/internal/PLANE_C.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 37500,
+      "loc": 1426,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/internal/PLANE_C_ERRATA.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 9906,
+      "loc": 315,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/internal/PLANE_D.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 29725,
+      "loc": 1040,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/internal/ROADMAP_REVIEW.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 7730,
+      "loc": 84,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/internal/ROADMAP_STATUS.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 4922,
+      "loc": 72,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/internal/SELF_COMPETITION_WARGAME.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 9044,
+      "loc": 302,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/load-test-reports/2026-07-05-adversarial-quarantine-bounds.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 13311,
+      "loc": 225,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/load-test-reports/2026-07-05-claim-load-50k.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 13253,
+      "loc": 219,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/load-test-reports/2026-07-06-claim-load-100k-500workers.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 5358,
+      "loc": 90,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/research/BACKEND_COMPETITIVE_AUDIT_2026-07-13.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 17164,
+      "loc": 124,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/research/BACKEND_CONSOLIDATION_AUDIT_2026-07-13.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 19861,
+      "loc": 340,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/research/CX_CYCLES_FORK_GRADE_AND_POTENTIAL_AUDIT_2026-07-08.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 35116,
+      "loc": 630,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/research/SPEED_LANE_AUDIT_2_AND_HANDOFF.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 35125,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/A100_CAPABILITY_SWEEP.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 4706,
+      "loc": 77,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/A100_REFERENCE_MEASURED.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 4409,
+      "loc": 74,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/FANOUT_PLANNER_WAVE1B.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 16549,
+      "loc": 220,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/HAWKING_REGATE_WAVE2B.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 9837,
+      "loc": 155,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/SLA_QUOTE_WAVE2A.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 13953,
+      "loc": 225,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/STUDIO_SCALE_10_RECEIPTS_2026-07-09.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 4614,
+      "loc": 106,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/SUBSTRATE_ROUTING_WAVE3.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 7078,
+      "loc": 101,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/VLLM_RESTART_SOAK_2026-07-06.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 8556,
+      "loc": 132,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/artifacts/a100-sxm-capability-sweep-2026-07-06.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 2222,
+      "loc": 20,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/artifacts/a100-sxm-reference-2026-07-06.json",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 428,
+      "loc": 1,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/AUDACIOUS_TARGET.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 27960,
+      "loc": 435,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/CX_CYCLES_KILLER_OVERNIGHT_2026-07-09.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 5946,
+      "loc": 127,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/CX_RENDER_AUTOPROBE_2026-07-09.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 1798,
+      "loc": 56,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/CYCLES_CHUNKED_FANOUT_2026-07-08.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 4100,
+      "loc": 75,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/CYCLES_HEAVY_CHUNKED_PYMERGE_2026-07-08.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 3434,
+      "loc": 74,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/CYCLES_HOPPER_BATCH_RUNTIME_TAR_2026-07-08.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 2603,
+      "loc": 64,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/CYCLES_HOPPER_NOBUILD_HEAVY_FANOUT_2026-07-08.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 3458,
+      "loc": 81,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/CYCLES_HOPPER_PARALLEL_FANOUT_2026-07-08.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 3207,
+      "loc": 71,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/CYCLES_HOPPER_RUNTIME_TAR_2026-07-08.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 3160,
+      "loc": 94,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/CYCLES_NO_REBUILD_VALIDATION_2026-07-08.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 5876,
+      "loc": 117,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/CYCLES_QUALITY_LADDER_AND_PROVISIONING_2026-07-08.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 6006,
+      "loc": 154,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/CYCLES_THROTTLED_PARALLEL_VALIDATION_2026-07-08.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 3924,
+      "loc": 82,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/EMPIRICAL_RENDERER_10X_PATH_2026-07-09.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 9205,
+      "loc": 218,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/INTEGRATED_SPEC_RENDER_TOKEN_BENCHMARK_2026-07-09.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 20081,
+      "loc": 900,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/NEXT_FRONTIER_STATE.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 15240,
+      "loc": 219,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/OPTIMIZATION_DEEP_RESEARCH_2026-07-07.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 11474,
+      "loc": 233,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/OVERNIGHT_CAMPAIGN_FINAL_REPORT.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 8537,
+      "loc": 128,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/OVERNIGHT_CAMPAIGN_STATE.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 22771,
+      "loc": 264,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/RENDERER_5X_PUSH_AND_3AM_RESTART_2026-07-09.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 3881,
+      "loc": 115,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/RENDERER_FRONTIER_10X_AND_DIMINISHING_RETURNS_2026-07-09.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 8002,
+      "loc": 207,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/RENDERER_FRONTIER_ITERATION_2026-07-09.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 5179,
+      "loc": 129,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/RENDER_POLICY_TRAINING_2026-07-09.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 2089,
+      "loc": 32,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/RUN_2026-07-06.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 15122,
+      "loc": 190,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/SPECULATIVE_RENDER_LADDER_2026-07-09.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 25056,
+      "loc": 282,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/SPEC_RENDER_AND_TOKEN_DECODE_ITERATION_2026-07-09.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 18811,
+      "loc": 335,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/SPEC_RENDER_TOKEN_DECODE_BRANCH_LEDGER_2026-07-09.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 12531,
+      "loc": 70,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/TILE_REFINEMENT_2026-07-09.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 3083,
+      "loc": 94,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/TUNING_PLAN.md",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 49473,
+      "loc": 683,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/cross_arch_gate_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 16202,
+      "loc": 4,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/cross_denoiser_probe_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 7778,
+      "loc": 3,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/cross_scene_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 8104,
+      "loc": 7,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/cx_native_speculation_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 3953453,
+      "loc": 2282,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/cx_render_autoprobe_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 53999,
+      "loc": 51,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/cycles_baseline_matrix_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 198610,
+      "loc": 105,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/cycles_device_diag_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 51416,
+      "loc": 12,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/cycles_fork_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 40738,
+      "loc": 28,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/cycles_quality_ladder_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 387582,
+      "loc": 134,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/cycles_sample_fanout_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 2268203,
+      "loc": 335,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/cycles_sample_subset_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 55604,
+      "loc": 24,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/denoiser_artifacts/cx_denoiser.onnx",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 4469392,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/denoiser_artifacts/cx_denoiser.pt",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 4470485,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/denoiser_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 16096,
+      "loc": 20,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/guiding_ab_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 2336,
+      "loc": 3,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/integrated_spec_render_token_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 76629,
+      "loc": 35,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 175023,
+      "loc": 153,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/local_metal_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 3152,
+      "loc": 1,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/multi_selector_probe_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 11577,
+      "loc": 2,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/multipod_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 5954,
+      "loc": 9,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/prod_render_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 9855,
+      "loc": 8,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/reference_consistency_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 4025,
+      "loc": 2,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/render_policy_2026-07-09.json",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 8714,
+      "loc": 281,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/render_policy_training_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 2638,
+      "loc": 4,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/renderer_micro_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 9941,
+      "loc": 18,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/research_queue_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 2025,
+      "loc": 4,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/restir_build_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 23689,
+      "loc": 29,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/scene_sweep_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 43210,
+      "loc": 5,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/spec_render_token_branch_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 3140052,
+      "loc": 2280,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/speculative_render_ladder_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 665497,
+      "loc": 21,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/stack_analytical_tuner_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 109530,
+      "loc": 30,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/stack_ladder_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 19972,
+      "loc": 11,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/stack_tuner_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 72370,
+      "loc": 30,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/tile_refinement_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 138730,
+      "loc": 55,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/token_spec_decode_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 31210,
+      "loc": 21,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/track5_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 84309,
+      "loc": 4,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/transcode_spec_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 18420,
+      "loc": 5,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/ultimate_ledger.jsonl",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 4800,
+      "loc": 3,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "docs/thermal-sustained-reports/2026-07-05-m3pro-8min.json",
+      "reason": "relocate -\u003e computexchange-docs-archive",
+      "layer": "pack:computexchange-docs-archive",
+      "bytes": 2974,
+      "loc": 128,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/CONCERNS.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 15114,
+      "loc": 218,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/CX-ORACLES-GEOMETRY-TEN.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 9514,
+      "loc": 123,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/CX-ORACLES-MASTER-LOOP.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 21629,
+      "loc": 269,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/DGX-SPARK-360-SPEC.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 4977,
+      "loc": 64,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/FINAL-WAVE-COMPLETION.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 4641,
+      "loc": 56,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/FRONTIER-V2-CLOSURE.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 4752,
+      "loc": 62,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/GEOMETRY-AUDIT.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 4096,
+      "loc": 49,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/GRADER-RETURN-COMPLETION.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 4137,
+      "loc": 63,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/MAC-STUDIO-360-SPEC.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 3568,
+      "loc": 45,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/MEASUREMENTS.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 27768,
+      "loc": 238,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/MORNING-REPORT.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 19313,
+      "loc": 244,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/NOTES.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 58542,
+      "loc": 801,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/OVERNIGHT-LOOP.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 10614,
+      "loc": 134,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/PHOTOREAL-LEDGER.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 3762,
+      "loc": 24,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/PHOTOREAL-PANEL.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 16282,
+      "loc": 180,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/PHOTOREAL-SHIFT-REPORT.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 36172,
+      "loc": 499,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/RACK-BUILD-PLAN.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 12494,
+      "loc": 174,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/RACK-DETAIL-AUDIT.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 9027,
+      "loc": 110,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/RACK-GROUNDING.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 9785,
+      "loc": 123,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/RACK-LOOP.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 13869,
+      "loc": 175,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/RACK-NOTES.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 6292,
+      "loc": 88,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/SHIFT-REPORT.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 5832,
+      "loc": 85,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/SITE-SCROLL-TRIO.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 2945,
+      "loc": 40,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/_audit_desktop.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1543,
+      "loc": 27,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/_checkpoint_export.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 5425,
+      "loc": 112,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/_collage.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 3520,
+      "loc": 75,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/_contact_sheet.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 2293,
+      "loc": 50,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/_detailpack.sh",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 905,
+      "loc": 15,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/_finalpack.sh",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 2047,
+      "loc": 33,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/_finalwave_reshoot.sh",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 555,
+      "loc": 11,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/_foam3d_test.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 5626,
+      "loc": 109,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "render/_geo_audit_workflow.js",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 3619,
+      "loc": 72,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/_geopack.sh",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 511,
+      "loc": 9,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/_grain.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1056,
+      "loc": 22,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/_l19pack.sh",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1213,
+      "loc": 19,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/_panel_agg.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 3453,
+      "loc": 72,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/_panel_build.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 3299,
+      "loc": 65,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/_panel_isolated_workflow.js",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 2715,
+      "loc": 53,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/_panel_reshoot.sh",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1249,
+      "loc": 21,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/_panel_save.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1730,
+      "loc": 49,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/_panel_workflow.js",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 3267,
+      "loc": 66,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/_phase4_batch.sh",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 820,
+      "loc": 10,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/_photoreal_reshoot.sh",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1070,
+      "loc": 19,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/_pr_gate.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 3561,
+      "loc": 80,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/_rack_bakeoff.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 11996,
+      "loc": 236,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/_rear_detail.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 4081,
+      "loc": 62,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/_smoke.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1079,
+      "loc": 25,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/_spark_reshoot.sh",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 958,
+      "loc": 16,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/_wave8_reshoot.sh",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 871,
+      "loc": 17,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/_wave8b.sh",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 534,
+      "loc": 10,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/build_rack.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 88925,
+      "loc": 1318,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/build_scene.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 114229,
+      "loc": 1882,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/build_trio.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 5092,
+      "loc": 101,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/clipcheck.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1450,
+      "loc": 42,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/contact_sheet.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1759,
+      "loc": 46,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/foam_maps.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 3527,
+      "loc": 77,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/geometry-audit-raw.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 100577,
+      "loc": 1088,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/gltf/oracles.glb",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1066896,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/handoff/ASCENSION-GOAL-PROMPT.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 16835,
+      "loc": 187,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/handoff/ASCENSION-HANDOFF.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 16102,
+      "loc": 191,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/handoff/ASCENSION-INDEX.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 4748,
+      "loc": 57,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/handoff/FABLE5-RESEARCH-PROMPT.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 4496,
+      "loc": 60,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/handoff/GRADING-REPORT.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 40561,
+      "loc": 251,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/handoff/HANDOFF.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 10633,
+      "loc": 128,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/handoff/README.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1738,
+      "loc": 25,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/measure.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 35051,
+      "loc": 622,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/measure_evidence/finalwave-patch-table.txt",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 593,
+      "loc": 12,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/measure_evidence/wave8-patch-table.txt",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 594,
+      "loc": 12,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/measure_fillet.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 3251,
+      "loc": 72,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/measure_spark_bezel.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 5483,
+      "loc": 107,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/measure_spark_front.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 3826,
+      "loc": 75,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/overlay.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 3630,
+      "loc": 93,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/PANEL-LOG.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 27393,
+      "loc": 330,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop1/_KEY.txt",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 468,
+      "loc": 14,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop1/_summary.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1056,
+      "loc": 84,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop1/_verdicts.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 30888,
+      "loc": 680,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop10/_KEY.txt",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 469,
+      "loc": 14,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop10/_summary.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 880,
+      "loc": 72,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop10/_verdicts.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 29293,
+      "loc": 680,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop11/_KEY.txt",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 469,
+      "loc": 14,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop11/_summary.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 983,
+      "loc": 80,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop11/_verdicts.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 30909,
+      "loc": 680,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop12/_KEY.txt",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 600,
+      "loc": 18,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop12/_summary.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1004,
+      "loc": 80,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop12/_verdicts.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 35663,
+      "loc": 880,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop13/_KEY.txt",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 600,
+      "loc": 18,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop13/_summary.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 897,
+      "loc": 72,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop13/_verdicts.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 36375,
+      "loc": 870,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop14/_KEY.txt",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 600,
+      "loc": 18,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop14/_summary.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1035,
+      "loc": 84,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop14/_verdicts.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 34531,
+      "loc": 880,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop15/_verdicts.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 24509,
+      "loc": 405,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop16/_KEY.txt",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 600,
+      "loc": 18,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop16/_summary.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 836,
+      "loc": 68,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop16/_verdicts.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 44489,
+      "loc": 880,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop17/_KEY.txt",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 600,
+      "loc": 18,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop17/_summary.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 989,
+      "loc": 80,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop17/_verdicts.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 38221,
+      "loc": 880,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop18/_KEY.txt",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 600,
+      "loc": 18,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop18/_verdicts.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 40383,
+      "loc": 880,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop19/_KEY.txt",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 600,
+      "loc": 18,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop19/_verdicts.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 38939,
+      "loc": 880,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop2/_KEY.txt",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 468,
+      "loc": 14,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop2/_summary.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 881,
+      "loc": 72,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop2/_verdicts.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 30838,
+      "loc": 680,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop20/_KEY.txt",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 600,
+      "loc": 18,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop20/_verdicts.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 36156,
+      "loc": 880,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop3/_KEY.txt",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 468,
+      "loc": 14,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop3/_summary.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 896,
+      "loc": 72,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop3/_verdicts.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 27169,
+      "loc": 680,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop4/_KEY.txt",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 468,
+      "loc": 14,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop4/_summary.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 892,
+      "loc": 72,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop4/_verdicts.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 29792,
+      "loc": 680,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop5/_KEY.txt",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 468,
+      "loc": 14,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop5/_summary.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1154,
+      "loc": 92,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop5/_verdicts.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 28657,
+      "loc": 680,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop6/_KEY.txt",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 468,
+      "loc": 14,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop6/_summary.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1084,
+      "loc": 88,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop6/_verdicts.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 30479,
+      "loc": 680,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop7/_KEY.txt",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 468,
+      "loc": 14,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop7/_summary.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1054,
+      "loc": 84,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop7/_verdicts.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 29811,
+      "loc": 670,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop8/_KEY.txt",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 468,
+      "loc": 14,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop8/_summary.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1018,
+      "loc": 84,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop8/_verdicts.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 30039,
+      "loc": 680,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop9/_KEY.txt",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 468,
+      "loc": 14,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop9/_summary.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 943,
+      "loc": 76,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/panel/loop9/_verdicts.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 30009,
+      "loc": 680,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/portrait_compare.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 2425,
+      "loc": 57,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/post_chain.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 2756,
+      "loc": 52,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/previews/_smoke.png",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 76527,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/previews/dgx-spark-iter3@3x.png",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1031804,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/previews/mac-studio-iter3@3x.png",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1065417,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/previews/oracles-pair-iter2@3x.png",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1629923,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/previews/oracles-pair-iter3@3x.png",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1640007,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/rack-audit-raw.json",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 121519,
+      "loc": 1160,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/rack_verify.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 5908,
+      "loc": 116,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/SOURCES.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 7496,
+      "loc": 87,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/dgx-spark-front-ref.jpg",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 454105,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/mac-studio-front-ref.jpg",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 40385,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/mac-studio/apple_LEGAL_NOTICE.rtf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 16924,
+      "loc": 157,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/mac-studio/dim_back-side.svg",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 22507,
+      "loc": 315,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/mac-studio/dim_top-front.svg",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 31461,
+      "loc": 375,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/pool-dark/SOURCES.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 855,
+      "loc": 8,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/D-ARCH.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 3485,
+      "loc": 46,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/RECON-D-ARCH.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 9551,
+      "loc": 121,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/RTX5090FE-SPEC.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 5132,
+      "loc": 68,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/SOURCES.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 9022,
+      "loc": 83,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/accessories/apc-ap8868-pdu-spec.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 982015,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/accessories/apc-ar8136blk-blanking-spec.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 113284,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/accessories/chatsworth-1521x-datasheet.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 348801,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/accessories/dell-rail-matrix.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 967053,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/accessories/tripplite-srcableduct1u-spec.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 49982,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/enclosure/apc-ar3100-datasheet.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 34511,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/enclosure/apc-netshelter-sx-manual.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 2966456,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/enclosure/tripplite-sr42ub-spec.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 56310,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/enclosure/tripplite-sr42ubcl-drawing.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1063734,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/enclosure/tripplite-sr42ubdp48-drawing.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1064757,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/enclosure/tripplite-sr42ubwd-drawing.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 674073,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/enclosure/tripplite-sr48ub-spec.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 53939,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/enclosure/tripplite-sr48ubdpwd-drawing.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 632221,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/enclosure/vertiv-vr-guide-spec.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 97742,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/enclosure/vertiv-vr-selection-guide.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1001410,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/enclosure/vertiv-vr3100-submittal.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 421543,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/enclosure/vertiv-vr3107-submittal.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 366633,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/enclosure/vertiv-vr3150-submittal.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 302701,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/enclosure/vertiv-vr3307-submittal.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 372793,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/enclosure/vertiv-vr3350-submittal.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 316807,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/enclosure/vertiv-vr3357-submittal.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 312624,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/node/rosewill_rsv-l4500_manual.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1051416,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/standards/eia-rs310-1968.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 180427,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/standards/intel-rack-compat-guide-r24.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 492817,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/switch/mikrotik-crs326-dimensions-cad.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 178336,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/switch/mikrotik-crs354-dimensions-cad.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 356267,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/ups/smt1500rm2uc-datasheet.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 61235,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/ups/smt2200rm2uc-datasheet.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 88979,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/ref/rack/ups/smt3000rm2u-datasheet.pdf",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 58948,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/rig_patches.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 7424,
+      "loc": 145,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/settle_sheet.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 5281,
+      "loc": 100,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/site/continuity.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1648,
+      "loc": 39,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/site/og.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 684,
+      "loc": 14,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/site/oracles.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 25545,
+      "loc": 631,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/site/precompress.sh",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 580,
+      "loc": 11,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/site/previews/continuity.png",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 358400,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/site/previews/dgx-spark-iter4@3x.png",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1141862,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/site/previews/dgx-spark-iter5@3x.png",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1147125,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/site/previews/dgx-spark-iter6@3x.png",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1089148,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/site/previews/dgx-spark-iter7@3x.png",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1090724,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/site/previews/mac-studio-iter10@3x.png",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 945851,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/site/previews/mac-studio-iter4@3x.png",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 982587,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/site/previews/mac-studio-iter5@3x.png",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 977427,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/site/previews/oracles-pair-iter10@3x.png",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1889750,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/site/previews/oracles-pair-iter1@3x.png",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1746662,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/site/previews/oracles-pair-iter2@3x.png",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1789848,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/site/previews/oracles-pair-iter3@3x.png",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1936990,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/site/previews/oracles-pair-iter4@3x.png",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1989679,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/site/previews/oracles-pair-iter5@3x.png",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1934362,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/site/previews/oracles-pair-iter6@3x.png",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1936124,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/site/previews/oracles-pair-iter8@3x.png",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1903256,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/site/previews/oracles-pair-iter9@3x.png",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1913663,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/site/webify.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 910,
+      "loc": 19,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/turnaround_sheet.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 4097,
+      "loc": 84,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/verify/dgx-spark-front.png",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1371181,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/verify/mac-studio-front-overlay.png",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 216820,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/verify/mac-studio-front-sidebyside.png",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 319258,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/verify/mac-studio-front.png",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1544555,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/verify_sheet.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 8898,
+      "loc": 188,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "render/wave8_settle.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 3133,
+      "loc": 71,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "renderer/.gitignore",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 85,
+      "loc": 2,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "renderer/Cargo.lock",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "generated",
+      "bytes": 28616,
+      "loc": 1095,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "renderer/Cargo.toml",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 2387,
+      "loc": 52,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "renderer/DECOUPLED_SHADING_NOTES.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 6803,
+      "loc": 121,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "renderer/README.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1694,
+      "loc": 32,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "renderer/examples/decoupled_micro.rs",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1292,
+      "loc": 31,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "renderer/examples/wgpu_smoke.rs",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 8788,
+      "loc": 237,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "renderer/src/decoupled.rs",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 8801,
+      "loc": 290,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "renderer/src/furnace.rs",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 9904,
+      "loc": 277,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "renderer/src/lib.rs",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1169,
+      "loc": 26,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "renderer/src/rng.rs",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1259,
+      "loc": 39,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "renderer/src/vec3.rs",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 3074,
+      "loc": 124,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "renderer/tests/decoupled_shading_test.rs",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1524,
+      "loc": 49,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "renderer/tests/furnace_test.rs",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 5504,
+      "loc": 147,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/anytask_demo.py",
+      "reason": "python -\u003e Go (operational/evidence authority)",
+      "layer": "active_repo_support",
+      "bytes": 3060,
+      "loc": 72,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "scripts/api_contract.py",
+      "reason": "python -\u003e Go (operational/evidence authority)",
+      "layer": "active_repo_support",
+      "bytes": 60980,
+      "loc": 1419,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "scripts/cost_calculator.py",
+      "reason": "python -\u003e Go (operational/evidence authority)",
+      "layer": "active_repo_support",
+      "bytes": 5996,
+      "loc": 119,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "scripts/cx_trace.py",
+      "reason": "python -\u003e Go (operational/evidence authority)",
+      "layer": "active_repo_support",
+      "bytes": 4353,
+      "loc": 121,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "scripts/doc-as-test-drainer.py",
+      "reason": "python -\u003e Go (operational/evidence authority)",
+      "layer": "active_repo_support",
+      "bytes": 8615,
+      "loc": 205,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "scripts/five-by-five.py",
+      "reason": "python -\u003e Go (operational/evidence authority)",
+      "layer": "active_repo_support",
+      "bytes": 13118,
+      "loc": 313,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "scripts/fleet_proof.py",
+      "reason": "python -\u003e Go (operational/evidence authority)",
+      "layer": "active_repo_support",
+      "bytes": 61176,
+      "loc": 1360,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "scripts/performance_proof.py",
+      "reason": "python -\u003e Go (operational/evidence authority)",
+      "layer": "active_repo_support",
+      "bytes": 41496,
+      "loc": 854,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "scripts/runtime_matrix.py",
+      "reason": "python -\u003e Go (operational/evidence authority)",
+      "layer": "active_repo_support",
+      "bytes": 39075,
+      "loc": 948,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "scripts/source_fingerprint.py",
+      "reason": "python -\u003e Go (operational/evidence authority)",
+      "layer": "active_repo_support",
+      "bytes": 4263,
+      "loc": 124,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "scripts/spec-lab/.gitignore",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 101,
+      "loc": 2,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/README.md",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 7836,
+      "loc": 133,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/bench_resident_engine.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 36743,
+      "loc": 794,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/calibrate_repair_budget.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 19060,
+      "loc": 400,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/customer_render_policy_v1.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 13512,
+      "loc": 393,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/cx_agent_render_preview_driver.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 14981,
+      "loc": 376,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/cx_cycles_render_preview_backend.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 142392,
+      "loc": 3535,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/cx_denoiser_model.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 9517,
+      "loc": 196,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/cx_integrated_speculation.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 8866,
+      "loc": 221,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/cx_render_autoprobe.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 17374,
+      "loc": 481,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/cx_render_project_bundle_v1.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 26858,
+      "loc": 662,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/cx_render_project_contract_v2.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 33255,
+      "loc": 893,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/cx_render_quality_v3.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 38994,
+      "loc": 1105,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/cx_render_spatial75_v1.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 64300,
+      "loc": 1796,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/cx_render_spec_adapter.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 47597,
+      "loc": 975,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/cx_speculative_core.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 39037,
+      "loc": 864,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/cx_transcode_spec_adapter.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 106967,
+      "loc": 2381,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/cycles_fork.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 12542,
+      "loc": 338,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/emit_current_spec_receipts.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1239,
+      "loc": 45,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/eval_cx_denoiser.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 15914,
+      "loc": 399,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/experiments.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 21578,
+      "loc": 394,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/make_stylized_levi_deformation_derivative.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 11531,
+      "loc": 310,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/orchestrator.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 10447,
+      "loc": 265,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_ar_vllm.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 21790,
+      "loc": 510,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_bytes_specdec.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 7522,
+      "loc": 192,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_cost_model.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 15674,
+      "loc": 330,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_cross_arch_gate.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 44302,
+      "loc": 875,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_cross_denoiser_probe.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 21459,
+      "loc": 452,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_cycles_render.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 23407,
+      "loc": 533,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_cycles_render_prod.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 52671,
+      "loc": 1098,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_distributed.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 11052,
+      "loc": 231,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_guiding_ab.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 31345,
+      "loc": 681,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_mint_denoise_pairs.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 23613,
+      "loc": 545,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_multi_selector_probe.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 32248,
+      "loc": 657,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_pipeline_render_transcode.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 36442,
+      "loc": 718,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_protocol.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 12472,
+      "loc": 315,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_real_image.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 24312,
+      "loc": 569,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_real_video.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 22405,
+      "loc": 518,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_reference_consistency_probe.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 19739,
+      "loc": 361,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_render_convergence.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 50246,
+      "loc": 1048,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_render_denoise.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 17653,
+      "loc": 377,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_render_faninout.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 46856,
+      "loc": 1002,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_render_frame_subset.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 33693,
+      "loc": 768,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_render_gbuffer.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 41509,
+      "loc": 899,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_render_heavy.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 46379,
+      "loc": 924,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_render_interp_learned.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 56379,
+      "loc": 1234,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_render_production.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 39208,
+      "loc": 855,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_render_stack.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 179664,
+      "loc": 3608,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_render_stack_analytical.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 84394,
+      "loc": 1836,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_render_temporal.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 76658,
+      "loc": 1507,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_render_tiles.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 36753,
+      "loc": 820,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_render_ultimate.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 51025,
+      "loc": 905,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_render_upscale_guided.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 63464,
+      "loc": 1431,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_video_interp.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 18515,
+      "loc": 421,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_video_residual.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 8523,
+      "loc": 214,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/exp_video_transcode.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 38896,
+      "loc": 843,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/pod/setup_base.sh",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 7580,
+      "loc": 155,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/research_next_queue.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 7111,
+      "loc": 225,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run.sh",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1241,
+      "loc": 24,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_analytical_pushfurther.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 5744,
+      "loc": 134,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_analytical_verify.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 5759,
+      "loc": 129,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_cache_verify.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 4807,
+      "loc": 114,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_cross_arch_gate.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 27273,
+      "loc": 603,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_cross_denoiser_probe.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 9223,
+      "loc": 199,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_cross_scene_verify.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 7869,
+      "loc": 171,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_customer_render_path_benchmark.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 36700,
+      "loc": 913,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_cx_native_speculation_ladder.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 84175,
+      "loc": 1881,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_cycles_baseline_matrix.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 11069,
+      "loc": 296,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_cycles_device_diag.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 9201,
+      "loc": 229,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_cycles_fork_build.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 7198,
+      "loc": 196,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_cycles_quality_ladder.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 35256,
+      "loc": 937,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_cycles_sample_fanout_matrix.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 50545,
+      "loc": 1221,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_cycles_sample_subset_probe.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 9829,
+      "loc": 260,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_denoiser_experiment.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 12853,
+      "loc": 263,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_diag_probe4.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 15309,
+      "loc": 386,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_diag_repro.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 7413,
+      "loc": 180,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_diag_repro2.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 9499,
+      "loc": 228,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_diag_repro3.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 7414,
+      "loc": 180,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_guiding_ab.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 6316,
+      "loc": 150,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_integrated_production_benchmark.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 16597,
+      "loc": 325,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_local_cycles_spec_benchmark.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 27197,
+      "loc": 696,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_local_cycles_spec_sequence.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 61558,
+      "loc": 1624,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_local_metal_anchor.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 20608,
+      "loc": 463,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_multi_selector_probe.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 9765,
+      "loc": 205,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_multipod_distribution.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 27620,
+      "loc": 527,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_prod_render.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 7891,
+      "loc": 167,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_reference_consistency_probe.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 10193,
+      "loc": 209,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_renderer_micro.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 8441,
+      "loc": 218,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_research_queue.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 7305,
+      "loc": 190,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_restir_branch_build.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 21894,
+      "loc": 428,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_scene_sweep.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 24470,
+      "loc": 513,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_spatial75_cycles_frontier.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 126305,
+      "loc": 3189,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_spec_render_token_end_to_end.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 12434,
+      "loc": 291,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_speculative_render_ladder.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 19699,
+      "loc": 493,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_stack_analytical_tuner.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 5099,
+      "loc": 117,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_stack_ladder.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 7819,
+      "loc": 164,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_stack_tuner.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 6124,
+      "loc": 129,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_tile_refinement_ladder.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 27546,
+      "loc": 783,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_token_spec_decode_ladder.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 21209,
+      "loc": 556,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_track5_spikes.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 5289,
+      "loc": 127,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/run_ultimate_no_reprojection.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 6955,
+      "loc": 160,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/runpod.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 31721,
+      "loc": 726,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/runpod_cost_quote.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 29747,
+      "loc": 636,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/screen_blender_inmemory_endpoints.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 37626,
+      "loc": 1040,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/screen_blender_oidn_multipass.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 42940,
+      "loc": 1081,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/screen_blender_one_render_confidence.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 38032,
+      "loc": 971,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/screen_blender_resident_invalidation.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 37548,
+      "loc": 935,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/screen_blender_resident_mutations.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 44326,
+      "loc": 1158,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/screen_blender_resident_raster_followup.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 23710,
+      "loc": 630,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/screen_customer_png_transport.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 41834,
+      "loc": 1099,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/screen_spatial75_one_render_upper_bound.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 69549,
+      "loc": 1743,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/screen_static_frame_cache_reuse.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 108758,
+      "loc": 2771,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/screen_temporal_prediction_frontier.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 64559,
+      "loc": 1766,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/test_bench_resident_engine.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 8660,
+      "loc": 216,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_cross_arch_gate.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 25076,
+      "loc": 555,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_cross_denoiser_probe.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 14607,
+      "loc": 341,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_customer_render_policy_v1.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 19370,
+      "loc": 476,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_cx_agent_render_preview_driver.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 8017,
+      "loc": 215,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_cx_cycles_render_preview_backend.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 82091,
+      "loc": 1893,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_cx_integrated_speculation.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 8712,
+      "loc": 194,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_cx_native_speculation_ladder.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 10518,
+      "loc": 267,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_cx_render_autoprobe.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1668,
+      "loc": 50,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_cx_render_project_bundle_v1.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 15325,
+      "loc": 392,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_cx_render_project_contract_v2.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 22677,
+      "loc": 528,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_cx_render_quality_v3.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 22038,
+      "loc": 530,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_cx_render_spatial75_v1.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 35448,
+      "loc": 815,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_cx_render_spec_adapter.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 14590,
+      "loc": 308,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_cx_speculative_core.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 22912,
+      "loc": 578,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_cx_transcode_spec_adapter.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 39836,
+      "loc": 861,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_cycles_baseline_matrix.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 2244,
+      "loc": 62,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_cycles_device_diag.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1091,
+      "loc": 33,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_cycles_dockerfile.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 925,
+      "loc": 26,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_cycles_fork.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 4750,
+      "loc": 107,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_cycles_patches.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 3162,
+      "loc": 98,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_cycles_quality_ladder.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 4251,
+      "loc": 129,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_cycles_sample_fanout_matrix.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 21197,
+      "loc": 527,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_cycles_sample_subset_probe.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 2307,
+      "loc": 64,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_local_metal_anchor.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 9286,
+      "loc": 235,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_multi_selector_probe.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 17986,
+      "loc": 379,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_reference_consistency_probe.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 12205,
+      "loc": 279,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_render_reference_cache.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 20480,
+      "loc": 495,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_render_repair_loop.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 48098,
+      "loc": 934,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_run_customer_render_path_benchmark.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 11750,
+      "loc": 297,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_run_local_cycles_spec_benchmark.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 7627,
+      "loc": 198,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_run_local_cycles_spec_sequence.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 23554,
+      "loc": 592,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_run_spatial75_cycles_frontier.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 41087,
+      "loc": 1060,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_runpod_cost_quote.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 14216,
+      "loc": 332,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_runpod_safety.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 7025,
+      "loc": 198,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_scene_sweep.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 16061,
+      "loc": 341,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_screen_blender_inmemory_endpoints.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 3956,
+      "loc": 114,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_screen_blender_oidn_multipass.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 11272,
+      "loc": 343,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_screen_blender_one_render_confidence.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 11650,
+      "loc": 328,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_screen_blender_resident_invalidation.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 5969,
+      "loc": 170,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_screen_blender_resident_mutations.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 8747,
+      "loc": 255,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_screen_blender_resident_raster_followup.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1871,
+      "loc": 60,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_screen_customer_png_transport.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 14807,
+      "loc": 339,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_screen_spatial75_one_render_upper_bound.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 27139,
+      "loc": 663,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_screen_static_frame_cache_reuse.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 45002,
+      "loc": 1171,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_screen_temporal_prediction_frontier.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 10427,
+      "loc": 281,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_speculative_render_ladder.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 2526,
+      "loc": 69,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_tile_refinement_ladder.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1808,
+      "loc": 56,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_token_spec_decode_ladder.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1996,
+      "loc": 50,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_verify_cx_render_quality_v3.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 11062,
+      "loc": 300,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_verify_render_bmw_integrator_screen.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 7567,
+      "loc": 187,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_verify_render_deformation_screen.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 8521,
+      "loc": 213,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_verify_render_hair_transfer.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 6796,
+      "loc": 176,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_verify_render_koro_transfer.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 15054,
+      "loc": 366,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/test_verify_render_transfer_matrix.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 16553,
+      "loc": 410,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/spec-lab/train_cx_denoiser.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 11439,
+      "loc": 270,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/train_render_policy.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 11455,
+      "loc": 314,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/tuner.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 12625,
+      "loc": 304,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/tuner_stack.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 19894,
+      "loc": 418,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/tuner_stack_analytical.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 14026,
+      "loc": 346,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/tuning_spaces.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 6637,
+      "loc": 112,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/validate_temporal_prediction_frontier.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 1660,
+      "loc": 61,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/verify_cx_render_quality_v3.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 16300,
+      "loc": 479,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/verify_render_bmw_integrator_screen.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 48228,
+      "loc": 985,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/verify_render_deformation_screen.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 38399,
+      "loc": 980,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/verify_render_hair_transfer.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 22461,
+      "loc": 475,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/verify_render_koro_transfer.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 59495,
+      "loc": 813,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/spec-lab/verify_render_transfer_matrix.py",
+      "reason": "relocate -\u003e computexchange-render-lab",
+      "layer": "pack:computexchange-render-lab",
+      "bytes": 58855,
+      "loc": 1425,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "scripts/supplier_earnings_calculator.py",
+      "reason": "python -\u003e Go (operational/evidence authority)",
+      "layer": "active_repo_support",
+      "bytes": 21107,
+      "loc": 369,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "scripts/test_api_contract.py",
+      "reason": "python -\u003e Go (operational/evidence authority)",
+      "layer": "active_repo_support",
+      "bytes": 10545,
+      "loc": 266,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/test_five_by_five.py",
+      "reason": "python -\u003e Go (operational/evidence authority)",
+      "layer": "active_repo_support",
+      "bytes": 6660,
+      "loc": 167,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/test_fleet_proof.py",
+      "reason": "python -\u003e Go (operational/evidence authority)",
+      "layer": "active_repo_support",
+      "bytes": 9236,
+      "loc": 201,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/test_performance_proof.py",
+      "reason": "python -\u003e Go (operational/evidence authority)",
+      "layer": "active_repo_support",
+      "bytes": 13051,
+      "loc": 278,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/test_release_surface.py",
+      "reason": "python -\u003e Go (operational/evidence authority)",
+      "layer": "active_repo_support",
+      "bytes": 5665,
+      "loc": 159,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/test_runtime_matrix.py",
+      "reason": "python -\u003e Go (operational/evidence authority)",
+      "layer": "active_repo_support",
+      "bytes": 8791,
+      "loc": 199,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/test_source_fingerprint.py",
+      "reason": "python -\u003e Go (operational/evidence authority)",
+      "layer": "active_repo_support",
+      "bytes": 3266,
+      "loc": 82,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/test_validate_claims.py",
+      "reason": "python -\u003e Go (operational/evidence authority)",
+      "layer": "active_repo_support",
+      "bytes": 6955,
+      "loc": 172,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/test_verify_proof_ledger.py",
+      "reason": "python -\u003e Go (operational/evidence authority)",
+      "layer": "active_repo_support",
+      "bytes": 3590,
+      "loc": 98,
+      "deletion_risk": "high"
+    },
+    {
+      "path": "scripts/validate_claims.py",
+      "reason": "python -\u003e Go (operational/evidence authority)",
+      "layer": "active_repo_support",
+      "bytes": 8596,
+      "loc": 223,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "scripts/verify_proof_ledger.py",
+      "reason": "python -\u003e Go (operational/evidence authority)",
+      "layer": "active_repo_support",
+      "bytes": 5680,
+      "loc": 153,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "spec-engine/Cargo.lock",
+      "reason": "generated: prefer regenerate over track",
+      "layer": "generated",
+      "bytes": 2673,
+      "loc": 107,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "token-spec-poc/Cargo.lock",
+      "reason": "generated: prefer regenerate over track",
+      "layer": "generated",
+      "bytes": 84219,
+      "loc": 3433,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "web/assets/site/hero.js.br",
+      "reason": "generated: prefer regenerate over track",
+      "layer": "generated",
+      "bytes": 3276,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "web/assets/site/vendor/addons/loaders/GLTFLoader.js",
+      "reason": "generated: prefer regenerate over track",
+      "layer": "vendored",
+      "bytes": 108522,
+      "loc": 4663,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "web/assets/site/vendor/addons/loaders/GLTFLoader.js.br",
+      "reason": "generated: prefer regenerate over track",
+      "layer": "vendored",
+      "bytes": 19521,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "web/assets/site/vendor/addons/utils/BufferGeometryUtils.js",
+      "reason": "generated: prefer regenerate over track",
+      "layer": "vendored",
+      "bytes": 31906,
+      "loc": 1375,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "web/assets/site/vendor/addons/utils/BufferGeometryUtils.js.br",
+      "reason": "generated: prefer regenerate over track",
+      "layer": "vendored",
+      "bytes": 6002,
+      "loc": 0,
+      "deletion_risk": "low"
+    },
+    {
+      "path": "web/assets/site/vendor/three.module.js",
+      "reason": "generated: prefer regenerate over track",
+      "layer": "vendored",
+      "bytes": 1272972,
+      "loc": 53044,
+      "deletion_risk": "medium"
+    },
+    {
+      "path": "web/assets/site/vendor/three.module.js.br",
+      "reason": "generated: prefer regenerate over track",
+      "layer": "vendored",
+      "bytes": 200866,
+      "loc": 0,
+      "deletion_risk": "low"
+    }
+  ],
+  "pack_bytes_total": 78346493,
+  "pack_rollup": {
+    "computexchange-docs-archive": {
+      "files": 114,
+      "loc": 25753,
+      "code": 0,
+      "blank": 0,
+      "comment": 0,
+      "bytes": 21945181
+    },
+    "computexchange-render-lab": {
+      "files": 403,
+      "loc": 141504,
+      "code": 0,
+      "blank": 0,
+      "comment": 0,
+      "bytes": 56401312
+    }
+  }
+}

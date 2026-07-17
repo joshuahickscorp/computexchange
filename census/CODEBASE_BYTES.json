@@ -1,0 +1,187 @@
+{
+  "bytes_by_language": {
+    "binary": 77114928,
+    "config": 34716,
+    "documentation": 2831052,
+    "go": 3343075,
+    "javascript": 1459906,
+    "json": 13185610,
+    "lockfile": 237628,
+    "other": 52442,
+    "patch": 22301,
+    "python": 5400306,
+    "rust": 2244250,
+    "shader": 609891,
+    "shell": 351145,
+    "sql": 169236,
+    "swift": 195329,
+    "text": 28061,
+    "toml": 18529,
+    "web": 671378,
+    "yaml": 74275
+  },
+  "largest_tracked_40": [
+    {
+      "path": "docs/speed-lane-reports/spec-lab/denoiser_artifacts/cx_denoiser.pt",
+      "bytes": 4470485
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/denoiser_artifacts/cx_denoiser.onnx",
+      "bytes": 4469392
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/cx_native_speculation_ledger.jsonl",
+      "bytes": 3953453
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/spec_render_token_branch_ledger.jsonl",
+      "bytes": 3140052
+    },
+    {
+      "path": "render/ref/rack/enclosure/apc-netshelter-sx-manual.pdf",
+      "bytes": 2966456
+    },
+    {
+      "path": "web/assets/site/oracles-pair@3x.png",
+      "bytes": 2313625
+    },
+    {
+      "path": "docs/speed-lane-reports/spec-lab/cycles_sample_fanout_ledger.jsonl",
+      "bytes": 2268203
+    },
+    {
+      "path": "render/site/previews/oracles-pair-iter4@3x.png",
+      "bytes": 1989679
+    },
+    {
+      "path": "render/site/previews/oracles-pair-iter3@3x.png",
+      "bytes": 1936990
+    },
+    {
+      "path": "render/site/previews/oracles-pair-iter6@3x.png",
+      "bytes": 1936124
+    },
+    {
+      "path": "render/site/previews/oracles-pair-iter5@3x.png",
+      "bytes": 1934362
+    },
+    {
+      "path": "render/site/previews/oracles-pair-iter9@3x.png",
+      "bytes": 1913663
+    },
+    {
+      "path": "render/site/previews/oracles-pair-iter8@3x.png",
+      "bytes": 1903256
+    },
+    {
+      "path": "render/site/previews/oracles-pair-iter10@3x.png",
+      "bytes": 1889750
+    },
+    {
+      "path": "render/site/previews/oracles-pair-iter2@3x.png",
+      "bytes": 1789848
+    },
+    {
+      "path": "render/site/previews/oracles-pair-iter1@3x.png",
+      "bytes": 1746662
+    },
+    {
+      "path": "web/assets/site/mac-studio@3x.png",
+      "bytes": 1651459
+    },
+    {
+      "path": "render/previews/oracles-pair-iter3@3x.png",
+      "bytes": 1640007
+    },
+    {
+      "path": "render/previews/oracles-pair-iter2@3x.png",
+      "bytes": 1629923
+    },
+    {
+      "path": "render/verify/mac-studio-front.png",
+      "bytes": 1544555
+    },
+    {
+      "path": "web/assets/btn-add-payment-shell@3x.png",
+      "bytes": 1448440
+    },
+    {
+      "path": "render/verify/dgx-spark-front.png",
+      "bytes": 1371181
+    },
+    {
+      "path": "web/assets/site/vendor/three.module.js",
+      "bytes": 1272972
+    },
+    {
+      "path": "web/assets/site/oracles-pair@2x.png",
+      "bytes": 1177044
+    },
+    {
+      "path": "render/site/previews/dgx-spark-iter5@3x.png",
+      "bytes": 1147125
+    },
+    {
+      "path": "render/site/previews/dgx-spark-iter4@3x.png",
+      "bytes": 1141862
+    },
+    {
+      "path": "render/site/previews/dgx-spark-iter7@3x.png",
+      "bytes": 1090724
+    },
+    {
+      "path": "render/site/previews/dgx-spark-iter6@3x.png",
+      "bytes": 1089148
+    },
+    {
+      "path": "render/gltf/oracles.glb",
+      "bytes": 1066896
+    },
+    {
+      "path": "web/assets/site/oracles.glb",
+      "bytes": 1066164
+    },
+    {
+      "path": "render/previews/mac-studio-iter3@3x.png",
+      "bytes": 1065417
+    },
+    {
+      "path": "render/ref/rack/enclosure/tripplite-sr42ubdp48-drawing.pdf",
+      "bytes": 1064757
+    },
+    {
+      "path": "render/ref/rack/enclosure/tripplite-sr42ubcl-drawing.pdf",
+      "bytes": 1063734
+    },
+    {
+      "path": "render/ref/rack/node/rosewill_rsv-l4500_manual.pdf",
+      "bytes": 1051416
+    },
+    {
+      "path": "render/previews/dgx-spark-iter3@3x.png",
+      "bytes": 1031804
+    },
+    {
+      "path": "render/ref/rack/enclosure/vertiv-vr-selection-guide.pdf",
+      "bytes": 1001410
+    },
+    {
+      "path": "render/site/previews/mac-studio-iter4@3x.png",
+      "bytes": 982587
+    },
+    {
+      "path": "render/ref/rack/accessories/apc-ap8868-pdu-spec.pdf",
+      "bytes": 982015
+    },
+    {
+      "path": "render/site/previews/mac-studio-iter5@3x.png",
+      "bytes": 977427
+    },
+    {
+      "path": "render/ref/rack/accessories/dell-rail-matrix.pdf",
+      "bytes": 967053
+    }
+  ],
+  "note": "tracked-only (git ls-files). Excludes .git, model weights, dep caches, untracked artifacts.",
+  "tracked_bytes": 108044058
+}

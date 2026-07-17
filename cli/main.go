@@ -181,6 +181,8 @@ func main() {
 		cmdCancel(args)
 	case "private-pool":
 		cmdPrivatePool(args)
+	case "audit":
+		cmdAudit(args)
 	case "version":
 		cmdVersion(args)
 	case "-h", "--help", "help":
@@ -849,6 +851,7 @@ Usage:
   cx estimate --model <id> --units N [--tier t]
   cx explain-scheduler --worker <id>   (admin key)
   cx private-pool add|list|remove <supplier_id>
+  cx audit codebase [--out DIR]        (authoritative census; retires make loc)
   cx version [--json]
 
 Env:
