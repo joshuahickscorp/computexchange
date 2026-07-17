@@ -183,6 +183,8 @@ func main() {
 		cmdPrivatePool(args)
 	case "audit":
 		cmdAudit(args)
+	case "source-id":
+		cmdSourceID(args)
 	case "version":
 		cmdVersion(args)
 	case "-h", "--help", "help":
@@ -852,6 +854,7 @@ Usage:
   cx explain-scheduler --worker <id>   (admin key)
   cx private-pool add|list|remove <supplier_id>
   cx audit codebase [--out DIR]        (authoritative census; retires make loc)
+  cx source-id [--root DIR] [--field F] (source fingerprint; replaces scripts/source_fingerprint.py)
   cx version [--json]
 
 Env:
