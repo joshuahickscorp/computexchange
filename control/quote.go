@@ -259,19 +259,9 @@ func recommendField(fields map[string]bool, strLen, occur map[string]int) ([]Fie
 	return stats, recommended
 }
 
-func sortedKeys(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	// small N — insertion sort keeps it dependency-free and deterministic.
-	for i := 1; i < len(out); i++ {
-		for j := i; j > 0 && out[j-1] > out[j]; j-- {
-			out[j-1], out[j] = out[j], out[j-1]
-		}
-	}
-	return out
-}
+// sortedKeys(map[string]bool) is now served by the generic sortedKeys[V any] in
+// audit.go (folded in from the buyer CLI); the map[string]bool caller above binds
+// it directly. One deterministic sorted-keys helper for the whole cx binary.
 
 // --- quote object (PLANE_C §7) --------------------------------------------------
 

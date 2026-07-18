@@ -326,16 +326,16 @@ if [ "$SKIP_LIVE" = "1" ]; then
 else
   # ── Phase 3: live control plane + real agent inference ─────────────────────
   say "3/6 building + starting the control plane"
-  (cd control && go build -o "$ART/control" .) || die "control build failed"
-  record PASS control-binary-identity "fresh build sha256=$(sha256_file "$ART/control")"
-  ( CX_VERIFICATION_SAMPLE_SECRET="$PROOF_VERIFICATION_SAMPLE_SECRET" "$ART/control" ) >"$CONTROL_LOG" 2>&1 &
+  (cd control && go build -o "$ART/cx" .) || die "control build failed"
+  record PASS control-binary-identity "fresh build sha256=$(sha256_file "$ART/cx")"
+  ( CX_VERIFICATION_SAMPLE_SECRET="$PROOF_VERIFICATION_SAMPLE_SECRET" "$ART/cx" ) >"$CONTROL_LOG" 2>&1 &
   CONTROL_PID=$!
   wait_for 30 "control healthz" bash -c "kill -0 $CONTROL_PID 2>/dev/null && curl -fsS '$CONTROL_URL/healthz'" \
     || die "control plane never became healthy"
   record PASS control-healthz "control plane healthy on :$CONTROL_PORT"
 
   # Seed demo creds (idempotent; integration suite already seeded, this re-confirms).
-  (cd control && CX_VERIFICATION_SAMPLE_SECRET="$PROOF_VERIFICATION_SAMPLE_SECRET" "$ART/control" seed) >/dev/null 2>&1 \
+  (cd control && CX_VERIFICATION_SAMPLE_SECRET="$PROOF_VERIFICATION_SAMPLE_SECRET" "$ART/cx" seed) >/dev/null 2>&1 \
     || (cd control && CX_VERIFICATION_SAMPLE_SECRET="$PROOF_VERIFICATION_SAMPLE_SECRET" go run . seed) >/dev/null 2>&1 \
     || die "seed failed"
   record PASS seed "demo buyer api_key + worker_token minted"
@@ -875,7 +875,7 @@ TOML
   # `cx explain-scheduler --worker` (admin key) — proving the CLI wiring + flags match
   # the server, not just curl. Deterministic: EMBED_JOB + WORKER_ID already exist.
   CLI_OK=0
-  if (cd cli && go build -o "$ART/cx") >/dev/null 2>&1; then
+  if (cd control && go build -o "$ART/cx" .) >/dev/null 2>&1; then
     CINV="$(CX_API_URL="$CONTROL_URL" CX_API_KEY="$API_KEY" "$ART/cx" invoice --json "$EMBED_JOB" 2>/dev/null \
       | python3 -c 'import sys,json;d=json.load(sys.stdin);print("ok" if d.get("job_id") and ("charged_usd" in d) else "bad")' 2>/dev/null || true)"
     CEXP="$(CX_API_URL="$CONTROL_URL" CX_API_KEY="$ADMIN_KEY" "$ART/cx" explain-scheduler --worker "$WORKER_ID" 2>/dev/null \

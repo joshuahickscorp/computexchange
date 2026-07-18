@@ -3,9 +3,8 @@
 agent/target/
 **/*.rs.bk
 # Go (control/) — compiled binaries and test/coverage output
-control/control
+control/cx
 control/**/*.test
-cli/cli
 *.out
 coverage.out
 # Swift (macapp/) build products

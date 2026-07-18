@@ -1,18 +1,18 @@
 {
   "bytes_by_language": {
     "binary": 18276901,
-    "config": 35951,
-    "documentation": 956473,
-    "go": 3396184,
+    "config": 35818,
+    "documentation": 957937,
+    "go": 3396975,
     "javascript": 1450305,
-    "json": 591360,
+    "json": 592344,
     "lockfile": 237628,
-    "other": 52442,
+    "other": 52422,
     "patch": 22301,
-    "python": 1114581,
+    "python": 1114586,
     "rust": 2244250,
     "shader": 609891,
-    "shell": 331591,
+    "shell": 331558,
     "sql": 169236,
     "swift": 195329,
     "toml": 18529,
@@ -182,5 +182,5 @@
     }
   ],
   "note": "tracked-only (git ls-files). Excludes .git, model weights, dep caches, untracked artifacts.",
-  "tracked_bytes": 30394637
+  "tracked_bytes": 30397695
 }
