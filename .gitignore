@@ -4,6 +4,7 @@ agent/target/
 **/*.rs.bk
 # Go (control/) — compiled binaries and test/coverage output
 control/cx
+control/control
 control/**/*.test
 *.out
 coverage.out
