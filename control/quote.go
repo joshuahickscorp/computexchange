@@ -697,23 +697,6 @@ func (s *Server) quoteInitialEconomicTaskCount(ctx context.Context, sub jobSubmi
 	return primaryTasks + redundancy + honeypots, nil
 }
 
-// buildQuote assembles a conservative quote from the scanned input + live exchange
-// state, reusing the same estimators the real submission path uses (so a quote and
-// the eventual job agree). It performs NO writes and creates no job. buyerID is
-// used only to look up the buyer's OWN private-pool member count when
-// sub.PrivatePool is set (Buyer advantage & pricing edge 6->7) — every other
-// estimator here is buyer-independent, same as before this rung.
-func (s *Server) buildQuote(ctx context.Context, buyerID uuid.UUID, sub jobSubmit, inputBytes []byte) Quote {
-	schedule, err := LoadEconomicScheduleFromEnv()
-	if err != nil {
-		// Non-handler/internal callers still receive an explicitly blocked quote.
-		// Public handlers reject it below rather than treating missing configuration
-		// as an executable $0 schedule.
-		return s.buildQuoteWithSchedule(ctx, buyerID, sub, inputBytes, EconomicSchedule{})
-	}
-	return s.buildQuoteWithSchedule(ctx, buyerID, sub, inputBytes, schedule)
-}
-
 func (s *Server) buildQuoteWithSchedule(ctx context.Context, buyerID uuid.UUID, sub jobSubmit, inputBytes []byte, schedule EconomicSchedule) Quote {
 	jobType := sub.JobType.Type
 	tier := sub.Tier
