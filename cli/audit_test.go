@@ -25,21 +25,21 @@ func TestLanguageOf(t *testing.T) {
 
 func TestSubsystemOf(t *testing.T) {
 	cases := map[string]string{
-		"control/billing.go":         "payment",
-		"control/payout.go":          "payment",
-		"control/verification.go":    "verification",
-		"control/reputation.go":      "verification",
-		"control/api.go":             "control",
-		"agent/src/main.rs":          "agent",
-		"agent/vendor/x/lib.rs":      "vendored",
-		"spec-engine/src/lib.rs":     "speculation",
-		"scripts/spec-lab/core.py":   "speculation",
-		"scripts/five-by-five.py":    "proof",
-		"proto/tasks.proto":          "contract",
-		"sdk/python/client.py":       "sdk",
-		"db/schema.sql":              "store",
-		"render/site/oracles.py":     "render",
-		"docs/RUNBOOKS.md":           "documentation",
+		"control/billing.go":       "payment",
+		"control/payout.go":        "payment",
+		"control/verification.go":  "verification",
+		"control/reputation.go":    "verification",
+		"control/api.go":           "control",
+		"agent/src/main.rs":        "agent",
+		"agent/vendor/x/lib.rs":    "vendored",
+		"spec-engine/src/lib.rs":   "speculation",
+		"scripts/spec-lab/core.py": "speculation",
+		"scripts/five-by-five.py":  "proof",
+		"proto/tasks.proto":        "contract",
+		"sdk/python/client.py":     "sdk",
+		"db/schema.sql":            "store",
+		"render/site/oracles.py":   "render",
+		"docs/RUNBOOKS.md":         "documentation",
 	}
 	for path, want := range cases {
 		if got := subsystemOf(path); got != want {

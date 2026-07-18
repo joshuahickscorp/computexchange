@@ -58,7 +58,7 @@ func cmdSourceID(args []string) {
 		}
 		return
 	}
-	b, err := canonicalJSON(res.toMap())
+	b, err := canonicalProofJSON(res.toMap())
 	if err != nil {
 		fatalf("encode: %v", err)
 	}
@@ -260,16 +260,16 @@ func cmdVerify(args []string) {
 	rp := append([]string(nil), requirePass...)
 	sort.Strings(rp)
 	summary := map[string]any{
-		"status":                "PASS",
-		"proof_mode":            res.meta["proof_mode"],
-		"source_sha256":         res.meta["source_sha256"],
-		"ledger_sha256":         res.ledgerSHA256,
-		"pass_rows":             passRows,
-		"skip_rows":             skipRows,
-		"required_passes":       rp,
-		"current_source_bound":  currentSource,
+		"status":               "PASS",
+		"proof_mode":           res.meta["proof_mode"],
+		"source_sha256":        res.meta["source_sha256"],
+		"ledger_sha256":        res.ledgerSHA256,
+		"pass_rows":            passRows,
+		"skip_rows":            skipRows,
+		"required_passes":      rp,
+		"current_source_bound": currentSource,
 	}
-	b, _ := canonicalJSON(summary)
+	b, _ := canonicalProofJSON(summary)
 	fmt.Println(string(b))
 }
 

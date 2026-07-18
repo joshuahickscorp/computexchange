@@ -10,6 +10,7 @@
 //	cx audit codebase [--out DIR]   (default DIR: census/)
 //
 // Outputs (in DIR):
+//
 //	CODEBASE_CENSUS.json      per-file records + aggregates
 //	CODEBASE_CENSUS.md        human-readable summary
 //	CODEBASE_LOC.json         LOC rollups (language / subsystem / layer)
@@ -585,7 +586,7 @@ func short(h string) string {
 
 // ---- artifact writers ----
 
-func writeJSON(root, dir, name string, v any) {
+func writeCensusArtifact(root, dir, name string, v any) {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		fatalf("marshal %s: %v", name, err)
@@ -638,17 +639,17 @@ func writeCensus(root, dir, head string, records []fileRecord) {
 		totalBytes += r.Bytes
 	}
 	census := map[string]any{
-		"head":         head,
+		"head":          head,
 		"tracked_files": len(records),
-		"total_loc":    totalLOC,
-		"total_code":   totalCode,
-		"total_bytes":  totalBytes,
-		"by_layer":     byLayer,
-		"by_subsystem": bySub,
-		"by_language":  byLang,
-		"files":        records,
+		"total_loc":     totalLOC,
+		"total_code":    totalCode,
+		"total_bytes":   totalBytes,
+		"by_layer":      byLayer,
+		"by_subsystem":  bySub,
+		"by_language":   byLang,
+		"files":         records,
 	}
-	writeJSON(root, dir, "CODEBASE_CENSUS.json", census)
+	writeCensusArtifact(root, dir, "CODEBASE_CENSUS.json", census)
 
 	// markdown summary
 	var b strings.Builder
@@ -722,36 +723,36 @@ func writeLOC(root, dir string, records []fileRecord) {
 		}
 	}
 	out := map[string]any{
-		"total_loc":               totalLOC,
-		"kernel_LOC":              kernel,
-		"active_product_LOC":      kernel + activeProductLayer, // kernel + {sdk, web, macapp, in-tree tests}
-		"active_repository_LOC":   totalLOC - vendored - generated - packLOC,
-		"hydrated_owned_LOC":      totalLOC - vendored,
-		"historical_LOC":          historical,
-		"generated_LOC":           generated,
-		"vendored_LOC":            vendored,
-		"test_LOC":                test,
-		"go_LOC":                  loc(byLang, "go"),
-		"rust_LOC":                loc(byLang, "rust"),
-		"python_LOC":              loc(byLang, "python"),
-		"swift_LOC":               loc(byLang, "swift"),
-		"javascript_LOC":          loc(byLang, "javascript"),
-		"shell_LOC":               loc(byLang, "shell"),
-		"sql_LOC":                 loc(byLang, "sql"),
-		"shader_LOC":              loc(byLang, "shader"),
-		"documentation_LOC":       loc(byLang, "documentation"),
-		"control_LOC":             loc(bySub, "control"),
-		"agent_LOC":               loc(bySub, "agent"),
-		"speculation_LOC":         loc(bySub, "speculation"),
-		"proof_LOC":               loc(bySub, "proof"),
-		"payment_LOC":             loc(bySub, "payment"),
-		"verification_LOC":        loc(bySub, "verification"),
-		"interface_LOC":           loc(bySub, "interface"),
-		"render_LOC":              loc(bySub, "render"),
-		"sdk_LOC":                 loc(bySub, "sdk"),
-		"note":                    "kernel/active_* are derived per documented layer rules in CODEBASE_CENSUS.md; retires `make loc`.",
+		"total_loc":             totalLOC,
+		"kernel_LOC":            kernel,
+		"active_product_LOC":    kernel + activeProductLayer, // kernel + {sdk, web, macapp, in-tree tests}
+		"active_repository_LOC": totalLOC - vendored - generated - packLOC,
+		"hydrated_owned_LOC":    totalLOC - vendored,
+		"historical_LOC":        historical,
+		"generated_LOC":         generated,
+		"vendored_LOC":          vendored,
+		"test_LOC":              test,
+		"go_LOC":                loc(byLang, "go"),
+		"rust_LOC":              loc(byLang, "rust"),
+		"python_LOC":            loc(byLang, "python"),
+		"swift_LOC":             loc(byLang, "swift"),
+		"javascript_LOC":        loc(byLang, "javascript"),
+		"shell_LOC":             loc(byLang, "shell"),
+		"sql_LOC":               loc(byLang, "sql"),
+		"shader_LOC":            loc(byLang, "shader"),
+		"documentation_LOC":     loc(byLang, "documentation"),
+		"control_LOC":           loc(bySub, "control"),
+		"agent_LOC":             loc(bySub, "agent"),
+		"speculation_LOC":       loc(bySub, "speculation"),
+		"proof_LOC":             loc(bySub, "proof"),
+		"payment_LOC":           loc(bySub, "payment"),
+		"verification_LOC":      loc(bySub, "verification"),
+		"interface_LOC":         loc(bySub, "interface"),
+		"render_LOC":            loc(bySub, "render"),
+		"sdk_LOC":               loc(bySub, "sdk"),
+		"note":                  "kernel/active_* are derived per documented layer rules in CODEBASE_CENSUS.md; retires `make loc`.",
 	}
-	writeJSON(root, dir, "CODEBASE_LOC.json", out)
+	writeCensusArtifact(root, dir, "CODEBASE_LOC.json", out)
 }
 
 func writeBytes(root, dir string, records []fileRecord) {
@@ -773,12 +774,12 @@ func writeBytes(root, dir string, records []fileRecord) {
 		top = append(top, fb{sorted[i].Path, sorted[i].Bytes})
 	}
 	out := map[string]any{
-		"tracked_bytes":       total,
-		"bytes_by_language":   byLang,
-		"largest_tracked_40":  top,
-		"note":                "tracked-only (git ls-files). Excludes .git, model weights, dep caches, untracked artifacts.",
+		"tracked_bytes":      total,
+		"bytes_by_language":  byLang,
+		"largest_tracked_40": top,
+		"note":               "tracked-only (git ls-files). Excludes .git, model weights, dep caches, untracked artifacts.",
 	}
-	writeJSON(root, dir, "CODEBASE_BYTES.json", out)
+	writeCensusArtifact(root, dir, "CODEBASE_BYTES.json", out)
 }
 
 func writePython(root, dir string, records []fileRecord) {
@@ -805,22 +806,22 @@ func writePython(root, dir string, records []fileRecord) {
 		files[plan] = append(files[plan], r.Path)
 	}
 	out := map[string]any{
-		"policy":               "production_python=0, proof_authority_python=0, speculative_runtime_python=0. Only retain_sdk + retain_blender_pack remain in a shipped surface.",
-		"by_plan":              byPlan,
-		"files_by_plan":        files,
-		"unknown_remaining":    unknown,
+		"policy":            "production_python=0, proof_authority_python=0, speculative_runtime_python=0. Only retain_sdk + retain_blender_pack remain in a shipped surface.",
+		"by_plan":           byPlan,
+		"files_by_plan":     files,
+		"unknown_remaining": unknown,
 	}
-	writeJSON(root, dir, "PYTHON_RECLAMATION.json", out)
+	writeCensusArtifact(root, dir, "PYTHON_RECLAMATION.json", out)
 }
 
 func writeDeps(root, dir string) {
 	out := map[string]any{
-		"go_modules":     goModules(root),
-		"cargo_crates":   cargoCrates(root),
-		"python":         map[string]any{"sdk": "dependency-free (stdlib only)", "note": "see sdk/python + docker/vllm"},
-		"note":           "direct dependencies parsed from manifests; transitive counts from lockfiles.",
+		"go_modules":   goModules(root),
+		"cargo_crates": cargoCrates(root),
+		"python":       map[string]any{"sdk": "dependency-free (stdlib only)", "note": "see sdk/python + docker/vllm"},
+		"note":         "direct dependencies parsed from manifests; transitive counts from lockfiles.",
 	}
-	writeJSON(root, dir, "DEPENDENCY_CENSUS.json", out)
+	writeCensusArtifact(root, dir, "DEPENDENCY_CENSUS.json", out)
 }
 
 func goModules(root string) []map[string]any {
@@ -925,12 +926,12 @@ func writeCandidates(root, dir string, records []fileRecord) {
 		}
 	}
 	out := map[string]any{
-		"pack_rollup":        packByName,
-		"pack_bytes_total":   packBytes,
-		"candidate_count":    len(cands),
-		"candidates":         cands,
+		"pack_rollup":      packByName,
+		"pack_bytes_total": packBytes,
+		"candidate_count":  len(cands),
+		"candidates":       cands,
 	}
-	writeJSON(root, dir, "CONDENSATION_CANDIDATES.json", out)
+	writeCensusArtifact(root, dir, "CONDENSATION_CANDIDATES.json", out)
 }
 
 func sortedKeys[V any](m map[string]V) []string {

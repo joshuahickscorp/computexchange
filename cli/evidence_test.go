@@ -11,14 +11,14 @@ import (
 )
 
 func TestCanonicalJSONSortedCompactNoHTMLEscape(t *testing.T) {
-	got, err := canonicalJSON(map[string]any{"b": 1, "a": "x<y", "c": true})
+	got, err := canonicalProofJSON(map[string]any{"b": 1, "a": "x<y", "c": true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// keys sorted, compact separators, and < NOT escaped (Python json.dumps parity)
 	want := `{"a":"x<y","b":1,"c":true}`
 	if string(got) != want {
-		t.Errorf("canonicalJSON = %q, want %q", got, want)
+		t.Errorf("canonicalProofJSON = %q, want %q", got, want)
 	}
 }
 
@@ -79,8 +79,8 @@ func TestSourceFingerprintDeterministicAndFieldParity(t *testing.T) {
 	if a.SchemaVersion != 1 {
 		t.Errorf("schema_version = %d, want 1", a.SchemaVersion)
 	}
-	// toMap round-trips through canonicalJSON with sorted keys
-	j, _ := canonicalJSON(a.toMap())
+	// toMap round-trips through canonicalProofJSON with sorted keys
+	j, _ := canonicalProofJSON(a.toMap())
 	var back map[string]any
 	if err := json.Unmarshal(j, &back); err != nil {
 		t.Fatalf("canonical json invalid: %v", err)

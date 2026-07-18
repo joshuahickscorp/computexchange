@@ -26,11 +26,11 @@ var sourceFingerprintDomain = []byte("computexchange-source-fingerprint-v1\x00")
 
 const sourceFingerprintSchema = 1
 
-// canonicalJSON encodes v the way the Python authority did:
+// canonicalProofJSON encodes v the way the Python authority did:
 // json.dumps(sort_keys=True, separators=(",", ":")) — compact, keys sorted.
 // Go's encoding/json already sorts map keys and omits insignificant whitespace,
 // and it must NOT HTML-escape (Python does not escape <, >, &).
-func canonicalJSON(v any) ([]byte, error) {
+func canonicalProofJSON(v any) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
@@ -99,7 +99,7 @@ type sourceFingerprintResult struct {
 	SourceSHA256  string `json:"source_sha256"`
 }
 
-// toMap yields a map so canonicalJSON emits keys in sorted order (Python used a
+// toMap yields a map so canonicalProofJSON emits keys in sorted order (Python used a
 // dict + sort_keys=True; Go sorts map keys but preserves struct field order).
 func (r sourceFingerprintResult) toMap() map[string]any {
 	return map[string]any{
