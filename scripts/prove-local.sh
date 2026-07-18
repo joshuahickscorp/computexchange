@@ -176,7 +176,7 @@ rm -rf "$ART"; mkdir -p "$ART"; : >"$LEDGER_FILE"
 # for the normal development case where the proof runs before a commit. The end
 # fingerprint must match the start fingerprint or the proof fails as a mixed-source
 # run. The site build is read-only and never copies a test count into source.
-SOURCE_START_JSON="$(python3 scripts/source_fingerprint.py)" || die "source fingerprint failed"
+SOURCE_START_JSON="$(cd control && go run . source-id)" || die "source fingerprint failed"
 GIT_SHA="$(printf '%s' "$SOURCE_START_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["head"])')"
 SOURCE_FINGERPRINT_START="$(printf '%s' "$SOURCE_START_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["source_sha256"])')"
 SOURCE_STATUS_START="$(printf '%s' "$SOURCE_START_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status_sha256"])')"
@@ -209,13 +209,14 @@ PROOF_VERIFICATION_SAMPLE_SECRET="$(python3 -c 'import secrets; print(secrets.to
 [ "${#PROOF_VERIFICATION_SAMPLE_SECRET}" -ge 48 ] \
   || die "verification-sampling proof secret generation returned an undersized value"
 record PASS verification-sample-secret "fresh per-run secret passed only to control/test processes; exported worker environment remains unset"
+# Source identity (cx source-id), terminal-ledger validation (cx verify), and the
+# 5x5 registry engine (cx prove) are now the Go evidence authority, covered by the
+# tests-go gate (go test ./control: evidence_test.go, prove_test.go). Only the still
+# Python runtime-matrix generation is unit-tested here.
 if python3 -m unittest -v \
-  scripts/test_source_fingerprint.py \
-  scripts/test_verify_proof_ledger.py \
-  scripts/test_five_by_five.py \
   scripts/test_runtime_matrix.py >"$ART/source-fingerprint-test.log" 2>&1 && \
   python3 scripts/runtime_matrix.py --check >>"$ART/source-fingerprint-test.log" 2>&1; then
-  record PASS evidence-envelope-contract "source identity, terminal ledger, runtime-matrix generation, non-vacuous run, and overwrite tests green"
+  record PASS evidence-envelope-contract "runtime-matrix generation + overwrite tests green (source identity/ledger/registry -> Go tests-go gate)"
 else
   record FAIL evidence-envelope-contract "evidence-envelope tests failed — see $ART/source-fingerprint-test.log"
   die "evidence-envelope contract failed"
@@ -1175,7 +1176,7 @@ fi
 # editor, agent, or generator changing a tracked/untracked source file while the
 # long integration run is in flight. Ignored build outputs are intentionally not
 # part of the source identity.
-SOURCE_END_JSON="$(python3 scripts/source_fingerprint.py)" || die "final source fingerprint failed"
+SOURCE_END_JSON="$(cd control && go run . source-id)" || die "final source fingerprint failed"
 SOURCE_FINGERPRINT_END="$(printf '%s' "$SOURCE_END_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["source_sha256"])')"
 SOURCE_STATUS_END="$(printf '%s' "$SOURCE_END_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status_sha256"])')"
 printf 'META\tsource_sha256_end\t%s\n' "$SOURCE_FINGERPRINT_END" >>"$LEDGER_FILE"
@@ -1219,4 +1220,4 @@ else
   say "$(b 'LOCAL RELEASE-CANDIDATE PROOF: PASS') ✅"
 fi
 say "This proves the selected local matrix, not product 5/5 or launch readiness."
-say "Run: python3 scripts/five-by-five.py  # remaining local + external gates"
+say "Run: cx prove  # remaining local + external gates"

@@ -187,6 +187,8 @@ func dispatchBuyer(cmd string, args []string) bool {
 		cmdSourceID(args)
 	case "verify":
 		cmdVerify(args)
+	case "prove":
+		cmdProve(args)
 	case "version":
 		cmdVersion(args)
 	case "-h", "--help", "help":

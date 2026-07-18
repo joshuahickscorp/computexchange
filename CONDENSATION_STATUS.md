@@ -122,7 +122,7 @@ risking a red checkpoint:
    this worktree, so flipping them blind would break "green at every checkpoint".
 
 Exact flip (do when `cx` is installed + against live prove-local/CI): rewrite the 14
-`python3 scripts/verify_proof_ledger.py` gate commands and the `prove-local.sh`
+`cx verify` gate commands and the `prove-local.sh`
 source-fingerprint calls to `cx verify` / `cx source-id`; port `five-by-five.py` to
 `cx prove` and `runtime_matrix.py`/`api_contract.py` (`--check`) to `cx runtime check`
 / `cx contract check`; swap the CI `proof-contracts` steps to `go test ./cli` + the

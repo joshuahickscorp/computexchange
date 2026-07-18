@@ -25,12 +25,12 @@
       "bytes": 32990
     },
     "rewrite_go": {
-      "files": 22,
-      "loc": 7902,
+      "files": 16,
+      "loc": 6973,
       "code": 0,
       "blank": 0,
       "comment": 0,
-      "bytes": 345279
+      "bytes": 309228
     },
     "rewrite_rust": {
       "files": 11,
@@ -73,23 +73,17 @@
       "scripts/cost_calculator.py",
       "scripts/cx_trace.py",
       "scripts/doc-as-test-drainer.py",
-      "scripts/five-by-five.py",
       "scripts/fleet_proof.py",
       "scripts/performance_proof.py",
       "scripts/runtime_matrix.py",
-      "scripts/source_fingerprint.py",
       "scripts/supplier_earnings_calculator.py",
       "scripts/test_api_contract.py",
-      "scripts/test_five_by_five.py",
       "scripts/test_fleet_proof.py",
       "scripts/test_performance_proof.py",
       "scripts/test_release_surface.py",
       "scripts/test_runtime_matrix.py",
-      "scripts/test_source_fingerprint.py",
       "scripts/test_validate_claims.py",
-      "scripts/test_verify_proof_ledger.py",
-      "scripts/validate_claims.py",
-      "scripts/verify_proof_ledger.py"
+      "scripts/validate_claims.py"
     ],
     "rewrite_rust": [
       "scripts/spec-lab/cx_integrated_speculation.py",
