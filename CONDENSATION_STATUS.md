@@ -138,10 +138,16 @@ Remaining Python proof scripts to port before deletion: `five-by-five` (313),
   `spec-engine`; one receipt type; delete Python core. Gate: cross-language golden
   fixtures + full `cargo test` + the CI spec lane; `scripts/spec-lab/` is a live CI
   dep until then.
-- **E** Go product collapse: merge `cli/`+`control/` into one `cx` module/binary; one
-  lifecycle engine; one worker supervisor. Gate: the full Go integration matrix
-  (Postgres + MinIO), not runnable here. This also unblocks the Phase C Python
-  deletion (installed `cx`).
+- **E** Go product collapse: **steps 1-2 DONE** (matrix-green). `cli/`+`control/` are
+  now ONE Go module (`computeexchange/control`) producing ONE `cx` binary: `cx serve`
+  = control plane; `cx submit/status/.../version` + `cx audit/source-id/verify` dispatch
+  at the top of `main()` before the DB gate (verified to run without DATABASE_URL).
+  Designed by a 6-agent map+design+adversarial-review workflow; validated by the native
+  prove-local matrix (573 pass / 0 skip / 0 fail). _Remaining E:_ step 3 wire-type dedup
+  (deferred: inert byte change for ~40 LOC), then one lifecycle engine + one worker
+  supervisor (the large internal control dedup, 62k -> 25k, needs the integration matrix
+  per change). Now unblocks the Phase C Python deletion (installed `cx` for the registry
+  flip).
 - **F** Rust agent collapse: one Cargo workspace (`agent` + `spec-engine` +
   `token-spec-poc` merged); kill shadow impls. Gate: full `cargo build/test` across
   the candle/Metal feature graph.
