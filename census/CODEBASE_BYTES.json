@@ -1,13 +1,13 @@
 {
   "bytes_by_language": {
     "binary": 18276901,
-    "config": 35818,
-    "documentation": 958276,
-    "go": 3397007,
+    "config": 35834,
+    "documentation": 958521,
+    "go": 3408064,
     "javascript": 1450305,
-    "json": 592700,
+    "json": 594311,
     "lockfile": 237628,
-    "other": 22031896,
+    "other": 52422,
     "patch": 22301,
     "python": 1078535,
     "rust": 2244250,
@@ -20,10 +20,6 @@
     "yaml": 74796
   },
   "largest_tracked_40": [
-    {
-      "path": "control/control",
-      "bytes": 21979474
-    },
     {
       "path": "web/assets/site/oracles-pair@3x.png",
       "bytes": 2313625
@@ -179,8 +175,12 @@
     {
       "path": "render/build_scene.py",
       "bytes": 114229
+    },
+    {
+      "path": "web/assets/site/vendor/addons/loaders/GLTFLoader.js",
+      "bytes": 108522
     }
   ],
   "note": "tracked-only (git ls-files). Excludes .git, model weights, dep caches, untracked artifacts.",
-  "tracked_bytes": 52342527
+  "tracked_bytes": 30375982
 }
