@@ -13,7 +13,9 @@ DELETION of maintained first-party source. Relocation gets zero credit._
 | R3a | 225,121 | -6,562 | delete render one-offs + asset generators; untrack regenerable census dumps |
 | R3b | 205,984 | -19,106 | delete render/panel loop verdicts + render research artifacts |
 | R3c | 206,361 | +377 | restore cx_agent_render_preview_driver.py (live Rust dep the matrix caught) |
-| **now** | **~206,361** | **-146,222 (-41.5%)** | all deletion, not relocation |
+| E1-E2 | 206,385 | ~0 | merge cli+control -> ONE cx module + ONE binary (structural; matrix 573/0/0) |
+| C-flip | 205,470 | -915 | port five-by-five -> cx prove; flip registry/CI/prove-local; delete 6 proof-python |
+| **now** | **~205,464** | **-147,119 (-41.7%)** | all deletion + one cx binary + proof orchestration in Go |
 
 Validated by the native prove-local integration matrix (throwaway Postgres + MinIO):
 **559 Go checks PASS + source-stability PASS + `cargo test` 278/0**. Python 123,741
